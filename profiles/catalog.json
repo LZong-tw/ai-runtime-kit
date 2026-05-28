@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "profiles": [
+    {
+      "name": "openai-compatible-example",
+      "visibility": "public",
+      "summary": "Public example for an OpenAI-compatible chat completions gateway.",
+      "shell": {
+        "ccrStartFunction": "airkit-ccr-start-openai-compatible-example",
+        "wrappers": [
+          {
+            "name": "cclaude-example",
+            "command": "cclaude",
+            "env": {
+              "CCR_PROFILE": "openai-compatible-example"
+            }
+          }
+        ]
+      },
+      "ccr": {
+        "APIKEY": "ccr-local",
+        "LOG": false,
+        "API_TIMEOUT_MS": 600000,
+        "Providers": [
+          {
+            "name": "openai-compatible",
+            "api_base_url": "https://example.test/v1/chat/completions",
+            "api_key": "$ANTHROPIC_AUTH_TOKEN",
+            "models": [
+              "fast-coder",
+              "steady-coder",
+              "reasoning-coder",
+              "long-context-coder"
+            ],
+            "transformer": {
+              "use": []
+            }
+          }
+        ],
+        "Router": {
+          "default": "openai-compatible,steady-coder",
+          "background": "openai-compatible,fast-coder",
+          "think": "openai-compatible,reasoning-coder",
+          "longContext": "openai-compatible,long-context-coder",
+          "longContextThreshold": 120000,
+          "webSearch": "openai-compatible,fast-coder"
+        }
+      }
+    }
+  ]
+}

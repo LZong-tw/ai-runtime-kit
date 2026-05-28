@@ -1,0 +1,17 @@
+{
+  "name": "@lzong/ai-runtime-kit",
+  "version": "0.1.0",
+  "description": "Public-safe runtime profile templates for AI client wrappers.",
+  "type": "module",
+  "bin": {
+    "airkit": "src/airkit.mjs"
+  },
+  "scripts": {
+    "check": "node --check src/airkit.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "author": "LZong, Lim, Un-tiong <lzong.tw@gmail.com>"
+}
