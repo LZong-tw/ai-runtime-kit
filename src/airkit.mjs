@@ -17,17 +17,18 @@ export async function loadCatalog(path = defaultCatalogPath) {
   return catalog;
 }
 
-export function buildCcrConfig(catalog, profileName) {
+export function buildCcrConfig(catalog, profileName, options = {}) {
   const profile = findProfile(catalog, profileName);
   if (!profile.ccr) {
     throw new Error(`profile "${profileName}" does not define a CCR config`);
   }
-  return structuredClone(profile.ccr);
+  return renderTemplateValue(structuredClone(profile.ccr), profileTemplateVars(profile, options.configDir));
 }
 
 export function buildShellSnippet(catalog, profileName, options = {}) {
   const profile = findProfile(catalog, profileName);
   const shell = profile.shell ?? {};
+  const templateVars = profileTemplateVars(profile, options.configDir);
   const ccrConfigPath = resolve(
     options.ccrConfigPath ?? join(resolve(options.configDir ?? defaultConfigDir()), "ccr", `${profile.name}.json`),
   );
@@ -72,12 +73,14 @@ export function buildShellSnippet(catalog, profileName, options = {}) {
   for (const wrapper of shell.wrappers ?? []) {
     lines.push(`${wrapper.name}() {`);
     for (const [key, value] of Object.entries(wrapper.env ?? {})) {
-      lines.push(`  export ${key}=${quoteShell(value)}`);
+      lines.push(`  export ${key}=${quoteShell(renderTemplateValue(value, templateVars))}`);
     }
     if (syncFunction) {
       lines.push(`  ${syncFunction} || return`);
     }
-    lines.push(`  ${wrapper.command} "$@"`, "}");
+    const wrapperArgs = (wrapper.args ?? []).map((arg) => quoteShell(renderTemplateValue(arg, templateVars)));
+    const renderedArgs = wrapperArgs.length ? ` ${wrapperArgs.join(" ")}` : "";
+    lines.push(`  ${wrapper.command}${renderedArgs} "$@"`, "}");
   }
 
   return `${lines.join("\n")}\n`;
@@ -109,12 +112,17 @@ export function planInstall(catalog, profileName, options = {}) {
   const configDir = resolve(options.configDir ?? defaultConfigDir());
   const ccrConfig = join(configDir, "ccr", `${profile.name}.json`);
   const shellSnippet = join(configDir, "shell", `${profile.name}.zsh`);
+  const managedFiles = renderManagedFiles(profile, { configDir }).map((file) => ({
+    label: file.label,
+    path: file.path,
+  }));
 
   return {
     profile: { name: profile.name, summary: profile.summary, visibility: profile.visibility },
+    configDir,
     write: options.write === true,
     force: options.force === true,
-    files: { ccrConfig, shellSnippet },
+    files: { ccrConfig, shellSnippet, managedFiles },
     nextSteps: [
       `source ${shellSnippet}`,
       `ccr config: ${ccrConfig}`,
@@ -129,27 +137,39 @@ export async function installProfile(catalog, profileName, options = {}) {
 
   await mkdir(dirname(plan.files.ccrConfig), { recursive: true });
   await mkdir(dirname(plan.files.shellSnippet), { recursive: true });
-  const rendered = renderProfile(catalog, profileName, { ccrConfigPath: plan.files.ccrConfig });
+  const rendered = renderProfile(catalog, profileName, { configDir: plan.configDir, ccrConfigPath: plan.files.ccrConfig });
   await writeTextFile(plan.files.ccrConfig, rendered.ccrConfig, { force: plan.force });
   await writeTextFile(plan.files.shellSnippet, rendered.shellSnippet, { force: plan.force });
+  for (const file of rendered.managedFiles) {
+    await mkdir(dirname(file.path), { recursive: true });
+    await writeTextFile(file.path, file.content, { force: plan.force });
+  }
   return plan;
 }
 
 export async function updateProfile(catalog, profileName, options = {}) {
   const plan = planInstall(catalog, profileName, options);
-  const rendered = renderProfile(catalog, profileName, { ccrConfigPath: plan.files.ccrConfig });
+  const rendered = renderProfile(catalog, profileName, { configDir: plan.configDir, ccrConfigPath: plan.files.ccrConfig });
   const previewDir = options.previewDir
     ? resolve(options.previewDir)
     : await mkdtemp(join(tmpdir(), `airkit-${profileName}-update-`));
   const preview = {
     ccrConfig: join(previewDir, "ccr", `${plan.profile.name}.json`),
     shellSnippet: join(previewDir, "shell", `${plan.profile.name}.zsh`),
+    managedFiles: rendered.managedFiles.map((file) => ({
+      ...file,
+      preview: join(previewDir, file.relativePath),
+    })),
   };
 
   await mkdir(dirname(preview.ccrConfig), { recursive: true });
   await mkdir(dirname(preview.shellSnippet), { recursive: true });
   await writeFile(preview.ccrConfig, rendered.ccrConfig);
   await writeFile(preview.shellSnippet, rendered.shellSnippet);
+  for (const file of preview.managedFiles) {
+    await mkdir(dirname(file.preview), { recursive: true });
+    await writeFile(file.preview, file.content);
+  }
 
   const files = {
     ccrConfig: await planUpdateFile(plan.files.ccrConfig, preview.ccrConfig, rendered.ccrConfig, "CCR config"),
@@ -159,6 +179,9 @@ export async function updateProfile(catalog, profileName, options = {}) {
       rendered.shellSnippet,
       "shell snippet",
     ),
+    managedFiles: await Promise.all(
+      preview.managedFiles.map((file) => planUpdateFile(file.path, file.preview, file.content, file.label)),
+    ),
   };
 
   if (plan.write) {
@@ -166,6 +189,10 @@ export async function updateProfile(catalog, profileName, options = {}) {
     await mkdir(dirname(plan.files.shellSnippet), { recursive: true });
     await writeFile(plan.files.ccrConfig, rendered.ccrConfig);
     await writeFile(plan.files.shellSnippet, rendered.shellSnippet);
+    for (const file of rendered.managedFiles) {
+      await mkdir(dirname(file.path), { recursive: true });
+      await writeFile(file.path, file.content);
+    }
   }
 
   return { profile: plan.profile, write: plan.write, previewDir, files };
@@ -174,10 +201,13 @@ export async function updateProfile(catalog, profileName, options = {}) {
 export async function doctorProfile(catalog, profileName, options = {}) {
   const profile = findProfile(catalog, profileName);
   const plan = planInstall(catalog, profileName, options);
-  const expected = renderProfile(catalog, profileName, { ccrConfigPath: plan.files.ccrConfig });
+  const expected = renderProfile(catalog, profileName, { configDir: plan.configDir, ccrConfigPath: plan.files.ccrConfig });
   const files = {
     ccrConfig: await checkRenderedFile(plan.files.ccrConfig, expected.ccrConfig, "CCR config"),
     shellSnippet: await checkRenderedFile(plan.files.shellSnippet, expected.shellSnippet, "shell snippet"),
+    managedFiles: await Promise.all(
+      expected.managedFiles.map((file) => checkRenderedFile(file.path, file.content, file.label)),
+    ),
   };
   const runtime = {
     ccr: await checkCcrAvailability(profile, options.commandExists ?? commandExistsOnPath),
@@ -185,7 +215,7 @@ export async function doctorProfile(catalog, profileName, options = {}) {
       ? await checkShellSourceability(plan.files.shellSnippet, profile, options.sourceShellSnippet ?? sourceShellSnippet)
       : { ok: true, skipped: true, path: plan.files.shellSnippet },
   };
-  const failures = Object.values({ ...files, ...runtime })
+  const failures = [files.ccrConfig, files.shellSnippet, ...files.managedFiles, ...Object.values(runtime)]
     .filter((file) => !file.ok)
     .map((file) => file.reason);
 
@@ -212,6 +242,7 @@ function validateCatalog(catalog) {
       throw new Error(`profile "${profile.name}" has invalid visibility`);
     }
     if (profile.ccr) validateCcr(profile.name, profile.ccr);
+    validateManagedFiles(profile);
   }
 }
 
@@ -219,6 +250,17 @@ function validateCcr(profileName, ccr) {
   for (const provider of ccr.Providers ?? []) {
     if (typeof provider.api_key === "string" && provider.api_key.startsWith("sk-")) {
       throw new Error(`profile "${profileName}" embeds a secret-looking API key`);
+    }
+  }
+}
+
+function validateManagedFiles(profile) {
+  for (const file of profile.managedFiles ?? []) {
+    if (!file.path || typeof file.content !== "string") {
+      throw new Error(`profile "${profile.name}" has an invalid managed file`);
+    }
+    if (file.path.startsWith("/") || file.path.split("/").includes("..")) {
+      throw new Error(`profile "${profile.name}" managed file must stay inside the config dir: ${file.path}`);
     }
   }
 }
@@ -375,11 +417,16 @@ function defaultConfigDir() {
 
 function renderInstallPlan(plan) {
   const action = plan.write ? "Wrote" : "Dry run";
+  const fileLines = [
+    `- CCR config: ${plan.files.ccrConfig}`,
+    `- Shell snippet: ${plan.files.shellSnippet}`,
+    ...plan.files.managedFiles.map((file) => `- ${file.label}: ${file.path}`),
+  ];
+
   return `${action} airkit profile: ${plan.profile.name}
 
 Files:
-- CCR config: ${plan.files.ccrConfig}
-- Shell snippet: ${plan.files.shellSnippet}
+${fileLines.join("\n")}
 
 Next steps:
 ${plan.nextSteps.map((step) => `- ${step}`).join("\n")}
@@ -389,28 +436,55 @@ ${plan.write ? "" : "Re-run with --write to create these files.\n"}`;
 
 function renderUpdateResult(result) {
   const action = result.write ? "Wrote" : "Dry run";
+  const targetLines = [
+    `- ${result.files.ccrConfig.status} CCR config: ${result.files.ccrConfig.target}`,
+    `- ${result.files.shellSnippet.status} shell snippet: ${result.files.shellSnippet.target}`,
+    ...result.files.managedFiles.map((file) => `- ${file.status} ${file.label}: ${file.target}`),
+  ];
+  const previewLines = [
+    `- CCR config: ${result.files.ccrConfig.preview}`,
+    `- Shell snippet: ${result.files.shellSnippet.preview}`,
+    ...result.files.managedFiles.map((file) => `- ${file.label}: ${file.preview}`),
+  ];
+  const diffLines = [
+    `- CCR config: ${result.files.ccrConfig.diff}`,
+    `- Shell snippet: ${result.files.shellSnippet.diff}`,
+    ...result.files.managedFiles.map((file) => `- ${file.label}: ${file.diff}`),
+  ];
+
   return `${action} update airkit profile: ${result.profile.name}
 
 Targets:
-- ${result.files.ccrConfig.status} CCR config: ${result.files.ccrConfig.target}
-- ${result.files.shellSnippet.status} shell snippet: ${result.files.shellSnippet.target}
+${targetLines.join("\n")}
 
 Preview files:
-- CCR config: ${result.files.ccrConfig.preview}
-- Shell snippet: ${result.files.shellSnippet.preview}
+${previewLines.join("\n")}
 
 Diff summary:
-- CCR config: ${result.files.ccrConfig.diff}
-- Shell snippet: ${result.files.shellSnippet.diff}
+${diffLines.join("\n")}
 
 ${result.write ? "" : "Re-run with --write to overwrite stale or missing target files.\n"}`;
 }
 
 function renderProfile(catalog, profileName, options = {}) {
+  const profile = findProfile(catalog, profileName);
+  const configDir = resolve(options.configDir ?? defaultConfigDir());
+
   return {
-    ccrConfig: `${JSON.stringify(buildCcrConfig(catalog, profileName), null, 2)}\n`,
+    ccrConfig: `${JSON.stringify(buildCcrConfig(catalog, profileName, { configDir }), null, 2)}\n`,
     shellSnippet: buildShellSnippet(catalog, profileName, options),
+    managedFiles: renderManagedFiles(profile, { configDir }),
   };
+}
+
+function renderManagedFiles(profile, options = {}) {
+  const configDir = resolve(options.configDir ?? defaultConfigDir());
+  return (profile.managedFiles ?? []).map((file) => ({
+    label: file.label ?? `managed file ${file.path}`,
+    path: resolve(configDir, file.path),
+    relativePath: file.path,
+    content: renderTemplateValue(file.content, profileTemplateVars(profile, configDir)),
+  }));
 }
 
 async function writeTextFile(path, content, { force }) {
@@ -426,15 +500,15 @@ async function checkRenderedFile(path, expected, label) {
     actual = await readFile(path, "utf8");
   } catch (error) {
     if (error?.code === "ENOENT") {
-      return { ok: false, path, reason: `missing ${label}: ${path}` };
+      return { ok: false, label, path, reason: `missing ${label}: ${path}` };
     }
     throw error;
   }
 
   if (actual !== expected) {
-    return { ok: false, path, reason: `stale ${label}: ${path}` };
+    return { ok: false, label, path, reason: `stale ${label}: ${path}` };
   }
-  return { ok: true, path };
+  return { ok: true, label, path };
 }
 
 async function planUpdateFile(target, preview, expected, label) {
@@ -443,16 +517,16 @@ async function planUpdateFile(target, preview, expected, label) {
     actual = await readFile(target, "utf8");
   } catch (error) {
     if (error?.code === "ENOENT") {
-      return { status: "missing", target, preview, diff: `missing ${label}; would create` };
+      return { status: "missing", label, target, preview, diff: `missing ${label}; would create` };
     }
     throw error;
   }
 
   if (actual === expected) {
-    return { status: "current", target, preview, diff: "no changes" };
+    return { status: "current", label, target, preview, diff: "no changes" };
   }
 
-  return { status: "stale", target, preview, diff: describeTextDiff(actual, expected) };
+  return { status: "stale", label, target, preview, diff: describeTextDiff(actual, expected) };
 }
 
 function describeTextDiff(actual, expected) {
@@ -474,6 +548,9 @@ function renderDoctorResult(result) {
     `profile: ${result.profile.name}`,
     `${result.files.ccrConfig.ok ? "ok" : "fail"} CCR config: ${result.files.ccrConfig.path}`,
     `${result.files.shellSnippet.ok ? "ok" : "fail"} shell snippet: ${result.files.shellSnippet.path}`,
+    ...result.files.managedFiles.map(
+      (file) => `${file.ok ? "ok" : "fail"} ${file.label ?? "managed file"}: ${file.path}`,
+    ),
     `${statusOf(result.runtime.ccr)} CCR availability: ${result.runtime.ccr.command}`,
     `${statusOf(result.runtime.shellSource)} shell source: ${result.runtime.shellSource.path}`,
   ];
@@ -534,6 +611,30 @@ function shellFunctionNames(profile) {
 function statusOf(check) {
   if (check.skipped) return "skip";
   return check.ok ? "ok" : "fail";
+}
+
+function profileTemplateVars(profile, configDir = defaultConfigDir()) {
+  return {
+    configDir: resolve(configDir),
+    profileName: profile.name,
+  };
+}
+
+function renderTemplateValue(value, vars) {
+  if (typeof value === "string") {
+    let rendered = value;
+    for (const [key, replacement] of Object.entries(vars)) {
+      rendered = rendered.replaceAll(`{{${key}}}`, replacement);
+    }
+    return rendered;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => renderTemplateValue(entry, vars));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, renderTemplateValue(entry, vars)]));
+  }
+  return value;
 }
 
 async function fileExists(path) {

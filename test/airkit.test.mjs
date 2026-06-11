@@ -59,6 +59,94 @@ test("installed shell snippet can sync the rendered CCR config into CCR live con
   }
 });
 
+test("managed files are installed and CCR config templates resolve to the config dir", async () => {
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-oss-managed-"));
+  const previewDir = await mkdtemp(join(tmpdir(), "airkit-oss-managed-preview-"));
+  const transformerPath = join(configDir, "ccr", "transformers", "drop-reasoning.js");
+  const transformerContent = "module.exports = { profile: '{{profileName}}', root: '{{configDir}}' };\n";
+  const catalog = {
+    schema: 1,
+    profiles: [
+      {
+        name: "custom-transformer",
+        visibility: "public",
+        summary: "Profile with a custom CCR transformer.",
+        managedFiles: [
+          {
+            label: "drop reasoning transformer",
+            path: "ccr/transformers/drop-reasoning.js",
+            content: transformerContent,
+          },
+        ],
+        ccr: {
+          transformers: [{ path: "{{configDir}}/ccr/transformers/drop-reasoning.js" }],
+          Providers: [
+            {
+              name: "custom",
+              api_base_url: "https://example.invalid/v1/chat/completions",
+              api_key: "$CUSTOM_API_KEY",
+              models: ["steady-coder"],
+            },
+          ],
+          Router: { default: "custom,steady-coder" },
+        },
+      },
+    ],
+  };
+
+  try {
+    const config = buildCcrConfig(catalog, "custom-transformer", { configDir });
+    const result = await installProfile(catalog, "custom-transformer", { configDir, write: true });
+    const update = await updateProfile(catalog, "custom-transformer", { configDir, previewDir, write: false });
+
+    assert.equal(config.transformers[0].path, transformerPath);
+    assert.deepEqual(result.files.managedFiles, [{ label: "drop reasoning transformer", path: transformerPath }]);
+    assert.equal(update.files.managedFiles[0].label, "drop reasoning transformer");
+    assert.equal(
+      await readFile(transformerPath, "utf8"),
+      `module.exports = { profile: 'custom-transformer', root: '${configDir}' };\n`,
+    );
+  } finally {
+    await rm(previewDir, { force: true, recursive: true });
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("shell wrapper args can use config dir templates", async () => {
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-oss-wrapper-args-"));
+  const catalog = {
+    schema: 1,
+    profiles: [
+      {
+        name: "wrapper-args",
+        visibility: "public",
+        summary: "Profile with wrapper args.",
+        shell: {
+          wrappers: [
+            {
+              name: "cclaude-wrapper",
+              command: "cclaude",
+              args: ["--strict-mcp-config", "--mcp-config", "{{configDir}}/claude/empty-mcp.json"],
+            },
+          ],
+        },
+      },
+    ],
+  };
+
+  try {
+    const snippet = buildShellSnippet(catalog, "wrapper-args", { configDir });
+
+    assert.ok(
+      snippet.includes(
+        `  cclaude '--strict-mcp-config' '--mcp-config' '${configDir}/claude/empty-mcp.json' "$@"`,
+      ),
+    );
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
 test("updateProfile dry run renders previews and does not mutate stale installed files", async () => {
   const catalog = await loadCatalog();
   const configDir = await mkdtemp(join(tmpdir(), "airkit-oss-update-"));
