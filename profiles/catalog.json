@@ -1,5 +1,711 @@
 {
   "schema": 1,
+  "modelCatalog": {
+    "schema": 1,
+    "lastReviewed": "2026-06-11",
+    "sources": {
+      "litellmProviders": "https://docs.litellm.ai/docs/providers",
+      "litellmAzure": "https://docs.litellm.ai/docs/providers/azure",
+      "openaiModels": "https://developers.openai.com/api/docs/models",
+      "anthropicModels": "https://platform.claude.com/docs/en/about-claude/models/overview",
+      "anthropicPricing": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "googleGeminiModels": "https://ai.google.dev/gemini-api/docs/models",
+      "googleGeminiPricing": "https://ai.google.dev/gemini-api/docs/pricing",
+      "mistralModels": "https://docs.mistral.ai/models/overview",
+      "deepseekPricing": "https://api-docs.deepseek.com/quick_start/pricing",
+      "xaiModels": "https://docs.x.ai/developers/models",
+      "azureModels": "https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure"
+    },
+    "capabilityLevels": [
+      "economy",
+      "balanced",
+      "frontier",
+      "specialist"
+    ],
+    "taskModes": [
+      "default",
+      "background",
+      "think",
+      "longContext",
+      "webSearch",
+      "coding"
+    ],
+    "gateways": {
+      "litellm": {
+        "kind": "llm-gateway",
+        "apiBaseEnv": "LITELLM_BASE_URL",
+        "apiKeyEnv": "LITELLM_API_KEY",
+        "providerModelPatterns": {
+          "openai": "openai/<model>",
+          "anthropic": "anthropic/<model>",
+          "google-ai-studio": "gemini/<model>",
+          "mistral": "mistral/<model>",
+          "deepseek": "deepseek/<model>",
+          "xai": "xai/<model>",
+          "azure-openai": "azure/<deployment-name>"
+        },
+        "notes": [
+          "Azure requests are routed by deployment name. Set model_info.base_model in LiteLLM when accurate Azure cost tracking is required.",
+          "For OpenAI-compatible custom gateways, use provider-specific LiteLLM prefixes when available, or openai/<model> with a custom base URL."
+        ]
+      },
+      "azure-openai": {
+        "kind": "cloud-provider",
+        "apiBaseEnv": "AZURE_API_BASE",
+        "apiKeyEnv": "AZURE_API_KEY",
+        "apiVersionEnv": "AZURE_API_VERSION",
+        "modelIdMode": "deployment-name",
+        "litellmPattern": "azure/<deployment-name>",
+        "notes": [
+          "Azure availability and prices vary by region, deployment type, and account eligibility.",
+          "Keep deployment names local to the user's environment; this catalog records public base-model families only."
+        ]
+      }
+    },
+    "providers": [
+      {
+        "id": "openai",
+        "name": "OpenAI",
+        "apiStyle": "openai-responses-or-chat",
+        "apiBaseUrl": "https://api.openai.com/v1",
+        "apiKeyEnv": "OPENAI_API_KEY",
+        "litellmProvider": "openai",
+        "models": [
+          {
+            "id": "gpt-5.5",
+            "litellm": "openai/gpt-5.5",
+            "level": "frontier",
+            "taskFit": [
+              "default",
+              "think",
+              "longContext",
+              "coding",
+              "webSearch"
+            ],
+            "contextWindow": 1000000,
+            "maxOutputTokens": 128000,
+            "pricingUsdPer1M": {
+              "input": 5,
+              "output": 30
+            },
+            "capabilities": [
+              "reasoning",
+              "coding",
+              "vision",
+              "function-calling",
+              "web-search",
+              "file-search",
+              "computer-use"
+            ],
+            "sourceRefs": [
+              "openaiModels",
+              "litellmProviders"
+            ]
+          },
+          {
+            "id": "gpt-5.4",
+            "litellm": "openai/gpt-5.4",
+            "level": "balanced",
+            "taskFit": [
+              "default",
+              "think",
+              "coding",
+              "webSearch"
+            ],
+            "contextWindow": 1000000,
+            "maxOutputTokens": 128000,
+            "pricingUsdPer1M": {
+              "input": 2.5,
+              "output": 15
+            },
+            "capabilities": [
+              "reasoning",
+              "coding",
+              "vision",
+              "function-calling",
+              "web-search",
+              "file-search",
+              "computer-use"
+            ],
+            "sourceRefs": [
+              "openaiModels",
+              "litellmProviders"
+            ]
+          },
+          {
+            "id": "gpt-5.4-mini",
+            "litellm": "openai/gpt-5.4-mini",
+            "level": "economy",
+            "taskFit": [
+              "default",
+              "background",
+              "coding",
+              "webSearch"
+            ],
+            "contextWindow": 400000,
+            "maxOutputTokens": 128000,
+            "pricingUsdPer1M": {
+              "input": 0.75,
+              "output": 4.5
+            },
+            "capabilities": [
+              "reasoning",
+              "coding",
+              "vision",
+              "function-calling",
+              "web-search",
+              "file-search",
+              "computer-use"
+            ],
+            "sourceRefs": [
+              "openaiModels",
+              "litellmProviders"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "anthropic",
+        "name": "Anthropic",
+        "apiStyle": "anthropic-messages",
+        "apiBaseUrl": "https://api.anthropic.com",
+        "apiKeyEnv": "ANTHROPIC_API_KEY",
+        "litellmProvider": "anthropic",
+        "models": [
+          {
+            "id": "claude-fable-5",
+            "litellm": "anthropic/claude-fable-5",
+            "level": "frontier",
+            "taskFit": [
+              "think",
+              "longContext",
+              "coding"
+            ],
+            "contextWindow": 1000000,
+            "maxOutputTokens": 128000,
+            "pricingUsdPer1M": {
+              "input": 10,
+              "output": 50
+            },
+            "capabilities": [
+              "reasoning",
+              "coding",
+              "vision",
+              "adaptive-thinking",
+              "tool-use"
+            ],
+            "sourceRefs": [
+              "anthropicModels",
+              "anthropicPricing"
+            ]
+          },
+          {
+            "id": "claude-opus-4-8",
+            "litellm": "anthropic/claude-opus-4-8",
+            "level": "frontier",
+            "taskFit": [
+              "think",
+              "longContext",
+              "coding"
+            ],
+            "contextWindow": 1000000,
+            "maxOutputTokens": 128000,
+            "pricingUsdPer1M": {
+              "input": 5,
+              "output": 25
+            },
+            "capabilities": [
+              "reasoning",
+              "coding",
+              "vision",
+              "adaptive-thinking",
+              "tool-use"
+            ],
+            "sourceRefs": [
+              "anthropicModels",
+              "anthropicPricing"
+            ]
+          },
+          {
+            "id": "claude-sonnet-4-6",
+            "litellm": "anthropic/claude-sonnet-4-6",
+            "level": "balanced",
+            "taskFit": [
+              "default",
+              "think",
+              "coding"
+            ],
+            "contextWindow": 1000000,
+            "maxOutputTokens": 64000,
+            "pricingUsdPer1M": {
+              "input": 3,
+              "output": 15
+            },
+            "capabilities": [
+              "reasoning",
+              "coding",
+              "vision",
+              "extended-thinking",
+              "adaptive-thinking",
+              "tool-use"
+            ],
+            "sourceRefs": [
+              "anthropicModels",
+              "anthropicPricing"
+            ]
+          },
+          {
+            "id": "claude-haiku-4-5",
+            "litellm": "anthropic/claude-haiku-4-5",
+            "level": "economy",
+            "taskFit": [
+              "background",
+              "default",
+              "coding"
+            ],
+            "contextWindow": 200000,
+            "maxOutputTokens": 64000,
+            "pricingUsdPer1M": {
+              "input": 1,
+              "output": 5
+            },
+            "capabilities": [
+              "reasoning",
+              "coding",
+              "vision",
+              "extended-thinking",
+              "tool-use"
+            ],
+            "sourceRefs": [
+              "anthropicModels",
+              "anthropicPricing"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "google-ai-studio",
+        "name": "Google AI Studio",
+        "apiStyle": "gemini",
+        "apiBaseUrl": "https://generativelanguage.googleapis.com",
+        "apiKeyEnv": "GEMINI_API_KEY",
+        "litellmProvider": "gemini",
+        "models": [
+          {
+            "id": "gemini-3.5-flash",
+            "litellm": "gemini/gemini-3.5-flash",
+            "level": "frontier",
+            "taskFit": [
+              "default",
+              "think",
+              "coding"
+            ],
+            "pricingUsdPer1M": {
+              "input": 2,
+              "output": 12
+            },
+            "capabilities": [
+              "reasoning",
+              "coding",
+              "vision",
+              "function-calling",
+              "google-search"
+            ],
+            "sourceRefs": [
+              "googleGeminiModels",
+              "googleGeminiPricing"
+            ]
+          },
+          {
+            "id": "gemini-3.1-flash-lite",
+            "litellm": "gemini/gemini-3.1-flash-lite",
+            "level": "economy",
+            "taskFit": [
+              "background",
+              "default"
+            ],
+            "pricingUsdPer1M": {
+              "input": 0.25,
+              "output": 1.5
+            },
+            "capabilities": [
+              "agentic-tasks",
+              "translation",
+              "simple-data-processing",
+              "vision"
+            ],
+            "sourceRefs": [
+              "googleGeminiModels",
+              "googleGeminiPricing"
+            ]
+          },
+          {
+            "id": "gemini-2.5-pro",
+            "litellm": "gemini/gemini-2.5-pro",
+            "level": "balanced",
+            "taskFit": [
+              "think",
+              "coding",
+              "longContext"
+            ],
+            "pricingUsdPer1M": {
+              "input": 1.25,
+              "output": 10
+            },
+            "capabilities": [
+              "deep-reasoning",
+              "coding",
+              "vision",
+              "long-context"
+            ],
+            "pricingNotes": [
+              "Listed price is for prompts up to 200k tokens; Google publishes higher rates above 200k tokens."
+            ],
+            "sourceRefs": [
+              "googleGeminiModels",
+              "googleGeminiPricing"
+            ]
+          },
+          {
+            "id": "gemini-2.5-flash",
+            "litellm": "gemini/gemini-2.5-flash",
+            "level": "economy",
+            "taskFit": [
+              "background",
+              "default",
+              "webSearch"
+            ],
+            "pricingUsdPer1M": {
+              "input": 0.3,
+              "output": 2.5
+            },
+            "capabilities": [
+              "reasoning",
+              "low-latency",
+              "high-volume",
+              "vision"
+            ],
+            "sourceRefs": [
+              "googleGeminiModels",
+              "googleGeminiPricing"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "mistral",
+        "name": "Mistral AI",
+        "apiStyle": "mistral",
+        "apiBaseUrl": "https://api.mistral.ai/v1",
+        "apiKeyEnv": "MISTRAL_API_KEY",
+        "litellmProvider": "mistral",
+        "models": [
+          {
+            "id": "mistral-medium-latest",
+            "litellm": "mistral/mistral-medium-latest",
+            "level": "balanced",
+            "taskFit": [
+              "default",
+              "coding"
+            ],
+            "capabilities": [
+              "multimodal",
+              "agentic-coding"
+            ],
+            "sourceRefs": [
+              "mistralModels",
+              "litellmProviders"
+            ]
+          },
+          {
+            "id": "mistral-small-latest",
+            "litellm": "mistral/mistral-small-latest",
+            "level": "economy",
+            "taskFit": [
+              "background",
+              "default"
+            ],
+            "capabilities": [
+              "hybrid-instruct",
+              "reasoning",
+              "coding"
+            ],
+            "sourceRefs": [
+              "mistralModels",
+              "litellmProviders"
+            ]
+          },
+          {
+            "id": "codestral-latest",
+            "litellm": "mistral/codestral-latest",
+            "level": "specialist",
+            "taskFit": [
+              "coding"
+            ],
+            "capabilities": [
+              "code-completion",
+              "coding"
+            ],
+            "sourceRefs": [
+              "mistralModels",
+              "litellmProviders"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "deepseek",
+        "name": "DeepSeek",
+        "apiStyle": "openai-compatible",
+        "apiBaseUrl": "https://api.deepseek.com",
+        "apiKeyEnv": "DEEPSEEK_API_KEY",
+        "litellmProvider": "deepseek",
+        "models": [
+          {
+            "id": "deepseek-v4-flash",
+            "litellm": "deepseek/deepseek-v4-flash",
+            "level": "economy",
+            "taskFit": [
+              "background",
+              "default",
+              "think",
+              "longContext"
+            ],
+            "contextWindow": 1000000,
+            "maxOutputTokens": 384000,
+            "pricingUsdPer1M": {
+              "inputCacheHit": 0.0028,
+              "inputCacheMiss": 0.14,
+              "output": 0.28
+            },
+            "capabilities": [
+              "thinking-mode",
+              "json-output",
+              "tool-calls",
+              "chat-prefix-completion",
+              "fim"
+            ],
+            "sourceRefs": [
+              "deepseekPricing",
+              "litellmProviders"
+            ]
+          },
+          {
+            "id": "deepseek-v4-pro",
+            "litellm": "deepseek/deepseek-v4-pro",
+            "level": "balanced",
+            "taskFit": [
+              "default",
+              "think",
+              "longContext"
+            ],
+            "contextWindow": 1000000,
+            "maxOutputTokens": 384000,
+            "pricingUsdPer1M": {
+              "inputCacheHit": 0.003625,
+              "inputCacheMiss": 0.435,
+              "output": 0.87
+            },
+            "capabilities": [
+              "thinking-mode",
+              "json-output",
+              "tool-calls",
+              "chat-prefix-completion",
+              "fim"
+            ],
+            "sourceRefs": [
+              "deepseekPricing",
+              "litellmProviders"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "xai",
+        "name": "xAI",
+        "apiStyle": "openai-compatible",
+        "apiBaseUrl": "https://api.x.ai/v1",
+        "apiKeyEnv": "XAI_API_KEY",
+        "litellmProvider": "xai",
+        "models": [
+          {
+            "id": "grok-4.3",
+            "litellm": "xai/grok-4.3",
+            "level": "balanced",
+            "taskFit": [
+              "default",
+              "think",
+              "webSearch"
+            ],
+            "contextWindow": 1000000,
+            "pricingUsdPer1M": {
+              "input": 1.25,
+              "output": 2.5
+            },
+            "capabilities": [
+              "agentic-tool-calling",
+              "configurable-reasoning",
+              "web-search",
+              "x-search"
+            ],
+            "sourceRefs": [
+              "xaiModels",
+              "litellmProviders"
+            ]
+          },
+          {
+            "id": "grok-build-0.1",
+            "litellm": "xai/grok-build-0.1",
+            "level": "specialist",
+            "taskFit": [
+              "coding"
+            ],
+            "contextWindow": 256000,
+            "pricingUsdPer1M": {
+              "input": 1,
+              "output": 2
+            },
+            "capabilities": [
+              "agentic-coding",
+              "fast-coding"
+            ],
+            "sourceRefs": [
+              "xaiModels",
+              "litellmProviders"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "azure-openai",
+        "name": "Azure OpenAI / Foundry Models sold by Azure",
+        "apiStyle": "azure-openai",
+        "apiBaseUrlEnv": "AZURE_API_BASE",
+        "apiKeyEnv": "AZURE_API_KEY",
+        "apiVersionEnv": "AZURE_API_VERSION",
+        "litellmProvider": "azure",
+        "models": [
+          {
+            "id": "gpt-5",
+            "litellm": "azure/<deployment-name>",
+            "baseModel": "gpt-5",
+            "level": "frontier",
+            "taskFit": [
+              "default",
+              "think",
+              "coding"
+            ],
+            "capabilities": [
+              "reasoning",
+              "coding"
+            ],
+            "pricingNotes": [
+              "Azure pricing depends on region and deployment type; keep the concrete deployment and price in a local overlay."
+            ],
+            "sourceRefs": [
+              "azureModels",
+              "litellmAzure"
+            ]
+          },
+          {
+            "id": "gpt-5-mini",
+            "litellm": "azure/<deployment-name>",
+            "baseModel": "gpt-5-mini",
+            "level": "economy",
+            "taskFit": [
+              "background",
+              "default",
+              "coding"
+            ],
+            "capabilities": [
+              "reasoning",
+              "coding"
+            ],
+            "pricingNotes": [
+              "Azure pricing depends on region and deployment type; keep the concrete deployment and price in a local overlay."
+            ],
+            "sourceRefs": [
+              "azureModels",
+              "litellmAzure"
+            ]
+          },
+          {
+            "id": "gpt-4.1",
+            "litellm": "azure/<deployment-name>",
+            "baseModel": "gpt-4.1",
+            "level": "balanced",
+            "taskFit": [
+              "default",
+              "coding"
+            ],
+            "capabilities": [
+              "coding",
+              "vision"
+            ],
+            "pricingNotes": [
+              "Azure pricing depends on region and deployment type; keep the concrete deployment and price in a local overlay."
+            ],
+            "sourceRefs": [
+              "azureModels",
+              "litellmAzure"
+            ]
+          },
+          {
+            "id": "o-series",
+            "litellm": "azure/<deployment-name>",
+            "baseModelFamily": "o-series",
+            "level": "specialist",
+            "taskFit": [
+              "think",
+              "coding"
+            ],
+            "capabilities": [
+              "reasoning",
+              "science",
+              "coding",
+              "math"
+            ],
+            "pricingNotes": [
+              "Azure pricing depends on region and deployment type; keep the concrete deployment and price in a local overlay."
+            ],
+            "sourceRefs": [
+              "azureModels",
+              "litellmAzure"
+            ]
+          }
+        ]
+      }
+    ],
+    "routingPresets": {
+      "coding-balanced": {
+        "default": [
+          "anthropic/claude-sonnet-4-6",
+          "openai/gpt-5.4",
+          "google-ai-studio/gemini-2.5-pro"
+        ],
+        "background": [
+          "openai/gpt-5.4-mini",
+          "google-ai-studio/gemini-2.5-flash",
+          "deepseek/deepseek-v4-flash"
+        ],
+        "think": [
+          "anthropic/claude-opus-4-8",
+          "openai/gpt-5.5",
+          "deepseek/deepseek-v4-pro"
+        ],
+        "longContext": [
+          "anthropic/claude-opus-4-8",
+          "openai/gpt-5.5",
+          "deepseek/deepseek-v4-flash"
+        ],
+        "coding": [
+          "xai/grok-build-0.1",
+          "mistral/codestral-latest",
+          "anthropic/claude-sonnet-4-6"
+        ]
+      }
+    }
+  },
   "profiles": [
     {
       "name": "openai-compatible-example",

@@ -18,6 +18,18 @@ node src/airkit.mjs doctor
 The dry run prints every file path it would create. Do not edit runtime files
 directly unless the user explicitly asks for a manual repair.
 
+## Public Model Catalog
+
+- Public provider/model facts live in `profiles/catalog.json` under
+  `modelCatalog`.
+- Use only vendor documentation or gateway documentation that can be publicly
+  verified.
+- Keep `modelCatalog.lastReviewed` current whenever provider prices, context
+  windows, model IDs, LiteLLM prefixes, or Azure routing metadata change.
+- Azure entries should describe public base-model families and LiteLLM routing
+  shape only. Do not commit tenant-specific deployment names, regions, quotas,
+  or negotiated pricing.
+
 ## Product Boundary
 
 - Keep runtime state out of git: Claude sessions, CCR daemon state, caches,
