@@ -79,6 +79,7 @@ negotiated pricing.
 - `summary`: operational description. Included in install output and generated
   shell comments.
 - `shell`: optional object for generated shell snippets.
+- `launch`: optional object for `airclaude` one-command setup and launch.
 - `ccr`: optional object. When present, it is rendered as the CCR JSON config
   for the profile.
 
@@ -121,6 +122,62 @@ Fields:
 
 The catalog stores snippet inputs, not generated shell. Do not hand-write
 runtime shell files into the repo.
+
+## Launch Fields
+
+`launch` controls the `airclaude` daily entrypoint. Unlike shell wrappers,
+`airclaude` automatically writes managed files, syncs the selected CCR config to
+CCR's live config path, starts CCR when needed, and then launches the configured
+Claude Code command.
+
+```json
+{
+  "launch": {
+    "binary": "claude",
+    "args": [
+      "--strict-mcp-config",
+      "--mcp-config",
+      "{{configDir}}/claude/empty-mcp.json"
+    ],
+    "env": {
+      "CCR_PROFILE": "{{profileName}}"
+    },
+    "defaultMode": "auto",
+    "modes": {
+      "auto": {},
+      "pro": {
+        "ccr": {
+          "Router": {
+            "default": "openai-compatible,reasoning-coder",
+            "think": "openai-compatible,reasoning-coder",
+            "longContext": "openai-compatible,long-context-coder"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Fields:
+
+- `binary`: command to execute after CCR setup, usually `claude`.
+- `args`: arguments passed before user-provided Claude Code arguments.
+- `env`: additional environment variables for the launched command. Values may
+  use `{{profileName}}` and `{{configDir}}`.
+- `defaultMode`: mode used by plain `airclaude`; defaults to `auto`.
+- `modes`: map of mode names. `auto` is the normal mode. `pro` is the
+  convention for stronger routing.
+- `modes.<name>.ccr`: partial CCR config overlay applied only to the live CCR
+  config for that launch. It does not create a separate profile.
+
+`airclaude` also applies CCR's own activation environment internally. Do not put
+real provider API keys in `launch.env`.
+
+When a profile defines `shell.ccrTokenOpRef`, `airclaude` resolves that
+reference with `op read` during launch and passes the token only to `ccr
+restart`. The token is not written to managed files, the live CCR config, or
+normal command output.
 
 ## CCR Fields
 

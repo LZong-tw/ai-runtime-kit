@@ -2,8 +2,9 @@
 
 import { access, chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -198,6 +199,82 @@ export async function updateProfile(catalog, profileName, options = {}) {
   return { profile: plan.profile, write: plan.write, previewDir, files };
 }
 
+export function buildLaunchPlan(catalog, profileName, options = {}) {
+  const profile = findProfile(catalog, profileName);
+  const configDir = resolve(options.configDir ?? defaultConfigDir());
+  const templateVars = profileTemplateVars(profile, configDir);
+  const launch = resolveLaunchConfig(profile, templateVars);
+  const mode = resolveLaunchMode(profile, launch, options.mode);
+  const ccrConfig = applyLaunchModeOverlay(buildCcrConfig(catalog, profileName, { configDir }), profile, mode, templateVars);
+  const basePlan = planInstall(catalog, profileName, { configDir, write: true, force: true });
+  const liveCcrConfig = resolve(
+    options.liveCcrConfig ?? process.env.AIRKIT_CCR_LIVE_CONFIG ?? join(homedir(), ".claude-code-router", "config.json"),
+  );
+
+  return {
+    profile: basePlan.profile,
+    mode,
+    configDir,
+    files: basePlan.files,
+    ccrConfig,
+    liveCcrConfig: { path: liveCcrConfig },
+    credential: {
+      ccrTokenOpRef: profile.shell?.ccrTokenOpRef ?? null,
+    },
+    launch: {
+      command: renderTemplateValue(launch.binary, templateVars),
+      args: (launch.args ?? []).map((arg) => renderTemplateValue(arg, templateVars)),
+      env: renderTemplateValue(launch.env ?? {}, templateVars),
+      userArgs: options.userArgs ?? [],
+    },
+  };
+}
+
+export async function prepareLaunch(catalog, profileName, options = {}) {
+  const plan = buildLaunchPlan(catalog, profileName, options);
+  const rendered = renderProfile(catalog, profileName, {
+    configDir: plan.configDir,
+    ccrConfigPath: plan.files.ccrConfig,
+  });
+  const files = await planLaunchFiles(plan, rendered);
+
+  if (options.dryRun || options.doctor) {
+    return {
+      ...plan,
+      write: false,
+      files,
+      liveCcrConfig: { ...plan.liveCcrConfig, status: "would-sync" },
+      runtime: await checkLaunchRuntime(plan, options),
+    };
+  }
+
+  await writeLaunchFiles(plan, rendered);
+  await mkdir(dirname(plan.liveCcrConfig.path), { recursive: true });
+  await writeFile(plan.liveCcrConfig.path, `${JSON.stringify(plan.ccrConfig, null, 2)}\n`);
+  const runtime = await checkLaunchRuntime(plan, options);
+  if (!runtime.ccr.ok) throw new Error(runtime.ccr.reason);
+  if (!runtime.launch.ok) throw new Error(runtime.launch.reason);
+  const launchEnv = { ...(runtime.ccr.env ?? {}), ...plan.launch.env };
+
+  let child = null;
+  if (options.launch !== false) {
+    const spawnCommand = options.spawnCommand ?? spawnCommandSync;
+    child = spawnCommand(plan.launch.command, [...plan.launch.args, ...plan.launch.userArgs], {
+      env: launchEnv,
+      stdio: "inherit",
+    });
+  }
+
+  return {
+    ...plan,
+    write: true,
+    files: await planLaunchFiles(plan, rendered),
+    liveCcrConfig: { ...plan.liveCcrConfig, status: "synced" },
+    runtime,
+    child,
+  };
+}
+
 export async function doctorProfile(catalog, profileName, options = {}) {
   const profile = findProfile(catalog, profileName);
   const plan = planInstall(catalog, profileName, options);
@@ -280,7 +357,7 @@ function publicPackage() {
     description: "Public-safe runtime profile templates for AI client wrappers.",
     type: "module",
     exports: "./src/airkit.mjs",
-    bin: { airkit: "src/airkit.mjs" },
+    bin: { airkit: "src/airkit.mjs", airclaude: "src/airkit.mjs" },
     scripts: { check: "node --check src/airkit.mjs", test: "node --test" },
     engines: { node: ">=20" },
     license: "MIT",
@@ -296,6 +373,10 @@ Public-safe runtime profile templates for Claude Code Router and other AI client
 This repository intentionally contains no private endpoints, no credential-manager item references, and no secret values. Use \`profiles/catalog.json\` as a starting point, then keep machine-specific runtime state outside git.
 
 \`\`\`bash
+airclaude
+airclaude pro
+airclaude --dry-run
+airclaude --doctor
 airkit list
 airkit init --profile openai-compatible-example
 airkit init --profile openai-compatible-example --write
@@ -305,8 +386,13 @@ airkit update --profile openai-compatible-example
 airkit doctor --profile openai-compatible-example
 \`\`\`
 
-For LLM-guided installation, start with \`CLAUDE.md\`. The normal flow is a dry
-run first, then \`--write\` after the user confirms the target paths.
+\`airclaude\` is the daily entrypoint. It automatically renders managed files,
+syncs the CCR live config, starts CCR when needed, and launches Claude Code.
+\`airclaude pro\` applies the profile's stronger routing overlay before launch.
+
+For LLM-guided installation or debugging, start with \`CLAUDE.md\`. The
+management flow remains inspectable: dry run first, then \`--write\` after the
+user confirms the target paths.
 `;
 }
 
@@ -314,6 +400,10 @@ export async function runCli(argv = process.argv.slice(2), options = {}) {
   const stdout = options.stdout ?? process.stdout;
   const [command, subcommand, ...rest] = argv;
   const catalog = command === "export-oss" ? null : await loadCatalog(options.catalogPath ?? defaultCatalogPath);
+
+  if (command === "airclaude") {
+    return runAirclaudeCli([subcommand, ...rest].filter((arg) => arg !== undefined), options);
+  }
 
   if (command === "init") {
     const profile = requireFlag([subcommand, ...rest], "--profile");
@@ -383,6 +473,24 @@ export async function runCli(argv = process.argv.slice(2), options = {}) {
   throw new Error(`unknown command: ${argv.join(" ") || "(none)"}`);
 }
 
+export async function runAirclaudeCli(argv = process.argv.slice(2), options = {}) {
+  const stdout = options.stdout ?? process.stdout;
+  const catalog = await loadCatalog(options.catalogPath ?? defaultCatalogPath);
+  const parsed = parseAirclaudeArgs(argv);
+  const profile = parsed.profile ?? process.env.AIRCLAUDE_PROFILE ?? defaultLaunchProfile(catalog);
+  const result = await prepareLaunch(catalog, profile, {
+    ...options,
+    configDir: parsed.configDir ?? options.configDir ?? defaultConfigDir(),
+    doctor: parsed.doctor,
+    dryRun: parsed.dryRun || parsed.doctor,
+    launch: !parsed.dryRun && !parsed.doctor,
+    mode: parsed.mode,
+    userArgs: parsed.userArgs,
+  });
+  stdout.write(renderLaunchResult(result, { doctor: parsed.doctor, dryRun: parsed.dryRun }));
+  return result.child?.status ?? 0;
+}
+
 async function emitJson(value, outPath, stdout = process.stdout) {
   await emitText(`${JSON.stringify(value, null, 2)}\n`, outPath, stdout);
 }
@@ -394,6 +502,40 @@ async function emitText(value, outPath, stdout = process.stdout) {
   } else {
     stdout.write(value);
   }
+}
+
+function parseAirclaudeArgs(argv) {
+  const parsed = { userArgs: [] };
+  const passthroughIndex = argv.indexOf("--");
+  const ownArgs = passthroughIndex === -1 ? argv : argv.slice(0, passthroughIndex);
+  parsed.userArgs.push(...(passthroughIndex === -1 ? [] : argv.slice(passthroughIndex + 1)));
+
+  for (let index = 0; index < ownArgs.length; index += 1) {
+    const arg = ownArgs[index];
+    if (arg === "--profile") {
+      parsed.profile = ownArgs[++index];
+    } else if (arg === "--config-dir") {
+      parsed.configDir = ownArgs[++index];
+    } else if (arg === "--mode") {
+      parsed.mode = ownArgs[++index];
+    } else if (arg === "--dry-run") {
+      parsed.dryRun = true;
+    } else if (arg === "--doctor") {
+      parsed.doctor = true;
+    } else if ((arg === "auto" || arg === "pro") && !parsed.mode) {
+      parsed.mode = arg;
+    } else {
+      parsed.userArgs.push(arg);
+    }
+  }
+
+  return parsed;
+}
+
+function defaultLaunchProfile(catalog) {
+  const profile = catalog.profiles.find((candidate) => candidate.launch || candidate.ccr);
+  if (!profile) throw new Error("catalog does not define a launchable profile");
+  return profile.name;
 }
 
 function readFlag(args, name) {
@@ -466,6 +608,42 @@ ${diffLines.join("\n")}
 ${result.write ? "" : "Re-run with --write to overwrite stale or missing target files.\n"}`;
 }
 
+function renderLaunchResult(result, options = {}) {
+  const action = options.doctor ? "Doctor" : options.dryRun || !result.write ? "Dry run" : "Launched";
+  const fileLines = [
+    `- ${result.files.ccrConfig.status} CCR config: ${result.files.ccrConfig.target}`,
+    `- ${result.files.shellSnippet.status} shell snippet: ${result.files.shellSnippet.target}`,
+    ...result.files.managedFiles.map((file) => `- ${file.status} ${file.label}: ${file.target}`),
+  ];
+  const runtimeLines = result.runtime
+    ? [
+        `- ${result.runtime.ccr.ok ? "ok" : "fail"} CCR: ${result.runtime.ccr.command}`,
+        `- ${result.runtime.launch.ok ? "ok" : "fail"} launch command: ${result.runtime.launch.command}`,
+      ]
+    : [];
+
+  return `${action} airclaude profile: ${result.profile.name}
+mode: ${result.mode}
+
+Routes:
+- default: ${result.ccrConfig.Router?.default ?? "unset"}
+- think: ${result.ccrConfig.Router?.think ?? "unset"}
+- longContext: ${result.ccrConfig.Router?.longContext ?? "unset"}
+- background: ${result.ccrConfig.Router?.background ?? "unset"}
+- webSearch: ${result.ccrConfig.Router?.webSearch ?? "unset"}
+
+Files:
+${fileLines.join("\n")}
+- ${result.liveCcrConfig.status} live CCR config: ${result.liveCcrConfig.path}
+
+Runtime:
+${runtimeLines.join("\n") || "- skipped"}
+
+Launch:
+- ${result.launch.command} ${[...result.launch.args, ...result.launch.userArgs].map(quoteShell).join(" ")}
+`;
+}
+
 function renderProfile(catalog, profileName, options = {}) {
   const profile = findProfile(catalog, profileName);
   const configDir = resolve(options.configDir ?? defaultConfigDir());
@@ -475,6 +653,167 @@ function renderProfile(catalog, profileName, options = {}) {
     shellSnippet: buildShellSnippet(catalog, profileName, options),
     managedFiles: renderManagedFiles(profile, { configDir }),
   };
+}
+
+function resolveLaunchConfig(profile, templateVars) {
+  if (profile.launch) return profile.launch;
+  const wrapper = profile.shell?.wrappers?.[0];
+  if (wrapper) {
+    return {
+      binary: wrapper.command,
+      args: wrapper.args ?? [],
+      env: wrapper.env ?? {},
+      defaultMode: "auto",
+      modes: { auto: {} },
+    };
+  }
+  return {
+    binary: "ccr",
+    args: ["code"],
+    env: { CCR_PROFILE: "{{profileName}}" },
+    defaultMode: "auto",
+    modes: { auto: {} },
+  };
+}
+
+function resolveLaunchMode(profile, launch, requestedMode) {
+  const mode = requestedMode ?? launch.defaultMode ?? "auto";
+  const modes = launch.modes ?? { auto: {} };
+  if (!Object.hasOwn(modes, mode)) {
+    throw new Error(`profile "${profile.name}" does not define launch mode "${mode}"`);
+  }
+  return mode;
+}
+
+function applyLaunchModeOverlay(ccrConfig, profile, mode, templateVars) {
+  const overlay = profile.launch?.modes?.[mode]?.ccr;
+  if (!overlay) return ccrConfig;
+  return mergeDeep(ccrConfig, renderTemplateValue(overlay, templateVars));
+}
+
+function mergeDeep(base, overlay) {
+  if (Array.isArray(base) || Array.isArray(overlay) || !isPlainObject(base) || !isPlainObject(overlay)) {
+    return structuredClone(overlay);
+  }
+  const merged = structuredClone(base);
+  for (const [key, value] of Object.entries(overlay)) {
+    merged[key] = key in merged ? mergeDeep(merged[key], value) : structuredClone(value);
+  }
+  return merged;
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+async function planLaunchFiles(plan, rendered) {
+  return {
+    ccrConfig: await checkLaunchFile(plan.files.ccrConfig, rendered.ccrConfig, "CCR config"),
+    shellSnippet: await checkLaunchFile(plan.files.shellSnippet, rendered.shellSnippet, "shell snippet"),
+    managedFiles: await Promise.all(
+      rendered.managedFiles.map((file) => checkLaunchFile(file.path, file.content, file.label)),
+    ),
+  };
+}
+
+async function checkLaunchFile(path, expected, label) {
+  let actual;
+  try {
+    actual = await readFile(path, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return { status: "missing", label, target: path };
+    }
+    throw error;
+  }
+  return { status: actual === expected ? "current" : "stale", label, target: path };
+}
+
+async function writeLaunchFiles(plan, rendered) {
+  await mkdir(dirname(plan.files.ccrConfig), { recursive: true });
+  await mkdir(dirname(plan.files.shellSnippet), { recursive: true });
+  await writeFile(plan.files.ccrConfig, rendered.ccrConfig);
+  await writeFile(plan.files.shellSnippet, rendered.shellSnippet);
+  for (const file of rendered.managedFiles) {
+    await mkdir(dirname(file.path), { recursive: true });
+    await writeFile(file.path, file.content);
+  }
+}
+
+async function checkLaunchRuntime(plan, options = {}) {
+  const commandExists = options.commandExists ?? commandExistsOnPath;
+  const runCommand = options.runCommand ?? runCommandSync;
+  const env = options.env ?? process.env;
+  const ccrExists = await commandExists("ccr");
+  const launchExists = await commandExists(plan.launch.command);
+  const runtime = {
+    ccr: ccrExists ? { ok: true, command: "ccr" } : { ok: false, command: "ccr", reason: "missing command: ccr" },
+    launch: launchExists
+      ? { ok: true, command: plan.launch.command }
+      : { ok: false, command: plan.launch.command, reason: `missing command: ${plan.launch.command}` },
+  };
+  if (!runtime.ccr.ok || options.dryRun || options.doctor) return runtime;
+
+  const authEnv = await resolveCcrAuthEnv(plan, { commandExists, env, runCommand });
+  if (!authEnv.ok) {
+    runtime.ccr = { ok: false, command: "ccr", reason: authEnv.reason };
+    return runtime;
+  }
+
+  const restart = await runCommand("ccr", ["restart"], { env: { ...env, ...authEnv.env } });
+  if (!restart.ok) {
+    runtime.ccr = {
+      ok: false,
+      command: "ccr",
+      reason: `ccr restart failed${restart.stderr ? `: ${restart.stderr}` : ""}`,
+    };
+    return runtime;
+  }
+
+  const activate = await runCommand("ccr", ["activate"]);
+  if (!activate.ok) {
+    runtime.ccr = {
+      ok: false,
+      command: "ccr",
+      reason: `ccr activate failed${activate.stderr ? `: ${activate.stderr}` : ""}`,
+    };
+    return runtime;
+  }
+  runtime.ccr.env = parseShellExports(activate.stdout);
+  return runtime;
+}
+
+async function resolveCcrAuthEnv(plan, { commandExists, env, runCommand }) {
+  const existingToken = env.ANTHROPIC_AUTH_TOKEN;
+  if (existingToken && !existingToken.startsWith("op://")) {
+    return { ok: true, env: { ANTHROPIC_AUTH_TOKEN: existingToken } };
+  }
+
+  const ref =
+    env.CCR_ANTHROPIC_AUTH_TOKEN_OP_REF ??
+    env.ANTHROPIC_AUTH_TOKEN_OP_REF_DEFAULT ??
+    env.ANTHROPIC_AUTH_TOKEN_OP_REF ??
+    plan.credential.ccrTokenOpRef;
+  if (!ref) return { ok: true, env: {} };
+  if (!(await commandExists("op"))) {
+    return { ok: false, reason: `op not found; cannot resolve ${ref}` };
+  }
+
+  const token = await runCommand("op", ["read", ref, "--no-newline"], { env });
+  if (!token.ok) {
+    return { ok: false, reason: `unable to read ${ref} from 1Password; run op signin and retry` };
+  }
+  return { ok: true, env: { ANTHROPIC_AUTH_TOKEN: token.stdout } };
+}
+
+function parseShellExports(source = "") {
+  const env = {};
+  for (const line of source.split("\n")) {
+    const match = line.match(/^export\s+([A-Za-z_][A-Za-z0-9_]*)=(?:"([^"]*)"|'([^']*)'|(.*))$/);
+    if (!match) continue;
+    env[match[1]] = match[2] ?? match[3] ?? match[4] ?? "";
+  }
+  return env;
 }
 
 function renderManagedFiles(profile, options = {}) {
@@ -587,6 +926,23 @@ function commandExistsOnPath(command) {
   return result.status === 0;
 }
 
+function runCommandSync(command, args = [], options = {}) {
+  const result = spawnSync(command, args, { encoding: "utf8", env: { ...process.env, ...(options.env ?? {}) } });
+  return {
+    ok: result.status === 0,
+    status: result.status,
+    stdout: result.stdout?.trim() ?? "",
+    stderr: result.stderr?.trim() ?? result.error?.message ?? "",
+  };
+}
+
+function spawnCommandSync(command, args = [], options = {}) {
+  return spawnSync(command, args, {
+    stdio: options.stdio ?? "inherit",
+    env: { ...process.env, ...(options.env ?? {}) },
+  });
+}
+
 function sourceShellSnippet(path, functionNames) {
   const script = 'source "$1" || exit $?; shift; for fn in "$@"; do typeset -f "$fn" >/dev/null || exit 1; done';
   const result = spawnSync("zsh", ["-fc", script, "airkit-source-check", path, ...functionNames], {
@@ -661,14 +1017,17 @@ OpenCode-style install flow: inspect first, write only when the user passes
 Run these from the repo root:
 
 \`\`\`bash
+node src/airkit.mjs airclaude --dry-run
+node src/airkit.mjs airclaude pro --dry-run
 node src/airkit.mjs list
 node src/airkit.mjs init --profile ${defaultProfile}
 node src/airkit.mjs init --profile ${defaultProfile} --write
 node src/airkit.mjs doctor
 \`\`\`
 
-The dry run prints every file path it would create. Do not edit runtime files
-directly unless the user explicitly asks for a manual repair.
+\`airclaude\` is the daily launch path. The management dry run prints every file
+path it would create. Do not edit runtime files directly unless the user
+explicitly asks for a manual repair.
 
 ## Product Boundary
 
@@ -692,8 +1051,12 @@ personal/company tokens to this repository.
 `;
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  runCli()
+if (isDirectEntrypoint()) {
+  const entrypoint = basename(process.argv[1]);
+  const argv = process.argv.slice(2);
+  const runner = entrypoint === "airclaude" ? runAirclaudeCli : runCli;
+
+  runner(argv)
     .then((exitCode) => {
       process.exitCode = exitCode;
     })
@@ -701,4 +1064,13 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       console.error(`airkit: ${error.message}`);
       process.exitCode = 1;
     });
+}
+
+function isDirectEntrypoint() {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
 }

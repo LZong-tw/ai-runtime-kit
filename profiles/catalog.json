@@ -723,6 +723,26 @@
           }
         ]
       },
+      "launch": {
+        "binary": "claude",
+        "args": [],
+        "env": {
+          "CCR_PROFILE": "{{profileName}}"
+        },
+        "defaultMode": "auto",
+        "modes": {
+          "auto": {},
+          "pro": {
+            "ccr": {
+              "Router": {
+                "default": "openai-compatible,reasoning-coder",
+                "think": "openai-compatible,reasoning-coder",
+                "longContext": "openai-compatible,long-context-coder"
+              }
+            }
+          }
+        }
+      },
       "ccr": {
         "APIKEY": "ccr-local",
         "LOG": false,

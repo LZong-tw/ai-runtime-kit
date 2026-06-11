@@ -11,6 +11,10 @@ public vendor documentation and include a `lastReviewed` date because model
 catalogs change frequently.
 
 ```bash
+airclaude
+airclaude pro
+airclaude --dry-run
+airclaude --doctor
 airkit list
 airkit init --profile openai-compatible-example
 airkit init --profile openai-compatible-example --write
@@ -18,8 +22,13 @@ airkit render ccr --profile openai-compatible-example
 airkit render shell --profile openai-compatible-example
 ```
 
-For LLM-guided installation, start with `CLAUDE.md`. The normal flow is a dry
-run first, then `--write` after the user confirms the target paths.
+`airclaude` is the daily entrypoint. It automatically renders managed files,
+syncs the CCR live config, starts CCR when needed, and launches Claude Code.
+`airclaude pro` applies the profile's stronger routing overlay before launch.
+
+For LLM-guided installation or debugging, start with `CLAUDE.md`. The
+management flow remains inspectable: dry run first, then `--write` after the
+user confirms the target paths.
 
 ## Public model catalog
 

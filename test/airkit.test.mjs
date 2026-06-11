@@ -7,10 +7,13 @@ import assert from "node:assert/strict";
 
 import {
   buildCcrConfig,
+  buildLaunchPlan,
   buildShellSnippet,
   doctorProfile,
   installProfile,
   loadCatalog,
+  prepareLaunch,
+  runAirclaudeCli,
   runCli,
   updateProfile,
 } from "../src/airkit.mjs";
@@ -245,9 +248,221 @@ test("runCli can render a caller-provided catalog", async () => {
   assert.match(output.join(""), /openai-compatible-example/);
 });
 
+test("buildLaunchPlan applies pro mode CCR routing overlay without mutating the catalog", async () => {
+  const catalog = launchCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-plan-"));
+
+  try {
+    const plan = buildLaunchPlan(catalog, "launch-example", { configDir, mode: "pro" });
+
+    assert.equal(plan.mode, "pro");
+    assert.equal(plan.ccrConfig.Router.default, "demo,strong-coder");
+    assert.equal(plan.ccrConfig.Router.think, "demo,strong-coder");
+    assert.equal(plan.ccrConfig.Router.background, "demo,cheap-coder");
+    assert.equal(catalog.profiles[0].ccr.Router.default, "demo,steady-coder");
+    assert.deepEqual(plan.launch.args, ["--strict-mcp-config", "--mcp-config", `${configDir}/claude/empty-mcp.json`]);
+    assert.deepEqual(plan.launch.userArgs, []);
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("prepareLaunch dry run reports stale files and does not write targets", async () => {
+  const catalog = launchCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-dry-run-"));
+  const staleCcr = "{ \"stale\": true }\n";
+
+  try {
+    await mkdir(join(configDir, "ccr"), { recursive: true });
+    await writeFile(join(configDir, "ccr", "launch-example.json"), staleCcr);
+
+    const result = await prepareLaunch(catalog, "launch-example", {
+      configDir,
+      dryRun: true,
+      mode: "auto",
+      commandExists: async () => true,
+      runCommand: async () => ({ ok: true, status: 0 }),
+      spawnCommand: () => ({ status: 0 }),
+    });
+
+    assert.equal(result.write, false);
+    assert.equal(result.files.ccrConfig.status, "stale");
+    assert.equal(await readFile(join(configDir, "ccr", "launch-example.json"), "utf8"), staleCcr);
+    assert.equal(result.liveCcrConfig.status, "would-sync");
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("prepareLaunch writes managed files, syncs live CCR config, and preserves passthrough args", async () => {
+  const catalog = launchCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-write-"));
+  const liveCcrConfig = join(configDir, "live", "config.json");
+  const spawned = [];
+
+  try {
+    const result = await prepareLaunch(catalog, "launch-example", {
+      configDir,
+      liveCcrConfig,
+      mode: "pro",
+      userArgs: ["--dangerously-skip-permissions"],
+      commandExists: async (command) => ["ccr", "claude"].includes(command),
+      runCommand: async (command, args) => ({
+        ok: true,
+        status: 0,
+        stdout: command === "ccr" && args[0] === "activate" ? 'export ANTHROPIC_BASE_URL="http://127.0.0.1:3456"\n' : "",
+      }),
+      spawnCommand: (command, args, options) => {
+        spawned.push({ command, args, env: options.env });
+        return { status: 0 };
+      },
+    });
+
+    assert.equal(result.write, true);
+    assert.equal(result.liveCcrConfig.status, "synced");
+    assert.match(await readFile(liveCcrConfig, "utf8"), /strong-coder/);
+    assert.deepEqual(spawned, [
+      {
+        command: "claude",
+        args: ["--strict-mcp-config", "--mcp-config", `${configDir}/claude/empty-mcp.json`, "--dangerously-skip-permissions"],
+        env: { ANTHROPIC_BASE_URL: "http://127.0.0.1:3456", CCR_PROFILE: "launch-example" },
+      },
+    ]);
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("prepareLaunch resolves ccrTokenOpRef through op only for CCR restart", async () => {
+  const catalog = launchCatalog();
+  catalog.profiles[0].shell = { ccrTokenOpRef: "op://Test/API/token" };
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-op-"));
+  const calls = [];
+  const spawned = [];
+
+  try {
+    const result = await prepareLaunch(catalog, "launch-example", {
+      configDir,
+      liveCcrConfig: join(configDir, "live", "config.json"),
+      commandExists: async (command) => ["ccr", "claude", "op"].includes(command),
+      env: {},
+      runCommand: async (command, args, options = {}) => {
+        calls.push({ command, args, token: options.env?.ANTHROPIC_AUTH_TOKEN });
+        if (command === "op") return { ok: true, status: 0, stdout: "resolved-token" };
+        if (command === "ccr" && args[0] === "activate") {
+          return { ok: true, status: 0, stdout: 'export ANTHROPIC_AUTH_TOKEN="ccr-local"\n' };
+        }
+        return { ok: true, status: 0, stdout: "" };
+      },
+      spawnCommand: (command, args, options) => {
+        spawned.push({ command, args, token: options.env.ANTHROPIC_AUTH_TOKEN });
+        return { status: 0 };
+      },
+    });
+
+    assert.equal(result.runtime.ccr.ok, true);
+    assert.deepEqual(calls, [
+      { command: "op", args: ["read", "op://Test/API/token", "--no-newline"], token: undefined },
+      { command: "ccr", args: ["restart"], token: "resolved-token" },
+      { command: "ccr", args: ["activate"], token: undefined },
+    ]);
+    assert.equal(spawned[0].token, "ccr-local");
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("runAirclaudeCli dry run supports positional pro mode and avoids launching", async () => {
+  const catalogPath = await writeLaunchCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-cli-"));
+  const output = [];
+
+  try {
+    const exitCode = await runAirclaudeCli(["pro", "--dry-run", "--profile", "launch-example", "--config-dir", configDir], {
+      catalogPath,
+      stdout: { write: (chunk) => output.push(chunk) },
+      commandExists: async () => true,
+      runCommand: async () => ({ ok: true, status: 0 }),
+      spawnCommand: () => {
+        throw new Error("dry run should not launch");
+      },
+    });
+
+    assert.equal(exitCode, 0);
+    assert.match(output.join(""), /mode: pro/);
+    assert.match(output.join(""), /demo,strong-coder/);
+    assert.doesNotMatch(output.join(""), /sk-/);
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+    await rm(resolve(catalogPath, ".."), { force: true, recursive: true });
+  }
+});
+
 function runAirkitWithEnv(env, ...args) {
   return spawnSync(process.execPath, [resolve(import.meta.dirname, "..", "src", "airkit.mjs"), ...args], {
     encoding: "utf8",
     env: { ...process.env, ...env },
   });
+}
+
+function launchCatalog() {
+  return {
+    schema: 1,
+    profiles: [
+      {
+        name: "launch-example",
+        visibility: "public",
+        summary: "Launch-capable profile.",
+        managedFiles: [
+          {
+            label: "empty MCP config",
+            path: "claude/empty-mcp.json",
+            content: "{\n  \"mcpServers\": {}\n}\n",
+          },
+        ],
+        launch: {
+          binary: "claude",
+          args: ["--strict-mcp-config", "--mcp-config", "{{configDir}}/claude/empty-mcp.json"],
+          env: { CCR_PROFILE: "{{profileName}}" },
+          defaultMode: "auto",
+          modes: {
+            auto: {},
+            pro: {
+              ccr: {
+                Router: {
+                  default: "demo,strong-coder",
+                  think: "demo,strong-coder",
+                  longContext: "demo,strong-coder",
+                },
+              },
+            },
+          },
+        },
+        ccr: {
+          APIKEY: "ccr-local",
+          Providers: [
+            {
+              name: "demo",
+              api_base_url: "https://example.invalid/v1/chat/completions",
+              api_key: "$DEMO_API_KEY",
+              models: ["cheap-coder", "steady-coder", "strong-coder"],
+            },
+          ],
+          Router: {
+            default: "demo,steady-coder",
+            background: "demo,cheap-coder",
+            think: "demo,steady-coder",
+            longContext: "demo,steady-coder",
+          },
+        },
+      },
+    ],
+  };
+}
+
+async function writeLaunchCatalog() {
+  const dir = await mkdtemp(join(tmpdir(), "airkit-launch-catalog-"));
+  const path = join(dir, "catalog.json");
+  await writeFile(path, `${JSON.stringify(launchCatalog(), null, 2)}\n`);
+  return path;
 }
