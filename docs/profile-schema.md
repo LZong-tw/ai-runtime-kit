@@ -136,10 +136,7 @@ Claude Code command.
     "binary": "claude",
     "args": [
       "--settings",
-      "{\"apiKeyHelper\":\"\"}",
-      "--strict-mcp-config",
-      "--mcp-config",
-      "{{configDir}}/claude/empty-mcp.json"
+      "{\"apiKeyHelper\":\"\"}"
     ],
     "env": {
       "CCR_PROFILE": "{{profileName}}"
@@ -175,6 +172,9 @@ Fields:
   `{"apiKeyHelper":""}` when the user's normal Claude setup may define a global
   `apiKeyHelper`; this keeps the CCR auth token as the only active auth source
   for the launch.
+  Do not add `--strict-mcp-config` by default: preserving Claude Code's normal
+  MCP and plugin configuration keeps tool use, installed plugins, and compact
+  behavior aligned with the user's regular CLI.
 - `env`: additional environment variables for the launched command. Values may
   use `{{profileName}}` and `{{configDir}}`.
 - `restore.model`: optional Claude Code model ID used only for persisted session

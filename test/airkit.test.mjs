@@ -279,9 +279,6 @@ test("buildLaunchPlan applies pro mode CCR routing overlay without mutating the 
     assert.deepEqual(plan.launch.args, [
       "--settings",
       "{\"apiKeyHelper\":\"\"}",
-      "--strict-mcp-config",
-      "--mcp-config",
-      `${configDir}/claude/empty-mcp.json`,
     ]);
     assert.deepEqual(plan.launch.userArgs, []);
   } finally {
@@ -349,9 +346,6 @@ test("prepareLaunch writes managed files, syncs live CCR config, and preserves p
         args: [
           "--settings",
           "{\"apiKeyHelper\":\"\"}",
-          "--strict-mcp-config",
-          "--mcp-config",
-          `${configDir}/claude/empty-mcp.json`,
           "--dangerously-skip-permissions",
         ],
         env: { ANTHROPIC_BASE_URL: "http://127.0.0.1:3456", CCR_PROFILE: "launch-example" },
@@ -418,6 +412,17 @@ test("repairClaudeRestoreSessions rewrites persisted routed models and keeps a b
         JSON.stringify({ type: "assistant", message: { role: "assistant", model: "demo,strong-coder" } }),
         JSON.stringify({ type: "assistant", message: { role: "assistant", model: "sonnet" } }),
         JSON.stringify({ type: "assistant", message: { role: "assistant", model: "claude-sonnet-4-6" } }),
+        JSON.stringify({
+          type: "system",
+          subtype: "compact_boundary",
+          content: "Conversation compacted",
+          compactMetadata: { trigger: "manual" },
+        }),
+        JSON.stringify({
+          type: "user",
+          isCompactSummary: true,
+          message: { role: "user", content: "This session is being continued from a previous conversation." },
+        }),
         "not json",
         "",
       ].join("\n"),
@@ -437,6 +442,8 @@ test("repairClaudeRestoreSessions rewrites persisted routed models and keeps a b
     assert.doesNotMatch(repaired, /steady-coder/);
     assert.doesNotMatch(repaired, /demo,strong-coder/);
     assert.match(repaired, /claude-sonnet-4-6/);
+    assert.match(repaired, /"subtype":"compact_boundary"/);
+    assert.match(repaired, /"isCompactSummary":true/);
     assert.match(repaired, /not json/);
     assert.equal(result.backups.length, 1);
     assert.match(await readFile(result.backups[0], "utf8"), /steady-coder/);
@@ -605,21 +612,12 @@ function launchCatalog() {
         name: "launch-example",
         visibility: "public",
         summary: "Launch-capable profile.",
-        managedFiles: [
-          {
-            label: "empty MCP config",
-            path: "claude/empty-mcp.json",
-            content: "{\n  \"mcpServers\": {}\n}\n",
-          },
-        ],
+        managedFiles: [],
         launch: {
           binary: "claude",
           args: [
             "--settings",
             "{\"apiKeyHelper\":\"\"}",
-            "--strict-mcp-config",
-            "--mcp-config",
-            "{{configDir}}/claude/empty-mcp.json",
           ],
           env: { CCR_PROFILE: "{{profileName}}" },
           restore: { model: "claude-sonnet-4-6", models: ["sonnet"] },
