@@ -1,6 +1,6 @@
 {
   "name": "@lzong/ai-runtime-kit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Public-safe runtime profile templates for AI client wrappers.",
   "type": "module",
   "exports": "./src/airkit.mjs",
@@ -10,7 +10,9 @@
   },
   "scripts": {
     "check": "node --check src/airkit.mjs",
-    "test": "node --test"
+    "pack:check": "npm pack --dry-run",
+    "test": "node --test",
+    "verify": "npm test && npm run check && npm run pack:check"
   },
   "engines": {
     "node": ">=20"

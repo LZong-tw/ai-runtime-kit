@@ -22,8 +22,11 @@ Run these from the repo root:
 ```bash
 node --version
 npm --version
+node src/airkit.mjs --help
+node src/airkit.mjs airclaude --help
 node src/airkit.mjs list
 command -v ccr
+command -v claude
 command -v zsh
 ```
 
@@ -31,6 +34,7 @@ Expected repo-owned checks:
 
 - `node src/airkit.mjs list` prints the available profile names.
 - `command -v ccr` finds the CCR command needed by CCR-backed profiles.
+- `command -v claude` finds the Claude Code command used by `airclaude`.
 - `command -v zsh` finds the shell used to source-check generated snippets.
 
 If a command is missing, install or authenticate that tool through the user's

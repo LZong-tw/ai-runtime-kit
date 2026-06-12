@@ -15,7 +15,9 @@ airclaude
 airclaude pro
 airclaude --dry-run
 airclaude --doctor
+airclaude --help
 airkit list
+airkit --help
 airkit init --profile openai-compatible-example
 airkit init --profile openai-compatible-example --write
 airkit render ccr --profile openai-compatible-example

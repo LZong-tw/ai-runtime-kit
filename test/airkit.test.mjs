@@ -248,6 +248,21 @@ test("runCli can render a caller-provided catalog", async () => {
   assert.match(output.join(""), /openai-compatible-example/);
 });
 
+test("runCli prints help without loading the catalog", async () => {
+  for (const arg of ["-h", "--help"]) {
+    const output = [];
+    const exitCode = await runCli([arg], {
+      catalogPath: "/does/not/exist/catalog.json",
+      stdout: { write: (chunk) => output.push(chunk) },
+    });
+
+    assert.equal(exitCode, 0);
+    assert.match(output.join(""), /Usage: airkit/);
+    assert.match(output.join(""), /airclaude/);
+    assert.match(output.join(""), /init --profile/);
+  }
+});
+
 test("buildLaunchPlan applies pro mode CCR routing overlay without mutating the catalog", async () => {
   const catalog = launchCatalog();
   const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-plan-"));
@@ -260,7 +275,13 @@ test("buildLaunchPlan applies pro mode CCR routing overlay without mutating the 
     assert.equal(plan.ccrConfig.Router.think, "demo,strong-coder");
     assert.equal(plan.ccrConfig.Router.background, "demo,cheap-coder");
     assert.equal(catalog.profiles[0].ccr.Router.default, "demo,steady-coder");
-    assert.deepEqual(plan.launch.args, ["--strict-mcp-config", "--mcp-config", `${configDir}/claude/empty-mcp.json`]);
+    assert.deepEqual(plan.launch.args, [
+      "--settings",
+      "{\"apiKeyHelper\":\"\"}",
+      "--strict-mcp-config",
+      "--mcp-config",
+      `${configDir}/claude/empty-mcp.json`,
+    ]);
     assert.deepEqual(plan.launch.userArgs, []);
   } finally {
     await rm(configDir, { force: true, recursive: true });
@@ -324,7 +345,14 @@ test("prepareLaunch writes managed files, syncs live CCR config, and preserves p
     assert.deepEqual(spawned, [
       {
         command: "claude",
-        args: ["--strict-mcp-config", "--mcp-config", `${configDir}/claude/empty-mcp.json`, "--dangerously-skip-permissions"],
+        args: [
+          "--settings",
+          "{\"apiKeyHelper\":\"\"}",
+          "--strict-mcp-config",
+          "--mcp-config",
+          `${configDir}/claude/empty-mcp.json`,
+          "--dangerously-skip-permissions",
+        ],
         env: { ANTHROPIC_BASE_URL: "http://127.0.0.1:3456", CCR_PROFILE: "launch-example" },
       },
     ]);
@@ -372,6 +400,34 @@ test("prepareLaunch resolves ccrTokenOpRef through op only for CCR restart", asy
   }
 });
 
+test("prepareLaunch fails fast when credential resolution hangs", async () => {
+  const catalog = launchCatalog();
+  catalog.profiles[0].shell = { ccrTokenOpRef: "op://Test/API/token" };
+  const fakeBin = await mkdtemp(join(tmpdir(), "airkit-launch-hanging-op-"));
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-timeout-"));
+
+  try {
+    const fakeOp = join(fakeBin, "op");
+    await writeFile(fakeOp, "#!/bin/sh\n/bin/sleep 5\n");
+    await chmod(fakeOp, 0o755);
+
+    await assert.rejects(
+      () =>
+        prepareLaunch(catalog, "launch-example", {
+          commandExists: async (command) => ["ccr", "claude", "op"].includes(command),
+          commandTimeoutMs: 50,
+          configDir,
+          env: { PATH: fakeBin },
+          liveCcrConfig: join(configDir, "live", "config.json"),
+        }),
+      /unable to read op:\/\/Test\/API\/token/,
+    );
+  } finally {
+    await rm(fakeBin, { force: true, recursive: true });
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
 test("runAirclaudeCli dry run supports positional pro mode and avoids launching", async () => {
   const catalogPath = await writeLaunchCatalog();
   const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-cli-"));
@@ -395,6 +451,24 @@ test("runAirclaudeCli dry run supports positional pro mode and avoids launching"
   } finally {
     await rm(configDir, { force: true, recursive: true });
     await rm(resolve(catalogPath, ".."), { force: true, recursive: true });
+  }
+});
+
+test("runAirclaudeCli prints help without loading the catalog", async () => {
+  for (const arg of ["-h", "--help"]) {
+    const output = [];
+    const exitCode = await runAirclaudeCli([arg], {
+      catalogPath: "/does/not/exist/catalog.json",
+      stdout: { write: (chunk) => output.push(chunk) },
+      spawnCommand: () => {
+        throw new Error("help should not launch");
+      },
+    });
+
+    assert.equal(exitCode, 0);
+    assert.match(output.join(""), /Usage: airclaude/);
+    assert.match(output.join(""), /airclaude pro/);
+    assert.match(output.join(""), /--doctor/);
   }
 });
 
@@ -422,7 +496,13 @@ function launchCatalog() {
         ],
         launch: {
           binary: "claude",
-          args: ["--strict-mcp-config", "--mcp-config", "{{configDir}}/claude/empty-mcp.json"],
+          args: [
+            "--settings",
+            "{\"apiKeyHelper\":\"\"}",
+            "--strict-mcp-config",
+            "--mcp-config",
+            "{{configDir}}/claude/empty-mcp.json",
+          ],
           env: { CCR_PROFILE: "{{profileName}}" },
           defaultMode: "auto",
           modes: {

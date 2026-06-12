@@ -135,6 +135,8 @@ Claude Code command.
   "launch": {
     "binary": "claude",
     "args": [
+      "--settings",
+      "{\"apiKeyHelper\":\"\"}",
       "--strict-mcp-config",
       "--mcp-config",
       "{{configDir}}/claude/empty-mcp.json"
@@ -163,6 +165,10 @@ Fields:
 
 - `binary`: command to execute after CCR setup, usually `claude`.
 - `args`: arguments passed before user-provided Claude Code arguments.
+  CCR-backed Claude Code launches should include `--settings` with
+  `{"apiKeyHelper":""}` when the user's normal Claude setup may define a global
+  `apiKeyHelper`; this keeps the CCR auth token as the only active auth source
+  for the launch.
 - `env`: additional environment variables for the launched command. Values may
   use `{{profileName}}` and `{{configDir}}`.
 - `defaultMode`: mode used by plain `airclaude`; defaults to `auto`.

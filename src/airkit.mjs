@@ -353,12 +353,17 @@ function airkitEnvVar(prefix, profileName) {
 function publicPackage() {
   return {
     name: "@lzong/ai-runtime-kit",
-    version: "0.1.0",
+    version: "0.2.0",
     description: "Public-safe runtime profile templates for AI client wrappers.",
     type: "module",
     exports: "./src/airkit.mjs",
     bin: { airkit: "src/airkit.mjs", airclaude: "src/airkit.mjs" },
-    scripts: { check: "node --check src/airkit.mjs", test: "node --test" },
+    scripts: {
+      check: "node --check src/airkit.mjs",
+      "pack:check": "npm pack --dry-run",
+      test: "node --test",
+      verify: "npm test && npm run check && npm run pack:check",
+    },
     engines: { node: ">=20" },
     license: "MIT",
     author: "LZong, Lim, Un-tiong <lzong.tw@gmail.com>",
@@ -377,7 +382,9 @@ airclaude
 airclaude pro
 airclaude --dry-run
 airclaude --doctor
+airclaude --help
 airkit list
+airkit --help
 airkit init --profile openai-compatible-example
 airkit init --profile openai-compatible-example --write
 airkit render ccr --profile openai-compatible-example
@@ -399,11 +406,17 @@ user confirms the target paths.
 export async function runCli(argv = process.argv.slice(2), options = {}) {
   const stdout = options.stdout ?? process.stdout;
   const [command, subcommand, ...rest] = argv;
-  const catalog = command === "export-oss" ? null : await loadCatalog(options.catalogPath ?? defaultCatalogPath);
+
+  if (isHelpRequest(argv)) {
+    stdout.write(renderAirkitHelp());
+    return 0;
+  }
 
   if (command === "airclaude") {
     return runAirclaudeCli([subcommand, ...rest].filter((arg) => arg !== undefined), options);
   }
+
+  const catalog = command === "export-oss" ? null : await loadCatalog(options.catalogPath ?? defaultCatalogPath);
 
   if (command === "init") {
     const profile = requireFlag([subcommand, ...rest], "--profile");
@@ -475,6 +488,12 @@ export async function runCli(argv = process.argv.slice(2), options = {}) {
 
 export async function runAirclaudeCli(argv = process.argv.slice(2), options = {}) {
   const stdout = options.stdout ?? process.stdout;
+
+  if (isHelpRequest(argv)) {
+    stdout.write(renderAirclaudeHelp());
+    return 0;
+  }
+
   const catalog = await loadCatalog(options.catalogPath ?? defaultCatalogPath);
   const parsed = parseAirclaudeArgs(argv);
   const profile = parsed.profile ?? process.env.AIRCLAUDE_PROFILE ?? defaultLaunchProfile(catalog);
@@ -489,6 +508,11 @@ export async function runAirclaudeCli(argv = process.argv.slice(2), options = {}
   });
   stdout.write(renderLaunchResult(result, { doctor: parsed.doctor, dryRun: parsed.dryRun }));
   return result.child?.status ?? 0;
+}
+
+function isHelpRequest(argv) {
+  const [first] = argv;
+  return first === "-h" || first === "--help" || first === "help";
 }
 
 async function emitJson(value, outPath, stdout = process.stdout) {
@@ -555,6 +579,53 @@ function hasFlag(args, name) {
 
 function defaultConfigDir() {
   return process.env.AIRKIT_CONFIG_DIR ?? join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "ai-runtime-kit");
+}
+
+function renderAirkitHelp() {
+  return `Usage: airkit <command> [options]
+
+Commands:
+  list [--visibility all|public|internal]
+  init --profile <name> [--write] [--force] [--config-dir <dir>]
+  update --profile <name> [--write] [--config-dir <dir>] [--preview-dir <dir>]
+  doctor [--profile <name>] [--config-dir <dir>]
+  render ccr --profile <name> [--out <path>]
+  render shell --profile <name> [--out <path>]
+  airclaude [auto|pro] [options] [-- <claude-args>]
+  export-oss --out <dir>
+
+Options:
+  -h, --help    Show this help.
+
+Examples:
+  airkit list
+  airkit init --profile openai-compatible-example
+  airkit doctor --profile openai-compatible-example
+  airkit airclaude pro --dry-run
+`;
+}
+
+function renderAirclaudeHelp() {
+  return `Usage: airclaude [auto|pro] [options] [-- <claude-args>]
+
+Modes:
+  auto          Use the profile's default low-friction routing.
+  pro           Apply the profile's stronger routing overlay.
+
+Options:
+  --profile <name>       Select a launch-capable profile.
+  --config-dir <dir>     Use a custom ai-runtime-kit config directory.
+  --mode <auto|pro>      Select a mode without positional syntax.
+  --dry-run              Render and report the launch plan without writing or launching.
+  --doctor               Run launch preflight checks without launching.
+  -h, --help             Show this help.
+
+Examples:
+  airclaude
+  airclaude pro
+  airclaude --doctor
+  airclaude -- --dangerously-skip-permissions
+`;
 }
 
 function renderInstallPlan(plan) {
@@ -744,6 +815,7 @@ async function checkLaunchRuntime(plan, options = {}) {
   const commandExists = options.commandExists ?? commandExistsOnPath;
   const runCommand = options.runCommand ?? runCommandSync;
   const env = options.env ?? process.env;
+  const timeoutMs = options.commandTimeoutMs ?? 30000;
   const ccrExists = await commandExists("ccr");
   const launchExists = await commandExists(plan.launch.command);
   const runtime = {
@@ -754,13 +826,13 @@ async function checkLaunchRuntime(plan, options = {}) {
   };
   if (!runtime.ccr.ok || options.dryRun || options.doctor) return runtime;
 
-  const authEnv = await resolveCcrAuthEnv(plan, { commandExists, env, runCommand });
+  const authEnv = await resolveCcrAuthEnv(plan, { commandExists, env, runCommand, timeoutMs });
   if (!authEnv.ok) {
     runtime.ccr = { ok: false, command: "ccr", reason: authEnv.reason };
     return runtime;
   }
 
-  const restart = await runCommand("ccr", ["restart"], { env: { ...env, ...authEnv.env } });
+  const restart = await runCommand("ccr", ["restart"], { env: { ...env, ...authEnv.env }, timeoutMs });
   if (!restart.ok) {
     runtime.ccr = {
       ok: false,
@@ -770,7 +842,7 @@ async function checkLaunchRuntime(plan, options = {}) {
     return runtime;
   }
 
-  const activate = await runCommand("ccr", ["activate"]);
+  const activate = await runCommand("ccr", ["activate"], { timeoutMs });
   if (!activate.ok) {
     runtime.ccr = {
       ok: false,
@@ -783,7 +855,7 @@ async function checkLaunchRuntime(plan, options = {}) {
   return runtime;
 }
 
-async function resolveCcrAuthEnv(plan, { commandExists, env, runCommand }) {
+async function resolveCcrAuthEnv(plan, { commandExists, env, runCommand, timeoutMs }) {
   const existingToken = env.ANTHROPIC_AUTH_TOKEN;
   if (existingToken && !existingToken.startsWith("op://")) {
     return { ok: true, env: { ANTHROPIC_AUTH_TOKEN: existingToken } };
@@ -799,7 +871,7 @@ async function resolveCcrAuthEnv(plan, { commandExists, env, runCommand }) {
     return { ok: false, reason: `op not found; cannot resolve ${ref}` };
   }
 
-  const token = await runCommand("op", ["read", ref, "--no-newline"], { env });
+  const token = await runCommand("op", ["read", ref, "--no-newline"], { env, timeoutMs });
   if (!token.ok) {
     return { ok: false, reason: `unable to read ${ref} from 1Password; run op signin and retry` };
   }
@@ -927,12 +999,18 @@ function commandExistsOnPath(command) {
 }
 
 function runCommandSync(command, args = [], options = {}) {
-  const result = spawnSync(command, args, { encoding: "utf8", env: { ...process.env, ...(options.env ?? {}) } });
+  const result = spawnSync(command, args, {
+    encoding: "utf8",
+    env: { ...process.env, ...(options.env ?? {}) },
+    timeout: options.timeoutMs ?? 30000,
+  });
+  const stderr = [result.stderr?.trim(), result.error?.message].filter(Boolean).join("\n");
+
   return {
     ok: result.status === 0,
     status: result.status,
     stdout: result.stdout?.trim() ?? "",
-    stderr: result.stderr?.trim() ?? result.error?.message ?? "",
+    stderr,
   };
 }
 
@@ -1017,6 +1095,8 @@ OpenCode-style install flow: inspect first, write only when the user passes
 Run these from the repo root:
 
 \`\`\`bash
+node src/airkit.mjs --help
+node src/airkit.mjs airclaude --help
 node src/airkit.mjs airclaude --dry-run
 node src/airkit.mjs airclaude pro --dry-run
 node src/airkit.mjs list
@@ -1042,7 +1122,7 @@ explicitly asks for a manual repair.
 For public changes:
 
 \`\`\`bash
-npm run check
+npm run verify
 git push
 \`\`\`
 

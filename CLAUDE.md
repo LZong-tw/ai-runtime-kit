@@ -9,6 +9,10 @@ OpenCode-style install flow: inspect first, write only when the user passes
 Run these from the repo root:
 
 ```bash
+node src/airkit.mjs --help
+node src/airkit.mjs airclaude --help
+node src/airkit.mjs airclaude --dry-run
+node src/airkit.mjs airclaude pro --dry-run
 node src/airkit.mjs list
 node src/airkit.mjs init --profile openai-compatible-example
 node src/airkit.mjs init --profile openai-compatible-example --write
@@ -43,7 +47,7 @@ directly unless the user explicitly asks for a manual repair.
 For public changes:
 
 ```bash
-npm run check
+npm run verify
 git push
 ```
 
