@@ -144,6 +144,12 @@ Claude Code command.
     "env": {
       "CCR_PROFILE": "{{profileName}}"
     },
+    "restore": {
+      "model": "claude-sonnet-4-6",
+      "models": [
+        "sonnet"
+      ]
+    },
     "defaultMode": "auto",
     "modes": {
       "auto": {},
@@ -171,6 +177,11 @@ Fields:
   for the launch.
 - `env`: additional environment variables for the launched command. Values may
   use `{{profileName}}` and `{{configDir}}`.
+- `restore.model`: optional Claude Code model ID used only for persisted session
+  metadata repair. Use a full Claude Code-recognized model ID, not a short alias
+  such as `sonnet`; aliases can launch but may not restore from session JSONL.
+- `restore.models`: optional extra persisted model strings to repair. Use this
+  for legacy aliases or previously shipped invalid restore values.
 - `defaultMode`: mode used by plain `airclaude`; defaults to `auto`.
 - `modes`: map of mode names. `auto` is the normal mode. `pro` is the
   convention for stronger routing.
@@ -184,6 +195,12 @@ When a profile defines `shell.ccrTokenOpRef`, `airclaude` resolves that
 reference with `op read` during launch and passes the token only to `ccr
 restart`. The token is not written to managed files, the live CCR config, or
 normal command output.
+
+When `launch.restore.model` is present, `airclaude` repairs persisted Claude Code
+session JSONL before launching so previously routed provider model names do not
+break session restore. The repair targets the profile's CCR provider models and
+router values, writes a backup under `~/.claude/backups`, and can be run manually
+with `airclaude --repair-restore`.
 
 ## CCR Fields
 

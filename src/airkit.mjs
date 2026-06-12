@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
-import { access, chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -251,6 +251,11 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
   await writeLaunchFiles(plan, rendered);
   await mkdir(dirname(plan.liveCcrConfig.path), { recursive: true });
   await writeFile(plan.liveCcrConfig.path, `${JSON.stringify(plan.ccrConfig, null, 2)}\n`);
+  const restoreRepair = await repairClaudeRestoreSessions(catalog, profileName, {
+    backupsDir: options.backupsDir,
+    projectsDir: options.projectsDir,
+    write: true,
+  });
   const runtime = await checkLaunchRuntime(plan, options);
   if (!runtime.ccr.ok) throw new Error(runtime.ccr.reason);
   if (!runtime.launch.ok) throw new Error(runtime.launch.reason);
@@ -271,8 +276,54 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     files: await planLaunchFiles(plan, rendered),
     liveCcrConfig: { ...plan.liveCcrConfig, status: "synced" },
     runtime,
+    restoreRepair,
     child,
   };
+}
+
+export async function repairClaudeRestoreSessions(catalog, profileName, options = {}) {
+  const profile = findProfile(catalog, profileName);
+  const restore = resolveRestoreRepairConfig(profile);
+  const projectsDir = resolve(options.projectsDir ?? claudeRestoreProjectsDir());
+  const result = {
+    profile: { name: profile.name, summary: profile.summary, visibility: profile.visibility },
+    enabled: Boolean(restore),
+    model: restore?.model ?? null,
+    projectsDir,
+    backupsDir: null,
+    scannedFiles: 0,
+    repairedFiles: 0,
+    repairedLines: 0,
+    backups: [],
+    write: options.write !== false,
+  };
+  if (!restore) return result;
+
+  const files = await listClaudeSessionFiles(projectsDir);
+  result.scannedFiles = files.length;
+
+  for (const file of files) {
+    const original = await readFile(file, "utf8");
+    const repaired = repairClaudeSessionText(original, restore);
+    if (repaired.repairedLines === 0) continue;
+
+    result.repairedFiles += 1;
+    result.repairedLines += repaired.repairedLines;
+    if (!result.write) continue;
+
+    if (!result.backupsDir) {
+      result.backupsDir = resolve(
+        options.backupsDir ?? join(homedir(), ".claude", "backups", `airkit-restore-${timestampForPath()}`),
+      );
+      await mkdir(result.backupsDir, { recursive: true });
+    }
+    const backup = restoreBackupPath(result.backupsDir, projectsDir, file);
+    await copyFile(file, backup);
+    await writeFile(file, repaired.text);
+    result.backups.push(backup);
+  }
+
+  return result;
 }
 
 export async function doctorProfile(catalog, profileName, options = {}) {
@@ -497,6 +548,16 @@ export async function runAirclaudeCli(argv = process.argv.slice(2), options = {}
   const catalog = await loadCatalog(options.catalogPath ?? defaultCatalogPath);
   const parsed = parseAirclaudeArgs(argv);
   const profile = parsed.profile ?? process.env.AIRCLAUDE_PROFILE ?? defaultLaunchProfile(catalog);
+  if (parsed.repairRestore) {
+    const result = await repairClaudeRestoreSessions(catalog, profile, {
+      backupsDir: parsed.backupsDir ?? options.backupsDir,
+      projectsDir: parsed.projectsDir ?? options.projectsDir,
+      write: true,
+    });
+    stdout.write(renderRestoreRepairResult(result));
+    return 0;
+  }
+
   const result = await prepareLaunch(catalog, profile, {
     ...options,
     configDir: parsed.configDir ?? options.configDir ?? defaultConfigDir(),
@@ -504,6 +565,8 @@ export async function runAirclaudeCli(argv = process.argv.slice(2), options = {}
     dryRun: parsed.dryRun || parsed.doctor,
     launch: !parsed.dryRun && !parsed.doctor,
     mode: parsed.mode,
+    backupsDir: parsed.backupsDir ?? options.backupsDir,
+    projectsDir: parsed.projectsDir ?? options.projectsDir,
     userArgs: parsed.userArgs,
   });
   stdout.write(renderLaunchResult(result, { doctor: parsed.doctor, dryRun: parsed.dryRun }));
@@ -546,6 +609,12 @@ function parseAirclaudeArgs(argv) {
       parsed.dryRun = true;
     } else if (arg === "--doctor") {
       parsed.doctor = true;
+    } else if (arg === "--repair-restore") {
+      parsed.repairRestore = true;
+    } else if (arg === "--restore-projects-dir") {
+      parsed.projectsDir = ownArgs[++index];
+    } else if (arg === "--restore-backups-dir") {
+      parsed.backupsDir = ownArgs[++index];
     } else if ((arg === "auto" || arg === "pro") && !parsed.mode) {
       parsed.mode = arg;
     } else {
@@ -618,12 +687,14 @@ Options:
   --mode <auto|pro>      Select a mode without positional syntax.
   --dry-run              Render and report the launch plan without writing or launching.
   --doctor               Run launch preflight checks without launching.
+  --repair-restore       Repair persisted Claude Code session model metadata and exit.
   -h, --help             Show this help.
 
 Examples:
   airclaude
   airclaude pro
   airclaude --doctor
+  airclaude --repair-restore
   airclaude -- --dangerously-skip-permissions
 `;
 }
@@ -709,10 +780,33 @@ ${fileLines.join("\n")}
 
 Runtime:
 ${runtimeLines.join("\n") || "- skipped"}
+${result.restoreRepair ? `\nRestore repair:\n${renderRestoreRepairSummary(result.restoreRepair)}` : ""}
 
 Launch:
 - ${result.launch.command} ${[...result.launch.args, ...result.launch.userArgs].map(quoteShell).join(" ")}
 `;
+}
+
+function renderRestoreRepairResult(result) {
+  return `Restore repair airclaude profile: ${result.profile.name}
+restore model: ${result.model ?? "disabled"}
+projects dir: ${result.projectsDir}
+scanned files: ${result.scannedFiles}
+repaired files: ${result.repairedFiles}
+repaired lines: ${result.repairedLines}
+${result.backups.length ? `backups: ${result.backups.length} (${result.backupsDir})` : "backups: 0"}
+`;
+}
+
+function renderRestoreRepairSummary(result) {
+  if (!result.enabled) return "- disabled";
+  return [
+    `- restore model: ${result.model}`,
+    `- scanned files: ${result.scannedFiles}`,
+    `- repaired files: ${result.repairedFiles}`,
+    `- repaired lines: ${result.repairedLines}`,
+    `- backups: ${result.backups.length}${result.backupsDir ? ` (${result.backupsDir})` : ""}`,
+  ].join("\n");
 }
 
 function renderProfile(catalog, profileName, options = {}) {
@@ -760,6 +854,87 @@ function applyLaunchModeOverlay(ccrConfig, profile, mode, templateVars) {
   const overlay = profile.launch?.modes?.[mode]?.ccr;
   if (!overlay) return ccrConfig;
   return mergeDeep(ccrConfig, renderTemplateValue(overlay, templateVars));
+}
+
+function resolveRestoreRepairConfig(profile) {
+  const model = profile.launch?.restore?.model;
+  if (!model) return null;
+
+  const replaceModels = new Set(profile.launch?.restore?.models ?? []);
+  for (const provider of profile.ccr?.Providers ?? []) {
+    for (const providerModel of provider.models ?? []) {
+      replaceModels.add(providerModel);
+      if (provider.name) replaceModels.add(`${provider.name},${providerModel}`);
+    }
+  }
+  for (const routerModel of Object.values(profile.ccr?.Router ?? {})) {
+    if (typeof routerModel === "string") replaceModels.add(routerModel);
+  }
+  replaceModels.delete(model);
+  return { model, replaceModels };
+}
+
+function claudeRestoreProjectsDir() {
+  return join(homedir(), ".claude", "projects");
+}
+
+async function listClaudeSessionFiles(root) {
+  let entries;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
+
+  const files = [];
+  for (const entry of entries) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...(await listClaudeSessionFiles(path)));
+    } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+      files.push(path);
+    }
+  }
+  return files.sort();
+}
+
+function repairClaudeSessionText(text, restore) {
+  let repairedLines = 0;
+  const lines = text.split("\n").map((line) => {
+    if (!line) return line;
+
+    let record;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      return line;
+    }
+
+    if (!repairMessageModel(record, restore)) return line;
+    repairedLines += 1;
+    return JSON.stringify(record);
+  });
+
+  return { text: lines.join("\n"), repairedLines };
+}
+
+function repairMessageModel(record, restore) {
+  const message = record?.message;
+  if (!message || typeof message !== "object") return false;
+  if (typeof message.model !== "string") return false;
+  if (!restore.replaceModels.has(message.model)) return false;
+  message.model = restore.model;
+  return true;
+}
+
+function restoreBackupPath(backupsDir, projectsDir, file) {
+  const relativePath = relative(projectsDir, file).replaceAll(/[\\/]+/g, "__");
+  return join(backupsDir, `${relativePath}.bak`);
+}
+
+function timestampForPath() {
+  return new Date().toISOString().replaceAll(/[:.]/g, "-");
 }
 
 function mergeDeep(base, overlay) {

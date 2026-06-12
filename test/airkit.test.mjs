@@ -13,6 +13,7 @@ import {
   installProfile,
   loadCatalog,
   prepareLaunch,
+  repairClaudeRestoreSessions,
   runAirclaudeCli,
   runCli,
   updateProfile,
@@ -400,6 +401,51 @@ test("prepareLaunch resolves ccrTokenOpRef through op only for CCR restart", asy
   }
 });
 
+test("repairClaudeRestoreSessions rewrites persisted routed models and keeps a backup", async () => {
+  const catalog = launchCatalog();
+  const projectsDir = await mkdtemp(join(tmpdir(), "airkit-restore-projects-"));
+  const backupsDir = await mkdtemp(join(tmpdir(), "airkit-restore-backups-"));
+  const projectDir = join(projectsDir, "-Users-example-project");
+  const sessionPath = join(projectDir, "session.jsonl");
+
+  try {
+    await mkdir(projectDir, { recursive: true });
+    await writeFile(
+      sessionPath,
+      [
+        JSON.stringify({ type: "user", message: { role: "user", content: "hi" } }),
+        JSON.stringify({ type: "assistant", message: { role: "assistant", model: "steady-coder" } }),
+        JSON.stringify({ type: "assistant", message: { role: "assistant", model: "demo,strong-coder" } }),
+        JSON.stringify({ type: "assistant", message: { role: "assistant", model: "sonnet" } }),
+        JSON.stringify({ type: "assistant", message: { role: "assistant", model: "claude-sonnet-4-6" } }),
+        "not json",
+        "",
+      ].join("\n"),
+    );
+
+    const result = await repairClaudeRestoreSessions(catalog, "launch-example", {
+      backupsDir,
+      projectsDir,
+      write: true,
+    });
+    const repaired = await readFile(sessionPath, "utf8");
+
+    assert.equal(result.scannedFiles, 1);
+    assert.equal(result.repairedFiles, 1);
+    assert.equal(result.repairedLines, 3);
+    assert.match(repaired, /"model":"claude-sonnet-4-6"/);
+    assert.doesNotMatch(repaired, /steady-coder/);
+    assert.doesNotMatch(repaired, /demo,strong-coder/);
+    assert.match(repaired, /claude-sonnet-4-6/);
+    assert.match(repaired, /not json/);
+    assert.equal(result.backups.length, 1);
+    assert.match(await readFile(result.backups[0], "utf8"), /steady-coder/);
+  } finally {
+    await rm(projectsDir, { force: true, recursive: true });
+    await rm(backupsDir, { force: true, recursive: true });
+  }
+});
+
 test("prepareLaunch fails fast when credential resolution hangs", async () => {
   const catalog = launchCatalog();
   catalog.profiles[0].shell = { ccrTokenOpRef: "op://Test/API/token" };
@@ -425,6 +471,44 @@ test("prepareLaunch fails fast when credential resolution hangs", async () => {
   } finally {
     await rm(fakeBin, { force: true, recursive: true });
     await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("prepareLaunch repairs restore metadata before launching", async () => {
+  const catalog = launchCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-restore-"));
+  const projectsDir = await mkdtemp(join(tmpdir(), "airkit-launch-restore-projects-"));
+  const backupsDir = await mkdtemp(join(tmpdir(), "airkit-launch-restore-backups-"));
+  const projectDir = join(projectsDir, "-Users-example-project");
+
+  try {
+    await mkdir(projectDir, { recursive: true });
+    await writeFile(
+      join(projectDir, "session.jsonl"),
+      `${JSON.stringify({ type: "assistant", message: { role: "assistant", model: "demo,strong-coder" } })}\n`,
+    );
+
+    const result = await prepareLaunch(catalog, "launch-example", {
+      backupsDir,
+      commandExists: async (command) => ["ccr", "claude"].includes(command),
+      configDir,
+      liveCcrConfig: join(configDir, "live", "config.json"),
+      projectsDir,
+      runCommand: async (command, args) => {
+        if (command === "ccr" && args[0] === "activate") {
+          return { ok: true, status: 0, stdout: 'export ANTHROPIC_AUTH_TOKEN="ccr-local"\n' };
+        }
+        return { ok: true, status: 0, stdout: "" };
+      },
+      spawnCommand: () => ({ status: 0 }),
+    });
+
+    assert.equal(result.restoreRepair.repairedFiles, 1);
+    assert.match(await readFile(join(projectDir, "session.jsonl"), "utf8"), /"model":"claude-sonnet-4-6"/);
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+    await rm(projectsDir, { force: true, recursive: true });
+    await rm(backupsDir, { force: true, recursive: true });
   }
 });
 
@@ -472,6 +556,40 @@ test("runAirclaudeCli prints help without loading the catalog", async () => {
   }
 });
 
+test("runAirclaudeCli can repair restore metadata without launching", async () => {
+  const catalogPath = await writeLaunchCatalog();
+  const projectsDir = await mkdtemp(join(tmpdir(), "airkit-restore-cli-projects-"));
+  const backupsDir = await mkdtemp(join(tmpdir(), "airkit-restore-cli-backups-"));
+  const projectDir = join(projectsDir, "-Users-example-project");
+  const output = [];
+
+  try {
+    await mkdir(projectDir, { recursive: true });
+    await writeFile(
+      join(projectDir, "session.jsonl"),
+      `${JSON.stringify({ type: "assistant", message: { role: "assistant", model: "strong-coder" } })}\n`,
+    );
+
+    const exitCode = await runAirclaudeCli(["--repair-restore", "--profile", "launch-example"], {
+      backupsDir,
+      catalogPath,
+      projectsDir,
+      stdout: { write: (chunk) => output.push(chunk) },
+      spawnCommand: () => {
+        throw new Error("repair should not launch");
+      },
+    });
+
+    assert.equal(exitCode, 0);
+    assert.match(output.join(""), /repaired files: 1/);
+    assert.match(await readFile(join(projectDir, "session.jsonl"), "utf8"), /"model":"claude-sonnet-4-6"/);
+  } finally {
+    await rm(projectsDir, { force: true, recursive: true });
+    await rm(backupsDir, { force: true, recursive: true });
+    await rm(resolve(catalogPath, ".."), { force: true, recursive: true });
+  }
+});
+
 function runAirkitWithEnv(env, ...args) {
   return spawnSync(process.execPath, [resolve(import.meta.dirname, "..", "src", "airkit.mjs"), ...args], {
     encoding: "utf8",
@@ -504,6 +622,7 @@ function launchCatalog() {
             "{{configDir}}/claude/empty-mcp.json",
           ],
           env: { CCR_PROFILE: "{{profileName}}" },
+          restore: { model: "claude-sonnet-4-6", models: ["sonnet"] },
           defaultMode: "auto",
           modes: {
             auto: {},
