@@ -1,5 +1,6 @@
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
@@ -21,6 +22,46 @@ import {
 } from "../src/airkit.mjs";
 
 const profile = "openai-compatible-example";
+
+function freePort() {
+  return new Promise((res, rej) => {
+    const probe = createServer();
+    probe.on("error", rej);
+    probe.listen(0, "127.0.0.1", () => {
+      const { port } = probe.address();
+      probe.close(() => res(port));
+    });
+  });
+}
+
+// Spawn a real listener in a child process so the shell helper can kill it by PID.
+// kind "http" answers /health with 200 (a healthy CCR); kind "net" is a bare TCP
+// socket that never speaks HTTP (a stale orphan curl can't health-check).
+function spawnListener(kind, port) {
+  const code =
+    kind === "http"
+      ? `require('http').createServer((q,r)=>{r.writeHead(200);r.end('ok')}).listen(${port},'127.0.0.1',()=>console.log('ready'))`
+      : `require('net').createServer(()=>{}).listen(${port},'127.0.0.1',()=>console.log('ready'))`;
+  const child = spawn(process.execPath, ["-e", code], { stdio: ["ignore", "pipe", "ignore"] });
+  return new Promise((res, rej) => {
+    child.on("error", rej);
+    child.stdout.on("data", (chunk) => {
+      if (String(chunk).includes("ready")) res(child);
+    });
+  });
+}
+
+async function isAlive(pid) {
+  for (let i = 0; i < 30; i++) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return false;
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return true;
+}
 
 test("buildShellSnippet syncs the rendered CCR config before launching wrappers", async () => {
   const catalog = await loadCatalog();
@@ -66,6 +107,86 @@ test("ccr-start reloads CCR only when the rendered config or bundled transformer
     const wrapperBody = snippet.slice(snippet.indexOf("cclaude-example() {"));
     assert.match(wrapperBody, /airkit-ccr-reload-if-changed-openai-compatible-example/);
   } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("buildShellSnippet renders an orphan reaper and wires it into the launch wrapper", async () => {
+  const catalog = await loadCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-oss-reap-"));
+
+  try {
+    const snippet = buildShellSnippet(catalog, profile, { configDir });
+
+    // A stale daemon CCR can't track keeps port 3456, so `ccr start` hits EADDRINUSE and airclaude
+    // silently falls back to the real API. The reaper kills a listener only when /health fails.
+    assert.match(snippet, /airkit-ccr-reap-orphan-openai-compatible-example\(\) \{/);
+    assert.match(snippet, /\/health/);
+    assert.match(snippet, /lsof/);
+    assert.match(snippet, /kill -9/);
+    const wrapperBody = snippet.slice(snippet.indexOf("cclaude-example() {"));
+    assert.match(wrapperBody, /airkit-ccr-reap-orphan-openai-compatible-example/);
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("airkit-ccr-reap-orphan kills a stale listener that fails the health check", async () => {
+  const catalog = await loadCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-oss-reapkill-"));
+  const port = await freePort();
+  const child = await spawnListener("net", port);
+
+  try {
+    const installed = await installProfile(catalog, profile, { configDir, write: true });
+    const res = spawnSync(
+      "zsh",
+      [
+        "-fc",
+        'source "$1" && CCR_PORT="$2" CCR_HEALTH_URL="http://127.0.0.1:$2/health" airkit-ccr-reap-orphan-openai-compatible-example',
+        "reap-test",
+        installed.files.shellSnippet,
+        String(port),
+      ],
+      { encoding: "utf8" },
+    );
+
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(await isAlive(child.pid), false, "stale orphan listener should have been reaped");
+  } finally {
+    try {
+      process.kill(child.pid, 9);
+    } catch {}
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("airkit-ccr-reap-orphan leaves a healthy CCR (answers /health) running", async () => {
+  const catalog = await loadCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-oss-reapkeep-"));
+  const port = await freePort();
+  const child = await spawnListener("http", port);
+
+  try {
+    const installed = await installProfile(catalog, profile, { configDir, write: true });
+    const res = spawnSync(
+      "zsh",
+      [
+        "-fc",
+        'source "$1" && CCR_PORT="$2" airkit-ccr-reap-orphan-openai-compatible-example',
+        "reap-test",
+        installed.files.shellSnippet,
+        String(port),
+      ],
+      { encoding: "utf8" },
+    );
+
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(await isAlive(child.pid), true, "a healthy CCR must not be reaped");
+  } finally {
+    try {
+      process.kill(child.pid, 9);
+    } catch {}
     await rm(configDir, { force: true, recursive: true });
   }
 });

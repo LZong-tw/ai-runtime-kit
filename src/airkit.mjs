@@ -95,11 +95,37 @@ export function buildShellSnippet(catalog, profileName, options = {}) {
     );
   }
 
+  // A crash or a half-stopped daemon can leave a node process holding the CCR port with no pid file,
+  // so `ccr status` reports "not running" yet every `ccr start` dies with EADDRINUSE — and airclaude
+  // then silently falls back to the real Anthropic API. This reaper kills a port squatter only when it
+  // fails the /health check, so a genuinely healthy daemon is always preserved (and reused).
+  const reapFunction = profile.ccr ? `airkit-ccr-reap-orphan-${profile.name}` : null;
+  if (reapFunction) {
+    lines.push(
+      `${reapFunction}() {`,
+      '  local _airkit_port="${CCR_PORT:-3456}"',
+      '  local _airkit_url="${CCR_HEALTH_URL:-http://127.0.0.1:${_airkit_port}/health}"',
+      '  command curl -fsS -m 1 "$_airkit_url" > /dev/null 2>&1 && return 0',
+      "  local _airkit_pids",
+      '  _airkit_pids="$(command lsof -nP -t -iTCP:"$_airkit_port" -sTCP:LISTEN 2>/dev/null)"',
+      '  [[ -n "$_airkit_pids" ]] || return 0',
+      '  print -r -- "airkit: clearing stale CCR listener on port ${_airkit_port}" >&2',
+      "  command kill -9 ${=_airkit_pids} 2>/dev/null",
+      "  local _airkit_i",
+      "  for _airkit_i in {1..10}; do",
+      '    command lsof -nP -t -iTCP:"$_airkit_port" -sTCP:LISTEN > /dev/null 2>&1 || return 0',
+      "    command sleep 0.1",
+      "  done",
+      "}",
+    );
+  }
+
   if (shell.ccrStartFunction) {
     lines.push(
       `${shell.ccrStartFunction}() {`,
       ...(syncFunction ? [`  ${syncFunction} || return`] : []),
       ...(reloadFunction ? [`  ${reloadFunction}`] : []),
+      ...(reapFunction ? [`  ${reapFunction}`] : []),
       "  CCR_ANTHROPIC_AUTH_TOKEN_OP_REF=${CCR_ANTHROPIC_AUTH_TOKEN_OP_REF:?missing CCR_ANTHROPIC_AUTH_TOKEN_OP_REF} ccr-start \"$@\"",
       "}",
     );
@@ -115,6 +141,9 @@ export function buildShellSnippet(catalog, profileName, options = {}) {
     }
     if (reloadFunction) {
       lines.push(`  ${reloadFunction}`);
+    }
+    if (reapFunction) {
+      lines.push(`  ${reapFunction}`);
     }
     const rawWrapperArgs = (wrapper.args ?? []).map((arg) => renderTemplateValue(arg, templateVars));
     const wrapperCcrConfig = profile.ccr ? buildCcrConfig(catalog, profileName, { configDir: options.configDir }) : null;
