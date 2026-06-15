@@ -176,7 +176,11 @@ Fields:
   MCP and plugin configuration keeps tool use, installed plugins, and compact
   behavior aligned with the user's regular CLI.
 - `env`: additional environment variables for the launched command. Values may
-  use `{{profileName}}` and `{{configDir}}`.
+  use `{{profileName}}`, `{{configDir}}`, and launch-aware variables such as
+  `{{launchMode}}`, `{{restoreModel}}`, `{{statuslineLabel}}`,
+  `{{routeDefault}}`, `{{routeDefaultProvider}}`, `{{routeDefaultModel}}`,
+  `{{routeThink}}`, and `{{routeLongContextModel}}`. These variables are
+  rendered after the mode-specific CCR overlay is applied.
 - `restore.model`: optional Claude Code model ID used only for persisted session
   metadata repair. Use a full Claude Code-recognized model ID, not a short alias
   such as `sonnet`; aliases can launch but may not restore from session JSONL.
@@ -190,6 +194,14 @@ Fields:
 
 `airclaude` also applies CCR's own activation environment internally. Do not put
 real provider API keys in `launch.env`.
+
+`airclaude` injects non-secret runtime metadata into the launched Claude Code
+process for statusline widgets, compact-aware prompts, and local hooks:
+`AIRCLAUDE_PROFILE`, `AIRCLAUDE_MODE`, `AIRCLAUDE_STATUSLINE_LABEL`,
+`AIRCLAUDE_RESTORE_MODEL`, and `AIRCLAUDE_ROUTE_<ROUTE>` values such as
+`AIRCLAUDE_ROUTE_DEFAULT_MODEL`. It also scopes `CLAUDE_STATUSLINE_CACHE_DIR`
+by profile and mode so a routed launch does not reuse a stale normal-Claude
+statusline cache.
 
 When a profile defines `shell.ccrTokenOpRef`, `airclaude` resolves that
 reference with `op read` during launch and passes the token only to `ccr

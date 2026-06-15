@@ -206,6 +206,8 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
   const launch = resolveLaunchConfig(profile, templateVars);
   const mode = resolveLaunchMode(profile, launch, options.mode);
   const ccrConfig = applyLaunchModeOverlay(buildCcrConfig(catalog, profileName, { configDir }), profile, mode, templateVars);
+  const restore = resolveRestoreRepairConfig(profile);
+  const launchVars = launchTemplateVars(profile, configDir, mode, ccrConfig, restore);
   const basePlan = planInstall(catalog, profileName, { configDir, write: true, force: true });
   const liveCcrConfig = resolve(
     options.liveCcrConfig ?? process.env.AIRKIT_CCR_LIVE_CONFIG ?? join(homedir(), ".claude-code-router", "config.json"),
@@ -222,9 +224,12 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
       ccrTokenOpRef: profile.shell?.ccrTokenOpRef ?? null,
     },
     launch: {
-      command: renderTemplateValue(launch.binary, templateVars),
-      args: (launch.args ?? []).map((arg) => renderTemplateValue(arg, templateVars)),
-      env: renderTemplateValue(launch.env ?? {}, templateVars),
+      command: renderTemplateValue(launch.binary, launchVars),
+      args: (launch.args ?? []).map((arg) => renderTemplateValue(arg, launchVars)),
+      env: {
+        ...airclaudeLaunchEnv(profile, mode, ccrConfig, restore),
+        ...renderTemplateValue(launch.env ?? {}, launchVars),
+      },
       userArgs: options.userArgs ?? [],
     },
   };
@@ -854,6 +859,81 @@ function applyLaunchModeOverlay(ccrConfig, profile, mode, templateVars) {
   const overlay = profile.launch?.modes?.[mode]?.ccr;
   if (!overlay) return ccrConfig;
   return mergeDeep(ccrConfig, renderTemplateValue(overlay, templateVars));
+}
+
+function launchTemplateVars(profile, configDir, mode, ccrConfig, restore) {
+  const vars = {
+    ...profileTemplateVars(profile, configDir),
+    launchMode: mode,
+    restoreModel: restore?.model ?? "",
+    statuslineLabel: statuslineLabel(mode, ccrConfig),
+  };
+
+  for (const [key, route] of Object.entries(ccrConfig.Router ?? {})) {
+    if (typeof route !== "string") continue;
+    const routeKey = `route${toPascalCase(key)}`;
+    const { provider, model } = splitRoute(route);
+    vars[routeKey] = route;
+    vars[`${routeKey}Provider`] = provider;
+    vars[`${routeKey}Model`] = model;
+  }
+
+  return vars;
+}
+
+function airclaudeLaunchEnv(profile, mode, ccrConfig, restore) {
+  const env = {
+    AIRCLAUDE_PROFILE: profile.name,
+    AIRCLAUDE_MODE: mode,
+    AIRCLAUDE_STATUSLINE_LABEL: statuslineLabel(mode, ccrConfig),
+    AIRCLAUDE_RESTORE_MODEL: restore?.model ?? "",
+    CLAUDE_STATUSLINE_CACHE_DIR: join(homedir(), ".claude", "cache", "airclaude", profile.name, mode),
+  };
+
+  for (const [key, route] of Object.entries(ccrConfig.Router ?? {})) {
+    if (typeof route !== "string") continue;
+    const envKey = `AIRCLAUDE_ROUTE_${toEnvKey(key)}`;
+    const { provider, model } = splitRoute(route);
+    env[envKey] = route;
+    env[`${envKey}_PROVIDER`] = provider;
+    env[`${envKey}_MODEL`] = model;
+  }
+
+  return env;
+}
+
+function statuslineLabel(mode, ccrConfig) {
+  const route = ccrConfig.Router?.default;
+  if (typeof route !== "string") return `airclaude ${mode}`;
+  return `airclaude ${mode} ${splitRoute(route).model}`;
+}
+
+function splitRoute(route) {
+  const index = route.indexOf(",");
+  if (index === -1) return { provider: "", model: route };
+  return {
+    provider: route.slice(0, index),
+    model: route.slice(index + 1),
+  };
+}
+
+function toPascalCase(value) {
+  return String(value)
+    .replace(/[^a-zA-Z0-9]+/g, " ")
+    .replace(/^[a-z]/, (match) => match.toUpperCase())
+    .replace(/[A-Z]/g, (match) => ` ${match}`)
+    .trim()
+    .split(/\s+/)
+    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+    .join("");
+}
+
+function toEnvKey(value) {
+  return String(value)
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[^a-zA-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toUpperCase();
 }
 
 function resolveRestoreRepairConfig(profile) {

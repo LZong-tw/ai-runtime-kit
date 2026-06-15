@@ -1,6 +1,6 @@
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -279,7 +279,18 @@ test("buildLaunchPlan applies pro mode CCR routing overlay without mutating the 
     assert.deepEqual(plan.launch.args, [
       "--settings",
       "{\"apiKeyHelper\":\"\"}",
+      "--append-system-prompt",
+      "AirClaude mode pro routes default to strong-coder while Claude restore uses claude-sonnet-4-6.",
     ]);
+    assert.equal(plan.launch.env.AIRCLAUDE_PROFILE, "launch-example");
+    assert.equal(plan.launch.env.AIRCLAUDE_MODE, "pro");
+    assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_DEFAULT, "demo,strong-coder");
+    assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_DEFAULT_MODEL, "strong-coder");
+    assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_THINK, "demo,strong-coder");
+    assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_LONG_CONTEXT_MODEL, "strong-coder");
+    assert.equal(plan.launch.env.AIRCLAUDE_STATUSLINE_LABEL, "airclaude pro strong-coder");
+    assert.equal(plan.launch.env.AIRCLAUDE_RESTORE_MODEL, "claude-sonnet-4-6");
+    assert.match(plan.launch.env.CLAUDE_STATUSLINE_CACHE_DIR, /\/\.claude\/cache\/airclaude\/launch-example\/pro$/);
     assert.deepEqual(plan.launch.userArgs, []);
   } finally {
     await rm(configDir, { force: true, recursive: true });
@@ -346,9 +357,31 @@ test("prepareLaunch writes managed files, syncs live CCR config, and preserves p
         args: [
           "--settings",
           "{\"apiKeyHelper\":\"\"}",
+          "--append-system-prompt",
+          "AirClaude mode pro routes default to strong-coder while Claude restore uses claude-sonnet-4-6.",
           "--dangerously-skip-permissions",
         ],
-        env: { ANTHROPIC_BASE_URL: "http://127.0.0.1:3456", CCR_PROFILE: "launch-example" },
+        env: {
+          ANTHROPIC_BASE_URL: "http://127.0.0.1:3456",
+          AIRCLAUDE_MODE: "pro",
+          AIRCLAUDE_PROFILE: "launch-example",
+          AIRCLAUDE_RESTORE_MODEL: "claude-sonnet-4-6",
+          AIRCLAUDE_ROUTE_BACKGROUND: "demo,cheap-coder",
+          AIRCLAUDE_ROUTE_BACKGROUND_MODEL: "cheap-coder",
+          AIRCLAUDE_ROUTE_BACKGROUND_PROVIDER: "demo",
+          AIRCLAUDE_ROUTE_DEFAULT: "demo,strong-coder",
+          AIRCLAUDE_ROUTE_DEFAULT_MODEL: "strong-coder",
+          AIRCLAUDE_ROUTE_DEFAULT_PROVIDER: "demo",
+          AIRCLAUDE_ROUTE_LONG_CONTEXT: "demo,strong-coder",
+          AIRCLAUDE_ROUTE_LONG_CONTEXT_MODEL: "strong-coder",
+          AIRCLAUDE_ROUTE_LONG_CONTEXT_PROVIDER: "demo",
+          AIRCLAUDE_ROUTE_THINK: "demo,strong-coder",
+          AIRCLAUDE_ROUTE_THINK_MODEL: "strong-coder",
+          AIRCLAUDE_ROUTE_THINK_PROVIDER: "demo",
+          AIRCLAUDE_STATUSLINE_LABEL: "airclaude pro strong-coder",
+          CLAUDE_STATUSLINE_CACHE_DIR: join(homedir(), ".claude", "cache", "airclaude", "launch-example", "pro"),
+          CCR_PROFILE: "launch-example",
+        },
       },
     ]);
   } finally {
@@ -618,6 +651,8 @@ function launchCatalog() {
           args: [
             "--settings",
             "{\"apiKeyHelper\":\"\"}",
+            "--append-system-prompt",
+            "AirClaude mode {{launchMode}} routes default to {{routeDefaultModel}} while Claude restore uses {{restoreModel}}.",
           ],
           env: { CCR_PROFILE: "{{profileName}}" },
           restore: { model: "claude-sonnet-4-6", models: ["sonnet"] },
