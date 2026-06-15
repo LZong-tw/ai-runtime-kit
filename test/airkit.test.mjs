@@ -47,6 +47,24 @@ test("buildShellSnippet syncs the rendered CCR config before launching wrappers"
   }
 });
 
+test("ccr-start reloads CCR only when the rendered config or bundled transformers change", async () => {
+  const catalog = await loadCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-oss-reload-"));
+
+  try {
+    const snippet = buildShellSnippet(catalog, profile, { configDir });
+
+    // Signature over the live config + transformer files, compared to a marker; stop (force reload)
+    // only on change, then a no-op start. Plain `ccr start` never reloads an already-running daemon.
+    assert.match(snippet, /shasum/);
+    assert.match(snippet, /command ccr stop/);
+    assert.match(snippet, /ccr-loaded\.openai-compatible-example\.sig/);
+    assert.match(snippet, /ccr\/transformers/);
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
 test("airclaude launch injects reusable runtime lessons", async () => {
   const catalog = await loadCatalog();
   const plan = buildLaunchPlan(catalog, profile, { configDir: "/tmp/airkit-test" });
