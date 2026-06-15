@@ -1,6 +1,7 @@
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
+import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -342,6 +343,151 @@ test("buildLaunchPlan applies pro mode CCR routing overlay without mutating the 
   }
 });
 
+test("airclaude launch quiets the Powerlevel10k instant prompt in its command subshells", async () => {
+  const catalog = launchCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-p10k-"));
+
+  try {
+    const plan = buildLaunchPlan(catalog, "launch-example", { configDir });
+    // P10k's instant-prompt eval leaks git/dir prompt segments into Claude Code's non-interactive
+    // command shells, spamming "(eval): command not found: git/head/awk/...". Disabling instant
+    // prompt for the launched process silences it without touching the user's P10k/.zshrc setup.
+    assert.equal(plan.launch.env.POWERLEVEL9K_INSTANT_PROMPT, "off");
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("runtime ships its bundled transformer for any provider that lists it in transformer.use", async () => {
+  const catalog = launchCatalog();
+  catalog.profiles[0].ccr.Providers[0].transformer = { use: ["drop-reasoning"] };
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-ship-transformer-"));
+
+  try {
+    const plan = buildLaunchPlan(catalog, "launch-example", { configDir });
+    const injected = plan.files.managedFiles.find((file) => /ccr\/transformers\/drop-reasoning\.js$/.test(file.path));
+    assert.ok(injected, "runtime should ship the drop-reasoning transformer it bundles when a provider uses it");
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("bundled drop-reasoning transformer fills missing usage tokens so context tracking and compact work", async () => {
+  const require = createRequire(import.meta.url);
+  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
+  const instance = new Transformer();
+
+  const streamResponse = new Response(
+    [
+      'event: message_start\ndata: {"type":"message_start","message":{"model":"steady-coder","usage":{"input_tokens":0,"output_tokens":0}}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello world, this is the model response."}}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":0}}\n\n',
+      "data: [DONE]\n\n",
+    ].join(""),
+    { headers: { "Content-Type": "text/event-stream" } },
+  );
+
+  const context = {
+    req: { body: { system: "You are a helpful assistant.", messages: [{ role: "user", content: "x".repeat(8000) }] } },
+  };
+
+  const body = await (await instance.transformResponseOut(streamResponse, context)).text();
+  const messageStart = JSON.parse(body.match(/data: (\{"type":"message_start".*?\})\n/)[1]);
+  const messageDelta = JSON.parse(body.match(/data: (\{"type":"message_delta".*?\})\n/)[1]);
+
+  assert.ok(messageStart.message.usage.input_tokens > 200, `input_tokens=${messageStart.message.usage.input_tokens}`);
+  assert.ok(messageStart.message.usage.input_tokens < 20000, `input_tokens=${messageStart.message.usage.input_tokens}`);
+  assert.ok(messageDelta.usage.output_tokens >= 1, `output_tokens=${messageDelta.usage.output_tokens}`);
+});
+
+test("bundled drop-reasoning transformer keeps real usage tokens when the provider reports them", async () => {
+  const require = createRequire(import.meta.url);
+  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
+  const instance = new Transformer();
+
+  const streamResponse = new Response(
+    [
+      'event: message_start\ndata: {"type":"message_start","message":{"model":"steady-coder","usage":{"input_tokens":4321,"output_tokens":0}}}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{},"usage":{"output_tokens":99}}\n\n',
+      "data: [DONE]\n\n",
+    ].join(""),
+    { headers: { "Content-Type": "text/event-stream" } },
+  );
+
+  const context = { req: { body: { messages: [{ role: "user", content: "short" }] } } };
+  const body = await (await instance.transformResponseOut(streamResponse, context)).text();
+  const messageStart = JSON.parse(body.match(/data: (\{"type":"message_start".*?\})\n/)[1]);
+  const messageDelta = JSON.parse(body.match(/data: (\{"type":"message_delta".*?\})\n/)[1]);
+
+  assert.equal(messageStart.message.usage.input_tokens, 4321);
+  assert.equal(messageDelta.usage.output_tokens, 99);
+});
+
+test("bundled drop-reasoning transformer masks provider models and tool names for Claude Code restore", async () => {
+  const require = createRequire(import.meta.url);
+  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
+  const instance = new Transformer();
+
+  const longToolName = "mcp__plugin_atlassian_atlassian__createCompassComponentRelationship";
+  const request = {
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: longToolName,
+          description: "Create a Compass component relationship. " + "x".repeat(1200),
+          parameters: { type: "object", properties: {} },
+        },
+      },
+    ],
+    tool_choice: { type: "function", function: { name: longToolName } },
+  };
+  const transformedRequest = await instance.transformRequestIn(request);
+  const providerToolName = transformedRequest.tools[0].function.name;
+
+  assert.match(providerToolName, /^airtool_[a-z0-9_]+$/);
+  assert.ok(providerToolName.length <= 64);
+  assert.equal(transformedRequest.tool_choice.function.name, providerToolName);
+  assert.notEqual(providerToolName, longToolName);
+  assert.ok(transformedRequest.tools[0].function.description.length <= 1024);
+  assert.match(transformedRequest.tools[0].function.description, new RegExp(longToolName));
+
+  const jsonResponse = new Response(JSON.stringify({ model: "some-provider-model", choices: [] }), {
+    headers: { "Content-Type": "application/json" },
+  });
+  assert.equal((await (await instance.transformResponseOut(jsonResponse)).json()).model, "claude-sonnet-4-6");
+
+  const toolResponse = new Response(
+    JSON.stringify({
+      model: "some-provider-model",
+      choices: [{ message: { tool_calls: [{ id: "call_1", type: "function", function: { name: providerToolName, arguments: "{}" } }] } }],
+    }),
+    { headers: { "Content-Type": "application/json" } },
+  );
+  const restoredToolBody = await (await instance.transformResponseOut(toolResponse)).json();
+  assert.equal(restoredToolBody.choices[0].message.tool_calls[0].function.name, longToolName);
+
+  const streamResponse = new Response('data: {"model":"some-provider-model","choices":[]}\n\ndata: [DONE]\n\n', {
+    headers: { "Content-Type": "text/event-stream" },
+  });
+  const streamBody = await (await instance.transformResponseOut(streamResponse)).text();
+  assert.match(streamBody, /"model":"claude-sonnet-4-6"/);
+  assert.doesNotMatch(streamBody, /some-provider-model/);
+
+  const thinkingStream = new Response(
+    [
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"secret"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hidden reasoning"}}\n\n',
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+    ].join(""),
+    { headers: { "Content-Type": "text/event-stream" } },
+  );
+  const sanitizedThinkingBody = await (await instance.transformResponseOut(thinkingStream)).text();
+  assert.match(sanitizedThinkingBody, /"content_block":\{"type":"text","text":""\}/);
+  assert.match(sanitizedThinkingBody, /"delta":\{"type":"text_delta","text":"\[reasoning omitted\]"\}/);
+  assert.doesNotMatch(sanitizedThinkingBody, /redacted_thinking|thinking_delta|hidden reasoning|secret/);
+});
+
 test("prepareLaunch dry run reports stale files and does not write targets", async () => {
   const catalog = launchCatalog();
   const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-dry-run-"));
@@ -380,6 +526,7 @@ test("prepareLaunch writes managed files, syncs live CCR config, and preserves p
       configDir,
       liveCcrConfig,
       mode: "pro",
+      env: {},
       userArgs: ["--dangerously-skip-permissions"],
       commandExists: async (command) => ["ccr", "claude"].includes(command),
       runCommand: async (command, args) => ({
@@ -432,6 +579,7 @@ test("prepareLaunch writes managed files, syncs live CCR config, and preserves p
       AIRCLAUDE_STATUSLINE_INPUT_PRICE_PER_MILLION: "2",
       AIRCLAUDE_STATUSLINE_LABEL: "airclaude pro strong-coder",
       CLAUDE_STATUSLINE_CACHE_DIR: join(homedir(), ".claude", "cache", "airclaude", "launch-example", "pro"),
+      POWERLEVEL9K_INSTANT_PROMPT: "off",
       CCR_PROFILE: "launch-example",
     });
   } finally {
@@ -582,6 +730,7 @@ test("prepareLaunch repairs restore metadata before launching", async () => {
       backupsDir,
       commandExists: async (command) => ["ccr", "claude"].includes(command),
       configDir,
+      env: {},
       liveCcrConfig: join(configDir, "live", "config.json"),
       projectsDir,
       runCommand: async (command, args) => {
