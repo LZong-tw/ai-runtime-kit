@@ -27,6 +27,10 @@ airkit render shell --profile openai-compatible-example
 `airclaude` is the daily entrypoint. It automatically renders managed files,
 syncs the CCR live config, starts CCR when needed, and launches Claude Code.
 `airclaude pro` applies the profile's stronger routing overlay before launch.
+Claude launches also receive reusable runtime lessons for recurring tool
+mistakes, such as preserving durable lessons, recording repeatable corrections
+without secrets, verifying Athena-style query context instead of assuming
+defaults, and ruling out local shell wrappers before blaming remote services.
 
 For LLM-guided installation or debugging, start with `CLAUDE.md`. The
 management flow remains inspectable: dry run first, then `--write` after the

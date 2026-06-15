@@ -195,6 +195,17 @@ Fields:
 `airclaude` also applies CCR's own activation environment internally. Do not put
 real provider API keys in `launch.env`.
 
+For `claude` and `cclaude` launches, `airclaude` appends reusable runtime
+lessons to the effective `--append-system-prompt`. These lessons are public-safe
+guardrails for recurring tool mistakes: treat durable notes and user
+corrections as hard constraints; record repeatable lessons as
+`Symptom/Cause/Rule/Action/Verify` when a workspace provides durable notes;
+avoid writing secrets or private endpoints into shared notes; verify Athena-like
+query context and result locations instead of assuming defaults; and rule out
+local shell wrappers before diagnosing remote service failures. Profile prompts
+may add environment-specific guidance, but shared prompts must stay free of
+private identifiers.
+
 `airclaude` injects non-secret runtime metadata into the launched Claude Code
 process for statusline widgets, compact-aware prompts, and local hooks:
 `AIRCLAUDE_PROFILE`, `AIRCLAUDE_MODE`, `AIRCLAUDE_STATUSLINE_LABEL`,

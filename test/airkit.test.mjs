@@ -32,9 +32,27 @@ test("buildShellSnippet syncs the rendered CCR config before launching wrappers"
     assert.match(snippet, /airkit-sync-ccr-config-openai-compatible-example/);
     assert.match(snippet, /cclaude-example\(\) \{/);
     assert.match(snippet, /airkit-sync-ccr-config-openai-compatible-example \|\| return/);
+    assert.match(snippet, /--append-system-prompt/);
+    assert.match(snippet, /AirKit reusable runtime lessons/);
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }
+});
+
+test("airclaude launch injects reusable runtime lessons", async () => {
+  const catalog = await loadCatalog();
+  const plan = buildLaunchPlan(catalog, profile, { configDir: "/tmp/airkit-test" });
+  const prompt = appendSystemPromptText(plan.launch.args);
+
+  assert.match(prompt, /durable lessons/i);
+  assert.match(prompt, /Symptom\/Cause\/Rule\/Action\/Verify/);
+  assert.match(prompt, /Do not record secrets/);
+  assert.match(prompt, /Athena/);
+  assert.match(prompt, /database, catalog, region, workgroup, or result output location/);
+  assert.match(prompt, /get-query-execution/);
+  assert.match(prompt, /StateChangeReason/);
+  assert.match(prompt, /shell wrapper/);
+  assert.match(prompt, /command -v/);
 });
 
 test("installed shell snippet can sync the rendered CCR config into CCR live config", async () => {
@@ -141,11 +159,12 @@ test("shell wrapper args can use config dir templates", async () => {
   try {
     const snippet = buildShellSnippet(catalog, "wrapper-args", { configDir });
 
-    assert.ok(
-      snippet.includes(
-        `  cclaude '--strict-mcp-config' '--mcp-config' '${configDir}/claude/empty-mcp.json' "$@"`,
-      ),
+    assert.match(
+      snippet,
+      new RegExp(`cclaude '--strict-mcp-config' '--mcp-config' '${escapeRegExp(configDir)}/claude/empty-mcp\\.json'`),
     );
+    assert.match(snippet, /--append-system-prompt/);
+    assert.match(snippet, /AirKit reusable runtime lessons/);
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }
@@ -276,12 +295,16 @@ test("buildLaunchPlan applies pro mode CCR routing overlay without mutating the 
     assert.equal(plan.ccrConfig.Router.think, "demo,strong-coder");
     assert.equal(plan.ccrConfig.Router.background, "demo,cheap-coder");
     assert.equal(catalog.profiles[0].ccr.Router.default, "demo,steady-coder");
-    assert.deepEqual(plan.launch.args, [
+    assert.deepEqual(plan.launch.args.slice(0, 3), [
       "--settings",
       "{\"apiKeyHelper\":\"\"}",
       "--append-system-prompt",
-      "AirClaude mode pro routes default to strong-coder while Claude restore uses claude-sonnet-4-6.",
     ]);
+    assert.match(
+      plan.launch.args[3],
+      /AirClaude mode pro routes default to strong-coder while Claude restore uses claude-sonnet-4-6\./,
+    );
+    assert.match(plan.launch.args[3], /AirKit reusable runtime lessons/);
     assert.equal(plan.launch.env.AIRCLAUDE_PROFILE, "launch-example");
     assert.equal(plan.launch.env.AIRCLAUDE_MODE, "pro");
     assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_DEFAULT, "demo,strong-coder");
@@ -351,39 +374,40 @@ test("prepareLaunch writes managed files, syncs live CCR config, and preserves p
     assert.equal(result.write, true);
     assert.equal(result.liveCcrConfig.status, "synced");
     assert.match(await readFile(liveCcrConfig, "utf8"), /strong-coder/);
-    assert.deepEqual(spawned, [
-      {
-        command: "claude",
-        args: [
-          "--settings",
-          "{\"apiKeyHelper\":\"\"}",
-          "--append-system-prompt",
-          "AirClaude mode pro routes default to strong-coder while Claude restore uses claude-sonnet-4-6.",
-          "--dangerously-skip-permissions",
-        ],
-        env: {
-          ANTHROPIC_BASE_URL: "http://127.0.0.1:3456",
-          AIRCLAUDE_MODE: "pro",
-          AIRCLAUDE_PROFILE: "launch-example",
-          AIRCLAUDE_RESTORE_MODEL: "claude-sonnet-4-6",
-          AIRCLAUDE_ROUTE_BACKGROUND: "demo,cheap-coder",
-          AIRCLAUDE_ROUTE_BACKGROUND_MODEL: "cheap-coder",
-          AIRCLAUDE_ROUTE_BACKGROUND_PROVIDER: "demo",
-          AIRCLAUDE_ROUTE_DEFAULT: "demo,strong-coder",
-          AIRCLAUDE_ROUTE_DEFAULT_MODEL: "strong-coder",
-          AIRCLAUDE_ROUTE_DEFAULT_PROVIDER: "demo",
-          AIRCLAUDE_ROUTE_LONG_CONTEXT: "demo,strong-coder",
-          AIRCLAUDE_ROUTE_LONG_CONTEXT_MODEL: "strong-coder",
-          AIRCLAUDE_ROUTE_LONG_CONTEXT_PROVIDER: "demo",
-          AIRCLAUDE_ROUTE_THINK: "demo,strong-coder",
-          AIRCLAUDE_ROUTE_THINK_MODEL: "strong-coder",
-          AIRCLAUDE_ROUTE_THINK_PROVIDER: "demo",
-          AIRCLAUDE_STATUSLINE_LABEL: "airclaude pro strong-coder",
-          CLAUDE_STATUSLINE_CACHE_DIR: join(homedir(), ".claude", "cache", "airclaude", "launch-example", "pro"),
-          CCR_PROFILE: "launch-example",
-        },
-      },
+    assert.equal(spawned.length, 1);
+    assert.equal(spawned[0].command, "claude");
+    assert.deepEqual(spawned[0].args.slice(0, 3), [
+      "--settings",
+      "{\"apiKeyHelper\":\"\"}",
+      "--append-system-prompt",
     ]);
+    assert.match(
+      spawned[0].args[3],
+      /AirClaude mode pro routes default to strong-coder while Claude restore uses claude-sonnet-4-6\./,
+    );
+    assert.match(spawned[0].args[3], /AirKit reusable runtime lessons/);
+    assert.equal(spawned[0].args[4], "--dangerously-skip-permissions");
+    assert.deepEqual(spawned[0].env, {
+      ANTHROPIC_BASE_URL: "http://127.0.0.1:3456",
+      AIRCLAUDE_MODE: "pro",
+      AIRCLAUDE_PROFILE: "launch-example",
+      AIRCLAUDE_RESTORE_MODEL: "claude-sonnet-4-6",
+      AIRCLAUDE_ROUTE_BACKGROUND: "demo,cheap-coder",
+      AIRCLAUDE_ROUTE_BACKGROUND_MODEL: "cheap-coder",
+      AIRCLAUDE_ROUTE_BACKGROUND_PROVIDER: "demo",
+      AIRCLAUDE_ROUTE_DEFAULT: "demo,strong-coder",
+      AIRCLAUDE_ROUTE_DEFAULT_MODEL: "strong-coder",
+      AIRCLAUDE_ROUTE_DEFAULT_PROVIDER: "demo",
+      AIRCLAUDE_ROUTE_LONG_CONTEXT: "demo,strong-coder",
+      AIRCLAUDE_ROUTE_LONG_CONTEXT_MODEL: "strong-coder",
+      AIRCLAUDE_ROUTE_LONG_CONTEXT_PROVIDER: "demo",
+      AIRCLAUDE_ROUTE_THINK: "demo,strong-coder",
+      AIRCLAUDE_ROUTE_THINK_MODEL: "strong-coder",
+      AIRCLAUDE_ROUTE_THINK_PROVIDER: "demo",
+      AIRCLAUDE_STATUSLINE_LABEL: "airclaude pro strong-coder",
+      CLAUDE_STATUSLINE_CACHE_DIR: join(homedir(), ".claude", "cache", "airclaude", "launch-example", "pro"),
+      CCR_PROFILE: "launch-example",
+    });
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }
@@ -635,6 +659,18 @@ function runAirkitWithEnv(env, ...args) {
     encoding: "utf8",
     env: { ...process.env, ...env },
   });
+}
+
+function appendSystemPromptText(args) {
+  const prompts = [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === "--append-system-prompt") prompts.push(args[index + 1] ?? "");
+  }
+  return prompts.join("\n");
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function launchCatalog() {

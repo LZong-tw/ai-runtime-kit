@@ -10,6 +10,13 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
 const defaultCatalogPath = join(repoRoot, "profiles", "catalog.json");
+const reusableRuntimeLessonsPrompt = [
+  "AirKit reusable runtime lessons:",
+  "Treat durable lessons, project memory, and user corrections as hard constraints. Before retrying a failed command, check whether the failure matches a known lesson.",
+  "When a user correction or repeated tool failure reveals a durable lesson, record it in the workspace's durable notes when available, using Symptom/Cause/Rule/Action/Verify. Do not record secrets, private endpoints, credential values, or company-only identifiers in shared notes.",
+  "For Athena and similar query services, never assume the database, catalog, region, workgroup, or result output location. Discover or verify them first, pass explicit query context and result configuration, and inspect get-query-execution StateChangeReason before calling get-query-results after a failure.",
+  "When a command fails inside a shell wrapper, first verify whether the command is a shell wrapper or the real binary with type, command -v, or whence. Rule out local shell wrapper/helper leakage before diagnosing the remote service.",
+].join(" ");
 
 export async function loadCatalog(path = defaultCatalogPath) {
   const raw = await readFile(path, "utf8");
@@ -79,7 +86,11 @@ export function buildShellSnippet(catalog, profileName, options = {}) {
     if (syncFunction) {
       lines.push(`  ${syncFunction} || return`);
     }
-    const wrapperArgs = (wrapper.args ?? []).map((arg) => quoteShell(renderTemplateValue(arg, templateVars)));
+    const rawWrapperArgs = (wrapper.args ?? []).map((arg) => renderTemplateValue(arg, templateVars));
+    const effectiveWrapperArgs = shouldAppendReusableRuntimeLessons(wrapper.command)
+      ? mergeAppendSystemPrompt(rawWrapperArgs, reusableRuntimeLessonsPrompt)
+      : rawWrapperArgs;
+    const wrapperArgs = effectiveWrapperArgs.map((arg) => quoteShell(arg));
     const renderedArgs = wrapperArgs.length ? ` ${wrapperArgs.join(" ")}` : "";
     lines.push(`  ${wrapper.command}${renderedArgs} "$@"`, "}");
   }
@@ -826,24 +837,47 @@ function renderProfile(catalog, profileName, options = {}) {
 }
 
 function resolveLaunchConfig(profile, templateVars) {
-  if (profile.launch) return profile.launch;
+  if (profile.launch) return withReusableRuntimeLessons(profile.launch);
   const wrapper = profile.shell?.wrappers?.[0];
   if (wrapper) {
-    return {
+    return withReusableRuntimeLessons({
       binary: wrapper.command,
       args: wrapper.args ?? [],
       env: wrapper.env ?? {},
       defaultMode: "auto",
       modes: { auto: {} },
-    };
+    });
   }
-  return {
+  return withReusableRuntimeLessons({
     binary: "ccr",
     args: ["code"],
     env: { CCR_PROFILE: "{{profileName}}" },
     defaultMode: "auto",
     modes: { auto: {} },
-  };
+  });
+}
+
+function withReusableRuntimeLessons(launch) {
+  const next = structuredClone(launch);
+  if (!shouldAppendReusableRuntimeLessons(next.binary)) return next;
+  next.args = mergeAppendSystemPrompt(next.args ?? [], reusableRuntimeLessonsPrompt);
+  return next;
+}
+
+function shouldAppendReusableRuntimeLessons(binary) {
+  const commandName = basename(String(binary ?? "").trim().split(/\s+/)[0] || "");
+  return commandName === "claude" || commandName === "cclaude";
+}
+
+function mergeAppendSystemPrompt(args, prompt) {
+  const next = [...args];
+  const index = next.findIndex((arg) => arg === "--append-system-prompt");
+  if (index >= 0 && typeof next[index + 1] === "string") {
+    next[index + 1] = `${next[index + 1]} ${prompt}`;
+  } else {
+    next.push("--append-system-prompt", prompt);
+  }
+  return next;
 }
 
 function resolveLaunchMode(profile, launch, requestedMode) {
