@@ -312,6 +312,7 @@ test("buildLaunchPlan applies pro mode CCR routing overlay without mutating the 
     assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_THINK, "demo,strong-coder");
     assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_LONG_CONTEXT_MODEL, "strong-coder");
     assert.equal(plan.launch.env.AIRCLAUDE_STATUSLINE_LABEL, "airclaude pro strong-coder");
+    assert.equal(plan.launch.env.AIRCLAUDE_STATUSLINE_INPUT_PRICE_PER_MILLION, "2");
     assert.equal(plan.launch.env.AIRCLAUDE_RESTORE_MODEL, "claude-sonnet-4-6");
     assert.match(plan.launch.env.CLAUDE_STATUSLINE_CACHE_DIR, /\/\.claude\/cache\/airclaude\/launch-example\/pro$/);
     assert.deepEqual(plan.launch.userArgs, []);
@@ -404,6 +405,7 @@ test("prepareLaunch writes managed files, syncs live CCR config, and preserves p
       AIRCLAUDE_ROUTE_THINK: "demo,strong-coder",
       AIRCLAUDE_ROUTE_THINK_MODEL: "strong-coder",
       AIRCLAUDE_ROUTE_THINK_PROVIDER: "demo",
+      AIRCLAUDE_STATUSLINE_INPUT_PRICE_PER_MILLION: "2",
       AIRCLAUDE_STATUSLINE_LABEL: "airclaude pro strong-coder",
       CLAUDE_STATUSLINE_CACHE_DIR: join(homedir(), ".claude", "cache", "airclaude", "launch-example", "pro"),
       CCR_PROFILE: "launch-example",
@@ -676,6 +678,18 @@ function escapeRegExp(value) {
 function launchCatalog() {
   return {
     schema: 1,
+    modelCatalog: {
+      providers: [
+        {
+          id: "demo",
+          models: [
+            { id: "cheap-coder", pricingUsdPer1M: { input: 0.1 } },
+            { id: "steady-coder", pricingUsdPer1M: { input: 0.5 } },
+            { id: "strong-coder", pricingUsdPer1M: { input: 2 } },
+          ],
+        },
+      ],
+    },
     profiles: [
       {
         name: "launch-example",

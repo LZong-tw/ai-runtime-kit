@@ -238,7 +238,7 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
       command: renderTemplateValue(launch.binary, launchVars),
       args: (launch.args ?? []).map((arg) => renderTemplateValue(arg, launchVars)),
       env: {
-        ...airclaudeLaunchEnv(profile, mode, ccrConfig, restore),
+        ...airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, restore),
         ...renderTemplateValue(launch.env ?? {}, launchVars),
       },
       userArgs: options.userArgs ?? [],
@@ -915,7 +915,7 @@ function launchTemplateVars(profile, configDir, mode, ccrConfig, restore) {
   return vars;
 }
 
-function airclaudeLaunchEnv(profile, mode, ccrConfig, restore) {
+function airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, restore) {
   const env = {
     AIRCLAUDE_PROFILE: profile.name,
     AIRCLAUDE_MODE: mode,
@@ -923,6 +923,11 @@ function airclaudeLaunchEnv(profile, mode, ccrConfig, restore) {
     AIRCLAUDE_RESTORE_MODEL: restore?.model ?? "",
     CLAUDE_STATUSLINE_CACHE_DIR: join(homedir(), ".claude", "cache", "airclaude", profile.name, mode),
   };
+
+  const statuslineInputPrice = routeInputPrice(catalog, profile, ccrConfig.Router?.default);
+  if (statuslineInputPrice !== null) {
+    env.AIRCLAUDE_STATUSLINE_INPUT_PRICE_PER_MILLION = String(statuslineInputPrice);
+  }
 
   for (const [key, route] of Object.entries(ccrConfig.Router ?? {})) {
     if (typeof route !== "string") continue;
@@ -934,6 +939,59 @@ function airclaudeLaunchEnv(profile, mode, ccrConfig, restore) {
   }
 
   return env;
+}
+
+function routeInputPrice(catalog, profile, route) {
+  if (typeof route !== "string") return null;
+  const { provider, model } = splitRoute(route);
+  return profileInputPrice(profile, provider, model) ?? catalogInputPrice(catalog, provider, model);
+}
+
+function profileInputPrice(profile, provider, model) {
+  const pricing = profile.statusline?.modelPricingUsdPer1M ?? profile.statusline?.pricingUsdPer1M;
+  if (!pricing || typeof pricing !== "object") return null;
+
+  return inputPriceFromValue(pricing[`${provider},${model}`] ?? pricing[model] ?? pricing[`${provider}/${model}`]);
+}
+
+function catalogInputPrice(catalog, provider, model) {
+  const providers = catalog.modelCatalog?.providers;
+  if (!Array.isArray(providers)) return null;
+
+  for (const providerEntry of providers) {
+    for (const modelEntry of providerEntry.models ?? []) {
+      if (!modelMatches(provider, model, providerEntry, modelEntry)) continue;
+      const price = inputPriceFromValue(modelEntry.pricingUsdPer1M);
+      if (price !== null) return price;
+    }
+  }
+
+  return null;
+}
+
+function modelMatches(provider, model, providerEntry, modelEntry) {
+  const candidates = new Set([
+    modelEntry.id,
+    modelEntry.litellm,
+    ...(Array.isArray(modelEntry.aliases) ? modelEntry.aliases : []),
+  ].filter(Boolean));
+
+  if (provider) {
+    candidates.add(`${provider}/${model}`);
+    candidates.add(`${provider},${model}`);
+  }
+  if (providerEntry.id) candidates.add(`${providerEntry.id}/${model}`);
+  if (providerEntry.litellmProvider) candidates.add(`${providerEntry.litellmProvider}/${model}`);
+
+  return candidates.has(model);
+}
+
+function inputPriceFromValue(value) {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
+  if (!value || typeof value !== "object") return null;
+
+  const input = Number(value.input ?? value.inputCacheMiss);
+  return Number.isFinite(input) && input > 0 ? input : null;
 }
 
 function statuslineLabel(mode, ccrConfig) {
