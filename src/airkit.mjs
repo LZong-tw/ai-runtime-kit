@@ -72,23 +72,35 @@ export function buildShellSnippet(catalog, profileName, options = {}) {
     );
   }
 
-  if (shell.ccrStartFunction) {
+  // `ccr start` never reloads an already-running daemon (it is a no-op), so a changed transformer
+  // or config would be silently ignored until a manual restart. This helper hashes the live config
+  // plus the bundled transformer files against a marker and stops CCR only when they changed, so the
+  // next start reloads. Both the start function and the launch wrapper call it (the wrapper delegates
+  // to a shell `cclaude` that only starts CCR when down, never restarts — so the check must run here).
+  const reloadFunction = profile.ccr ? `airkit-ccr-reload-if-changed-${profile.name}` : null;
+  if (reloadFunction) {
     lines.push(
-      `${shell.ccrStartFunction}() {`,
-      ...(syncFunction ? [`  ${syncFunction} || return`] : []),
-      // `ccr start` never reloads an already-running daemon, so a changed transformer/config would
-      // be ignored. Hash the live config + bundled transformers; if it differs from the last load,
-      // stop CCR first so the next start picks up the change. Unchanged -> plain no-op start.
+      `${reloadFunction}() {`,
       '  local _airkit_live="${AIRKIT_CCR_LIVE_CONFIG:-$HOME/.claude-code-router/config.json}"',
       `  local _airkit_tdir=${quoteShell(transformerDir)}`,
       `  local _airkit_marker=${quoteShell(ccrLoadMarker)}`,
       "  local _airkit_sig",
       '  _airkit_sig="$(command cat "$_airkit_live" "$_airkit_tdir"/*(.N) 2>/dev/null | command shasum 2>/dev/null | command awk \'{ print $1 }\')"',
-      '  if [[ -z "$_airkit_sig" || ! -f "$_airkit_marker" || "$_airkit_sig" != "$(command cat "$_airkit_marker" 2>/dev/null)" ]]; then',
+      '  [[ -n "$_airkit_sig" ]] || return 0',
+      '  if [[ "$_airkit_sig" != "$(command cat "$_airkit_marker" 2>/dev/null)" ]]; then',
       "    command ccr stop > /dev/null 2>&1",
+      '    command mkdir -p "${_airkit_marker:h}" && print -r -- "$_airkit_sig" > "$_airkit_marker"',
       "  fi",
-      "  CCR_ANTHROPIC_AUTH_TOKEN_OP_REF=${CCR_ANTHROPIC_AUTH_TOKEN_OP_REF:?missing CCR_ANTHROPIC_AUTH_TOKEN_OP_REF} ccr-start \"$@\" || return",
-      '  command mkdir -p "${_airkit_marker:h}" && print -r -- "$_airkit_sig" > "$_airkit_marker"',
+      "}",
+    );
+  }
+
+  if (shell.ccrStartFunction) {
+    lines.push(
+      `${shell.ccrStartFunction}() {`,
+      ...(syncFunction ? [`  ${syncFunction} || return`] : []),
+      ...(reloadFunction ? [`  ${reloadFunction}`] : []),
+      "  CCR_ANTHROPIC_AUTH_TOKEN_OP_REF=${CCR_ANTHROPIC_AUTH_TOKEN_OP_REF:?missing CCR_ANTHROPIC_AUTH_TOKEN_OP_REF} ccr-start \"$@\"",
       "}",
     );
   }
@@ -100,6 +112,9 @@ export function buildShellSnippet(catalog, profileName, options = {}) {
     }
     if (syncFunction) {
       lines.push(`  ${syncFunction} || return`);
+    }
+    if (reloadFunction) {
+      lines.push(`  ${reloadFunction}`);
     }
     const rawWrapperArgs = (wrapper.args ?? []).map((arg) => renderTemplateValue(arg, templateVars));
     const wrapperCcrConfig = profile.ccr ? buildCcrConfig(catalog, profileName, { configDir: options.configDir }) : null;

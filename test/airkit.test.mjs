@@ -55,11 +55,16 @@ test("ccr-start reloads CCR only when the rendered config or bundled transformer
     const snippet = buildShellSnippet(catalog, profile, { configDir });
 
     // Signature over the live config + transformer files, compared to a marker; stop (force reload)
-    // only on change, then a no-op start. Plain `ccr start` never reloads an already-running daemon.
+    // only on change. Plain `ccr start` never reloads an already-running daemon.
+    assert.match(snippet, /airkit-ccr-reload-if-changed-openai-compatible-example\(\) \{/);
     assert.match(snippet, /shasum/);
     assert.match(snippet, /command ccr stop/);
     assert.match(snippet, /ccr-loaded\.openai-compatible-example\.sig/);
     assert.match(snippet, /ccr\/transformers/);
+    // The launch wrapper (the actual hot path) must invoke the reload check before delegating to
+    // the shell cclaude, which only starts CCR when down and never restarts it.
+    const wrapperBody = snippet.slice(snippet.indexOf("cclaude-example() {"));
+    assert.match(wrapperBody, /airkit-ccr-reload-if-changed-openai-compatible-example/);
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }
@@ -439,6 +444,66 @@ test("bundled drop-reasoning transformer keeps real usage tokens when the provid
 
   assert.equal(messageStart.message.usage.input_tokens, 4321);
   assert.equal(messageDelta.usage.output_tokens, 99);
+});
+
+test("bundled drop-reasoning transformer synthesizes usage for an OpenAI-format stream that omits it", async () => {
+  const require = createRequire(import.meta.url);
+  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
+  const instance = new Transformer();
+
+  // Real LiteLLM/OpenAI gateway shape: data-only SSE, chat.completion.chunk, no usage anywhere.
+  const streamResponse = new Response(
+    [
+      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}\n\n',
+      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{"content":"Hello world response"}}]}\n\n',
+      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+      "data: [DONE]\n\n",
+    ].join(""),
+    { headers: { "Content-Type": "text/event-stream" } },
+  );
+
+  const context = {
+    req: { body: { system: "You are a helpful assistant.", messages: [{ role: "user", content: "x".repeat(8000) }] } },
+  };
+
+  const body = await (await instance.transformResponseOut(streamResponse, context)).text();
+  const usageChunk = body
+    .split("\n")
+    .filter((line) => line.startsWith("data: ") && line.slice(6).trim() !== "[DONE]")
+    .map((line) => JSON.parse(line.slice(6)))
+    .find((chunk) => chunk.usage && typeof chunk.usage.prompt_tokens === "number");
+
+  assert.ok(usageChunk, "an OpenAI chunk must carry synthesized usage so CCR's converter can read it");
+  assert.ok(usageChunk.usage.prompt_tokens > 200, `prompt_tokens=${usageChunk.usage.prompt_tokens}`);
+  assert.ok(usageChunk.usage.prompt_tokens < 20000, `prompt_tokens=${usageChunk.usage.prompt_tokens}`);
+  assert.ok(usageChunk.usage.completion_tokens >= 1, `completion_tokens=${usageChunk.usage.completion_tokens}`);
+});
+
+test("bundled drop-reasoning transformer keeps real OpenAI usage when the gateway reports it", async () => {
+  const require = createRequire(import.meta.url);
+  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
+  const instance = new Transformer();
+
+  const streamResponse = new Response(
+    [
+      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n',
+      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1234,"completion_tokens":88,"total_tokens":1322}}\n\n',
+      "data: [DONE]\n\n",
+    ].join(""),
+    { headers: { "Content-Type": "text/event-stream" } },
+  );
+
+  const context = { req: { body: { messages: [{ role: "user", content: "short" }] } } };
+  const body = await (await instance.transformResponseOut(streamResponse, context)).text();
+  const usageChunk = body
+    .split("\n")
+    .filter((line) => line.startsWith("data: ") && line.slice(6).trim() !== "[DONE]")
+    .map((line) => JSON.parse(line.slice(6)))
+    .find((chunk) => chunk.usage && typeof chunk.usage.prompt_tokens === "number");
+
+  assert.ok(usageChunk, "the real usage chunk must survive");
+  assert.equal(usageChunk.usage.prompt_tokens, 1234);
+  assert.equal(usageChunk.usage.completion_tokens, 88);
 });
 
 test("bundled drop-reasoning transformer masks provider models and tool names for Claude Code restore", async () => {

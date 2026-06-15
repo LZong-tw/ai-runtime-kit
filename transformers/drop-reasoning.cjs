@@ -104,6 +104,31 @@ class DropReasoningTransformer {
 
   fillStreamUsage(payload, state) {
     if (!payload || typeof payload !== "object") return payload;
+
+    // OpenAI chat.completion.chunk path. The provider streams OpenAI events and CCR converts
+    // them to Anthropic afterward, reading usage.prompt_tokens / usage.completion_tokens. Many
+    // gateways omit usage from the stream entirely, so synthesize it on the final chunk.
+    if (Array.isArray(payload.choices)) {
+      const usage = payload.usage;
+      const hasProviderUsage =
+        usage && typeof usage === "object" &&
+        (!this.isMissingTokenCount(usage.prompt_tokens) || !this.isMissingTokenCount(usage.completion_tokens));
+      if (hasProviderUsage) {
+        state.sawProviderUsage = true;
+        return payload;
+      }
+      const finished = payload.choices.some((choice) => choice && choice.finish_reason != null);
+      if (finished && !state.sawProviderUsage && state.inputEstimate > 0) {
+        const completionTokens = Math.max(state.outputChars > 0 ? 1 : 0, this.tokensFromChars(state.outputChars));
+        payload.usage = {
+          prompt_tokens: state.inputEstimate,
+          completion_tokens: completionTokens,
+          total_tokens: state.inputEstimate + completionTokens,
+        };
+      }
+      return payload;
+    }
+
     const eventType = payload.type || state.currentEvent;
     if (eventType === "message_start" && payload.message && typeof payload.message === "object") {
       const usage = payload.message.usage && typeof payload.message.usage === "object" ? payload.message.usage : (payload.message.usage = {});
@@ -121,6 +146,22 @@ class DropReasoningTransformer {
 
   countStreamOutput(payload, state) {
     if (!payload || typeof payload !== "object") return;
+
+    // OpenAI chat.completion.chunk: choices[].delta.content (and streamed tool-call arguments).
+    if (Array.isArray(payload.choices)) {
+      for (const choice of payload.choices) {
+        const delta = choice?.delta;
+        if (!delta || typeof delta !== "object") continue;
+        if (typeof delta.content === "string") state.outputChars += delta.content.length;
+        for (const call of delta.tool_calls ?? []) {
+          const args = call?.function?.arguments;
+          if (typeof args === "string") state.outputChars += args.length;
+        }
+      }
+      return;
+    }
+
+    // Anthropic streaming: content_block_delta.
     const eventType = payload.type || state.currentEvent;
     if (eventType !== "content_block_delta") return;
     const delta = payload.delta;
@@ -271,6 +312,7 @@ class DropReasoningTransformer {
       noticeIndexes: new Set(),
       inputEstimate,
       outputChars: 0,
+      sawProviderUsage: false,
     };
     const rewriteLine = (line) => this.rewriteSseLine(line, state);
     let buffer = "";
