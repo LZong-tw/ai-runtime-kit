@@ -87,8 +87,14 @@ export function buildShellSnippet(catalog, profileName, options = {}) {
       lines.push(`  ${syncFunction} || return`);
     }
     const rawWrapperArgs = (wrapper.args ?? []).map((arg) => renderTemplateValue(arg, templateVars));
+    const wrapperCcrConfig = profile.ccr ? buildCcrConfig(catalog, profileName, { configDir: options.configDir }) : null;
     const effectiveWrapperArgs = shouldAppendReusableRuntimeLessons(wrapper.command)
-      ? mergeAppendSystemPrompt(rawWrapperArgs, reusableRuntimeLessonsPrompt)
+      ? appendRuntimePrompts(rawWrapperArgs, [
+          reusableRuntimeLessonsPrompt,
+          wrapperCcrConfig
+            ? airclaudeRoutingPrompt(wrapper.env?.AIRCLAUDE_MODE ?? "auto", wrapperCcrConfig, resolveRestoreRepairConfig(profile))
+            : "",
+        ])
       : rawWrapperArgs;
     const wrapperArgs = effectiveWrapperArgs.map((arg) => quoteShell(arg));
     const renderedArgs = wrapperArgs.length ? ` ${wrapperArgs.join(" ")}` : "";
@@ -236,7 +242,13 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
     },
     launch: {
       command: renderTemplateValue(launch.binary, launchVars),
-      args: (launch.args ?? []).map((arg) => renderTemplateValue(arg, launchVars)),
+      args: appendLaunchRuntimePrompts(
+        (launch.args ?? []).map((arg) => renderTemplateValue(arg, launchVars)),
+        launch.binary,
+        mode,
+        ccrConfig,
+        restore,
+      ),
       env: {
         ...airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, restore),
         ...renderTemplateValue(launch.env ?? {}, launchVars),
@@ -880,6 +892,17 @@ function mergeAppendSystemPrompt(args, prompt) {
   return next;
 }
 
+function appendLaunchRuntimePrompts(args, binary, mode, ccrConfig, restore) {
+  if (!shouldAppendReusableRuntimeLessons(binary)) return args;
+  return appendRuntimePrompts(args, [airclaudeRoutingPrompt(mode, ccrConfig, restore)]);
+}
+
+function appendRuntimePrompts(args, prompts) {
+  return prompts
+    .filter((prompt) => typeof prompt === "string" && prompt.length > 0)
+    .reduce((next, prompt) => mergeAppendSystemPrompt(next, prompt), args);
+}
+
 function resolveLaunchMode(profile, launch, requestedMode) {
   const mode = requestedMode ?? launch.defaultMode ?? "auto";
   const modes = launch.modes ?? { auto: {} };
@@ -992,6 +1015,44 @@ function inputPriceFromValue(value) {
 
   const input = Number(value.input ?? value.inputCacheMiss);
   return Number.isFinite(input) && input > 0 ? input : null;
+}
+
+function airclaudeRoutingPrompt(mode, ccrConfig, restore) {
+  if (!ccrConfig?.Router || typeof ccrConfig.Router !== "object") return "";
+
+  const routeLines = sortedRouterEntries(ccrConfig.Router).map(([key, route]) => {
+    const { model } = splitRoute(route);
+    return `- ${key}: ${route} (model ${model})`;
+  });
+
+  return [
+    "AirClaude active routing:",
+    `- mode: ${mode}`,
+    "- AirClaude mode is routing mode, not Claude Code permission mode.",
+    ...routeLines,
+    restore?.model
+      ? `- Claude restore/display model is compatibility metadata only: ${restore.model}`
+      : "- Claude restore/display model is compatibility metadata only.",
+    "- Do not infer the active provider route from Claude Code's displayed model name.",
+    "- background/tool-heavy work may use the background route when the runtime/router selects it.",
+    "- When compacting, restoring, summarizing, or reporting status, preserve AirClaude mode and provider routes separately from Claude-compatible display metadata.",
+  ].join(" ");
+}
+
+function sortedRouterEntries(router) {
+  const preferred = ["default", "think", "longContext", "background", "webSearch"];
+  const entries = Object.entries(router)
+    .filter(([, route]) => typeof route === "string");
+  const byKey = new Map(entries);
+  const sorted = preferred
+    .filter((key) => byKey.has(key))
+    .map((key) => [key, byKey.get(key)]);
+
+  for (const [key, route] of entries) {
+    if (!preferred.includes(key)) sorted.push([key, route]);
+  }
+
+  return sorted;
 }
 
 function statuslineLabel(mode, ccrConfig) {

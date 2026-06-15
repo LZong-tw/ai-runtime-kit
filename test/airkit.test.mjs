@@ -34,6 +34,13 @@ test("buildShellSnippet syncs the rendered CCR config before launching wrappers"
     assert.match(snippet, /airkit-sync-ccr-config-openai-compatible-example \|\| return/);
     assert.match(snippet, /--append-system-prompt/);
     assert.match(snippet, /AirKit reusable runtime lessons/);
+    assert.match(snippet, /AirClaude active routing/);
+    assert.match(snippet, /mode: auto/);
+    assert.match(snippet, /default: openai-compatible,steady-coder \(model steady-coder\)/);
+    assert.match(snippet, /think: openai-compatible,reasoning-coder \(model reasoning-coder\)/);
+    assert.match(snippet, /longContext: openai-compatible,long-context-coder \(model long-context-coder\)/);
+    assert.match(snippet, /background: openai-compatible,fast-coder \(model fast-coder\)/);
+    assert.match(snippet, /background\/tool-heavy work may use the background route/);
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }
@@ -53,6 +60,13 @@ test("airclaude launch injects reusable runtime lessons", async () => {
   assert.match(prompt, /StateChangeReason/);
   assert.match(prompt, /shell wrapper/);
   assert.match(prompt, /command -v/);
+  assert.match(prompt, /AirClaude active routing/);
+  assert.match(prompt, /mode: auto/);
+  assert.match(prompt, /default: openai-compatible,steady-coder \(model steady-coder\)/);
+  assert.match(prompt, /think: openai-compatible,reasoning-coder \(model reasoning-coder\)/);
+  assert.match(prompt, /longContext: openai-compatible,long-context-coder \(model long-context-coder\)/);
+  assert.match(prompt, /background: openai-compatible,fast-coder \(model fast-coder\)/);
+  assert.match(prompt, /Claude restore\/display model is compatibility metadata only/);
 });
 
 test("installed shell snippet can sync the rendered CCR config into CCR live config", async () => {
@@ -305,6 +319,13 @@ test("buildLaunchPlan applies pro mode CCR routing overlay without mutating the 
       /AirClaude mode pro routes default to strong-coder while Claude restore uses claude-sonnet-4-6\./,
     );
     assert.match(plan.launch.args[3], /AirKit reusable runtime lessons/);
+    assert.match(plan.launch.args[3], /AirClaude active routing/);
+    assert.match(plan.launch.args[3], /mode: pro/);
+    assert.match(plan.launch.args[3], /default: demo,strong-coder \(model strong-coder\)/);
+    assert.match(plan.launch.args[3], /think: demo,strong-coder \(model strong-coder\)/);
+    assert.match(plan.launch.args[3], /longContext: demo,strong-coder \(model strong-coder\)/);
+    assert.match(plan.launch.args[3], /background: demo,cheap-coder \(model cheap-coder\)/);
+    assert.match(plan.launch.args[3], /Do not infer the active provider route from Claude Code's displayed model name/);
     assert.equal(plan.launch.env.AIRCLAUDE_PROFILE, "launch-example");
     assert.equal(plan.launch.env.AIRCLAUDE_MODE, "pro");
     assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_DEFAULT, "demo,strong-coder");
@@ -387,6 +408,9 @@ test("prepareLaunch writes managed files, syncs live CCR config, and preserves p
       /AirClaude mode pro routes default to strong-coder while Claude restore uses claude-sonnet-4-6\./,
     );
     assert.match(spawned[0].args[3], /AirKit reusable runtime lessons/);
+    assert.match(spawned[0].args[3], /AirClaude active routing/);
+    assert.match(spawned[0].args[3], /mode: pro/);
+    assert.match(spawned[0].args[3], /background: demo,cheap-coder \(model cheap-coder\)/);
     assert.equal(spawned[0].args[4], "--dangerously-skip-permissions");
     assert.deepEqual(spawned[0].env, {
       ANTHROPIC_BASE_URL: "http://127.0.0.1:3456",
