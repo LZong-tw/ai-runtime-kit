@@ -281,12 +281,32 @@ class DropReasoningTransformer {
       if (message && Array.isArray(message.content)) {
         message.content = message.content.map((block) => this.normalizeContentBlock(block));
       }
-      if (message && typeof message.reasoning_content === "string") delete message.reasoning_content;
-      const delta = choice?.delta;
-      if (delta && typeof delta.reasoning_content === "string") delete delta.reasoning_content;
+      this.deleteReasoningFields(message);
+      this.deleteReasoningFields(choice?.delta);
     }
 
     return payload;
+  }
+
+  // OpenAI-format reasoning models (deepseek et al.) put their chain-of-thought in
+  // reasoning_content / reasoning on the delta or message. Left in place, CCR's
+  // transformResponseIn turns it into an Anthropic `thinking` block and bumps the
+  // content-block index, so a later text_delta lands on a non-text block and Claude
+  // Code's stream accumulator throws "Content block is not a text block". This
+  // transformer drops reasoning, so strip those fields before CCR ever sees them.
+  stripStreamReasoning(payload) {
+    if (!payload || typeof payload !== "object" || !Array.isArray(payload.choices)) return payload;
+    for (const choice of payload.choices) {
+      this.deleteReasoningFields(choice?.delta);
+      this.deleteReasoningFields(choice?.message);
+    }
+    return payload;
+  }
+
+  deleteReasoningFields(holder) {
+    if (!holder || typeof holder !== "object") return;
+    delete holder.reasoning_content;
+    delete holder.reasoning;
   }
 
   normalizeContentBlock(block) {
@@ -358,6 +378,7 @@ class DropReasoningTransformer {
       const payload = JSON.parse(data);
       this.maskModel(payload);
       this.restoreProviderToolNames(payload);
+      this.stripStreamReasoning(payload);
       this.normalizeSsePayload(payload, state);
       this.countStreamOutput(payload, state);
       this.fillStreamUsage(payload, state);

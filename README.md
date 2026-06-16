@@ -52,3 +52,24 @@ entries include enough metadata to drive task-mode routing:
 - `routingPresets.coding-balanced` gives a starting point for mapping
   `default`, `background`, `think`, `longContext`, and `coding` work to model
   candidates.
+
+## Troubleshooting
+
+### `API Error: Content block is not a text block` on a reasoning model
+
+This is thrown by Claude Code's own response accumulator, not by the gateway: a
+`text_delta` arrived for a content block that was opened as a non-text type
+(`thinking` or `tool_use`). It shows up when you route Claude Code to an
+OpenAI-format reasoning model (anything that streams `reasoning_content` /
+`reasoning` on the delta) through CCR. CCR turns that reasoning into an Anthropic
+`thinking` block and advances the content-block index, so a later text delta can
+land on the thinking block and trip the accumulator.
+
+The bundled `drop-reasoning` transformer prevents this by stripping
+`reasoning_content` / `reasoning` from every response shape — JSON, Anthropic
+SSE, and OpenAI SSE — before CCR converts the stream. If you write your own
+transformer, strip reasoning on the streaming path too, not only the JSON path.
+
+CCR loads transformers into memory at startup, so after updating a transformer
+relaunch through `airclaude` (it reloads CCR when the rendered config or bundled
+transformers change) rather than reusing the running daemon.

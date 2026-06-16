@@ -627,6 +627,55 @@ test("bundled drop-reasoning transformer keeps real OpenAI usage when the gatewa
   assert.equal(usageChunk.usage.completion_tokens, 88);
 });
 
+test("bundled drop-reasoning transformer strips reasoning_content from an OpenAI-format stream", async () => {
+  const require = createRequire(import.meta.url);
+  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
+  const instance = new Transformer();
+
+  // A deepseek-style reasoning model interleaves reasoning_content with content and tool calls.
+  // If reasoning_content survives, CCR's converter injects a `thinking` block and bumps the
+  // content-block index, so Claude Code's accumulator throws "Content block is not a text block".
+  const streamResponse = new Response(
+    [
+      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"reasoning_content":"Let me think about the query first."}}]}\n\n',
+      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"content":"Running the query now."}}]}\n\n',
+      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"Bash","arguments":"{}"}}]}}]}\n\n',
+      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v4-pro","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+      "data: [DONE]\n\n",
+    ].join(""),
+    { headers: { "Content-Type": "text/event-stream" } },
+  );
+
+  const context = { req: { body: { messages: [{ role: "user", content: "x".repeat(400) }] } } };
+  const body = await (await instance.transformResponseOut(streamResponse, context)).text();
+
+  assert.ok(!body.includes("reasoning_content"), "reasoning_content must not survive the streamed OpenAI chunks");
+  assert.ok(body.includes("Running the query now."), "visible content must be preserved");
+  assert.ok(body.includes('"name":"Bash"'), "tool calls must be preserved");
+});
+
+test("bundled drop-reasoning transformer strips reasoning_content from a non-streamed OpenAI response", async () => {
+  const require = createRequire(import.meta.url);
+  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
+  const instance = new Transformer();
+
+  const jsonResponse = new Response(
+    JSON.stringify({
+      id: "x",
+      object: "chat.completion",
+      model: "deepseek-v4-pro",
+      choices: [{ index: 0, message: { role: "assistant", content: "Answer.", reasoning_content: "Hidden reasoning." } }],
+    }),
+    { headers: { "Content-Type": "application/json" } },
+  );
+
+  const context = { req: { body: { messages: [{ role: "user", content: "short" }] } } };
+  const body = await (await instance.transformResponseOut(jsonResponse, context)).text();
+
+  assert.ok(!body.includes("reasoning_content"), "reasoning_content must not survive the JSON response");
+  assert.ok(body.includes("Answer."), "visible content must be preserved");
+});
+
 test("bundled drop-reasoning transformer masks provider models and tool names for Claude Code restore", async () => {
   const require = createRequire(import.meta.url);
   const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
