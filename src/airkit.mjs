@@ -1004,6 +1004,13 @@ function airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, restore) {
     AIRCLAUDE_STATUSLINE_LABEL: statuslineLabel(mode, ccrConfig),
     AIRCLAUDE_RESTORE_MODEL: restore?.model ?? "",
     CLAUDE_STATUSLINE_CACHE_DIR: join(homedir(), ".claude", "cache", "airclaude", profile.name, mode),
+    // OSS routes (deepseek-v4 etc.) are 1M-context models, but Claude Code defaults the masked
+    // claude-sonnet-4-6 to a 200K window, so the statusline shows a wrong /200k. Enabling 1M context
+    // makes Claude Code report context_window_size=1000000, matching the real provider window.
+    // (longContextThreshold already routes oversized requests to a 1M model, so 1M-on is safe.)
+    // Value "true" is the proven token: a live session with ANTHROPIC_1M_CONTEXT=true reports
+    // context_window_size=1000000; without it, 200000.
+    ANTHROPIC_1M_CONTEXT: "true",
     // Claude Code sources the user's zsh snapshot in its non-interactive command shells. A
     // Powerlevel10k instant prompt there re-evals its git/dir segments and spams
     // "(eval): command not found: git/head/awk/dirname/basename". Quiet it for the launched

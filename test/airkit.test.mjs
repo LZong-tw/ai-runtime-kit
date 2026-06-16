@@ -502,6 +502,22 @@ test("airclaude launch quiets the Powerlevel10k instant prompt in its command su
   }
 });
 
+test("airclaude launch enables the 1M context window for OSS routes", async () => {
+  const catalog = launchCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-1m-"));
+
+  try {
+    const plan = buildLaunchPlan(catalog, "launch-example", { configDir });
+    // OSS routes (e.g. deepseek-v4) are 1M-context models, but Claude Code defaults the masked
+    // claude-sonnet-4-6 to a 200K window, so the statusline shows a wrong /200k. Enabling 1M context
+    // makes Claude Code report context_window_size=1000000 — verified: a session with
+    // ANTHROPIC_1M_CONTEXT set reports 1000000, without it 200000.
+    assert.equal(plan.launch.env.ANTHROPIC_1M_CONTEXT, "true");
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
 test("runtime ships its bundled transformer for any provider that lists it in transformer.use", async () => {
   const catalog = launchCatalog();
   catalog.profiles[0].ccr.Providers[0].transformer = { use: ["drop-reasoning"] };
@@ -832,6 +848,7 @@ test("prepareLaunch writes managed files, syncs live CCR config, and preserves p
       AIRCLAUDE_STATUSLINE_INPUT_PRICE_PER_MILLION: "2",
       AIRCLAUDE_STATUSLINE_LABEL: "airclaude pro strong-coder",
       CLAUDE_STATUSLINE_CACHE_DIR: join(homedir(), ".claude", "cache", "airclaude", "launch-example", "pro"),
+      ANTHROPIC_1M_CONTEXT: "true",
       POWERLEVEL9K_INSTANT_PROMPT: "off",
       CCR_PROFILE: "launch-example",
     });
