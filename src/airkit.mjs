@@ -140,12 +140,13 @@ export function buildShellSnippet(catalog, profileName, options = {}) {
       wrapperEnv[key] = renderTemplateValue(value, templateVars);
       lines.push(`  export ${key}=${quoteShell(wrapperEnv[key])}`);
     }
-    // The node prepareLaunch path applies airclaudeLaunchEnv (ANTHROPIC_1M_CONTEXT,
-    // POWERLEVEL9K_INSTANT_PROMPT, route metadata) on top of the profile env. A shell wrapper that
-    // skips it diverges from the node path: most importantly a missing ANTHROPIC_1M_CONTEXT makes
-    // Claude Code assume a 200K window and auto-compact at ~76K even though the routes are 1M models.
-    // Emit the launch env as defaults so any wrapper launch matches the node path; the profile's
-    // explicit wrapper env still wins for keys it sets.
+    // The node prepareLaunch path applies airclaudeLaunchEnv (POWERLEVEL9K_INSTANT_PROMPT, route
+    // metadata) on top of the profile env. A shell wrapper that skips it diverges from the node
+    // path: e.g. a missing POWERLEVEL9K_INSTANT_PROMPT lets the user's P10k zsh snapshot spam
+    // command-not-found in Claude Code's non-interactive shells. Emit the launch env as defaults so
+    // any wrapper launch matches the node path; the profile's explicit wrapper env still wins for
+    // keys it sets. (The 1M context window is NOT an env var — see airclaudeLaunchEnv — it comes
+    // from the [1m] suffix on launch.restore.model.)
     if (isAirclaudeLauncher && wrapperCcrConfig) {
       const launchEnv = airclaudeLaunchEnv(
         catalog,
