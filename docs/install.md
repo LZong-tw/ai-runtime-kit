@@ -94,6 +94,20 @@ After it is sourced, profile wrappers are one-command entry points. The wrapper
 first syncs the rendered CCR config into CCR's live `config.json`, then
 delegates to the configured client command.
 
+For airclaude launcher wrappers, the wrapper also exports the same launch
+environment the `node airkit.mjs` launch path applies (e.g.
+`POWERLEVEL9K_INSTANT_PROMPT=off`, which keeps the user's P10k zsh snapshot from
+spamming command-not-found in Claude Code's non-interactive shells), so a session
+started through the wrapper does not diverge from the node path. Prefer starting
+and resuming through the wrapper (`<wrapper> --resume`, `<wrapper> --continue`).
+
+The 1M context window is **not** controlled by an env var (there is no such env
+var in Claude Code — `ANTHROPIC_1M_CONTEXT` is a no-op). Claude Code enables 1M
+only when the resolved model string ends in the literal `[1m]` suffix, so the
+masked context window is set via the profile's `launch.restore.model`
+(`claude-sonnet-4-6[1m]`); the suffix is stripped back to `claude-sonnet-4-6` for
+the on-wire API id, so the gateway never sees it.
+
 ## Run Doctor
 
 After writing and sourcing, run:

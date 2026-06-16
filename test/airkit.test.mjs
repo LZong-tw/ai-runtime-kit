@@ -131,6 +131,25 @@ test("buildShellSnippet renders an orphan reaper and wires it into the launch wr
   }
 });
 
+test("buildShellSnippet applies airclaudeLaunchEnv to the launcher wrapper so it matches the node path", async () => {
+  const catalog = await loadCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-oss-launchenv-"));
+
+  try {
+    const snippet = buildShellSnippet(catalog, profile, { configDir });
+    const wrapperBody = snippet.slice(snippet.indexOf("cclaude-example() {"));
+
+    // POWERLEVEL9K_INSTANT_PROMPT lives only in airclaudeLaunchEnv (the node prepareLaunch path);
+    // without it the P10k snapshot spams command-not-found. The shell wrapper must emit the same launch
+    // env as the node path so a wrapper-launched session does not diverge.
+    assert.match(wrapperBody, /export POWERLEVEL9K_INSTANT_PROMPT='off'/);
+    // ANTHROPIC_1M_CONTEXT is a no-op in Claude Code and must NOT be emitted as dead config.
+    assert.doesNotMatch(wrapperBody, /ANTHROPIC_1M_CONTEXT/);
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
 test("airkit-ccr-reap-orphan kills a stale listener that fails the health check", async () => {
   const catalog = await loadCatalog();
   const configDir = await mkdtemp(join(tmpdir(), "airkit-oss-reapkill-"));
@@ -502,17 +521,16 @@ test("airclaude launch quiets the Powerlevel10k instant prompt in its command su
   }
 });
 
-test("airclaude launch enables the 1M context window for OSS routes", async () => {
+test("airclaude launch does not set the dead ANTHROPIC_1M_CONTEXT env (1M comes from the [1m] model suffix)", async () => {
   const catalog = launchCatalog();
   const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-1m-"));
 
   try {
     const plan = buildLaunchPlan(catalog, "launch-example", { configDir });
-    // OSS routes (e.g. deepseek-v4) are 1M-context models, but Claude Code defaults the masked
-    // claude-sonnet-4-6 to a 200K window, so the statusline shows a wrong /200k. Enabling 1M context
-    // makes Claude Code report context_window_size=1000000 — verified: a session with
-    // ANTHROPIC_1M_CONTEXT set reports 1000000, without it 200000.
-    assert.equal(plan.launch.env.ANTHROPIC_1M_CONTEXT, "true");
+    // 1M context is NOT enabled by any env var (ANTHROPIC_1M_CONTEXT is a no-op in Claude Code 2.1.178);
+    // it is gated on the resolved model string ending in `[1m]`, so the lever is launch.restore.model,
+    // not the launch env. Guard against re-introducing the dead env var.
+    assert.equal(plan.launch.env.ANTHROPIC_1M_CONTEXT, undefined);
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }
@@ -939,7 +957,6 @@ test("prepareLaunch writes managed files, syncs live CCR config, and preserves p
       AIRCLAUDE_STATUSLINE_INPUT_PRICE_PER_MILLION: "2",
       AIRCLAUDE_STATUSLINE_LABEL: "airclaude pro strong-coder",
       CLAUDE_STATUSLINE_CACHE_DIR: join(homedir(), ".claude", "cache", "airclaude", "launch-example", "pro"),
-      ANTHROPIC_1M_CONTEXT: "true",
       POWERLEVEL9K_INSTANT_PROMPT: "off",
       CCR_PROFILE: "launch-example",
     });

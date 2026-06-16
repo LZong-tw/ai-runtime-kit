@@ -133,8 +133,31 @@ export function buildShellSnippet(catalog, profileName, options = {}) {
 
   for (const wrapper of shell.wrappers ?? []) {
     lines.push(`${wrapper.name}() {`);
+    const wrapperCcrConfig = profile.ccr ? buildCcrConfig(catalog, profileName, { configDir: options.configDir }) : null;
+    const isAirclaudeLauncher = shouldAppendReusableRuntimeLessons(wrapper.command);
+    const wrapperEnv = {};
     for (const [key, value] of Object.entries(wrapper.env ?? {})) {
-      lines.push(`  export ${key}=${quoteShell(renderTemplateValue(value, templateVars))}`);
+      wrapperEnv[key] = renderTemplateValue(value, templateVars);
+      lines.push(`  export ${key}=${quoteShell(wrapperEnv[key])}`);
+    }
+    // The node prepareLaunch path applies airclaudeLaunchEnv (ANTHROPIC_1M_CONTEXT,
+    // POWERLEVEL9K_INSTANT_PROMPT, route metadata) on top of the profile env. A shell wrapper that
+    // skips it diverges from the node path: most importantly a missing ANTHROPIC_1M_CONTEXT makes
+    // Claude Code assume a 200K window and auto-compact at ~76K even though the routes are 1M models.
+    // Emit the launch env as defaults so any wrapper launch matches the node path; the profile's
+    // explicit wrapper env still wins for keys it sets.
+    if (isAirclaudeLauncher && wrapperCcrConfig) {
+      const launchEnv = airclaudeLaunchEnv(
+        catalog,
+        profile,
+        wrapperEnv.AIRCLAUDE_MODE ?? "auto",
+        wrapperCcrConfig,
+        resolveRestoreRepairConfig(profile),
+      );
+      for (const [key, value] of Object.entries(launchEnv)) {
+        if (key in wrapperEnv) continue;
+        lines.push(`  export ${key}=${quoteShell(value)}`);
+      }
     }
     if (syncFunction) {
       lines.push(`  ${syncFunction} || return`);
@@ -146,12 +169,11 @@ export function buildShellSnippet(catalog, profileName, options = {}) {
       lines.push(`  ${reapFunction}`);
     }
     const rawWrapperArgs = (wrapper.args ?? []).map((arg) => renderTemplateValue(arg, templateVars));
-    const wrapperCcrConfig = profile.ccr ? buildCcrConfig(catalog, profileName, { configDir: options.configDir }) : null;
-    const effectiveWrapperArgs = shouldAppendReusableRuntimeLessons(wrapper.command)
+    const effectiveWrapperArgs = isAirclaudeLauncher
       ? appendRuntimePrompts(rawWrapperArgs, [
           reusableRuntimeLessonsPrompt,
           wrapperCcrConfig
-            ? airclaudeRoutingPrompt(wrapper.env?.AIRCLAUDE_MODE ?? "auto", wrapperCcrConfig, resolveRestoreRepairConfig(profile))
+            ? airclaudeRoutingPrompt(wrapperEnv.AIRCLAUDE_MODE ?? "auto", wrapperCcrConfig, resolveRestoreRepairConfig(profile))
             : "",
         ])
       : rawWrapperArgs;
@@ -1004,13 +1026,13 @@ function airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, restore) {
     AIRCLAUDE_STATUSLINE_LABEL: statuslineLabel(mode, ccrConfig),
     AIRCLAUDE_RESTORE_MODEL: restore?.model ?? "",
     CLAUDE_STATUSLINE_CACHE_DIR: join(homedir(), ".claude", "cache", "airclaude", profile.name, mode),
-    // OSS routes (deepseek-v4 etc.) are 1M-context models, but Claude Code defaults the masked
-    // claude-sonnet-4-6 to a 200K window, so the statusline shows a wrong /200k. Enabling 1M context
-    // makes Claude Code report context_window_size=1000000, matching the real provider window.
-    // (longContextThreshold already routes oversized requests to a 1M model, so 1M-on is safe.)
-    // Value "true" is the proven token: a live session with ANTHROPIC_1M_CONTEXT=true reports
-    // context_window_size=1000000; without it, 200000.
-    ANTHROPIC_1M_CONTEXT: "true",
+    // NOTE: there is no env var that enables Claude Code's 1M context window. (ANTHROPIC_1M_CONTEXT
+    // is a no-op — it does not appear in the 2.1.178 binary.) 1M is gated purely on the resolved
+    // model string ending in the literal suffix `[1m]` (Jf = /\[1m\]/i, checked first in the window
+    // resolver), with CLAUDE_CODE_DISABLE_1M_CONTEXT as the only opt-out. So 1M is achieved by giving
+    // the masked restore model a `[1m]` suffix (launch.restore.model: claude-sonnet-4-6[1m]); the API
+    // id is normalized back to claude-sonnet-4-6 on the wire, so the suffix is a Claude-Code-local
+    // marker and the gateway never sees it. See resolveRestoreRepairConfig / the profile restore block.
     // Claude Code sources the user's zsh snapshot in its non-interactive command shells. A
     // Powerlevel10k instant prompt there re-evals its git/dir segments and spams
     // "(eval): command not found: git/head/awk/dirname/basename". Quiet it for the launched
