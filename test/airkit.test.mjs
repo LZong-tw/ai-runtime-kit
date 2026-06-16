@@ -643,6 +643,53 @@ test("bundled drop-reasoning transformer keeps real OpenAI usage when the gatewa
   assert.equal(usageChunk.usage.completion_tokens, 88);
 });
 
+test("bundled drop-reasoning transformer asks the gateway to stream usage on streaming requests", async () => {
+  const require = createRequire(import.meta.url);
+  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
+  const instance = new Transformer();
+
+  // Provider streams OpenAI but omits usage; request include_usage so the gateway emits a final
+  // usage chunk (real prompt/completion tokens, and cache tokens if it reports them). The built-in
+  // "streamoptions" transformer cannot be listed in this provider's use (it breaks registration), so
+  // we set it ourselves on the OpenAI request body that transformRequestIn receives.
+  const streamed = await instance.transformRequestIn({ stream: true, messages: [{ role: "user", content: "hi" }] });
+  assert.deepEqual(streamed.stream_options, { include_usage: true });
+
+  const nonStreamed = await instance.transformRequestIn({ messages: [{ role: "user", content: "hi" }] });
+  assert.equal(nonStreamed.stream_options, undefined);
+});
+
+test("bundled drop-reasoning transformer preserves a cache-only usage chunk instead of synthesizing over it", async () => {
+  const require = createRequire(import.meta.url);
+  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
+  const instance = new Transformer();
+
+  // A gateway may report usage with cached_tokens but a 0/absent prompt_tokens on the finish chunk.
+  // That is still real provider usage — synthesis must defer to it so cached_tokens reaches CCR.
+  const streamResponse = new Response(
+    [
+      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n',
+      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"prompt_tokens_details":{"cached_tokens":900}}}\n\n',
+      "data: [DONE]\n\n",
+    ].join(""),
+    { headers: { "Content-Type": "text/event-stream" } },
+  );
+
+  const context = { req: { body: { system: "x".repeat(8000), messages: [{ role: "user", content: "short" }] } } };
+  const body = await (await instance.transformResponseOut(streamResponse, context)).text();
+  const usageChunk = body
+    .split("\n")
+    .filter((line) => line.startsWith("data: ") && line.slice(6).trim() !== "[DONE]")
+    .map((line) => JSON.parse(line.slice(6)))
+    .find((chunk) => chunk.usage && chunk.usage.prompt_tokens_details);
+
+  assert.ok(usageChunk, "the cache-bearing usage chunk must survive");
+  assert.equal(usageChunk.usage.prompt_tokens_details.cached_tokens, 900);
+  // synthesis (which would write prompt_tokens = the ~2000 input estimate and drop the cache field)
+  // must NOT have run — the original prompt_tokens:0 is preserved untouched.
+  assert.equal(usageChunk.usage.prompt_tokens, 0);
+});
+
 test("bundled drop-reasoning transformer strips reasoning_content from an OpenAI-format stream", async () => {
   const require = createRequire(import.meta.url);
   const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
@@ -690,6 +737,50 @@ test("bundled drop-reasoning transformer strips reasoning_content from a non-str
 
   assert.ok(!body.includes("reasoning_content"), "reasoning_content must not survive the JSON response");
   assert.ok(body.includes("Answer."), "visible content must be preserved");
+});
+
+test("bundled drop-reasoning transformer routes the auto-mode classifier to the configured model", async () => {
+  const require = createRequire(import.meta.url);
+  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
+  const instance = new Transformer({ classifierModel: "gpt-5.4-mini" });
+
+  // Claude Code's auto-mode permission classifier fingerprint: a side query whose system prompt
+  // opens with this exact sentence. Through CCR it carries an Opus model id and would otherwise
+  // fall through to Router.default.
+  const classifierString = await instance.transformRequestIn({
+    model: "claude-opus-4-8",
+    system: "You are a security monitor for autonomous AI coding agents. Decide whether to block.",
+    messages: [{ role: "user", content: "ran: rm -rf /" }],
+  });
+  assert.equal(classifierString.model, "gpt-5.4-mini", "string-system classifier request must be rerouted");
+
+  const classifierBlocks = await instance.transformRequestIn({
+    model: "claude-opus-4-8",
+    system: [{ type: "text", text: "You are a security monitor for autonomous AI coding agents." }],
+    messages: [{ role: "user", content: "x" }],
+  });
+  assert.equal(classifierBlocks.model, "gpt-5.4-mini", "block-array-system classifier request must be rerouted");
+
+  // Normal traffic must be untouched.
+  const normal = await instance.transformRequestIn({
+    model: "claude-sonnet-4-6",
+    system: "You are Claude Code, a helpful coding assistant.",
+    messages: [{ role: "user", content: "fix the bug" }],
+  });
+  assert.equal(normal.model, "claude-sonnet-4-6", "non-classifier traffic must not be rerouted");
+});
+
+test("bundled drop-reasoning transformer leaves the classifier model alone when no classifierModel is set", async () => {
+  const require = createRequire(import.meta.url);
+  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
+  const instance = new Transformer();
+
+  const out = await instance.transformRequestIn({
+    model: "claude-opus-4-8",
+    system: "You are a security monitor for autonomous AI coding agents.",
+    messages: [{ role: "user", content: "x" }],
+  });
+  assert.equal(out.model, "claude-opus-4-8", "without classifierModel the request model is unchanged");
 });
 
 test("bundled drop-reasoning transformer masks provider models and tool names for Claude Code restore", async () => {

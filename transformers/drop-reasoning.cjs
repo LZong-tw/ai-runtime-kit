@@ -4,6 +4,12 @@ class DropReasoningTransformer {
   constructor(options = {}) {
     this.name = "drop-reasoning";
     this.restoreModel = options.restoreModel || "claude-sonnet-4-6";
+    // Optional: route Claude Code's auto-mode permission classifier to a specific model.
+    // The classifier call rides ANTHROPIC_BASE_URL, so through CCR it otherwise lands on
+    // Router.default like any other traffic. Setting this lets a non-Anthropic gateway serve
+    // the classifier with a chosen (cheap, format-reliable) model. This DELIBERATELY swaps the
+    // model that adjudicates action safety — keep it a capable instruct model, not the cheapest.
+    this.classifierModel = options.classifierModel || null;
     this.providerToolNameByOriginal = new Map();
     this.originalToolNameByProvider = new Map();
   }
@@ -15,6 +21,10 @@ class DropReasoningTransformer {
     delete request.thinking;
     delete request.enable_thinking;
 
+    if (this.classifierModel && this.isAutoModeClassifierRequest(request)) {
+      request.model = this.classifierModel;
+    }
+
     this.normalizeRequestToolNames(request);
 
     for (const message of request.messages ?? []) {
@@ -24,7 +34,33 @@ class DropReasoningTransformer {
       }
     }
 
+    // Ask the gateway to emit a final usage chunk for streaming requests, so real token counts (and
+    // cache tokens, if the gateway reports them) flow through instead of our chars/4 estimate. CCR's
+    // built-in "streamoptions" transformer cannot be listed in this provider's transformer.use (it
+    // breaks provider registration), so we set it directly on the OpenAI request body here.
+    if (request.stream) {
+      request.stream_options = { ...(request.stream_options ?? {}), include_usage: true };
+    }
+
     return request;
+  }
+
+  // Claude Code's auto-mode permission classifier issues a side query whose system prompt
+  // opens with this exact sentence. Matching on it is how we single out the classifier from
+  // normal traffic (both carry the same masked model name, so the model field can't tell them
+  // apart). If the marker ever drifts in a future Claude Code release this returns false and the
+  // classifier simply falls back to the default route — fail-safe, but silent.
+  isAutoModeClassifierRequest(request) {
+    return this.systemPromptText(request).includes("You are a security monitor for autonomous AI coding agents");
+  }
+
+  systemPromptText(request) {
+    const system = request?.system;
+    if (typeof system === "string") return system;
+    if (Array.isArray(system)) {
+      return system.map((block) => (block && typeof block.text === "string" ? block.text : "")).join("");
+    }
+    return "";
   }
 
   async transformResponseOut(response, context) {
@@ -112,7 +148,9 @@ class DropReasoningTransformer {
       const usage = payload.usage;
       const hasProviderUsage =
         usage && typeof usage === "object" &&
-        (!this.isMissingTokenCount(usage.prompt_tokens) || !this.isMissingTokenCount(usage.completion_tokens));
+        (!this.isMissingTokenCount(usage.prompt_tokens) ||
+          !this.isMissingTokenCount(usage.completion_tokens) ||
+          (usage.prompt_tokens_details && usage.prompt_tokens_details.cached_tokens > 0));
       if (hasProviderUsage) {
         state.sawProviderUsage = true;
         return payload;
