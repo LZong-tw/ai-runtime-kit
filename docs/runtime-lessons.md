@@ -183,6 +183,18 @@ entry); do not re-embed transformer content in profile data.
   `transformResponseOut` before CCR's format `transformResponseIn`, so stripping
   there preempts CCR.) After editing the bundled transformer, redeploy **and**
   reload the daemon (see CCR daemon operations).
+- **Second cause of the same error: a trailing whitespace `content` delta after
+  tool_calls.** deepseek-v3.2 streams parallel tool_calls and then emits a
+  `content:"\n"` after the final tool_call's arguments. CCR's converter appends that
+  as a `text_delta` to the still-open `tool_use` block → same "Content block is not
+  a text block" throw, but **intermittent** (only when the model emits the trailing
+  newline). Diagnose without a repro: scan an existing CCR `LOG` for a
+  `content_block_delta` whose `delta.type==="text_delta"` lands on an `index` opened
+  as `tool_use` (per `reqId`). Fix in the OpenAI-SSE branch: once any tool_call has
+  streamed, drop a whitespace-only `content` delta before CCR sees it (real text,
+  before tool_calls or non-whitespace, is untouched). Non-whitespace text after a
+  tool_call would still trip CCR's index reuse — unobserved so far, and a harder fix
+  (it would need a genuinely new text block), so left as a known residual.
 
 ## Statusline integration
 
