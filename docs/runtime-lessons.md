@@ -63,6 +63,27 @@ in for the other:
   it. How 1M is gated (and why it is the suffix, not an env var) is a Claude Code
   internal — see the internals notes. The launcher's job is only to put the
   marker on the restore/display model so resumed sessions get the right window.
+- **"Issue with the selected model" usually means a dead CCR provider, not a bad
+  model.** Claude Code's banner *"There's an issue with the selected model (X). It
+  may not exist or you may not have access to it"* + every turn ending `Worked for
+  0s` is raised from a **404 response** (`status === 404`) on the message request —
+  and the model name `X` in the message is just whatever was selected, not the
+  cause. If CCR's provider failed to register, **every** `/v1/messages` returns
+  `404 {"error":"Provider '<name>' not found"}` regardless of the model, and Claude
+  Code mislabels that provider-404 as a model problem. Do not chase the model
+  string (the `[1m]` suffix, an alias, entitlement). **Diagnose by curling CCR
+  directly** with any model: `POST /v1/messages` → if you get `Provider '…' not
+  found`, it is a dead daemon. Two traps: (a) `POST /v1/messages/count_tokens`
+  still returns `200` because CCR answers it locally without the provider — a green
+  count-tokens does **not** mean routing works; (b) the orphan-reaper only kills a
+  daemon whose `/health` *fails*, so a daemon that answers `/health` but has the
+  provider unregistered survives and 404s every turn. Fix is a clean authenticated
+  restart (`ccr stop` + authenticated `ccr-start`), not a hot-reload — CCR's
+  hot-reload on config change can leave a provider unregistered (more likely with
+  custom transformers in `transformer.use`). Verify with a real routed curl, never
+  `ccr status` or `/health`. (Misdiagnosed as a `[1m]` model-validation problem on
+  2026-06-17; the actual cause was the provider 404 — `[1m]` and a bare model id
+  returned the *identical* `Provider not found` error.)
 
 ## CCR routing
 
