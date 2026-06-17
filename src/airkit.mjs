@@ -169,7 +169,11 @@ export function buildShellSnippet(catalog, profileName, options = {}) {
     if (reapFunction) {
       lines.push(`  ${reapFunction}`);
     }
-    const rawWrapperArgs = (wrapper.args ?? []).map((arg) => renderTemplateValue(arg, templateVars));
+    const rawWrapperArgs = withAirclaudeModelArg(
+      (wrapper.args ?? []).map((arg) => renderTemplateValue(arg, templateVars)),
+      wrapper.command,
+      resolveRestoreRepairConfig(profile),
+    );
     const effectiveWrapperArgs = isAirclaudeLauncher
       ? appendRuntimePrompts(rawWrapperArgs, [
           reusableRuntimeLessonsPrompt,
@@ -325,7 +329,11 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
     launch: {
       command: renderTemplateValue(launch.binary, launchVars),
       args: appendLaunchRuntimePrompts(
-        (launch.args ?? []).map((arg) => renderTemplateValue(arg, launchVars)),
+        withAirclaudeModelArg(
+          (launch.args ?? []).map((arg) => renderTemplateValue(arg, launchVars)),
+          launch.binary,
+          restore,
+        ),
         launch.binary,
         mode,
         ccrConfig,
@@ -977,6 +985,19 @@ function mergeAppendSystemPrompt(args, prompt) {
 function appendLaunchRuntimePrompts(args, binary, mode, ccrConfig, restore) {
   if (!shouldAppendReusableRuntimeLessons(binary)) return args;
   return appendRuntimePrompts(args, [airclaudeRoutingPrompt(mode, ccrConfig, restore)]);
+}
+
+// airclaude launchers must pass the masked restore model as `--model` so a FRESH
+// session gets the masked window (e.g. the `[1m]` 1M suffix) too. restore.model alone
+// only fixes RESUMED sessions — resolveRestoreRepairConfig rewrites persisted
+// message.model on resume, but a brand-new session has nothing to repair and would
+// otherwise fall back to Claude Code's default model (no `[1m]`) → a 200K window.
+// Appended (not prepended) so existing arg order is preserved; a user `--model` passed
+// after these base args (e.g. `airclaude -- --model …`) still wins.
+function withAirclaudeModelArg(args, binary, restore) {
+  if (!shouldAppendReusableRuntimeLessons(binary) || !restore?.model) return args;
+  if (args.includes("--model")) return args;
+  return [...args, "--model", restore.model];
 }
 
 function appendRuntimePrompts(args, prompts) {

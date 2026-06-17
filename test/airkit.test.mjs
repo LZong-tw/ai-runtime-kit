@@ -936,7 +936,11 @@ test("prepareLaunch writes managed files, syncs live CCR config, and preserves p
     assert.match(spawned[0].args[3], /AirClaude active routing/);
     assert.match(spawned[0].args[3], /mode: pro/);
     assert.match(spawned[0].args[3], /background: demo,cheap-coder \(model cheap-coder\)/);
-    assert.equal(spawned[0].args[4], "--dangerously-skip-permissions");
+    // airclaude pins the masked restore model as --model so FRESH sessions get the
+  // masked window too; user passthrough args still follow (and would override).
+  assert.equal(spawned[0].args[4], "--model");
+  assert.equal(spawned[0].args[5], "claude-sonnet-4-6");
+  assert.equal(spawned[0].args.at(-1), "--dangerously-skip-permissions");
     assert.deepEqual(spawned[0].env, {
       ANTHROPIC_BASE_URL: "http://127.0.0.1:3456",
       AIRCLAUDE_MODE: "pro",
