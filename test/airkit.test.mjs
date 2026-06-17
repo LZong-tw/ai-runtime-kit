@@ -781,6 +781,40 @@ test("bundled drop-reasoning transformer strips reasoning_content from an OpenAI
   assert.ok(body.includes('"name":"Bash"'), "tool calls must be preserved");
 });
 
+test("bundled drop-reasoning transformer drops a whitespace-only content delta after tool_calls", async () => {
+  const require = createRequire(import.meta.url);
+  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
+  const instance = new Transformer();
+
+  // Observed deepseek-v3.2 shape: after the final tool_call's arguments, the model emits a trailing
+  // content:"\n". CCR's converter appends it as a text_delta to the still-open tool_use block, so
+  // Claude Code throws "Content block is not a text block". The transformer must drop that content.
+  const streamResponse = new Response(
+    [
+      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{"content":"Listing dirs."}}]}\n\n',
+      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"Bash","arguments":"{\\"command\\":\\"ls\\"}"}}]}}]}\n\n',
+      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{"content":"\\n"}}]}\n\n',
+      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+      "data: [DONE]\n\n",
+    ].join(""),
+    { headers: { "Content-Type": "text/event-stream" } },
+  );
+
+  const context = { req: { body: { messages: [{ role: "user", content: "short" }] } } };
+  const body = await (await instance.transformResponseOut(streamResponse, context)).text();
+  const contentValues = body
+    .split("\n")
+    .filter((line) => line.startsWith("data: ") && line.slice(6).trim() !== "[DONE]")
+    .map((line) => { try { return JSON.parse(line.slice(6)); } catch { return null; } })
+    .filter(Boolean)
+    .flatMap((c) => (c.choices ?? []).map((ch) => ch?.delta?.content))
+    .filter((v) => typeof v === "string");
+
+  // The leading real text survives; the trailing whitespace-after-tool_call is gone.
+  assert.deepEqual(contentValues, ["Listing dirs."], "only the pre-tool text content should remain");
+  assert.ok(body.includes('"name":"Bash"'), "the tool call must be preserved");
+});
+
 test("bundled drop-reasoning transformer strips reasoning_content from a non-streamed OpenAI response", async () => {
   const require = createRequire(import.meta.url);
   const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));

@@ -391,6 +391,23 @@ class DropReasoningTransformer {
     return payload;
   }
 
+  // deepseek-v3.2 emits a trailing whitespace-only `content` delta (e.g. "\n") AFTER its tool_calls.
+  // CCR's OpenAI->Anthropic converter appends that text to the still-open tool_use block as a
+  // text_delta, so Claude Code's stream accumulator throws "Content block is not a text block".
+  // The content is a meaningless trailing artifact, so once any tool_call has streamed we drop a
+  // whitespace-only content delta before CCR ever sees it. (Real text before tool_calls is untouched.)
+  stripTrailingWhitespaceContentAfterToolCall(payload, state) {
+    if (!payload || !Array.isArray(payload.choices)) return;
+    for (const choice of payload.choices) {
+      const delta = choice && choice.delta;
+      if (!delta || typeof delta !== "object") continue;
+      if (Array.isArray(delta.tool_calls) && delta.tool_calls.length) state.sawToolCallDelta = true;
+      if (state.sawToolCallDelta && typeof delta.content === "string" && delta.content.trim() === "") {
+        delete delta.content;
+      }
+    }
+  }
+
   deleteReasoningFields(holder) {
     if (!holder || typeof holder !== "object") return;
     delete holder.reasoning_content;
@@ -421,6 +438,7 @@ class DropReasoningTransformer {
       inputEstimate,
       outputChars: 0,
       sawProviderUsage: false,
+      sawToolCallDelta: false,
     };
     const rewriteLine = (line) => this.rewriteSseLine(line, state);
     let buffer = "";
@@ -474,6 +492,7 @@ class DropReasoningTransformer {
       this.maskModel(payload);
       this.restoreProviderToolNames(payload);
       this.stripStreamReasoning(payload);
+      this.stripTrailingWhitespaceContentAfterToolCall(payload, state);
       this.normalizeSsePayload(payload, state);
       this.countStreamOutput(payload, state);
       this.fillStreamUsage(payload, state);
