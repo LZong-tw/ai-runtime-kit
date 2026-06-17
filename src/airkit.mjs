@@ -1612,6 +1612,11 @@ function profileTemplateVars(profile, configDir = defaultConfigDir()) {
   return {
     configDir: resolve(configDir),
     profileName: profile.name,
+    // Single source for the masked identity: the CCR transformer's response maskModel
+    // must match launch.restore.model (incl. any [1m] suffix) so persisted message.model
+    // carries it and resume resolves the right window. Reference as {{restoreModel}} in
+    // a profile's transformer.use options.
+    restoreModel: profile.launch?.restore?.model ?? "",
   };
 }
 
