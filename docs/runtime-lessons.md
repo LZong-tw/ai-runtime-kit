@@ -191,11 +191,18 @@ entry); do not re-embed transformer content in profile data.
   statusline's usage/cost widgets but does **not** break auto-compaction —
   context is counted locally. Do not conflate "statusline shows nothing" with
   "compaction is broken"; verify with `/context`.
-- **Prompt-cache widgets need a cache signal the gateway may never send.** If the
-  gateway reports `cache_read_input_tokens=0` even for an identical prompt sent
-  twice, cache-hit/ROI widgets are permanently 0 — a gateway limitation, not a
-  bug. (The transformer should still map `prompt_tokens_details.cached_tokens` →
-  `cache_read` for gateways that do provide it.)
+- **Prompt-cache widgets need a cache signal the gateway may never send.** Verified
+  against real responses: with `include_usage` the gateway returns true
+  `prompt_tokens`/`completion_tokens` (so token/context tracking is accurate), but
+  sends **zero** cache data — no `prompt_tokens_details.cached_tokens`, no
+  provider-native fields (e.g. DeepSeek `prompt_cache_hit_tokens`/`miss_tokens`),
+  and `cache_read_input_tokens=0` in every chunk. So cache-hit/ROI widgets have no
+  real input — a gateway limitation, not a bug. The transformer **only preserves**
+  real cache when `prompt_tokens_details.cached_tokens > 0`; it never fabricates it.
+  Corollary: a **non-zero** cache % showing on a gateway-only session is **not real
+  gateway cache** — suspect a cumulative/cross-session statusline cache store
+  polluted by any turns that fell through to the first-party API (which does report
+  cache). Don't trust a cache ratio for a masked low-cost route.
 - **Turn/cache glyph widgets look broken with no cache signal.** A per-turn
   widget that draws cache hit/miss dots will render all-empty when there is no
   cache data. Fall back to input-volume glyphs **only** when read+creation
