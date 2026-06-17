@@ -36,6 +36,11 @@ For LLM-guided installation or debugging, start with `CLAUDE.md`. The
 management flow remains inspectable: dry run first, then `--write` after the
 user confirms the target paths.
 
+For hard-won operational lessons — CCR daemon reload/orphan handling, the
+provider transformer (usage synthesis, reasoning stripping), statusline
+integration, model masking, and route selection — see
+[`docs/runtime-lessons.md`](docs/runtime-lessons.md).
+
 ## Public model catalog
 
 The catalog is intentionally a seed, not a complete model database. Public
@@ -73,3 +78,6 @@ transformer, strip reasoning on the streaming path too, not only the JSON path.
 CCR loads transformers into memory at startup, so after updating a transformer
 relaunch through `airclaude` (it reloads CCR when the rendered config or bundled
 transformers change) rather than reusing the running daemon.
+
+For more runtime traps and their fixes, see
+[`docs/runtime-lessons.md`](docs/runtime-lessons.md).
