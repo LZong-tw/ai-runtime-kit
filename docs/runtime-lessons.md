@@ -77,13 +77,27 @@ in for the other:
   still returns `200` because CCR answers it locally without the provider — a green
   count-tokens does **not** mean routing works; (b) the orphan-reaper only kills a
   daemon whose `/health` *fails*, so a daemon that answers `/health` but has the
-  provider unregistered survives and 404s every turn. Fix is a clean authenticated
-  restart (`ccr stop` + authenticated `ccr-start`), not a hot-reload — CCR's
-  hot-reload on config change can leave a provider unregistered (more likely with
-  custom transformers in `transformer.use`). Verify with a real routed curl, never
-  `ccr status` or `/health`. (Misdiagnosed as a `[1m]` model-validation problem on
-  2026-06-17; the actual cause was the provider 404 — `[1m]` and a bare model id
-  returned the *identical* `Provider not found` error.)
+  provider unregistered survives and 404s every turn. Verify with a real routed
+  curl, never `ccr status` or `/health`. (Misdiagnosed as a `[1m]` model-validation
+  problem on 2026-06-17; the actual cause was the provider 404 — `[1m]` and a bare
+  model id returned the *identical* `Provider not found` error.)
+- **Pass options to a custom (path-loaded) transformer via the top-level
+  `transformers[].options`, never the `[name, {options}]` form in a provider's
+  `transformer.use`.** This is the concrete cause of the provider-404 above. CCR
+  registers a path transformer by instantiating it once at load —
+  `new Require(path)(entry.options)` — and stores the **instance** under its
+  `name`. So `transformer.use: ["cleancache", "drop-reasoning"]` (string) resolves
+  to that instance correctly (CCR checks `typeof o === "function" ? new o : o`).
+  But `transformer.use: ["cleancache", ["drop-reasoning", {opt}]]` (array form)
+  runs `new o(opt)` **without** the function check — and `o` is already an
+  instance, so it throws `TypeError: o is not a constructor`, the whole
+  `registerProvider` try/catch swallows it, and the provider is silently dropped →
+  every request 404s `Provider not found`. The array form only works for **built-in**
+  transformers (stored as classes), not custom ones. So options for a bundled
+  transformer (e.g. the restore-model the response mask pins) belong on the
+  `transformers` entry: `{path, options:{restoreModel:"…[1m]"}}` + string-form
+  `use`. (Shipped the array form 2026-06-17 → killed CCR registration; the symptom
+  read as a Claude Code model error, three layers removed from the cause.)
 
 ## CCR routing
 

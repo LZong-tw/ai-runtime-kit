@@ -279,13 +279,24 @@ test("managed files are installed and CCR config templates resolve to the config
           },
         ],
         ccr: {
-          transformers: [{ path: "{{configDir}}/ccr/transformers/drop-reasoning.js" }],
+          // Options for a custom (path-loaded) transformer MUST ride the top-level
+          // transformers entry — CCR instantiates `new Require(path)(entry.options)` once and
+          // stores the instance, so the `[name, {options}]` form in transformer.use would do
+          // `new instance()` → "o is not a constructor" and drop the whole provider. The
+          // renderer must preserve + template-substitute this options object.
+          transformers: [
+            {
+              path: "{{configDir}}/ccr/transformers/drop-reasoning.js",
+              options: { restoreModel: "{{profileName}}-1m" },
+            },
+          ],
           Providers: [
             {
               name: "custom",
               api_base_url: "https://example.invalid/v1/chat/completions",
               api_key: "$CUSTOM_API_KEY",
               models: ["steady-coder"],
+              transformer: { use: ["drop-reasoning"] },
             },
           ],
           Router: { default: "custom,steady-coder" },
@@ -300,6 +311,10 @@ test("managed files are installed and CCR config templates resolve to the config
     const update = await updateProfile(catalog, "custom-transformer", { configDir, previewDir, write: false });
 
     assert.equal(config.transformers[0].path, transformerPath);
+    // options preserved + template-substituted on the transformers entry (the only place CCR
+    // accepts options for a path transformer); string-form use references the instance by name.
+    assert.deepEqual(config.transformers[0].options, { restoreModel: "custom-transformer-1m" });
+    assert.deepEqual(config.Providers[0].transformer.use, ["drop-reasoning"]);
     assert.deepEqual(result.files.managedFiles, [{ label: "drop reasoning transformer", path: transformerPath }]);
     assert.equal(update.files.managedFiles[0].label, "drop reasoning transformer");
     assert.equal(
