@@ -119,12 +119,46 @@ class DropReasoningTransformer {
   fillJsonUsage(payload, inputEstimate) {
     if (!payload || typeof payload !== "object") return payload;
     const usage = payload.usage && typeof payload.usage === "object" ? payload.usage : (payload.usage = {});
+    // Non-stream OpenAI shape (choices[].message): fill prompt_tokens/completion_tokens.
+    // transformResponseOut sees the RAW provider body before CCR's OpenAI->Anthropic
+    // conversion, so for a /v1/chat/completions provider this is OpenAI-shaped, not Anthropic.
+    if (Array.isArray(payload.choices)) {
+      if (inputEstimate > 0 && this.isMissingTokenCount(usage.prompt_tokens)) usage.prompt_tokens = inputEstimate;
+      if (this.isMissingTokenCount(usage.completion_tokens)) {
+        const outChars = this.outputCharsFromOpenAiChoices(payload.choices);
+        usage.completion_tokens = Math.max(outChars > 0 ? 1 : 0, this.tokensFromChars(outChars));
+      }
+      if (
+        this.isMissingTokenCount(usage.total_tokens) &&
+        !this.isMissingTokenCount(usage.prompt_tokens) &&
+        !this.isMissingTokenCount(usage.completion_tokens)
+      ) {
+        usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+      }
+      return payload;
+    }
+    // Anthropic shape: input_tokens/output_tokens + content blocks.
     if (inputEstimate > 0 && this.isMissingTokenCount(usage.input_tokens)) usage.input_tokens = inputEstimate;
     if (this.isMissingTokenCount(usage.output_tokens)) {
       const outChars = this.outputCharsFromContent(payload.content);
       usage.output_tokens = Math.max(outChars > 0 ? 1 : 0, this.tokensFromChars(outChars));
     }
     return payload;
+  }
+
+  outputCharsFromOpenAiChoices(choices) {
+    if (!Array.isArray(choices)) return 0;
+    let chars = 0;
+    for (const choice of choices) {
+      const message = choice && choice.message;
+      if (!message || typeof message !== "object") continue;
+      if (typeof message.content === "string") chars += message.content.length;
+      for (const call of message.tool_calls ?? []) {
+        const args = call && call.function && call.function.arguments;
+        if (typeof args === "string") chars += args.length;
+      }
+    }
+    return chars;
   }
 
   outputCharsFromContent(content) {
