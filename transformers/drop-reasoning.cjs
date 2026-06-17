@@ -179,25 +179,21 @@ class DropReasoningTransformer {
     // them to Anthropic afterward, reading usage.prompt_tokens / usage.completion_tokens. Many
     // gateways omit usage from the stream entirely, so synthesize it on the final chunk.
     if (Array.isArray(payload.choices)) {
+      // Remember the chunk shape so a fallback usage chunk (emitted at [DONE] only if the gateway
+      // never sends usage) matches what CCR's OpenAI->Anthropic converter expects.
+      if (typeof payload.id === "string") state.lastChunkId = payload.id;
+      if (typeof payload.created === "number") state.lastChunkCreated = payload.created;
       const usage = payload.usage;
       const hasProviderUsage =
         usage && typeof usage === "object" &&
         (!this.isMissingTokenCount(usage.prompt_tokens) ||
           !this.isMissingTokenCount(usage.completion_tokens) ||
           (usage.prompt_tokens_details && usage.prompt_tokens_details.cached_tokens > 0));
-      if (hasProviderUsage) {
-        state.sawProviderUsage = true;
-        return payload;
-      }
-      const finished = payload.choices.some((choice) => choice && choice.finish_reason != null);
-      if (finished && !state.sawProviderUsage && state.inputEstimate > 0) {
-        const completionTokens = Math.max(state.outputChars > 0 ? 1 : 0, this.tokensFromChars(state.outputChars));
-        payload.usage = {
-          prompt_tokens: state.inputEstimate,
-          completion_tokens: completionTokens,
-          total_tokens: state.inputEstimate + completionTokens,
-        };
-      }
+      if (hasProviderUsage) state.sawProviderUsage = true;
+      // Do NOT synthesize on the finish_reason chunk. With include_usage the gateway sends real
+      // usage in a SEPARATE trailing chunk (choices:[]) that arrives AFTER finish_reason, so
+      // synthesizing here would emit an estimate that races/duplicates the real usage. The
+      // fallback (for gateways that ignore include_usage) is emitted once, at [DONE].
       return payload;
     }
 
@@ -214,6 +210,26 @@ class DropReasoningTransformer {
       }
     }
     return payload;
+  }
+
+  // Fallback usage chunk emitted just before [DONE] when the gateway never reported usage (it
+  // ignored include_usage). An OpenAI usage chunk has empty choices + a usage object; CCR's
+  // converter turns it into the Anthropic usage. Modeled on the last real chunk so ids/model match.
+  synthesizedUsageSseChunk(state) {
+    const completionTokens = Math.max(state.outputChars > 0 ? 1 : 0, this.tokensFromChars(state.outputChars));
+    const chunk = {
+      id: typeof state.lastChunkId === "string" ? state.lastChunkId : "chatcmpl-airkit-usage",
+      object: "chat.completion.chunk",
+      model: this.restoreModel,
+      choices: [],
+      usage: {
+        prompt_tokens: state.inputEstimate,
+        completion_tokens: completionTokens,
+        total_tokens: state.inputEstimate + completionTokens,
+      },
+    };
+    if (typeof state.lastChunkCreated === "number") chunk.created = state.lastChunkCreated;
+    return "data: " + JSON.stringify(chunk);
   }
 
   countStreamOutput(payload, state) {
@@ -444,7 +460,14 @@ class DropReasoningTransformer {
     }
     if (!line.startsWith("data: ")) return line;
     const data = line.slice(6).trim();
-    if (!data || data === "[DONE]") return line;
+    if (data === "[DONE]") {
+      // Last chance to supply usage if the gateway never did — emit one synthesized chunk, then [DONE].
+      if (!state.sawProviderUsage && state.inputEstimate > 0) {
+        return this.synthesizedUsageSseChunk(state) + "\n\n" + line;
+      }
+      return line;
+    }
+    if (!data) return line;
 
     try {
       const payload = JSON.parse(data);

@@ -676,6 +676,37 @@ test("bundled drop-reasoning transformer keeps real OpenAI usage when the gatewa
   assert.equal(usageChunk.usage.completion_tokens, 88);
 });
 
+test("bundled drop-reasoning transformer does not pre-synthesize usage when the gateway sends it in a trailing chunk", async () => {
+  const require = createRequire(import.meta.url);
+  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
+  const instance = new Transformer();
+
+  // include_usage shape: real usage arrives in a SEPARATE chunk (choices:[]) AFTER finish_reason.
+  // Synthesizing on the finish chunk would emit an estimate that races/duplicates the real usage,
+  // so the finish chunk must stay usage-free and only the trailing real chunk should carry usage.
+  const streamResponse = new Response(
+    [
+      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{"content":"hi there"}}]}\n\n',
+      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[],"usage":{"prompt_tokens":1234,"completion_tokens":88,"total_tokens":1322}}\n\n',
+      "data: [DONE]\n\n",
+    ].join(""),
+    { headers: { "Content-Type": "text/event-stream" } },
+  );
+
+  const context = { req: { body: { system: "x".repeat(8000), messages: [{ role: "user", content: "short" }] } } };
+  const body = await (await instance.transformResponseOut(streamResponse, context)).text();
+  const usageChunks = body
+    .split("\n")
+    .filter((line) => line.startsWith("data: ") && line.slice(6).trim() !== "[DONE]")
+    .map((line) => JSON.parse(line.slice(6)))
+    .filter((chunk) => chunk.usage && typeof chunk.usage.prompt_tokens === "number");
+
+  assert.equal(usageChunks.length, 1, "only the gateway's real usage chunk should carry usage — no pre-synthesized estimate");
+  assert.equal(usageChunks[0].usage.prompt_tokens, 1234);
+  assert.equal(usageChunks[0].usage.completion_tokens, 88);
+});
+
 test("bundled drop-reasoning transformer asks the gateway to stream usage on streaming requests", async () => {
   const require = createRequire(import.meta.url);
   const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
