@@ -195,6 +195,22 @@ entry); do not re-embed transformer content in profile data.
   before tool_calls or non-whitespace, is untouched). Non-whitespace text after a
   tool_call would still trip CCR's index reuse — unobserved so far, and a harder fix
   (it would need a genuinely new text block), so left as a known residual.
+- **Thinking-depth control can't be bolted on if the gateway drops `reasoning_effort`.**
+  Claude Code sends the depth signal as `thinking:{type:"adaptive"|"disabled"}` plus
+  `output_config:{effort:"low|medium|high|xhigh"}` — note the effort is nested in
+  `output_config`, **not** a top-level `request.effort`. The transformer strips
+  `thinking` (the gateway speaks OpenAI, not Anthropic thinking). The obvious remap —
+  translate effort → OpenAI `reasoning_effort` on the outgoing body — only helps if the
+  gateway actually honors it. **Test before building, with a bogus enum value:** curl the
+  route through CCR with `reasoning_effort:"high"`, omitted, and `reasoning_effort:"zzz"`.
+  If the bogus value does **not** 400, the gateway isn't validating the enum — it is
+  silently dropping the param (LiteLLM `drop_params`), so forwarding it is inert: harmless
+  but zero depth control. Observed 2026-06-17 on a LiteLLM gateway: all three returned
+  `200`, so `reasoning_effort` is dead config there. Depth control is a gateway
+  capability — a transformer cannot synthesize it. (To distinguish "gateway dropped it"
+  from "CCR stripped it before the gateway" you need CCR `LOG` on and to read the raw
+  outgoing request + the response's `completion_tokens_details.reasoning_tokens`; both
+  outcomes mean no control reaches the model, so it rarely matters which.)
 
 ## Statusline integration
 
