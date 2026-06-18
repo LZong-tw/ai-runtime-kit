@@ -1239,6 +1239,58 @@ test("runAirclaudeCli dry run supports positional pro mode and avoids launching"
   }
 });
 
+test("runAirclaudeCli treats any profile-defined mode as a bare positional, not just auto/pro", async () => {
+  const catalogPath = await writeLaunchCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-cli-"));
+  const output = [];
+
+  try {
+    const exitCode = await runAirclaudeCli(["fast", "--dry-run", "--profile", "launch-example", "--config-dir", configDir], {
+      catalogPath,
+      stdout: { write: (chunk) => output.push(chunk) },
+      commandExists: async () => true,
+      runCommand: async () => ({ ok: true, status: 0 }),
+      spawnCommand: () => {
+        throw new Error("dry run should not launch");
+      },
+    });
+
+    assert.equal(exitCode, 0);
+    assert.match(output.join(""), /mode: fast/);
+    assert.match(output.join(""), /default: demo,cheap-coder/);
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+    await rm(resolve(catalogPath, ".."), { force: true, recursive: true });
+  }
+});
+
+test("runAirclaudeCli forwards an unknown bare token to claude instead of treating it as a mode", async () => {
+  const catalogPath = await writeLaunchCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-cli-"));
+  const output = [];
+
+  try {
+    const exitCode = await runAirclaudeCli(["notamode", "--dry-run", "--profile", "launch-example", "--config-dir", configDir], {
+      catalogPath,
+      stdout: { write: (chunk) => output.push(chunk) },
+      commandExists: async () => true,
+      runCommand: async () => ({ ok: true, status: 0 }),
+      spawnCommand: () => {
+        throw new Error("dry run should not launch");
+      },
+    });
+
+    // Unknown token is not a defined mode → stays on defaultMode (auto) and is
+    // forwarded to claude as a user arg rather than throwing "does not define mode".
+    assert.equal(exitCode, 0);
+    assert.match(output.join(""), /mode: auto/);
+    assert.match(output.join(""), /notamode/);
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+    await rm(resolve(catalogPath, ".."), { force: true, recursive: true });
+  }
+});
+
 test("runAirclaudeCli prints help without loading the catalog", async () => {
   for (const arg of ["-h", "--help"]) {
     const output = [];
@@ -1350,6 +1402,13 @@ function launchCatalog() {
                   default: "demo,strong-coder",
                   think: "demo,strong-coder",
                   longContext: "demo,strong-coder",
+                },
+              },
+            },
+            fast: {
+              ccr: {
+                Router: {
+                  default: "demo,cheap-coder",
                 },
               },
             },

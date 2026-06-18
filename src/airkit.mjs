@@ -664,7 +664,16 @@ export async function runAirclaudeCli(argv = process.argv.slice(2), options = {}
   }
 
   const catalog = await loadCatalog(options.catalogPath ?? defaultCatalogPath);
-  const parsed = parseAirclaudeArgs(argv);
+  // Bare-positional modes are driven by the resolved profile's launch.modes (plus the
+  // always-available auto/pro), so a profile that defines a custom mode can invoke it as
+  // `airclaude <mode>` the same way `airclaude pro` works. Resolve the profile first
+  // (--profile/env/default) so we know which mode names are valid before parsing positionals.
+  const ownArgvForProfile = argv.indexOf("--") === -1 ? argv : argv.slice(0, argv.indexOf("--"));
+  const preProfileName =
+    readFlag(ownArgvForProfile, "--profile") ?? process.env.AIRCLAUDE_PROFILE ?? defaultLaunchProfile(catalog);
+  const preProfile = catalog.profiles.find((candidate) => candidate.name === preProfileName);
+  const validModes = new Set(["auto", "pro", ...Object.keys(preProfile?.launch?.modes ?? {})]);
+  const parsed = parseAirclaudeArgs(argv, validModes);
   const profile = parsed.profile ?? process.env.AIRCLAUDE_PROFILE ?? defaultLaunchProfile(catalog);
   if (parsed.repairRestore) {
     const result = await repairClaudeRestoreSessions(catalog, profile, {
@@ -709,7 +718,7 @@ async function emitText(value, outPath, stdout = process.stdout) {
   }
 }
 
-function parseAirclaudeArgs(argv) {
+function parseAirclaudeArgs(argv, validModes = new Set(["auto", "pro"])) {
   const parsed = { userArgs: [] };
   const passthroughIndex = argv.indexOf("--");
   const ownArgs = passthroughIndex === -1 ? argv : argv.slice(0, passthroughIndex);
@@ -733,7 +742,7 @@ function parseAirclaudeArgs(argv) {
       parsed.projectsDir = ownArgs[++index];
     } else if (arg === "--restore-backups-dir") {
       parsed.backupsDir = ownArgs[++index];
-    } else if ((arg === "auto" || arg === "pro") && !parsed.mode) {
+    } else if (validModes.has(arg) && !parsed.mode) {
       parsed.mode = arg;
     } else {
       parsed.userArgs.push(arg);
