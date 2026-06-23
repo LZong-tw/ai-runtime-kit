@@ -1291,6 +1291,25 @@ test("runAirclaudeCli forwards an unknown bare token to claude instead of treati
   }
 });
 
+test("CCR_LOG env overrides ccr.LOG for a single launch without editing the profile", async () => {
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-ccrlog-"));
+  // Fresh catalog per call + explicit env so the assertions are hermetic.
+  const planLog = (env = {}) => buildLaunchPlan(launchCatalog(), "launch-example", { configDir, env }).ccrConfig.LOG;
+
+  try {
+    assert.equal(planLog(), false); // profile default (ccr.LOG: false)
+    assert.equal(planLog({ CCR_LOG: "1" }), true);
+    assert.equal(planLog({ CCR_LOG: "true" }), true);
+    assert.equal(planLog({ CCR_LOG: "off" }), false);
+    assert.equal(planLog({ CCR_LOG: "0" }), false);
+    // Blank or unrecognized values fall back to the profile's ccr.LOG default.
+    assert.equal(planLog({ CCR_LOG: "" }), false);
+    assert.equal(planLog({ CCR_LOG: "maybe" }), false);
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
 test("runAirclaudeCli prints help without loading the catalog", async () => {
   for (const arg of ["-h", "--help"]) {
     const output = [];
@@ -1416,6 +1435,7 @@ function launchCatalog() {
         },
         ccr: {
           APIKEY: "ccr-local",
+          LOG: false,
           Providers: [
             {
               name: "demo",

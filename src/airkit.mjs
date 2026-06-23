@@ -302,6 +302,18 @@ export async function updateProfile(catalog, profileName, options = {}) {
   return { profile: plan.profile, write: plan.write, previewDir, files };
 }
 
+// CCR_LOG lets a single launch flip CCR request logging without editing the committed
+// profile: CCR_LOG=1/true/on/yes -> true, 0/false/off/no -> false, unset/blank/unknown ->
+// undefined (caller falls back to the profile's ccr.LOG). e.g. `CCR_LOG=1 airclaude`.
+function resolveCcrLogOverride(env = process.env) {
+  const raw = env?.CCR_LOG;
+  if (raw === undefined) return undefined;
+  const value = String(raw).trim().toLowerCase();
+  if (["1", "true", "on", "yes"].includes(value)) return true;
+  if (["0", "false", "off", "no"].includes(value)) return false;
+  return undefined;
+}
+
 export function buildLaunchPlan(catalog, profileName, options = {}) {
   const profile = findProfile(catalog, profileName);
   const configDir = resolve(options.configDir ?? defaultConfigDir());
@@ -309,6 +321,8 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
   const launch = resolveLaunchConfig(profile, templateVars);
   const mode = resolveLaunchMode(profile, launch, options.mode);
   const ccrConfig = applyLaunchModeOverlay(buildCcrConfig(catalog, profileName, { configDir }), profile, mode, templateVars);
+  const logOverride = resolveCcrLogOverride(options.env ?? process.env);
+  if (logOverride !== undefined) ccrConfig.LOG = logOverride;
   const restore = resolveRestoreRepairConfig(profile);
   const launchVars = launchTemplateVars(profile, configDir, mode, ccrConfig, restore);
   const basePlan = planInstall(catalog, profileName, { configDir, write: true, force: true });
