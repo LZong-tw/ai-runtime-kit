@@ -396,7 +396,12 @@ test("advisor bridge consults the configured Anthropic model and resumes the exe
         { type: "text", text: "I will consult the advisor." },
         { type: "tool_use", id: "toolu_advisor", name: "airkit_advisor", input: {} },
       ],
-      usage: { input_tokens: 10, output_tokens: 4 },
+      usage: {
+        input_tokens: 10,
+        output_tokens: 4,
+        cache_read_input_tokens: 5,
+        server_tool_use: { web_search_requests: 2 },
+      },
     }),
     message({
       id: "msg_advisor",
@@ -407,7 +412,7 @@ test("advisor bridge consults the configured Anthropic model and resumes the exe
     message({
       id: "msg_executor_2",
       content: [{ type: "text", text: "The boundary is now clear." }],
-      usage: { input_tokens: 12, output_tokens: 6 },
+      usage: { input_tokens: 12, output_tokens: 6, cache_creation_input_tokens: 3 },
     }),
   ]);
 
@@ -437,11 +442,19 @@ test("advisor bridge consults the configured Anthropic model and resumes the exe
   assert.deepEqual(result.usage, {
     input_tokens: 22,
     output_tokens: 10,
+    cache_creation_input_tokens: 3,
+    cache_read_input_tokens: 5,
+    server_tool_use: { web_search_requests: 2 },
     iterations: {
       advisor: [{ input_tokens: 100, output_tokens: 20 }],
       executor: [
-        { input_tokens: 10, output_tokens: 4 },
-        { input_tokens: 12, output_tokens: 6 },
+        {
+          input_tokens: 10,
+          output_tokens: 4,
+          cache_read_input_tokens: 5,
+          server_tool_use: { web_search_requests: 2 },
+        },
+        { input_tokens: 12, output_tokens: 6, cache_creation_input_tokens: 3 },
       ],
     },
   });
@@ -666,8 +679,75 @@ test("unsupported native history falls back for only this request with a visible
   assert.equal(fixture.calls[0].body.tools.some((tool) => tool.defer_loading === true), false);
   assert.equal(fixture.calls[0].body.tools.some((tool) => tool.name === "get_weather"), true);
   assert.match(JSON.stringify(fixture.calls[0].body.messages), /srvtoolu_web_search/);
+  assert.equal(
+    fixture.calls[0].body.messages.every(
+      (entry) => !Array.isArray(entry.content) || entry.content.length > 0,
+    ),
+    true,
+  );
   assert.equal(result.content[0].type, "text");
   assert.match(result.content[0].text, /compatibility fallback/i);
+});
+
+test("cross-kind native result IDs fall back without activating referenced tools", async () => {
+  for (const [serverName, result] of [
+    [
+      "advisor",
+      {
+        type: "tool_search_tool_result",
+        tool_use_id: "srvtoolu_mismatch",
+        content: {
+          type: "tool_search_tool_search_result",
+          tool_references: [{ type: "tool_reference", tool_name: "get_weather" }],
+        },
+      },
+    ],
+    [
+      "tool_search_tool_regex",
+      {
+        type: "advisor_tool_result",
+        tool_use_id: "srvtoolu_mismatch",
+        content: { type: "advisor_result", text: "wrong kind" },
+      },
+    ],
+  ]) {
+    const fixture = createBridgeFixture([
+      message({
+        model: "anthropic/claude-opus-4-8",
+        content: [{ type: "text", text: "Isolated fallback." }],
+      }),
+    ], {
+      body: {
+        messages: [
+          { role: "user", content: "Original request" },
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "server_tool_use",
+                id: "srvtoolu_mismatch",
+                name: serverName,
+                input: {},
+              },
+            ],
+          },
+          { role: "user", content: [result] },
+        ],
+      },
+    });
+
+    await handleCompatibilityMessage(fixture.input);
+
+    assert.equal(fixture.calls.length, 1);
+    assert.equal(fixture.calls[0].body.model, "anthropic/claude-opus-4-8");
+    assert.equal(
+      fixture.calls[0].body.messages.every(
+        (entry) => !Array.isArray(entry.content) || entry.content.length > 0,
+      ),
+      true,
+    );
+    assert.doesNotMatch(JSON.stringify(fixture.calls[0].body.messages), /get_weather|wrong kind/);
+  }
 });
 
 test("fallback rejects a configured non-Anthropic model before calling core", async () => {
@@ -741,6 +821,35 @@ test("bridge errors are bounded and never expose provider payloads", async () =>
   });
 });
 
+test("invalid nonnumeric usage counters are removed from totals and iteration details", async () => {
+  const fixture = createBridgeFixture([
+    message({
+      content: [{ type: "text", text: "Usage sanitized." }],
+      usage: {
+        input_tokens: 7,
+        output_tokens: 2,
+        cache_read_input_tokens: "provider-secret",
+        server_tool_use: { web_search_requests: "nested-secret" },
+        service_tier: "standard",
+      },
+    }),
+  ]);
+
+  const result = await handleCompatibilityMessage(fixture.input);
+
+  assert.equal(result.usage.input_tokens, 7);
+  assert.equal(result.usage.output_tokens, 2);
+  assert.equal(result.usage.cache_read_input_tokens, undefined);
+  assert.equal(result.usage.service_tier, "standard");
+  assert.equal(result.usage.iterations.executor[0].cache_read_input_tokens, undefined);
+  assert.equal(result.usage.server_tool_use?.web_search_requests, undefined);
+  assert.equal(
+    result.usage.iterations.executor[0].server_tool_use?.web_search_requests,
+    undefined,
+  );
+  assert.doesNotMatch(JSON.stringify(result.usage), /provider-secret|nested-secret/);
+});
+
 test("Anthropic JSON and SSE writers preserve canonical result ordering", async () => {
   const outbound = message({
     id: "msg_serialized",
@@ -805,6 +914,51 @@ test("Anthropic JSON and SSE writers preserve canonical result ordering", async 
     );
   }
   assert.equal(frames.some((frame) => frame.event === "message_delta"), true);
+});
+
+test("Anthropic SSE serializes thinking, redaction, citations, and unknown complete blocks", async () => {
+  const citation = {
+    type: "char_location",
+    cited_text: "Protocol excerpt",
+    document_index: 0,
+    document_title: "Protocol",
+    start_char_index: 0,
+    end_char_index: 16,
+  };
+  const outbound = message({
+    content: [
+      { type: "thinking", thinking: "Reason carefully.", signature: "signed-thinking" },
+      { type: "redacted_thinking", data: "opaque-redacted-thinking" },
+      { type: "text", text: "Cited answer.", citations: [citation] },
+      { type: "custom_complete_block", payload: { public: true } },
+    ],
+  });
+  const jsonResponse = createMessageResponse();
+  const streamResponse = createMessageResponse();
+
+  writeAnthropicMessage(jsonResponse, outbound, false);
+  writeAnthropicMessage(streamResponse, outbound, true);
+
+  assert.deepEqual(JSON.parse(jsonResponse.body), outbound);
+  const frames = parseSse(streamResponse.body);
+  const starts = frames.filter((frame) => frame.event === "content_block_start");
+  assert.deepEqual(starts[0].data.content_block, {
+    type: "thinking",
+    thinking: "",
+    signature: "",
+  });
+  assert.deepEqual(starts[1].data.content_block, outbound.content[1]);
+  assert.deepEqual(starts[2].data.content_block, { type: "text", text: "", citations: [] });
+  assert.deepEqual(starts[3].data.content_block, outbound.content[3]);
+  const deltas = frames
+    .filter((frame) => frame.event === "content_block_delta")
+    .map((frame) => frame.data.delta);
+  assert.deepEqual(deltas, [
+    { type: "thinking_delta", thinking: "Reason carefully." },
+    { type: "signature_delta", signature: "signed-thinking" },
+    { type: "text_delta", text: "Cited answer." },
+    { type: "citations_delta", citation },
+  ]);
 });
 
 function createBridgeFixture(script, options = {}) {

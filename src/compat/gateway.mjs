@@ -17,6 +17,7 @@ const MAX_TRANSCRIPT_LENGTH = 32_768;
 const MAX_HISTORY_TEXT_LENGTH = 4_096;
 const FALLBACK_WARNING =
   "Compatibility fallback active for this request; native server-tool behavior is unavailable.";
+const FALLBACK_HISTORY_NOTICE = "Compatibility history omitted for fallback.";
 
 const SAFE_HEADER_NAMES = new Set([
   "accept",
@@ -317,13 +318,13 @@ function normalizeCompatibilityHistory(source) {
           continue;
         }
         if (typeof block.id !== "string" || pendingUses.has(block.id)) throw unsupportedHistory();
-        pendingUses.set(block.id, block.name);
+        pendingUses.set(block.id, compatibilityServerUseKind(block));
         content.push({ type: "text", text: boundedHistoryText(`Compatibility request: ${block.name}`) });
       } else if (block?.type === "advisor_tool_result") {
-        if (!pendingUses.delete(block.tool_use_id)) throw unsupportedHistory();
+        consumePendingUse(pendingUses, block.tool_use_id, "advisor");
         content.push({ type: "text", text: boundedHistoryText(advisorHistoryText(block)) });
       } else if (block?.type === "tool_search_tool_result") {
-        if (!pendingUses.delete(block.tool_use_id)) throw unsupportedHistory();
+        consumePendingUse(pendingUses, block.tool_use_id, "tool_search");
         const references = block.content?.tool_references;
         if (Array.isArray(references)) {
           for (const reference of references) {
@@ -342,7 +343,18 @@ function normalizeCompatibilityHistory(source) {
 }
 
 function isCompatibilityServerUse(block) {
-  return block.name === "advisor" || String(block.name ?? "").startsWith("tool_search_tool_");
+  return compatibilityServerUseKind(block) !== null;
+}
+
+function compatibilityServerUseKind(block) {
+  if (block.name === "advisor") return "advisor";
+  if (String(block.name ?? "").startsWith("tool_search_tool_")) return "tool_search";
+  return null;
+}
+
+function consumePendingUse(pendingUses, toolUseId, expectedKind) {
+  if (pendingUses.get(toolUseId) !== expectedKind) throw unsupportedHistory();
+  pendingUses.delete(toolUseId);
 }
 
 function advisorHistoryText(block) {
@@ -489,18 +501,20 @@ async function requestCompatibilityFallback({
 function stripCompatibilityHistory(source) {
   return (Array.isArray(source) ? source : []).map((message) => {
     if (!Array.isArray(message?.content)) return structuredClone(message);
+    const content = message.content
+      .filter(
+        (block) =>
+          !(
+            (block?.type === "server_tool_use" && isCompatibilityServerUse(block)) ||
+            block?.type === "advisor_tool_result" ||
+            block?.type === "tool_search_tool_result"
+          ),
+      )
+      .map((block) => structuredClone(block));
     return {
       ...structuredClone(message),
-      content: message.content
-        .filter(
-          (block) =>
-            !(
-              (block?.type === "server_tool_use" && isCompatibilityServerUse(block)) ||
-              block?.type === "advisor_tool_result" ||
-              block?.type === "tool_search_tool_result"
-            ),
-        )
-        .map((block) => structuredClone(block)),
+      content:
+        content.length > 0 ? content : [{ type: "text", text: FALLBACK_HISTORY_NOTICE }],
     };
   });
 }
@@ -527,13 +541,7 @@ function finalizeMessage(message, content, executorUsage, advisorUsage) {
 
 function aggregateExecutorUsage(finalUsage, executorUsage, advisorUsage) {
   const usage = copyUsage(finalUsage);
-  const numericFields = new Set(executorUsage.flatMap((entry) => Object.keys(entry ?? {})));
-  for (const field of numericFields) {
-    const values = executorUsage.map((entry) => entry?.[field]);
-    if (values.every((value) => typeof value === "number")) {
-      usage[field] = values.reduce((sum, value) => sum + value, 0);
-    }
-  }
+  aggregateNumericUsageFields(usage, executorUsage);
   usage.iterations = {
     advisor: advisorUsage.map(copyUsage),
     executor: executorUsage.map(copyUsage),
@@ -541,11 +549,54 @@ function aggregateExecutorUsage(finalUsage, executorUsage, advisorUsage) {
   return usage;
 }
 
+function aggregateNumericUsageFields(target, entries) {
+  const fields = new Set(entries.flatMap((entry) => Object.keys(entry ?? {})));
+  for (const field of fields) {
+    const values = entries.map((entry) => entry?.[field]);
+    if (values.some((value) => typeof value === "number")) {
+      target[field] = values.reduce(
+        (sum, value) => sum + (typeof value === "number" ? value : 0),
+        0,
+      );
+      continue;
+    }
+    const objects = values.filter(isPlainUsageObject);
+    if (objects.length === 0) continue;
+    const nestedTarget = isPlainUsageObject(target[field]) ? target[field] : {};
+    aggregateNumericUsageFields(nestedTarget, objects);
+    if (Object.keys(nestedTarget).length > 0) target[field] = nestedTarget;
+  }
+}
+
 function copyUsage(usage) {
   if (usage === null || typeof usage !== "object" || Array.isArray(usage)) return {};
   const copy = structuredClone(usage);
   delete copy.iterations;
+  sanitizeUsageCounters(copy);
   return copy;
+}
+
+function sanitizeUsageCounters(usage) {
+  for (const [field, value] of Object.entries(usage)) {
+    if (isNumericUsageCounter(field) && !isValidUsageCounter(value)) {
+      delete usage[field];
+    } else if (isPlainUsageObject(value)) {
+      sanitizeUsageCounters(value);
+      if (Object.keys(value).length === 0) delete usage[field];
+    }
+  }
+}
+
+function isPlainUsageObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isNumericUsageCounter(field) {
+  return field.endsWith("_tokens") || field.endsWith("_requests");
+}
+
+function isValidUsageCounter(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
 function assertMessageResponse(message) {
@@ -569,11 +620,16 @@ function defaultCreateId(prefix) {
 }
 
 function isCompleteStartBlock(block) {
-  return block.type === "advisor_tool_result" || block.type === "tool_search_tool_result";
+  return !["text", "thinking", "tool_use", "server_tool_use"].includes(block.type);
 }
 
 function contentBlockStart(block) {
-  if (block.type === "text") return { type: "text", text: "" };
+  if (block.type === "text") {
+    return Array.isArray(block.citations)
+      ? { type: "text", text: "", citations: [] }
+      : { type: "text", text: "" };
+  }
+  if (block.type === "thinking") return { type: "thinking", thinking: "", signature: "" };
   if (block.type === "tool_use" || block.type === "server_tool_use") {
     return { ...block, input: {} };
   }
@@ -582,11 +638,35 @@ function contentBlockStart(block) {
 
 function writeContentDelta(response, index, block) {
   if (block.type === "text") {
-    writeSse(response, "content_block_delta", {
-      type: "content_block_delta",
-      index,
-      delta: { type: "text_delta", text: block.text },
-    });
+    if (typeof block.text === "string" && block.text.length > 0) {
+      writeSse(response, "content_block_delta", {
+        type: "content_block_delta",
+        index,
+        delta: { type: "text_delta", text: block.text },
+      });
+    }
+    for (const citation of Array.isArray(block.citations) ? block.citations : []) {
+      writeSse(response, "content_block_delta", {
+        type: "content_block_delta",
+        index,
+        delta: { type: "citations_delta", citation },
+      });
+    }
+  } else if (block.type === "thinking") {
+    if (typeof block.thinking === "string" && block.thinking.length > 0) {
+      writeSse(response, "content_block_delta", {
+        type: "content_block_delta",
+        index,
+        delta: { type: "thinking_delta", thinking: block.thinking },
+      });
+    }
+    if (typeof block.signature === "string") {
+      writeSse(response, "content_block_delta", {
+        type: "content_block_delta",
+        index,
+        delta: { type: "signature_delta", signature: block.signature },
+      });
+    }
   } else if (block.type === "tool_use" || block.type === "server_tool_use") {
     writeSse(response, "content_block_delta", {
       type: "content_block_delta",
