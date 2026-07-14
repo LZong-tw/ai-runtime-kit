@@ -15,7 +15,7 @@
     "verify": "npm test && npm run check && npm run pack:check"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "license": "MIT",
   "author": "LZong, Lim, Un-tiong <lzong.tw@gmail.com>"

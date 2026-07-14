@@ -22,6 +22,7 @@ Run these from the repo root:
 ```bash
 node --version
 npm --version
+node src/airkit.mjs runtime check
 node src/airkit.mjs --help
 node src/airkit.mjs airclaude --help
 node src/airkit.mjs list
@@ -32,14 +33,22 @@ command -v zsh
 
 Expected repo-owned checks:
 
+- `runtime check` requires Node.js 22+, Claude Code 2.1.208+, and CCR 3.0.4
+  through the latest 3.x release.
 - `node src/airkit.mjs list` prints the available profile names.
 - `command -v ccr` finds the CCR command needed by CCR-backed profiles.
 - `command -v claude` finds the Claude Code command used by `airclaude`.
 - `command -v zsh` finds the shell used to source-check generated snippets.
 
-If a command is missing, install or authenticate that tool through the user's
-normal process, then rerun the verification command. This repo does not own
-system package installation, user login state, or secret provisioning.
+If a required runtime is missing or stale, preview the explicit package update:
+
+```bash
+node src/airkit.mjs runtime update
+```
+
+After reviewing it, `runtime update --write` backs up CCR state, installs the
+pinned minimum Claude Code and CCR versions, and validates the result. It does
+not own user login state or secret provisioning.
 
 ## Dry Run First
 
@@ -90,9 +99,11 @@ For a persistent setup, add the same source line to the user's normal shell
 startup file. The generated snippet contains environment placeholders, not
 secret values.
 
-After it is sourced, profile wrappers are one-command entry points. The wrapper
-first syncs the rendered CCR config into CCR's live `config.json`, then
-delegates to the configured client command.
+After it is sourced, profile wrappers are one-command entry points. The launch
+path merges only the AirKit-owned providers and mode profiles through CCR 3's
+management API, preserving unrelated providers, profiles, and routing rules.
+It then delegates to `ccr <managed-profile> cli -- ...`; there is no CCR 2
+`restart`, `activate`, or live `config.json` overwrite path.
 
 For airclaude launcher wrappers, the wrapper also exports the same launch
 environment the `node airkit.mjs` launch path applies (e.g.
@@ -151,8 +162,8 @@ node src/airkit.mjs doctor --profile openai-compatible-example
 When guiding a user, keep the agent's write boundary clear:
 
 1. Ask the user which profile to install if it is not already specified.
-2. Run prerequisite verification commands and report missing tools without
-   guessing install commands.
+2. Run `runtime check`; when needed, preview `runtime update` before asking for
+   approval to rerun it with `--write`.
 3. Run `node src/airkit.mjs init --profile <profile>` and show the dry-run paths.
 4. Ask for confirmation before adding `--write`.
 5. Run `node src/airkit.mjs init --profile <profile> --write` only after

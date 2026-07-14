@@ -18,14 +18,23 @@ airclaude --doctor
 airclaude --help
 airkit list
 airkit --help
+airkit runtime check
+airkit runtime update
+airkit runtime update --write
 airkit init --profile openai-compatible-example
 airkit init --profile openai-compatible-example --write
 airkit render ccr --profile openai-compatible-example
 airkit render shell --profile openai-compatible-example
 ```
 
-`airclaude` is the daily entrypoint. It automatically renders managed files,
-syncs the CCR live config, starts CCR when needed, and launches Claude Code.
+The supported runtime is Node.js 22 or newer, Claude Code 2.1.208 or newer,
+and Claude Code Router 3.0.4 through the latest 3.x release. `runtime update`
+is preview-only; add `--write` to back up CCR state, install the pinned minimum
+versions, and validate them.
+
+`airclaude` is the daily entrypoint. It merges only AirKit-owned providers and
+profiles into CCR 3 through its management API, preserves unrelated CCR state,
+and launches `ccr <managed-profile> cli -- ...`.
 `airclaude pro` applies the profile's stronger routing overlay before launch.
 Claude launches also receive reusable runtime lessons for recurring tool
 mistakes, such as preserving durable lessons, recording repeatable corrections
@@ -36,7 +45,7 @@ For LLM-guided installation or debugging, start with `CLAUDE.md`. The
 management flow remains inspectable: dry run first, then `--write` after the
 user confirms the target paths.
 
-For hard-won operational lessons — CCR daemon reload/orphan handling, the
+For hard-won operational lessons — CCR lifecycle behavior, the
 provider transformer (usage synthesis, reasoning stripping), statusline
 integration, model masking, and route selection — see
 [`docs/runtime-lessons.md`](docs/runtime-lessons.md).
@@ -75,9 +84,9 @@ The bundled `drop-reasoning` transformer prevents this by stripping
 SSE, and OpenAI SSE — before CCR converts the stream. If you write your own
 transformer, strip reasoning on the streaming path too, not only the JSON path.
 
-CCR loads transformers into memory at startup, so after updating a transformer
-relaunch through `airclaude` (it reloads CCR when the rendered config or bundled
-transformers change) rather than reusing the running daemon.
+CCR loads transformers into memory at startup, so relaunch through `airclaude`
+after updating a transformer. The CCR 3 profile launch path owns gateway startup
+and applies the current managed profile.
 
 For more runtime traps and their fixes, see
 [`docs/runtime-lessons.md`](docs/runtime-lessons.md).

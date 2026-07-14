@@ -432,23 +432,27 @@ test("buildLaunchPlan applies pro mode CCR routing overlay without mutating the 
     assert.equal(plan.ccrConfig.Router.think, "demo,strong-coder");
     assert.equal(plan.ccrConfig.Router.background, "demo,cheap-coder");
     assert.equal(catalog.profiles[0].ccr.Router.default, "demo,steady-coder");
-    assert.deepEqual(plan.launch.args.slice(0, 3), [
+    assert.equal(plan.launch.command, "ccr");
+    assert.deepEqual(plan.launch.args.slice(0, 6), [
+      "airkit-launch-example-pro",
+      "cli",
+      "--",
       "--settings",
       "{\"apiKeyHelper\":\"\"}",
       "--append-system-prompt",
     ]);
     assert.match(
-      plan.launch.args[3],
+      plan.launch.args[6],
       /AirClaude mode pro routes default to strong-coder while Claude restore uses claude-sonnet-4-6\./,
     );
-    assert.match(plan.launch.args[3], /AirKit reusable runtime lessons/);
-    assert.match(plan.launch.args[3], /AirClaude active routing/);
-    assert.match(plan.launch.args[3], /mode: pro/);
-    assert.match(plan.launch.args[3], /default: demo,strong-coder \(model strong-coder\)/);
-    assert.match(plan.launch.args[3], /think: demo,strong-coder \(model strong-coder\)/);
-    assert.match(plan.launch.args[3], /longContext: demo,strong-coder \(model strong-coder\)/);
-    assert.match(plan.launch.args[3], /background: demo,cheap-coder \(model cheap-coder\)/);
-    assert.match(plan.launch.args[3], /Do not infer the active provider route from Claude Code's displayed model name/);
+    assert.match(plan.launch.args[6], /AirKit reusable runtime lessons/);
+    assert.match(plan.launch.args[6], /AirClaude active routing/);
+    assert.match(plan.launch.args[6], /mode: pro/);
+    assert.match(plan.launch.args[6], /default: demo,strong-coder \(model strong-coder\)/);
+    assert.match(plan.launch.args[6], /think: demo,strong-coder \(model strong-coder\)/);
+    assert.match(plan.launch.args[6], /longContext: demo,strong-coder \(model strong-coder\)/);
+    assert.match(plan.launch.args[6], /background: demo,cheap-coder \(model cheap-coder\)/);
+    assert.match(plan.launch.args[6], /Do not infer the active provider route from Claude Code's displayed model name/);
     assert.equal(plan.launch.env.AIRCLAUDE_PROFILE, "launch-example");
     assert.equal(plan.launch.env.AIRCLAUDE_MODE, "pro");
     assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_DEFAULT, "demo,strong-coder");
@@ -917,18 +921,20 @@ test("prepareLaunch dry run reports stale files and does not write targets", asy
   }
 });
 
-test("prepareLaunch writes managed files, syncs live CCR config, and preserves passthrough args", async () => {
+test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves passthrough args", async () => {
   const catalog = launchCatalog();
   const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-write-"));
-  const liveCcrConfig = join(configDir, "live", "config.json");
   const spawned = [];
+  const saved = [];
 
   try {
     const result = await prepareLaunch(catalog, "launch-example", {
       configDir,
-      liveCcrConfig,
+      ccrClient: ccrTestClient(saved),
       mode: "pro",
       env: {},
+      repairRestore: false,
+      runtimeVersions: passingRuntimeVersions(),
       userArgs: ["--dangerously-skip-permissions"],
       commandExists: async (command) => ["ccr", "claude"].includes(command),
       runCommand: async (command, args) => ({
@@ -943,30 +949,32 @@ test("prepareLaunch writes managed files, syncs live CCR config, and preserves p
     });
 
     assert.equal(result.write, true);
-    assert.equal(result.liveCcrConfig.status, "synced");
-    assert.match(await readFile(liveCcrConfig, "utf8"), /strong-coder/);
+    assert.equal(result.liveCcrConfig.status, "managed");
+    assert.equal(saved[0].profile.profiles.find((candidate) => candidate.id.endsWith("-pro")).model, "demo/strong-coder");
     assert.equal(spawned.length, 1);
-    assert.equal(spawned[0].command, "claude");
-    assert.deepEqual(spawned[0].args.slice(0, 3), [
+    assert.equal(spawned[0].command, "ccr");
+    assert.deepEqual(spawned[0].args.slice(0, 6), [
+      "airkit-launch-example-pro",
+      "cli",
+      "--",
       "--settings",
       "{\"apiKeyHelper\":\"\"}",
       "--append-system-prompt",
     ]);
     assert.match(
-      spawned[0].args[3],
+      spawned[0].args[6],
       /AirClaude mode pro routes default to strong-coder while Claude restore uses claude-sonnet-4-6\./,
     );
-    assert.match(spawned[0].args[3], /AirKit reusable runtime lessons/);
-    assert.match(spawned[0].args[3], /AirClaude active routing/);
-    assert.match(spawned[0].args[3], /mode: pro/);
-    assert.match(spawned[0].args[3], /background: demo,cheap-coder \(model cheap-coder\)/);
+    assert.match(spawned[0].args[6], /AirKit reusable runtime lessons/);
+    assert.match(spawned[0].args[6], /AirClaude active routing/);
+    assert.match(spawned[0].args[6], /mode: pro/);
+    assert.match(spawned[0].args[6], /background: demo,cheap-coder \(model cheap-coder\)/);
     // airclaude pins the masked restore model as --model so FRESH sessions get the
   // masked window too; user passthrough args still follow (and would override).
-  assert.equal(spawned[0].args[4], "--model");
-  assert.equal(spawned[0].args[5], "claude-sonnet-4-6");
+  assert.equal(spawned[0].args[7], "--model");
+  assert.equal(spawned[0].args[8], "claude-sonnet-4-6");
   assert.equal(spawned[0].args.at(-1), "--dangerously-skip-permissions");
     assert.deepEqual(spawned[0].env, {
-      ANTHROPIC_BASE_URL: "http://127.0.0.1:3456",
       AIRCLAUDE_MODE: "pro",
       AIRCLAUDE_PROFILE: "launch-example",
       AIRCLAUDE_RESTORE_MODEL: "claude-sonnet-4-6",
@@ -993,40 +1001,34 @@ test("prepareLaunch writes managed files, syncs live CCR config, and preserves p
   }
 });
 
-test("prepareLaunch resolves ccrTokenOpRef through op only for CCR restart", async () => {
+test("prepareLaunch resolves ccrTokenOpRef once for the CCR 3 config merge", async () => {
   const catalog = launchCatalog();
   catalog.profiles[0].shell = { ccrTokenOpRef: "op://Test/API/token" };
   const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-op-"));
   const calls = [];
-  const spawned = [];
+  const saved = [];
 
   try {
     const result = await prepareLaunch(catalog, "launch-example", {
       configDir,
-      liveCcrConfig: join(configDir, "live", "config.json"),
+      ccrClient: ccrTestClient(saved),
       commandExists: async (command) => ["ccr", "claude", "op"].includes(command),
       env: {},
+      launch: false,
+      repairRestore: false,
+      runtimeVersions: passingRuntimeVersions(),
       runCommand: async (command, args, options = {}) => {
         calls.push({ command, args, token: options.env?.ANTHROPIC_AUTH_TOKEN });
         if (command === "op") return { ok: true, status: 0, stdout: "resolved-token" };
-        if (command === "ccr" && args[0] === "activate") {
-          return { ok: true, status: 0, stdout: 'export ANTHROPIC_AUTH_TOKEN="ccr-local"\n' };
-        }
         return { ok: true, status: 0, stdout: "" };
-      },
-      spawnCommand: (command, args, options) => {
-        spawned.push({ command, args, token: options.env.ANTHROPIC_AUTH_TOKEN });
-        return { status: 0 };
       },
     });
 
     assert.equal(result.runtime.ccr.ok, true);
     assert.deepEqual(calls, [
       { command: "op", args: ["read", "op://Test/API/token", "--no-newline"], token: undefined },
-      { command: "ccr", args: ["restart"], token: "resolved-token" },
-      { command: "ccr", args: ["activate"], token: undefined },
     ]);
-    assert.equal(spawned[0].token, "ccr-local");
+    assert.equal(saved[0].Providers.find((provider) => provider.name === "demo").api_key, "resolved-token");
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }
@@ -1104,11 +1106,13 @@ test("prepareLaunch fails fast when credential resolution hangs", async () => {
     await assert.rejects(
       () =>
         prepareLaunch(catalog, "launch-example", {
+          ccrClient: ccrTestClient([]),
           commandExists: async (command) => ["ccr", "claude", "op"].includes(command),
           commandTimeoutMs: 50,
           configDir,
           env: { PATH: fakeBin },
           liveCcrConfig: join(configDir, "live", "config.json"),
+          runtimeVersions: passingRuntimeVersions(),
         }),
       /unable to read op:\/\/Test\/API\/token/,
     );
@@ -1134,11 +1138,13 @@ test("prepareLaunch repairs restore metadata before launching", async () => {
 
     const result = await prepareLaunch(catalog, "launch-example", {
       backupsDir,
+      ccrClient: ccrTestClient([]),
       commandExists: async (command) => ["ccr", "claude"].includes(command),
       configDir,
       env: {},
       liveCcrConfig: join(configDir, "live", "config.json"),
       projectsDir,
+      runtimeVersions: passingRuntimeVersions(),
       runCommand: async (command, args) => {
         if (command === "ccr" && args[0] === "activate") {
           return { ok: true, status: 0, stdout: 'export ANTHROPIC_AUTH_TOKEN="ccr-local"\n' };
@@ -1397,6 +1403,22 @@ function launchCatalog() {
         },
       },
     ],
+  };
+}
+
+function passingRuntimeVersions() {
+  return { claudeCode: "2.1.208", claudeCodeRouter: "3.0.4", node: "24.11.1" };
+}
+
+function ccrTestClient(saved) {
+  return {
+    getConfig: async () => ({
+      Providers: [],
+      Router: { builtInRules: {}, fallback: { mode: "off", models: [], retryCount: 1 }, rules: [] },
+      profile: { enabled: true, profiles: [] },
+    }),
+    getVersion: async () => "3.0.4",
+    saveConfig: async (config) => saved.push(config),
   };
 }
 
