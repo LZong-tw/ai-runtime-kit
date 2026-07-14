@@ -11,6 +11,7 @@ import {
   buildLaunchPlan,
   buildShellSnippet,
   doctorProfile,
+  exportOssRelease,
   installProfile,
   loadCatalog,
   prepareLaunch,
@@ -33,6 +34,32 @@ test("runtime requirements hard-cut to Node 22, Claude Code 2.1.208, and CCR 3.0
     claudeCodeRouter: ">=3.0.4 <4",
     node: ">=22",
   });
+});
+
+test("OSS package allowlist excludes tests and migration artifacts", async () => {
+  const expectedFiles = [
+    "CLAUDE.md",
+    "README.md",
+    "docs/install.md",
+    "docs/profile-schema.md",
+    "docs/runtime-lessons.md",
+    "profiles",
+    "src",
+  ];
+  const packageJson = JSON.parse(
+    await readFile(resolve(import.meta.dirname, "..", "package.json"), "utf8"),
+  );
+  const outDir = await mkdtemp(join(tmpdir(), "airkit-export-"));
+
+  try {
+    await exportOssRelease({ outDir });
+    const exportedPackage = JSON.parse(await readFile(join(outDir, "package.json"), "utf8"));
+
+    assert.deepEqual(packageJson.files, expectedFiles);
+    assert.deepEqual(exportedPackage.files, expectedFiles);
+  } finally {
+    await rm(outDir, { force: true, recursive: true });
+  }
 });
 
 test("CCR 3 merge creates CCR-only mode profiles and preserves unrelated configuration", () => {

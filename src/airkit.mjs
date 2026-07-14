@@ -555,6 +555,15 @@ function publicPackage() {
     type: "module",
     exports: "./src/airkit.mjs",
     bin: { airkit: "src/airkit.mjs", airclaude: "src/airkit.mjs" },
+    files: [
+      "CLAUDE.md",
+      "README.md",
+      "docs/install.md",
+      "docs/profile-schema.md",
+      "docs/runtime-lessons.md",
+      "profiles",
+      "src",
+    ],
     scripts: {
       check: "node --check src/airkit.mjs",
       "pack:check": "npm pack --dry-run",
