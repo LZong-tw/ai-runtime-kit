@@ -38,8 +38,11 @@ test("runtime requirements hard-cut to Node 22, Claude Code 2.1.208, and CCR 3.0
 });
 
 test("CCR 3 merge creates CCR-only mode profiles and preserves unrelated configuration", () => {
+  const catalog = launchCatalog();
+  catalog.profiles[0].ccr.transformers = [{ options: { restoreModel: "masked" }, path: "/tmp/airkit/managed.cjs" }];
   const current = {
     Providers: [{ id: "provider-unrelated", name: "unrelated", models: ["keep-me"] }],
+    transformers: [{ options: {}, path: "/tmp/user/unrelated.cjs" }],
     Router: {
       builtInRules: { "claude-code": { enabled: true }, codex: { enabled: true } },
       fallback: { mode: "off", models: [], retryCount: 1 },
@@ -62,7 +65,7 @@ test("CCR 3 merge creates CCR-only mode profiles and preserves unrelated configu
   };
 
   const merged = airkitRuntime.buildCcr3ManagedConfig(
-    launchCatalog(),
+    catalog,
     "launch-example",
     current,
     { apiKeys: { demo: "resolved-at-runtime" } },
@@ -97,6 +100,22 @@ test("CCR 3 merge creates CCR-only mode profiles and preserves unrelated configu
   );
   assert.ok(merged.config.profile.profiles.some((candidate) => candidate.id === "unrelated-profile"));
   assert.ok(merged.config.Router.rules.some((rule) => rule.id === "unrelated-rule"));
+  assert.deepEqual(merged.config.transformers.map((transformer) => transformer.path), [
+    "/tmp/user/unrelated.cjs",
+    "/tmp/airkit/managed.cjs",
+  ]);
+});
+
+test("CCR 3 merge refuses to replace an unowned provider with the same name", () => {
+  assert.throws(
+    () => airkitRuntime.buildCcr3ManagedConfig(
+      launchCatalog(),
+      "launch-example",
+      { Providers: [{ id: "user-provider", name: "demo", models: ["keep-me"] }] },
+      { apiKeys: { demo: "runtime-secret" } },
+    ),
+    /unowned CCR provider name collision: demo/,
+  );
 });
 
 test("CCR 3 launch path uses the managed profile and never invokes CCR 2 commands", async () => {
@@ -177,7 +196,44 @@ test("runtime update previews explicit installs without changing global packages
   assert.match(output.join(""), /Preview only/);
   assert.match(output.join(""), /@anthropic-ai\/claude-code@2\.1\.208/);
   assert.match(output.join(""), /@musistudio\/claude-code-router@3\.0\.4/);
+  assert.match(output.join(""), /npm install --global/);
+  assert.match(output.join(""), /\.claude-code-router/);
   assert.match(output.join(""), /Re-run with --write/);
+});
+
+test("runtime update --write requires the isolated CCR 3 profile probe", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-runtime-update-"));
+  const calls = [];
+  try {
+    const exitCode = await runCli(["runtime", "update", "--write"], {
+      backupDir: join(root, "backup"),
+      env: { HOME: join(root, "real-home") },
+      runCommand: async (command, args) => {
+        calls.push({ command, args });
+        return { ok: true, status: 0, stdout: "" };
+      },
+      runtimeProbe: async () => {
+        calls.push({ command: "runtimeProbe", args: [] });
+        return { profileResolved: true, version: "3.0.4" };
+      },
+      runtimeVersions: passingRuntimeVersions(),
+      stdout: { write: () => {} },
+    });
+
+    assert.equal(exitCode, 0);
+    assert.deepEqual(calls[0], {
+      command: "npm",
+      args: [
+        "install",
+        "--global",
+        "@anthropic-ai/claude-code@2.1.208",
+        "@musistudio/claude-code-router@3.0.4",
+      ],
+    });
+    assert.deepEqual(calls[1], { command: "runtimeProbe", args: [] });
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
 });
 
 test("airclaude launch injects reusable runtime lessons", async () => {
@@ -201,6 +257,15 @@ test("airclaude launch injects reusable runtime lessons", async () => {
   assert.match(prompt, /longContext: openai-compatible,long-context-coder \(model long-context-coder\)/);
   assert.match(prompt, /background: openai-compatible,fast-coder \(model fast-coder\)/);
   assert.match(prompt, /Claude restore\/display model is compatibility metadata only/);
+});
+
+test("generated shell wrappers delegate to the managed CCR 3 launch path", async () => {
+  const catalog = await loadCatalog();
+  const snippet = buildShellSnippet(catalog, profile, { configDir: "/tmp/airkit-test" });
+
+  assert.match(snippet, /cclaude-example\(\)/);
+  assert.match(snippet, /command airclaude --profile 'openai-compatible-example' --/);
+  assert.doesNotMatch(snippet, /\n  cclaude /);
 });
 
 test("managed files are installed and CCR config templates resolve to the config dir", async () => {
@@ -915,7 +980,7 @@ test("prepareLaunch dry run reports stale files and does not write targets", asy
     assert.equal(result.write, false);
     assert.equal(result.files.ccrConfig.status, "stale");
     assert.equal(await readFile(join(configDir, "ccr", "launch-example.json"), "utf8"), staleCcr);
-    assert.equal(result.liveCcrConfig.status, "would-sync");
+    assert.equal(result.liveCcrConfig.status, "would-manage");
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }
@@ -932,7 +997,7 @@ test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves
       configDir,
       ccrClient: ccrTestClient(saved),
       mode: "pro",
-      env: {},
+      env: { DEMO_API_KEY: "runtime-secret" },
       repairRestore: false,
       runtimeVersions: passingRuntimeVersions(),
       userArgs: ["--dangerously-skip-permissions"],
@@ -1141,7 +1206,7 @@ test("prepareLaunch repairs restore metadata before launching", async () => {
       ccrClient: ccrTestClient([]),
       commandExists: async (command) => ["ccr", "claude"].includes(command),
       configDir,
-      env: {},
+      env: { DEMO_API_KEY: "runtime-secret" },
       liveCcrConfig: join(configDir, "live", "config.json"),
       projectsDir,
       runtimeVersions: passingRuntimeVersions(),

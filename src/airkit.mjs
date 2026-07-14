@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { access, chmod, copyFile, mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -53,6 +53,11 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
     api_key: options.apiKeys?.[provider.name] ?? provider.api_key,
   }));
   const managedProviderNames = new Set(managedProviders.map((provider) => provider.name));
+  for (const provider of currentConfig.Providers ?? []) {
+    if (managedProviderNames.has(provider.name) && !provider.id?.startsWith(`airkit-provider-${slug(profile.name)}-`)) {
+      throw new Error(`unowned CCR provider name collision: ${provider.name}`);
+    }
+  }
   const preservedProviders = (currentConfig.Providers ?? []).filter(
     (provider) => !managedProviderNames.has(provider.name),
   );
@@ -83,6 +88,7 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
     config: {
       ...structuredClone(currentConfig),
       Providers: [...preservedProviders, ...managedProviders],
+      ...mergeManagedConfigArrays(currentConfig, baseConfig, managedPrefix),
       profile: {
         ...(currentConfig.profile ?? {}),
         enabled: true,
@@ -91,6 +97,24 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
     },
     profileIds: Object.fromEntries(modes.map((mode) => [mode, `${managedPrefix}${slug(mode)}`])),
   };
+}
+
+function mergeManagedConfigArrays(currentConfig, baseConfig, managedPrefix) {
+  const merged = {};
+  for (const key of ["transformers", "plugins", "providerPlugins", "virtualModelProfiles"]) {
+    if (!Array.isArray(baseConfig[key])) continue;
+    const managed = baseConfig[key].map((entry, index) => ({
+      ...entry,
+      id: entry.id ?? `${managedPrefix}${slug(key)}-${index + 1}`,
+    }));
+    const ownedIds = new Set(managed.map((entry) => entry.id));
+    const ownedPaths = new Set(managed.map((entry) => entry.path).filter(Boolean));
+    merged[key] = [
+      ...(currentConfig[key] ?? []).filter((entry) => !ownedIds.has(entry.id) && !ownedPaths.has(entry.path)),
+      ...managed,
+    ];
+  }
+  return merged;
 }
 
 export function buildShellSnippet(catalog, profileName, options = {}) {
@@ -104,32 +128,21 @@ export function buildShellSnippet(catalog, profileName, options = {}) {
 
   for (const wrapper of shell.wrappers ?? []) {
     lines.push(`${wrapper.name}() {`);
-    const wrapperCcrConfig = profile.ccr ? buildCcrConfig(catalog, profileName, { configDir: options.configDir }) : null;
     const isAirclaudeLauncher = shouldAppendReusableRuntimeLessons(wrapper.command);
     const wrapperEnv = {};
     for (const [key, value] of Object.entries(wrapper.env ?? {})) {
       wrapperEnv[key] = renderTemplateValue(value, templateVars);
       lines.push(`  export ${key}=${quoteShell(wrapperEnv[key])}`);
     }
-    // The node prepareLaunch path applies airclaudeLaunchEnv (POWERLEVEL9K_INSTANT_PROMPT, route
-    // metadata) on top of the profile env. A shell wrapper that skips it diverges from the node
-    // path: e.g. a missing POWERLEVEL9K_INSTANT_PROMPT lets the user's P10k zsh snapshot spam
-    // command-not-found in Claude Code's non-interactive shells. Emit the launch env as defaults so
-    // any wrapper launch matches the node path; the profile's explicit wrapper env still wins for
-    // keys it sets. (The 1M context window is NOT an env var — see airclaudeLaunchEnv — it comes
-    // from the [1m] suffix on launch.restore.model.)
-    if (isAirclaudeLauncher && wrapperCcrConfig) {
-      const launchEnv = airclaudeLaunchEnv(
-        catalog,
-        profile,
-        wrapperEnv.AIRCLAUDE_MODE ?? "auto",
-        wrapperCcrConfig,
-        resolveRestoreRepairConfig(profile),
+    if (profile.ccr) {
+      const mode = wrapperEnv.AIRCLAUDE_MODE ?? profile.launch?.defaultMode ?? "auto";
+      const wrapperArgs = (wrapper.args ?? []).map((arg) => quoteShell(renderTemplateValue(arg, templateVars)));
+      const renderedArgs = wrapperArgs.length ? ` ${wrapperArgs.join(" ")}` : "";
+      lines.push(
+        `  command airclaude --profile ${quoteShell(profile.name)} --mode ${quoteShell(mode)} --${renderedArgs} "$@"`,
+        "}",
       );
-      for (const [key, value] of Object.entries(launchEnv)) {
-        if (key in wrapperEnv) continue;
-        lines.push(`  export ${key}=${quoteShell(value)}`);
-      }
+      continue;
     }
     const rawWrapperArgs = withAirclaudeModelArg(
       (wrapper.args ?? []).map((arg) => renderTemplateValue(arg, templateVars)),
@@ -137,12 +150,7 @@ export function buildShellSnippet(catalog, profileName, options = {}) {
       resolveRestoreRepairConfig(profile),
     );
     const effectiveWrapperArgs = isAirclaudeLauncher
-      ? appendRuntimePrompts(rawWrapperArgs, [
-          reusableRuntimeLessonsPrompt,
-          wrapperCcrConfig
-            ? airclaudeRoutingPrompt(wrapperEnv.AIRCLAUDE_MODE ?? "auto", wrapperCcrConfig, resolveRestoreRepairConfig(profile))
-            : "",
-        ])
+      ? appendRuntimePrompts(rawWrapperArgs, [reusableRuntimeLessonsPrompt])
       : rawWrapperArgs;
     const wrapperArgs = effectiveWrapperArgs.map((arg) => quoteShell(arg));
     const renderedArgs = wrapperArgs.length ? ` ${wrapperArgs.join(" ")}` : "";
@@ -191,8 +199,8 @@ export function planInstall(catalog, profileName, options = {}) {
     files: { ccrConfig, shellSnippet, managedFiles },
     nextSteps: [
       `source ${shellSnippet}`,
-      `ccr config: ${ccrConfig}`,
-      "Run ccr-start, then launch the rendered wrapper from the shell snippet.",
+      "Run airkit runtime check.",
+      "Launch the rendered wrapper; AirKit will merge and open its managed CCR 3 profile.",
     ],
   };
 }
@@ -336,16 +344,16 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
       ...plan,
       write: false,
       files,
-      liveCcrConfig: { ...plan.liveCcrConfig, status: "would-sync" },
+      liveCcrConfig: { ...plan.liveCcrConfig, status: "would-manage" },
       runtime: await checkLaunchRuntime(plan, options),
     };
   }
 
-  const runtime = await checkLaunchRuntime(plan, options);
+  const ccrClient = options.ccrClient ?? createCcr3Client(options);
+  const runtime = await checkLaunchRuntime(plan, { ...options, ccrClient });
   if (!runtime.ccr.ok) throw new Error(runtime.ccr.reason);
   if (!runtime.launch.ok) throw new Error(runtime.launch.reason);
   await writeLaunchFiles(plan, rendered);
-  const ccrClient = options.ccrClient ?? createCcr3Client(options);
   const currentConfig = await ccrClient.getConfig();
   const apiKeys = await resolveProviderApiKeys(catalog, profileName, plan, options);
   const managed = buildCcr3ManagedConfig(catalog, profileName, currentConfig, {
@@ -779,11 +787,17 @@ function defaultConfigDir() {
 }
 
 function defaultCcrStateDir(env = process.env) {
-  return resolve(
-    env?.CCR_INTERNAL_HOME_DIR
-      ? join(env.CCR_INTERNAL_HOME_DIR, ".claude-code-router")
-      : join(homedir(), ".claude-code-router"),
+  return ccrRuntimePaths(env).configDir;
+}
+
+function ccrRuntimePaths(env = process.env) {
+  const home = resolve(env?.CCR_INTERNAL_HOME_DIR ?? env?.HOME ?? homedir());
+  const appData = resolve(env?.CCR_INTERNAL_APP_DATA_DIR ?? env?.XDG_CONFIG_HOME ?? join(home, ".config"));
+  const configDir = process.platform === "win32" ? join(appData, "claude-code-router") : join(home, ".claude-code-router");
+  const userDataDir = resolve(
+    env?.CCR_INTERNAL_USER_DATA_DIR ?? (process.platform === "win32" ? configDir : join(configDir, "app-data")),
   );
+  return { appDataDir: join(appData, "Claude Code Router"), configDir, home, userDataDir };
 }
 
 function renderAirkitHelp() {
@@ -818,7 +832,8 @@ function renderRuntimeReport(report) {
 
 function renderRuntimeUpdate(result) {
   const packages = result.packages.map((packageName) => `- ${packageName}`).join("\n");
-  if (!result.write) return `Preview only\n${packages}\nRe-run with --write to update global packages.\n`;
+  const paths = result.statePaths.map((path) => `- ${path}`).join("\n");
+  if (!result.write) return `Preview only\nCommand: npm install --global ${result.packages.join(" ")}\nCCR state to back up:\n${paths}\nPackages:\n${packages}\nRe-run with --write to update global packages.\n`;
   return `Updated runtime packages\n${packages}\nBackup: ${result.backupDir}\n${renderRuntimeReport(result.report)}`;
 }
 
@@ -924,7 +939,7 @@ Routes:
 
 Files:
 ${fileLines.join("\n")}
-- ${result.liveCcrConfig.status} live CCR config: ${result.liveCcrConfig.path}
+- ${result.liveCcrConfig.status} CCR state database: ${result.liveCcrConfig.path}
 
 Runtime:
 ${runtimeLines.join("\n") || "- skipped"}
@@ -1411,21 +1426,79 @@ async function updateRuntime(options = {}) {
     `@anthropic-ai/claude-code@${RUNTIME_TARGETS.claudeCode}`,
     `@musistudio/claude-code-router@${RUNTIME_TARGETS.claudeCodeRouter}`,
   ];
-  if (!options.write) return { write: false, packages };
+  const runtimePaths = ccrRuntimePaths(options.env);
+  const statePaths = [...new Set([runtimePaths.configDir, runtimePaths.userDataDir, runtimePaths.appDataDir])];
+  if (!options.write) return { write: false, packages, statePaths };
 
-  const stateDir = defaultCcrStateDir(options.env);
+  const stateDir = runtimePaths.configDir;
   const backupDir = resolve(options.backupDir ?? join(stateDir, "backups", `airkit-runtime-${timestampForPath()}`));
   await mkdir(backupDir, { recursive: true });
-  for (const name of ["config.json", "config.sqlite", "config.sqlite-wal", "config.sqlite-shm", "service.json"]) {
-    const source = join(stateDir, name);
-    if (await fileExists(source)) await copyFile(source, join(backupDir, name));
+  const stateFiles = ["config.json", "config.sqlite", "api-keys.sqlite", "usage.sqlite", "request-logs.sqlite", "service.json"];
+  for (const [directoryIndex, directory] of statePaths.entries()) {
+    for (const name of stateFiles.flatMap((file) => [file, `${file}-wal`, `${file}-shm`])) {
+      const source = join(directory, name);
+      if (await fileExists(source)) await copyFile(source, join(backupDir, `${directoryIndex}-${name}`));
+    }
   }
   const runCommand = options.runCommand ?? runCommandSync;
   const install = await runCommand("npm", ["install", "--global", ...packages], { timeoutMs: options.commandTimeoutMs ?? 120000 });
   if (!install.ok) throw new Error(`runtime update failed; backup preserved at ${backupDir}${install.stderr ? `: ${install.stderr}` : ""}`);
   const report = runtimeReport(options.runtimeVersions ?? await inspectRuntimeVersions({ ...options, runCommand }));
   if (!report.every((entry) => entry.ok)) throw new Error(`runtime validation failed; backup preserved at ${backupDir}`);
-  return { write: true, packages, backupDir, report };
+  const probe = await (options.runtimeProbe ?? probeCcr3Runtime)({ ...options, runCommand });
+  if (!meetsRuntimeRequirement("claudeCodeRouter", probe.version) || !probe.profileResolved) {
+    throw new Error(`isolated CCR 3 validation failed; backup preserved at ${backupDir}`);
+  }
+  return { write: true, packages, statePaths, backupDir, probe, report };
+}
+
+async function probeCcr3Runtime(options = {}) {
+  const root = await mkdtemp(join(tmpdir(), "airkit-runtime-probe-"));
+  const env = {
+    ...(options.env ?? process.env),
+    HOME: join(root, "home"),
+    CCR_INTERNAL_HOME_DIR: join(root, "home"),
+    CCR_INTERNAL_APP_DATA_DIR: join(root, "app-data"),
+    CCR_INTERNAL_USER_DATA_DIR: join(root, "user-data"),
+  };
+  const runCommand = options.runCommand ?? runCommandSync;
+  await mkdir(env.HOME, { recursive: true });
+  try {
+    const client = createCcr3Client({ ...options, env, runCommand });
+    const version = await client.getVersion();
+    const config = await client.getConfig();
+    await client.saveConfig({
+      ...config,
+      Providers: [...(config.Providers ?? []), {
+        api_base_url: "http://127.0.0.1:9/v1/chat/completions",
+        api_key: "airkit-runtime-probe",
+        id: "airkit-runtime-probe-provider",
+        models: ["probe"],
+        name: "airkit-runtime-probe",
+      }],
+      profile: {
+        ...(config.profile ?? {}),
+        enabled: true,
+        profiles: [...(config.profile?.profiles ?? []), {
+          agent: "claude-code",
+          enabled: true,
+          id: "airkit-runtime-probe",
+          model: "airkit-runtime-probe/probe",
+          name: "AirKit runtime probe",
+          scope: "ccr",
+          surface: "cli",
+        }],
+      },
+    });
+    const resolved = await runCommand("ccr", ["airkit-runtime-probe", "cli", "--", "--version"], {
+      env: { ...env, CCR_CLI_PREPARE_PROFILE_ONLY: "1" },
+      timeoutMs: options.commandTimeoutMs ?? 30000,
+    });
+    return { profileResolved: resolved.ok, version };
+  } finally {
+    await runCommand("ccr", ["stop"], { env, timeoutMs: options.commandTimeoutMs ?? 30000 });
+    await rm(root, { force: true, recursive: true });
+  }
 }
 
 function meetsRuntimeRequirement(key, version) {
@@ -1456,7 +1529,10 @@ function compareVersions(left, right) {
 async function checkLaunchRuntime(plan, options = {}) {
   const commandExists = options.commandExists ?? commandExistsOnPath;
   const ccrExists = await commandExists("ccr");
-  const versions = options.runtimeVersions ?? await inspectRuntimeVersions(options);
+  const versions = { ...(options.runtimeVersions ?? await inspectRuntimeVersions(options)) };
+  if (options.ccrClient && !options.dryRun && !options.doctor) {
+    versions.claudeCodeRouter = await options.ccrClient.getVersion();
+  }
   const report = runtimeReport(versions);
   const runtime = {
     ccr: ccrExists ? { ok: true, command: "ccr" } : { ok: false, command: "ccr", reason: "missing command: ccr" },
@@ -1518,6 +1594,10 @@ async function resolveProviderApiKeys(catalog, profileName, plan, options) {
       for (const providerName of unresolved) apiKeys[providerName] = auth.env.ANTHROPIC_AUTH_TOKEN;
     }
   }
+  const stillUnresolved = unresolved.filter((providerName) => !apiKeys[providerName]);
+  if (stillUnresolved.length > 0) {
+    throw new Error(`unresolved provider credentials: ${stillUnresolved.join(", ")}`);
+  }
   return apiKeys;
 }
 
@@ -1529,14 +1609,14 @@ function createCcr3Client(options = {}) {
 
   async function loadService(forceStart = false) {
     if (forceStart) {
-      const started = await runCommand("ccr", ["start", "--no-gateway"], { timeoutMs: options.commandTimeoutMs ?? 30000 });
+      const started = await runCommand("ccr", ["start", "--no-gateway"], { env: options.env, timeoutMs: options.commandTimeoutMs ?? 30000 });
       if (!started.ok) throw new Error(`unable to start CCR 3 management service${started.stderr ? `: ${started.stderr}` : ""}`);
     }
     try {
       return JSON.parse(await readFile(join(stateDir, "service.json"), "utf8"));
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
-      const started = await runCommand("ccr", ["start", "--no-gateway"], { timeoutMs: options.commandTimeoutMs ?? 30000 });
+      const started = await runCommand("ccr", ["start", "--no-gateway"], { env: options.env, timeoutMs: options.commandTimeoutMs ?? 30000 });
       if (!started.ok) throw new Error(`unable to start CCR 3 management service${started.stderr ? `: ${started.stderr}` : ""}`);
       return JSON.parse(await readFile(join(stateDir, "service.json"), "utf8"));
     }
