@@ -7,6 +7,8 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
+import * as airkitRuntime from "../src/airkit.mjs";
+
 import {
   buildCcrConfig,
   buildLaunchPlan,
@@ -22,6 +24,130 @@ import {
 } from "../src/airkit.mjs";
 
 const profile = "openai-compatible-example";
+
+test("runtime requirements hard-cut to Node 22, Claude Code 2.1.208, and CCR 3.0.4", async () => {
+  const packageJson = JSON.parse(
+    await readFile(resolve(import.meta.dirname, "..", "package.json"), "utf8"),
+  );
+
+  assert.equal(packageJson.engines.node, ">=22");
+  assert.deepEqual(airkitRuntime.RUNTIME_REQUIREMENTS, {
+    claudeCode: ">=2.1.208",
+    claudeCodeRouter: ">=3.0.4 <4",
+    node: ">=22",
+  });
+});
+
+test("CCR 3 merge creates CCR-only mode profiles and preserves unrelated configuration", () => {
+  const current = {
+    Providers: [{ id: "provider-unrelated", name: "unrelated", models: ["keep-me"] }],
+    Router: {
+      builtInRules: { "claude-code": { enabled: true }, codex: { enabled: true } },
+      fallback: { mode: "off", models: [], retryCount: 1 },
+      rules: [{ id: "unrelated-rule", name: "Keep me", enabled: true, target: "unrelated/keep-me" }],
+    },
+    profile: {
+      enabled: true,
+      profiles: [
+        {
+          agent: "claude-code",
+          enabled: true,
+          id: "unrelated-profile",
+          model: "unrelated/keep-me",
+          name: "Unrelated",
+          scope: "ccr",
+          surface: "cli",
+        },
+      ],
+    },
+  };
+
+  const merged = airkitRuntime.buildCcr3ManagedConfig(
+    launchCatalog(),
+    "launch-example",
+    current,
+    { apiKeys: { demo: "resolved-at-runtime" } },
+  );
+
+  assert.equal(merged.config.Providers[0].name, "unrelated");
+  assert.equal(merged.config.Providers.find((provider) => provider.name === "demo").api_key, "resolved-at-runtime");
+  assert.deepEqual(
+    merged.config.profile.profiles
+      .filter((candidate) => candidate.id.startsWith("airkit-launch-example-"))
+      .map(({ id, model, scope, surface }) => ({ id, model, scope, surface })),
+    [
+      {
+        id: "airkit-launch-example-auto",
+        model: "demo/steady-coder",
+        scope: "ccr",
+        surface: "cli",
+      },
+      {
+        id: "airkit-launch-example-fast",
+        model: "demo/cheap-coder",
+        scope: "ccr",
+        surface: "cli",
+      },
+      {
+        id: "airkit-launch-example-pro",
+        model: "demo/strong-coder",
+        scope: "ccr",
+        surface: "cli",
+      },
+    ],
+  );
+  assert.ok(merged.config.profile.profiles.some((candidate) => candidate.id === "unrelated-profile"));
+  assert.ok(merged.config.Router.rules.some((rule) => rule.id === "unrelated-rule"));
+});
+
+test("CCR 3 launch path uses the managed profile and never invokes CCR 2 commands", async () => {
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-ccr3-launch-"));
+  const calls = [];
+  const ccrClient = {
+    getConfig: async () => ({
+      Providers: [],
+      Router: {
+        builtInRules: { "claude-code": { enabled: true }, codex: { enabled: true } },
+        fallback: { mode: "off", models: [], retryCount: 1 },
+        rules: [],
+      },
+      profile: { enabled: true, profiles: [] },
+    }),
+    getVersion: async () => "3.0.4",
+    saveConfig: async (config) => calls.push({ command: "saveConfig", config }),
+  };
+
+  try {
+    const result = await prepareLaunch(launchCatalog(), "launch-example", {
+      backupsDir: join(configDir, "backups"),
+      ccrClient,
+      commandExists: async (command) => ["ccr", "claude"].includes(command),
+      configDir,
+      env: { DEMO_API_KEY: "runtime-secret" },
+      launch: false,
+      liveCcrConfig: join(configDir, "live", "config.json"),
+      mode: "pro",
+      projectsDir: join(configDir, "projects"),
+      repairRestore: false,
+      runCommand: async (command, args) => {
+        calls.push({ command, args });
+        return {
+          ok: true,
+          status: 0,
+          stdout: args[0] === "activate" ? 'export ANTHROPIC_BASE_URL="http://127.0.0.1:3456"\n' : "",
+        };
+      },
+      runtimeVersions: { claudeCode: "2.1.208", claudeCodeRouter: "3.0.4", node: "24.11.1" },
+    });
+
+    assert.equal(result.launch.command, "ccr");
+    assert.deepEqual(result.launch.args.slice(0, 3), ["airkit-launch-example-pro", "cli", "--"]);
+    assert.ok(calls.some((call) => call.command === "saveConfig"));
+    assert.ok(!calls.some((call) => ["restart", "activate"].includes(call.args?.[0])));
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
 
 function freePort() {
   return new Promise((res, rej) => {
