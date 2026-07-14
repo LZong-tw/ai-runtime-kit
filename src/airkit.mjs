@@ -2,7 +2,7 @@
 
 import { access, chmod, copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1045,7 +1045,7 @@ function withReusableRuntimeLessons(launch) {
 
 function shouldAppendReusableRuntimeLessons(binary) {
   const commandName = basename(String(binary ?? "").trim().split(/\s+/)[0] || "");
-  return commandName === "claude" || commandName === "cclaude";
+  return commandName === "claude";
 }
 
 function mergeAppendSystemPrompt(args, prompt) {
@@ -1679,27 +1679,6 @@ function createCcr3Client(options = {}) {
   };
 }
 
-const bundledTransformersDir = join(repoRoot, "transformers");
-
-function bundledTransformerNames(profile) {
-  const names = new Set();
-  const collect = (use) => {
-    for (const entry of use ?? []) {
-      const name = Array.isArray(entry) ? entry[0] : entry;
-      if (typeof name === "string") names.add(name);
-    }
-  };
-  for (const provider of profile.ccr?.Providers ?? []) {
-    const transformer = provider.transformer;
-    if (!transformer || typeof transformer !== "object") continue;
-    collect(transformer.use);
-    for (const [key, value] of Object.entries(transformer)) {
-      if (key !== "use" && value && typeof value === "object") collect(value.use);
-    }
-  }
-  return names;
-}
-
 function renderManagedFiles(profile, options = {}) {
   const configDir = resolve(options.configDir ?? defaultConfigDir());
   const vars = profileTemplateVars(profile, configDir);
@@ -1710,21 +1689,7 @@ function renderManagedFiles(profile, options = {}) {
     content: renderTemplateValue(file.content, vars),
   }));
 
-  const declared = new Set(explicit.map((file) => file.relativePath));
-  const bundled = [];
-  for (const name of bundledTransformerNames(profile)) {
-    const source = join(bundledTransformersDir, `${name}.cjs`);
-    const relativePath = `ccr/transformers/${name}.js`;
-    if (declared.has(relativePath) || !existsSync(source)) continue;
-    bundled.push({
-      label: `bundled transformer ${name}`,
-      path: resolve(configDir, relativePath),
-      relativePath,
-      content: renderTemplateValue(readFileSync(source, "utf8"), vars),
-    });
-  }
-
-  return [...explicit, ...bundled];
+  return explicit;
 }
 
 async function writeTextFile(path, content, { force }) {
@@ -1880,10 +1845,7 @@ function profileTemplateVars(profile, configDir = defaultConfigDir()) {
   return {
     configDir: resolve(configDir),
     profileName: profile.name,
-    // Single source for the masked identity: the CCR transformer's response maskModel
-    // must match launch.restore.model (incl. any [1m] suffix) so persisted message.model
-    // carries it and resume resolves the right window. Reference as {{restoreModel}} in
-    // a profile's transformer.use options.
+    // Restore repair uses this masked identity for persisted Claude session metadata.
     restoreModel: profile.launch?.restore?.model ?? "",
   };
 }

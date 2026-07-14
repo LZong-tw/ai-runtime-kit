@@ -1,7 +1,6 @@
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
-import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -344,77 +343,9 @@ test("generated shell wrappers delegate to the managed CCR 3 launch path", async
   const catalog = await loadCatalog();
   const snippet = buildShellSnippet(catalog, profile, { configDir: "/tmp/airkit-test" });
 
-  assert.match(snippet, /cclaude-example\(\)/);
+  assert.match(snippet, /airclaude-example\(\)/);
   assert.match(snippet, /command airclaude --profile 'openai-compatible-example' --/);
   assert.doesNotMatch(snippet, /\n  cclaude /);
-});
-
-test("managed files are installed and CCR config templates resolve to the config dir", async () => {
-  const configDir = await mkdtemp(join(tmpdir(), "airkit-oss-managed-"));
-  const previewDir = await mkdtemp(join(tmpdir(), "airkit-oss-managed-preview-"));
-  const transformerPath = join(configDir, "ccr", "transformers", "drop-reasoning.js");
-  const transformerContent = "module.exports = { profile: '{{profileName}}', root: '{{configDir}}' };\n";
-  const catalog = {
-    schema: 1,
-    profiles: [
-      {
-        name: "custom-transformer",
-        visibility: "public",
-        summary: "Profile with a custom CCR transformer.",
-        managedFiles: [
-          {
-            label: "drop reasoning transformer",
-            path: "ccr/transformers/drop-reasoning.js",
-            content: transformerContent,
-          },
-        ],
-        ccr: {
-          // Options for a custom (path-loaded) transformer MUST ride the top-level
-          // transformers entry — CCR instantiates `new Require(path)(entry.options)` once and
-          // stores the instance, so the `[name, {options}]` form in transformer.use would do
-          // `new instance()` → "o is not a constructor" and drop the whole provider. The
-          // renderer must preserve + template-substitute this options object.
-          transformers: [
-            {
-              path: "{{configDir}}/ccr/transformers/drop-reasoning.js",
-              options: { restoreModel: "{{profileName}}-1m" },
-            },
-          ],
-          Providers: [
-            {
-              name: "custom",
-              api_base_url: "https://example.invalid/v1/chat/completions",
-              api_key: "$CUSTOM_API_KEY",
-              models: ["steady-coder"],
-              transformer: { use: ["drop-reasoning"] },
-            },
-          ],
-          Router: { default: "custom,steady-coder" },
-        },
-      },
-    ],
-  };
-
-  try {
-    const config = buildCcrConfig(catalog, "custom-transformer", { configDir });
-    const result = await installProfile(catalog, "custom-transformer", { configDir, write: true });
-    const update = await updateProfile(catalog, "custom-transformer", { configDir, previewDir, write: false });
-
-    assert.equal(config.transformers[0].path, transformerPath);
-    // options preserved + template-substituted on the transformers entry (the only place CCR
-    // accepts options for a path transformer); string-form use references the instance by name.
-    assert.deepEqual(config.transformers[0].options, { restoreModel: "custom-transformer-1m" });
-    assert.deepEqual(config.Providers[0].transformer.use, ["drop-reasoning"]);
-    assert.deepEqual(result.files.managedFiles, [{ label: "drop reasoning transformer", path: transformerPath }]);
-    assert.equal(update.files.managedFiles[0].label, "drop reasoning transformer");
-    assert.equal(
-      await readFile(transformerPath, "utf8"),
-      `module.exports = { profile: 'custom-transformer', root: '${configDir}' };\n`,
-    );
-  } finally {
-    await rm(previewDir, { force: true, recursive: true });
-    await rm(configDir, { force: true, recursive: true });
-  }
 });
 
 test("shell wrapper args can use config dir templates", async () => {
@@ -429,8 +360,8 @@ test("shell wrapper args can use config dir templates", async () => {
         shell: {
           wrappers: [
             {
-              name: "cclaude-wrapper",
-              command: "cclaude",
+              name: "claude-wrapper",
+              command: "claude",
               args: ["--strict-mcp-config", "--mcp-config", "{{configDir}}/claude/empty-mcp.json"],
             },
           ],
@@ -444,7 +375,7 @@ test("shell wrapper args can use config dir templates", async () => {
 
     assert.match(
       snippet,
-      new RegExp(`cclaude '--strict-mcp-config' '--mcp-config' '${escapeRegExp(configDir)}/claude/empty-mcp\\.json'`),
+      new RegExp(`claude '--strict-mcp-config' '--mcp-config' '${escapeRegExp(configDir)}/claude/empty-mcp\\.json'`),
     );
     assert.match(snippet, /--append-system-prompt/);
     assert.match(snippet, /AirKit reusable runtime lessons/);
@@ -472,7 +403,7 @@ test("updateProfile dry run renders previews and does not mutate stale installed
     assert.equal(result.files.ccrConfig.status, "stale");
     assert.equal(result.files.shellSnippet.status, "stale");
     assert.match(await readFile(result.files.ccrConfig.preview, "utf8"), /steady-coder/);
-    assert.match(await readFile(result.files.shellSnippet.preview, "utf8"), /cclaude-example/);
+    assert.match(await readFile(result.files.shellSnippet.preview, "utf8"), /airclaude-example/);
     assert.equal(await readFile(result.files.ccrConfig.target, "utf8"), staleCcr);
     assert.equal(await readFile(result.files.shellSnippet.target, "utf8"), staleShell);
   } finally {
@@ -577,7 +508,7 @@ test("buildLaunchPlan applies pro mode CCR routing overlay without mutating the 
 
     assert.equal(plan.mode, "pro");
     assert.equal(plan.ccrConfig.Router.default, "demo,strong-coder");
-    assert.equal(plan.ccrConfig.Router.think, "demo,strong-coder");
+    assert.equal(plan.ccrConfig.Router.think, undefined);
     assert.equal(plan.ccrConfig.Router.background, "demo,cheap-coder");
     assert.equal(catalog.profiles[0].ccr.Router.default, "demo,steady-coder");
     assert.equal(plan.launch.command, "ccr");
@@ -644,387 +575,6 @@ test("airclaude launch does not set the dead ANTHROPIC_1M_CONTEXT env (1M comes 
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }
-});
-
-test("bundled drop-reasoning transformer fills missing usage tokens so context tracking and compact work", async () => {
-  const require = createRequire(import.meta.url);
-  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
-  const instance = new Transformer();
-
-  const streamResponse = new Response(
-    [
-      'event: message_start\ndata: {"type":"message_start","message":{"model":"steady-coder","usage":{"input_tokens":0,"output_tokens":0}}}\n\n',
-      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello world, this is the model response."}}\n\n',
-      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":0}}\n\n',
-      "data: [DONE]\n\n",
-    ].join(""),
-    { headers: { "Content-Type": "text/event-stream" } },
-  );
-
-  const context = {
-    req: { body: { system: "You are a helpful assistant.", messages: [{ role: "user", content: "x".repeat(8000) }] } },
-  };
-
-  const body = await (await instance.transformResponseOut(streamResponse, context)).text();
-  const messageStart = JSON.parse(body.match(/data: (\{"type":"message_start".*?\})\n/)[1]);
-  const messageDelta = JSON.parse(body.match(/data: (\{"type":"message_delta".*?\})\n/)[1]);
-
-  assert.ok(messageStart.message.usage.input_tokens > 200, `input_tokens=${messageStart.message.usage.input_tokens}`);
-  assert.ok(messageStart.message.usage.input_tokens < 20000, `input_tokens=${messageStart.message.usage.input_tokens}`);
-  assert.ok(messageDelta.usage.output_tokens >= 1, `output_tokens=${messageDelta.usage.output_tokens}`);
-});
-
-test("bundled drop-reasoning transformer keeps real usage tokens when the provider reports them", async () => {
-  const require = createRequire(import.meta.url);
-  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
-  const instance = new Transformer();
-
-  const streamResponse = new Response(
-    [
-      'event: message_start\ndata: {"type":"message_start","message":{"model":"steady-coder","usage":{"input_tokens":4321,"output_tokens":0}}}\n\n',
-      'event: message_delta\ndata: {"type":"message_delta","delta":{},"usage":{"output_tokens":99}}\n\n',
-      "data: [DONE]\n\n",
-    ].join(""),
-    { headers: { "Content-Type": "text/event-stream" } },
-  );
-
-  const context = { req: { body: { messages: [{ role: "user", content: "short" }] } } };
-  const body = await (await instance.transformResponseOut(streamResponse, context)).text();
-  const messageStart = JSON.parse(body.match(/data: (\{"type":"message_start".*?\})\n/)[1]);
-  const messageDelta = JSON.parse(body.match(/data: (\{"type":"message_delta".*?\})\n/)[1]);
-
-  assert.equal(messageStart.message.usage.input_tokens, 4321);
-  assert.equal(messageDelta.usage.output_tokens, 99);
-});
-
-test("bundled drop-reasoning transformer synthesizes usage for an OpenAI-format stream that omits it", async () => {
-  const require = createRequire(import.meta.url);
-  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
-  const instance = new Transformer();
-
-  // Real LiteLLM/OpenAI gateway shape: data-only SSE, chat.completion.chunk, no usage anywhere.
-  const streamResponse = new Response(
-    [
-      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}\n\n',
-      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{"content":"Hello world response"}}]}\n\n',
-      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
-      "data: [DONE]\n\n",
-    ].join(""),
-    { headers: { "Content-Type": "text/event-stream" } },
-  );
-
-  const context = {
-    req: { body: { system: "You are a helpful assistant.", messages: [{ role: "user", content: "x".repeat(8000) }] } },
-  };
-
-  const body = await (await instance.transformResponseOut(streamResponse, context)).text();
-  const usageChunk = body
-    .split("\n")
-    .filter((line) => line.startsWith("data: ") && line.slice(6).trim() !== "[DONE]")
-    .map((line) => JSON.parse(line.slice(6)))
-    .find((chunk) => chunk.usage && typeof chunk.usage.prompt_tokens === "number");
-
-  assert.ok(usageChunk, "an OpenAI chunk must carry synthesized usage so CCR's converter can read it");
-  assert.ok(usageChunk.usage.prompt_tokens > 200, `prompt_tokens=${usageChunk.usage.prompt_tokens}`);
-  assert.ok(usageChunk.usage.prompt_tokens < 20000, `prompt_tokens=${usageChunk.usage.prompt_tokens}`);
-  assert.ok(usageChunk.usage.completion_tokens >= 1, `completion_tokens=${usageChunk.usage.completion_tokens}`);
-});
-
-test("bundled drop-reasoning transformer keeps real OpenAI usage when the gateway reports it", async () => {
-  const require = createRequire(import.meta.url);
-  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
-  const instance = new Transformer();
-
-  const streamResponse = new Response(
-    [
-      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n',
-      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1234,"completion_tokens":88,"total_tokens":1322}}\n\n',
-      "data: [DONE]\n\n",
-    ].join(""),
-    { headers: { "Content-Type": "text/event-stream" } },
-  );
-
-  const context = { req: { body: { messages: [{ role: "user", content: "short" }] } } };
-  const body = await (await instance.transformResponseOut(streamResponse, context)).text();
-  const usageChunk = body
-    .split("\n")
-    .filter((line) => line.startsWith("data: ") && line.slice(6).trim() !== "[DONE]")
-    .map((line) => JSON.parse(line.slice(6)))
-    .find((chunk) => chunk.usage && typeof chunk.usage.prompt_tokens === "number");
-
-  assert.ok(usageChunk, "the real usage chunk must survive");
-  assert.equal(usageChunk.usage.prompt_tokens, 1234);
-  assert.equal(usageChunk.usage.completion_tokens, 88);
-});
-
-test("bundled drop-reasoning transformer does not pre-synthesize usage when the gateway sends it in a trailing chunk", async () => {
-  const require = createRequire(import.meta.url);
-  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
-  const instance = new Transformer();
-
-  // include_usage shape: real usage arrives in a SEPARATE chunk (choices:[]) AFTER finish_reason.
-  // Synthesizing on the finish chunk would emit an estimate that races/duplicates the real usage,
-  // so the finish chunk must stay usage-free and only the trailing real chunk should carry usage.
-  const streamResponse = new Response(
-    [
-      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{"content":"hi there"}}]}\n\n',
-      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
-      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[],"usage":{"prompt_tokens":1234,"completion_tokens":88,"total_tokens":1322}}\n\n',
-      "data: [DONE]\n\n",
-    ].join(""),
-    { headers: { "Content-Type": "text/event-stream" } },
-  );
-
-  const context = { req: { body: { system: "x".repeat(8000), messages: [{ role: "user", content: "short" }] } } };
-  const body = await (await instance.transformResponseOut(streamResponse, context)).text();
-  const usageChunks = body
-    .split("\n")
-    .filter((line) => line.startsWith("data: ") && line.slice(6).trim() !== "[DONE]")
-    .map((line) => JSON.parse(line.slice(6)))
-    .filter((chunk) => chunk.usage && typeof chunk.usage.prompt_tokens === "number");
-
-  assert.equal(usageChunks.length, 1, "only the gateway's real usage chunk should carry usage — no pre-synthesized estimate");
-  assert.equal(usageChunks[0].usage.prompt_tokens, 1234);
-  assert.equal(usageChunks[0].usage.completion_tokens, 88);
-});
-
-test("bundled drop-reasoning transformer asks the gateway to stream usage on streaming requests", async () => {
-  const require = createRequire(import.meta.url);
-  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
-  const instance = new Transformer();
-
-  // Provider streams OpenAI but omits usage; request include_usage so the gateway emits a final
-  // usage chunk (real prompt/completion tokens, and cache tokens if it reports them). The built-in
-  // "streamoptions" transformer cannot be listed in this provider's use (it breaks registration), so
-  // we set it ourselves on the OpenAI request body that transformRequestIn receives.
-  const streamed = await instance.transformRequestIn({ stream: true, messages: [{ role: "user", content: "hi" }] });
-  assert.deepEqual(streamed.stream_options, { include_usage: true });
-
-  const nonStreamed = await instance.transformRequestIn({ messages: [{ role: "user", content: "hi" }] });
-  assert.equal(nonStreamed.stream_options, undefined);
-});
-
-test("bundled drop-reasoning transformer preserves a cache-only usage chunk instead of synthesizing over it", async () => {
-  const require = createRequire(import.meta.url);
-  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
-  const instance = new Transformer();
-
-  // A gateway may report usage with cached_tokens but a 0/absent prompt_tokens on the finish chunk.
-  // That is still real provider usage — synthesis must defer to it so cached_tokens reaches CCR.
-  const streamResponse = new Response(
-    [
-      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n',
-      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"prompt_tokens_details":{"cached_tokens":900}}}\n\n',
-      "data: [DONE]\n\n",
-    ].join(""),
-    { headers: { "Content-Type": "text/event-stream" } },
-  );
-
-  const context = { req: { body: { system: "x".repeat(8000), messages: [{ role: "user", content: "short" }] } } };
-  const body = await (await instance.transformResponseOut(streamResponse, context)).text();
-  const usageChunk = body
-    .split("\n")
-    .filter((line) => line.startsWith("data: ") && line.slice(6).trim() !== "[DONE]")
-    .map((line) => JSON.parse(line.slice(6)))
-    .find((chunk) => chunk.usage && chunk.usage.prompt_tokens_details);
-
-  assert.ok(usageChunk, "the cache-bearing usage chunk must survive");
-  assert.equal(usageChunk.usage.prompt_tokens_details.cached_tokens, 900);
-  // synthesis (which would write prompt_tokens = the ~2000 input estimate and drop the cache field)
-  // must NOT have run — the original prompt_tokens:0 is preserved untouched.
-  assert.equal(usageChunk.usage.prompt_tokens, 0);
-});
-
-test("bundled drop-reasoning transformer strips reasoning_content from an OpenAI-format stream", async () => {
-  const require = createRequire(import.meta.url);
-  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
-  const instance = new Transformer();
-
-  // A deepseek-style reasoning model interleaves reasoning_content with content and tool calls.
-  // If reasoning_content survives, CCR's converter injects a `thinking` block and bumps the
-  // content-block index, so Claude Code's accumulator throws "Content block is not a text block".
-  const streamResponse = new Response(
-    [
-      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"reasoning_content":"Let me think about the query first."}}]}\n\n',
-      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"content":"Running the query now."}}]}\n\n',
-      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"Bash","arguments":"{}"}}]}}]}\n\n',
-      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v4-pro","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
-      "data: [DONE]\n\n",
-    ].join(""),
-    { headers: { "Content-Type": "text/event-stream" } },
-  );
-
-  const context = { req: { body: { messages: [{ role: "user", content: "x".repeat(400) }] } } };
-  const body = await (await instance.transformResponseOut(streamResponse, context)).text();
-
-  assert.ok(!body.includes("reasoning_content"), "reasoning_content must not survive the streamed OpenAI chunks");
-  assert.ok(body.includes("Running the query now."), "visible content must be preserved");
-  assert.ok(body.includes('"name":"Bash"'), "tool calls must be preserved");
-});
-
-test("bundled drop-reasoning transformer drops a whitespace-only content delta after tool_calls", async () => {
-  const require = createRequire(import.meta.url);
-  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
-  const instance = new Transformer();
-
-  // Observed deepseek-v3.2 shape: after the final tool_call's arguments, the model emits a trailing
-  // content:"\n". CCR's converter appends it as a text_delta to the still-open tool_use block, so
-  // Claude Code throws "Content block is not a text block". The transformer must drop that content.
-  const streamResponse = new Response(
-    [
-      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{"content":"Listing dirs."}}]}\n\n',
-      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"Bash","arguments":"{\\"command\\":\\"ls\\"}"}}]}}]}\n\n',
-      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{"content":"\\n"}}]}\n\n',
-      'data: {"id":"x","object":"chat.completion.chunk","model":"deepseek-v3.2","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
-      "data: [DONE]\n\n",
-    ].join(""),
-    { headers: { "Content-Type": "text/event-stream" } },
-  );
-
-  const context = { req: { body: { messages: [{ role: "user", content: "short" }] } } };
-  const body = await (await instance.transformResponseOut(streamResponse, context)).text();
-  const contentValues = body
-    .split("\n")
-    .filter((line) => line.startsWith("data: ") && line.slice(6).trim() !== "[DONE]")
-    .map((line) => { try { return JSON.parse(line.slice(6)); } catch { return null; } })
-    .filter(Boolean)
-    .flatMap((c) => (c.choices ?? []).map((ch) => ch?.delta?.content))
-    .filter((v) => typeof v === "string");
-
-  // The leading real text survives; the trailing whitespace-after-tool_call is gone.
-  assert.deepEqual(contentValues, ["Listing dirs."], "only the pre-tool text content should remain");
-  assert.ok(body.includes('"name":"Bash"'), "the tool call must be preserved");
-});
-
-test("bundled drop-reasoning transformer strips reasoning_content from a non-streamed OpenAI response", async () => {
-  const require = createRequire(import.meta.url);
-  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
-  const instance = new Transformer();
-
-  const jsonResponse = new Response(
-    JSON.stringify({
-      id: "x",
-      object: "chat.completion",
-      model: "deepseek-v4-pro",
-      choices: [{ index: 0, message: { role: "assistant", content: "Answer.", reasoning_content: "Hidden reasoning." } }],
-    }),
-    { headers: { "Content-Type": "application/json" } },
-  );
-
-  const context = { req: { body: { messages: [{ role: "user", content: "short" }] } } };
-  const body = await (await instance.transformResponseOut(jsonResponse, context)).text();
-
-  assert.ok(!body.includes("reasoning_content"), "reasoning_content must not survive the JSON response");
-  assert.ok(body.includes("Answer."), "visible content must be preserved");
-});
-
-test("bundled drop-reasoning transformer routes the auto-mode classifier to the configured model", async () => {
-  const require = createRequire(import.meta.url);
-  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
-  const instance = new Transformer({ classifierModel: "gpt-5.4-mini" });
-
-  // Claude Code's auto-mode permission classifier fingerprint: a side query whose system prompt
-  // opens with this exact sentence. Through CCR it carries an Opus model id and would otherwise
-  // fall through to Router.default.
-  const classifierString = await instance.transformRequestIn({
-    model: "claude-opus-4-8",
-    system: "You are a security monitor for autonomous AI coding agents. Decide whether to block.",
-    messages: [{ role: "user", content: "ran: rm -rf /" }],
-  });
-  assert.equal(classifierString.model, "gpt-5.4-mini", "string-system classifier request must be rerouted");
-
-  const classifierBlocks = await instance.transformRequestIn({
-    model: "claude-opus-4-8",
-    system: [{ type: "text", text: "You are a security monitor for autonomous AI coding agents." }],
-    messages: [{ role: "user", content: "x" }],
-  });
-  assert.equal(classifierBlocks.model, "gpt-5.4-mini", "block-array-system classifier request must be rerouted");
-
-  // Normal traffic must be untouched.
-  const normal = await instance.transformRequestIn({
-    model: "claude-sonnet-4-6",
-    system: "You are Claude Code, a helpful coding assistant.",
-    messages: [{ role: "user", content: "fix the bug" }],
-  });
-  assert.equal(normal.model, "claude-sonnet-4-6", "non-classifier traffic must not be rerouted");
-});
-
-test("bundled drop-reasoning transformer leaves the classifier model alone when no classifierModel is set", async () => {
-  const require = createRequire(import.meta.url);
-  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
-  const instance = new Transformer();
-
-  const out = await instance.transformRequestIn({
-    model: "claude-opus-4-8",
-    system: "You are a security monitor for autonomous AI coding agents.",
-    messages: [{ role: "user", content: "x" }],
-  });
-  assert.equal(out.model, "claude-opus-4-8", "without classifierModel the request model is unchanged");
-});
-
-test("bundled drop-reasoning transformer masks provider models and tool names for Claude Code restore", async () => {
-  const require = createRequire(import.meta.url);
-  const Transformer = require(resolve(import.meta.dirname, "..", "transformers", "drop-reasoning.cjs"));
-  const instance = new Transformer();
-
-  const longToolName = "mcp__plugin_atlassian_atlassian__createCompassComponentRelationship";
-  const request = {
-    tools: [
-      {
-        type: "function",
-        function: {
-          name: longToolName,
-          description: "Create a Compass component relationship. " + "x".repeat(1200),
-          parameters: { type: "object", properties: {} },
-        },
-      },
-    ],
-    tool_choice: { type: "function", function: { name: longToolName } },
-  };
-  const transformedRequest = await instance.transformRequestIn(request);
-  const providerToolName = transformedRequest.tools[0].function.name;
-
-  assert.match(providerToolName, /^airtool_[a-z0-9_]+$/);
-  assert.ok(providerToolName.length <= 64);
-  assert.equal(transformedRequest.tool_choice.function.name, providerToolName);
-  assert.notEqual(providerToolName, longToolName);
-  assert.ok(transformedRequest.tools[0].function.description.length <= 1024);
-  assert.match(transformedRequest.tools[0].function.description, new RegExp(longToolName));
-
-  const jsonResponse = new Response(JSON.stringify({ model: "some-provider-model", choices: [] }), {
-    headers: { "Content-Type": "application/json" },
-  });
-  assert.equal((await (await instance.transformResponseOut(jsonResponse)).json()).model, "claude-sonnet-4-6");
-
-  const toolResponse = new Response(
-    JSON.stringify({
-      model: "some-provider-model",
-      choices: [{ message: { tool_calls: [{ id: "call_1", type: "function", function: { name: providerToolName, arguments: "{}" } }] } }],
-    }),
-    { headers: { "Content-Type": "application/json" } },
-  );
-  const restoredToolBody = await (await instance.transformResponseOut(toolResponse)).json();
-  assert.equal(restoredToolBody.choices[0].message.tool_calls[0].function.name, longToolName);
-
-  const streamResponse = new Response('data: {"model":"some-provider-model","choices":[]}\n\ndata: [DONE]\n\n', {
-    headers: { "Content-Type": "text/event-stream" },
-  });
-  const streamBody = await (await instance.transformResponseOut(streamResponse)).text();
-  assert.match(streamBody, /"model":"claude-sonnet-4-6"/);
-  assert.doesNotMatch(streamBody, /some-provider-model/);
-
-  const thinkingStream = new Response(
-    [
-      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"secret"}}\n\n',
-      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hidden reasoning"}}\n\n',
-      'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
-    ].join(""),
-    { headers: { "Content-Type": "text/event-stream" } },
-  );
-  const sanitizedThinkingBody = await (await instance.transformResponseOut(thinkingStream)).text();
-  assert.match(sanitizedThinkingBody, /"content_block":\{"type":"text","text":""\}/);
-  assert.match(sanitizedThinkingBody, /"delta":\{"type":"text_delta","text":"\[reasoning omitted\]"\}/);
-  assert.doesNotMatch(sanitizedThinkingBody, /redacted_thinking|thinking_delta|hidden reasoning|secret/);
 });
 
 test("prepareLaunch dry run reports stale files and does not write targets", async () => {
@@ -1505,8 +1055,6 @@ function launchCatalog() {
               ccr: {
                 Router: {
                   default: "demo,strong-coder",
-                  think: "demo,strong-coder",
-                  longContext: "demo,strong-coder",
                 },
               },
             },
@@ -1525,6 +1073,7 @@ function launchCatalog() {
           Providers: [
             {
               name: "demo",
+              type: "openai_chat_completions",
               api_base_url: "https://example.invalid/v1/chat/completions",
               api_key: "$DEMO_API_KEY",
               models: ["cheap-coder", "steady-coder", "strong-coder"],
@@ -1533,8 +1082,6 @@ function launchCatalog() {
           Router: {
             default: "demo,steady-coder",
             background: "demo,cheap-coder",
-            think: "demo,steady-coder",
-            longContext: "demo,steady-coder",
           },
         },
       },

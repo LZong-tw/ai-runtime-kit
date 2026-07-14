@@ -712,11 +712,10 @@
       "visibility": "public",
       "summary": "Public example for an OpenAI-compatible chat completions gateway.",
       "shell": {
-        "ccrStartFunction": "airkit-ccr-start-openai-compatible-example",
         "wrappers": [
           {
-            "name": "cclaude-example",
-            "command": "cclaude",
+            "name": "airclaude-example",
+            "command": "airclaude",
             "env": {
               "CCR_PROFILE": "openai-compatible-example"
             }
@@ -741,9 +740,7 @@
           "pro": {
             "ccr": {
               "Router": {
-                "default": "openai-compatible,reasoning-coder",
-                "think": "openai-compatible,reasoning-coder",
-                "longContext": "openai-compatible,long-context-coder"
+                "default": "openai-compatible,reasoning-coder"
               }
             }
           }
@@ -756,6 +753,7 @@
         "Providers": [
           {
             "name": "openai-compatible",
+            "type": "openai_chat_completions",
             "api_base_url": "https://example.test/v1/chat/completions",
             "api_key": "$ANTHROPIC_AUTH_TOKEN",
             "models": [
@@ -763,19 +761,12 @@
               "steady-coder",
               "reasoning-coder",
               "long-context-coder"
-            ],
-            "transformer": {
-              "use": []
-            }
+            ]
           }
         ],
         "Router": {
           "default": "openai-compatible,steady-coder",
-          "background": "openai-compatible,fast-coder",
-          "think": "openai-compatible,reasoning-coder",
-          "longContext": "openai-compatible,long-context-coder",
-          "longContextThreshold": 120000,
-          "webSearch": "openai-compatible,fast-coder"
+          "background": "openai-compatible,fast-coder"
         }
       }
     }
