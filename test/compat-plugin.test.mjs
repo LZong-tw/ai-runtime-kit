@@ -166,6 +166,133 @@ test("raw passthrough safely ends a response with no upstream body", async () =>
   assert.deepEqual(response.body, Buffer.alloc(0));
 });
 
+test("raw passthrough cancels upstream when downstream closes under backpressure", async () => {
+  let cancelled = false;
+  const upstream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from("first"));
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  const client = createCoreClient({
+    config: {
+      gateway: {
+        coreHost: "127.0.0.1",
+        corePort: 43991,
+        generatedConfigFile: "/fixture/generated.json",
+      },
+    },
+    fetchImpl: async () => new Response(upstream, { status: 200 }),
+    readFile: () => generatedConfig(CORE_TOKEN),
+  });
+  const response = createRecordingResponse({ backpressure: true });
+  const pending = client.forwardRaw({ body: Buffer.from("request"), headers: {}, response });
+
+  await response.firstWrite;
+  response.emit("close");
+  const outcome = await observePromptSettlement(pending, response);
+
+  assert.equal(outcome.status, "rejected");
+  assert.match(outcome.error.message, /CCR passthrough downstream closed/);
+  assert.equal(cancelled, true);
+});
+
+test("raw passthrough sanitizes downstream errors and cancels upstream", async () => {
+  let cancelled = false;
+  const upstream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from("first"));
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  const client = createCoreClient({
+    config: {
+      gateway: {
+        coreHost: "127.0.0.1",
+        corePort: 43991,
+        generatedConfigFile: "/fixture/generated.json",
+      },
+    },
+    fetchImpl: async () => new Response(upstream, { status: 200 }),
+    readFile: () => generatedConfig(CORE_TOKEN),
+  });
+  const response = createRecordingResponse({ backpressure: true });
+  const pending = client.forwardRaw({ body: Buffer.from("request"), headers: {}, response });
+
+  await response.firstWrite;
+  response.emit("error", new Error("downstream-secret"));
+  const outcome = await observePromptSettlement(pending, response);
+
+  assert.equal(outcome.status, "rejected");
+  assert.match(outcome.error.message, /CCR passthrough downstream failed/);
+  assert.doesNotMatch(outcome.error.message, /downstream-secret/);
+  assert.equal(cancelled, true);
+});
+
+test("raw passthrough rejects when downstream closes before finish", async () => {
+  const client = createCoreClient({
+    config: {
+      gateway: {
+        coreHost: "127.0.0.1",
+        corePort: 43991,
+        generatedConfigFile: "/fixture/generated.json",
+      },
+    },
+    fetchImpl: async () => ({ body: null, headers: new Headers(), status: 204 }),
+    readFile: () => generatedConfig(CORE_TOKEN),
+  });
+  const response = createRecordingResponse({ endEvent: "close" });
+  const pending = client.forwardRaw({ body: Buffer.from("request"), headers: {}, response });
+
+  const outcome = await observePromptSettlement(pending, response);
+
+  assert.equal(outcome.status, "rejected");
+  assert.match(outcome.error.message, /CCR passthrough downstream closed/);
+});
+
+test("raw passthrough cancels upstream when aborted under backpressure", async () => {
+  let cancelled = false;
+  const upstream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from("first"));
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  const client = createCoreClient({
+    config: {
+      gateway: {
+        coreHost: "127.0.0.1",
+        corePort: 43991,
+        generatedConfigFile: "/fixture/generated.json",
+      },
+    },
+    fetchImpl: async () => new Response(upstream, { status: 200 }),
+    readFile: () => generatedConfig(CORE_TOKEN),
+  });
+  const response = createRecordingResponse({ backpressure: true });
+  const controller = new AbortController();
+  const pending = client.forwardRaw({
+    body: Buffer.from("request"),
+    headers: {},
+    response,
+    signal: controller.signal,
+  });
+
+  await response.firstWrite;
+  controller.abort();
+  const outcome = await observePromptSettlement(pending, response);
+
+  assert.equal(outcome.status, "rejected");
+  assert.equal(outcome.error.name, "AbortError");
+  assert.equal(cancelled, true);
+});
+
 test("core client converts wildcard core hosts to connectable loopback hosts", async (t) => {
   const fixture = await createCoreFixture(t, { coreHost: "0.0.0.0" });
   const client = createCoreClient(fixture.options);
@@ -321,7 +448,7 @@ function generatedConfig(tokenEntry) {
   return JSON.stringify({ auth: { staticApiKeys: { keys: [tokenEntry] } } });
 }
 
-function createRecordingResponse({ backpressure = false } = {}) {
+function createRecordingResponse({ backpressure = false, endEvent = "finish" } = {}) {
   const chunks = [];
   let notifyFirstWrite;
   const firstWrite = new Promise((resolve) => {
@@ -346,7 +473,7 @@ function createRecordingResponse({ backpressure = false } = {}) {
     end(chunk) {
       if (chunk !== undefined) chunks.push(Buffer.from(chunk));
       this.ended = true;
-      this.emit("finish");
+      this.emit(endEvent);
     },
     releaseDrain() {
       backpressure = false;
@@ -357,4 +484,20 @@ function createRecordingResponse({ backpressure = false } = {}) {
     get: () => Buffer.concat(chunks),
   });
   return response;
+}
+
+async function observePromptSettlement(pending, response) {
+  const observed = pending.then(
+    (value) => ({ status: "resolved", value }),
+    (error) => ({ error, status: "rejected" }),
+  );
+  const outcome = await Promise.race([
+    observed,
+    new Promise((resolve) => setImmediate(() => resolve({ status: "pending" }))),
+  ]);
+  if (outcome.status === "pending") {
+    response.emit("error", new Error("test cleanup"));
+    await observed;
+  }
+  return outcome;
 }

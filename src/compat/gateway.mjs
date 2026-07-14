@@ -1,4 +1,3 @@
-import { once } from "node:events";
 import { readFileSync } from "node:fs";
 
 const SAFE_HEADER_NAMES = new Set([
@@ -50,7 +49,7 @@ export function createCoreClient({ config, fetchImpl = fetch, readFile = readFil
         body,
         signal,
       });
-      await pipeCoreResponse(result, response);
+      await pipeCoreResponse(result, response, signal);
     },
   };
 }
@@ -102,22 +101,24 @@ async function parseCoreMessageResponse(response) {
   return response.json();
 }
 
-async function pipeCoreResponse(result, response) {
+async function pipeCoreResponse(result, response, signal) {
   const headers = Object.fromEntries(result.headers);
   response.writeHead(result.status, headers);
   if (result.body === null) {
-    await endResponse(response);
+    await endResponse(response, signal);
     return;
   }
 
   const reader = result.body.getReader();
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await waitForPassthrough(reader.read(), response, signal);
       if (done) break;
-      if (!response.write(Buffer.from(value))) await once(response, "drain");
+      if (!response.write(Buffer.from(value))) {
+        await waitForResponseEvent(response, "drain", signal);
+      }
     }
-    await endResponse(response);
+    await endResponse(response, signal);
   } catch (error) {
     await reader.cancel(error).catch(() => {});
     throw error;
@@ -126,8 +127,80 @@ async function pipeCoreResponse(result, response) {
   }
 }
 
-async function endResponse(response) {
-  const finished = once(response, "finish");
+async function endResponse(response, signal) {
+  const finished = waitForResponseEvent(response, "finish", signal);
   response.end();
   await finished;
+}
+
+function waitForResponseEvent(response, eventName, signal) {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      response.off(eventName, onEvent);
+      response.off("close", onClose);
+      response.off("error", onError);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const settle = (callback, value) => {
+      cleanup();
+      callback(value);
+    };
+    const onEvent = () => settle(resolve);
+    const onClose = () => settle(reject, downstreamClosedError());
+    const onError = () => settle(reject, downstreamFailedError());
+    const onAbort = () => settle(reject, passthroughAbortError());
+
+    response.once(eventName, onEvent);
+    response.once("close", onClose);
+    response.once("error", onError);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (response.destroyed === true) onClose();
+    else if (signal?.aborted) onAbort();
+  });
+}
+
+function waitForPassthrough(operation, response, signal) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      response.off("close", onClose);
+      response.off("error", onError);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const settle = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+    const onClose = () => settle(reject, downstreamClosedError());
+    const onError = () => settle(reject, downstreamFailedError());
+    const onAbort = () => settle(reject, passthroughAbortError());
+
+    response.once("close", onClose);
+    response.once("error", onError);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve(operation).then(
+      (value) => settle(resolve, value),
+      (error) => settle(reject, error),
+    );
+    if (response.destroyed === true) onClose();
+    else if (signal?.aborted) onAbort();
+  });
+}
+
+function downstreamClosedError() {
+  return Object.assign(new Error("CCR passthrough downstream closed"), {
+    code: "ERR_STREAM_PREMATURE_CLOSE",
+  });
+}
+
+function downstreamFailedError() {
+  return Object.assign(new Error("CCR passthrough downstream failed"), {
+    code: "ERR_STREAM_DESTROYED",
+  });
+}
+
+function passthroughAbortError() {
+  return new DOMException("This operation was aborted", "AbortError");
 }
