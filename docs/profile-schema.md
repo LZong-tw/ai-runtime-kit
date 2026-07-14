@@ -119,9 +119,7 @@ registered` failures.
     "env": {
       "CCR_PROFILE": "{{profileName}}"
     },
-    "restore": {
-      "model": "claude-sonnet-4-6"
-    },
+    "claudeModel": "claude-sonnet-4-6",
     "defaultMode": "auto",
     "modes": {
       "auto": {},
@@ -140,10 +138,10 @@ registered` failures.
 - `binary`: Claude-compatible command, normally `claude`.
 - `args`: base arguments before user passthrough arguments.
 - `env`: non-secret launch environment. Values may use `{{profileName}}`,
-  `{{configDir}}`, `{{launchMode}}`, `{{restoreModel}}`,
+  `{{configDir}}`, `{{launchMode}}`, `{{claudeModel}}`,
   `{{statuslineLabel}}`, and default/background route variables.
-- `restore.model`: Claude-recognized model used for persisted-session repair.
-- `restore.models`: optional previously stored aliases to repair.
+- `claudeModel`: Claude-recognized model passed only as the launched process's
+  `--model` argument.
 - `defaultMode`: mode selected by plain `airclaude`.
 - `modes.<name>.ccr`: partial CCR overlay for that managed mode.
 
@@ -153,9 +151,11 @@ a separate `scope: "ccr"` profile whose model selectors reference the managed
 provider identity. It does not sync a live CCR JSON file or invoke CCR 2
 start/restart/activate commands.
 
-When `restore.model` is present, AirKit may repair persisted Claude session
-metadata after backing it up. Provider credentials are passed to CCR management
-state and are never written to rendered profile files or command output.
+AirKit never writes `claudeModel` into Claude settings or transcripts. Claude
+Code owns `/model` and its normal model-choice persistence, so a routed launch
+does not replace the user's global choice. Provider credentials are passed to
+CCR management state and are never written to rendered profile files or command
+output.
 
 ## Shell fields
 

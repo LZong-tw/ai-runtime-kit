@@ -15,12 +15,14 @@
     "docs/profile-schema.md",
     "docs/runtime-lessons.md",
     "profiles",
+    "scripts/verify-ccr3-e2e.mjs",
     "src"
   ],
   "scripts": {
     "check": "node --check src/airkit.mjs",
     "pack:check": "npm pack --dry-run",
     "test": "node --test",
+    "verify:ccr3:e2e": "node scripts/verify-ccr3-e2e.mjs",
     "verify": "npm test && npm run check && npm run pack:check"
   },
   "engines": {

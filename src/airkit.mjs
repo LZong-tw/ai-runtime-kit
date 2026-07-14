@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 
-import { access, chmod, copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
@@ -94,13 +95,13 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
   );
   const managedProfiles = modes.map((mode) => {
     const modeConfig = applyLaunchModeOverlay(structuredClone(baseConfig), profile, mode, templateVars);
-    const restore = resolveRestoreRepairConfig(profile);
-    const launchVars = launchTemplateVars(profile, configDir, mode, modeConfig, restore);
+    const claudeModel = resolveClaudeLaunchModel(profile);
+    const launchVars = launchTemplateVars(profile, configDir, mode, modeConfig, claudeModel);
     return {
       agent: "claude-code",
       enabled: true,
       env: {
-        ...airclaudeLaunchEnv(catalog, profile, mode, modeConfig, restore),
+        ...airclaudeLaunchEnv(catalog, profile, mode, modeConfig, options.env),
         ...renderTemplateValue(launch.env ?? {}, launchVars),
         CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
       },
@@ -171,7 +172,7 @@ export function buildShellSnippet(catalog, profileName, options = {}) {
     const wrapperEnv = {};
     for (const [key, value] of Object.entries(wrapper.env ?? {})) {
       wrapperEnv[key] = renderTemplateValue(value, templateVars);
-      lines.push(`  export ${key}=${quoteShell(wrapperEnv[key])}`);
+      lines.push(`  local -x ${key}=${quoteShell(wrapperEnv[key])}`);
     }
     if (profile.ccr) {
       const mode = wrapperEnv.AIRCLAUDE_MODE ?? profile.launch?.defaultMode ?? "auto";
@@ -186,7 +187,7 @@ export function buildShellSnippet(catalog, profileName, options = {}) {
     const rawWrapperArgs = withAirclaudeModelArg(
       (wrapper.args ?? []).map((arg) => renderTemplateValue(arg, templateVars)),
       wrapper.command,
-      resolveRestoreRepairConfig(profile),
+      resolveClaudeLaunchModel(profile),
     );
     const effectiveWrapperArgs = isAirclaudeLauncher
       ? appendRuntimePrompts(rawWrapperArgs, [reusableRuntimeLessonsPrompt])
@@ -211,10 +212,15 @@ export async function exportOssRelease({ outDir }) {
 
   await mkdir(join(outDir, "src"), { recursive: true });
   await mkdir(join(outDir, "profiles"), { recursive: true });
+  await mkdir(join(outDir, "scripts"), { recursive: true });
   const binPath = join(outDir, "src", "airkit.mjs");
   await writeFile(binPath, await readFile(fileURLToPath(import.meta.url), "utf8"));
   await chmod(binPath, 0o755);
   await writeFile(join(outDir, "profiles", "catalog.json"), `${JSON.stringify(publicCatalog, null, 2)}\n`);
+  await writeFile(
+    join(outDir, "scripts", "verify-ccr3-e2e.mjs"),
+    await readFile(join(repoRoot, "scripts", "verify-ccr3-e2e.mjs"), "utf8"),
+  );
   await writeFile(join(outDir, "package.json"), `${JSON.stringify(publicPackage(), null, 2)}\n`);
   await writeFile(join(outDir, "CLAUDE.md"), claudeGuide());
   await writeFile(join(outDir, "README.md"), publicReadme());
@@ -333,20 +339,20 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
   assertCcr3Compatible(ccrConfig);
   const logOverride = resolveCcrLogOverride(options.env ?? process.env);
   if (logOverride !== undefined) ccrConfig.LOG = logOverride;
-  const restore = resolveRestoreRepairConfig(profile);
-  const launchVars = launchTemplateVars(profile, configDir, mode, ccrConfig, restore);
+  const claudeModel = resolveClaudeLaunchModel(profile);
+  const launchVars = launchTemplateVars(profile, configDir, mode, ccrConfig, claudeModel);
   const basePlan = planInstall(catalog, profileName, { configDir, write: true, force: true });
   const managedProfileId = `airkit-${slug(profile.name)}-${slug(mode)}`;
   const claudeArgs = appendLaunchRuntimePrompts(
     withAirclaudeModelArg(
       (launch.args ?? []).map((arg) => renderTemplateValue(arg, launchVars)),
       launch.binary,
-      restore,
+      claudeModel,
     ),
     launch.binary,
     mode,
     ccrConfig,
-    restore,
+    claudeModel,
   );
 
   return {
@@ -363,7 +369,7 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
       command: "ccr",
       args: [managedProfileId, "cli", "--", ...claudeArgs],
       env: {
-        ...airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, restore),
+        ...airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, options.env),
         ...renderTemplateValue(launch.env ?? {}, launchVars),
       },
       userArgs: options.userArgs ?? [],
@@ -401,22 +407,15 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     configDir: plan.configDir,
     env: options.env,
   });
-  if (JSON.stringify(managed.config) !== JSON.stringify(currentConfig)) {
+  if (!isDeepStrictEqual(managed.config, currentConfig)) {
     await ccrClient.saveConfig(managed.config);
   }
-  const restoreRepair = options.repairRestore === false
-    ? { enabled: false, backups: [], repairedFiles: 0, repairedLines: 0, scannedFiles: 0 }
-    : await repairClaudeRestoreSessions(catalog, profileName, {
-        backupsDir: options.backupsDir,
-        projectsDir: options.projectsDir,
-        write: true,
-      });
-
   let child = null;
   if (options.launch !== false) {
+    await ccrClient.ensureGateway();
     const spawnCommand = options.spawnCommand ?? spawnCommandSync;
     child = spawnCommand(plan.launch.command, [...plan.launch.args, ...plan.launch.userArgs], {
-      env: plan.launch.env,
+      env: { ...(options.env ?? process.env), ...plan.launch.env },
       stdio: "inherit",
     });
   }
@@ -427,54 +426,8 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     files: await planLaunchFiles(plan, rendered),
     liveCcrConfig: { ...plan.liveCcrConfig, status: "managed" },
     runtime,
-    restoreRepair,
     child,
   };
-}
-
-export async function repairClaudeRestoreSessions(catalog, profileName, options = {}) {
-  const profile = findProfile(catalog, profileName);
-  const restore = resolveRestoreRepairConfig(profile);
-  const projectsDir = resolve(options.projectsDir ?? claudeRestoreProjectsDir());
-  const result = {
-    profile: { name: profile.name, summary: profile.summary, visibility: profile.visibility },
-    enabled: Boolean(restore),
-    model: restore?.model ?? null,
-    projectsDir,
-    backupsDir: null,
-    scannedFiles: 0,
-    repairedFiles: 0,
-    repairedLines: 0,
-    backups: [],
-    write: options.write !== false,
-  };
-  if (!restore) return result;
-
-  const files = await listClaudeSessionFiles(projectsDir);
-  result.scannedFiles = files.length;
-
-  for (const file of files) {
-    const original = await readFile(file, "utf8");
-    const repaired = repairClaudeSessionText(original, restore);
-    if (repaired.repairedLines === 0) continue;
-
-    result.repairedFiles += 1;
-    result.repairedLines += repaired.repairedLines;
-    if (!result.write) continue;
-
-    if (!result.backupsDir) {
-      result.backupsDir = resolve(
-        options.backupsDir ?? join(homedir(), ".claude", "backups", `airkit-restore-${timestampForPath()}`),
-      );
-      await mkdir(result.backupsDir, { recursive: true });
-    }
-    const backup = restoreBackupPath(result.backupsDir, projectsDir, file);
-    await copyFile(file, backup);
-    await writeFile(file, repaired.text);
-    result.backups.push(backup);
-  }
-
-  return result;
 }
 
 export async function doctorProfile(catalog, profileName, options = {}) {
@@ -567,12 +520,14 @@ function publicPackage() {
       "docs/profile-schema.md",
       "docs/runtime-lessons.md",
       "profiles",
+      "scripts/verify-ccr3-e2e.mjs",
       "src",
     ],
     scripts: {
       check: "node --check src/airkit.mjs",
       "pack:check": "npm pack --dry-run",
       test: "node --test",
+      "verify:ccr3:e2e": "node scripts/verify-ccr3-e2e.mjs",
       verify: "npm test && npm run check && npm run pack:check",
     },
     engines: { node: RUNTIME_REQUIREMENTS.node },
@@ -734,16 +689,6 @@ export async function runAirclaudeCli(argv = process.argv.slice(2), options = {}
   const validModes = new Set(["auto", "pro", ...Object.keys(preProfile?.launch?.modes ?? {})]);
   const parsed = parseAirclaudeArgs(argv, validModes);
   const profile = parsed.profile ?? process.env.AIRCLAUDE_PROFILE ?? defaultLaunchProfile(catalog);
-  if (parsed.repairRestore) {
-    const result = await repairClaudeRestoreSessions(catalog, profile, {
-      backupsDir: parsed.backupsDir ?? options.backupsDir,
-      projectsDir: parsed.projectsDir ?? options.projectsDir,
-      write: true,
-    });
-    stdout.write(renderRestoreRepairResult(result));
-    return 0;
-  }
-
   const result = await prepareLaunch(catalog, profile, {
     ...options,
     configDir: parsed.configDir ?? options.configDir ?? defaultConfigDir(),
@@ -751,8 +696,6 @@ export async function runAirclaudeCli(argv = process.argv.slice(2), options = {}
     dryRun: parsed.dryRun || parsed.doctor,
     launch: !parsed.dryRun && !parsed.doctor,
     mode: parsed.mode,
-    backupsDir: parsed.backupsDir ?? options.backupsDir,
-    projectsDir: parsed.projectsDir ?? options.projectsDir,
     userArgs: parsed.userArgs,
   });
   stdout.write(renderLaunchResult(result, { doctor: parsed.doctor, dryRun: parsed.dryRun }));
@@ -795,12 +738,8 @@ function parseAirclaudeArgs(argv, validModes = new Set(["auto", "pro"])) {
       parsed.dryRun = true;
     } else if (arg === "--doctor") {
       parsed.doctor = true;
-    } else if (arg === "--repair-restore") {
-      parsed.repairRestore = true;
-    } else if (arg === "--restore-projects-dir") {
-      parsed.projectsDir = ownArgs[++index];
-    } else if (arg === "--restore-backups-dir") {
-      parsed.backupsDir = ownArgs[++index];
+    } else if (["--repair-restore", "--restore-projects-dir", "--restore-backups-dir"].includes(arg)) {
+      throw new Error(`${arg} was removed; AirKit no longer reads or rewrites Claude Code session model state`);
     } else if (validModes.has(arg) && !parsed.mode) {
       parsed.mode = arg;
     } else {
@@ -899,14 +838,12 @@ Options:
   --mode <mode>          Select a profile-defined mode without positional syntax.
   --dry-run              Render and report the launch plan without writing or launching.
   --doctor               Run launch preflight checks without launching.
-  --repair-restore       Repair persisted Claude Code session model metadata and exit.
   -h, --help             Show this help.
 
 Examples:
   airclaude
   airclaude pro
   airclaude --doctor
-  airclaude --repair-restore
   airclaude -- --dangerously-skip-permissions
 `;
 }
@@ -989,33 +926,9 @@ ${fileLines.join("\n")}
 
 Runtime:
 ${runtimeLines.join("\n") || "- skipped"}
-${result.restoreRepair ? `\nRestore repair:\n${renderRestoreRepairSummary(result.restoreRepair)}` : ""}
-
 Launch:
 - ${result.launch.command} ${[...result.launch.args, ...result.launch.userArgs].map(quoteShell).join(" ")}
 `;
-}
-
-function renderRestoreRepairResult(result) {
-  return `Restore repair airclaude profile: ${result.profile.name}
-restore model: ${result.model ?? "disabled"}
-projects dir: ${result.projectsDir}
-scanned files: ${result.scannedFiles}
-repaired files: ${result.repairedFiles}
-repaired lines: ${result.repairedLines}
-${result.backups.length ? `backups: ${result.backups.length} (${result.backupsDir})` : "backups: 0"}
-`;
-}
-
-function renderRestoreRepairSummary(result) {
-  if (!result.enabled) return "- disabled";
-  return [
-    `- restore model: ${result.model}`,
-    `- scanned files: ${result.scannedFiles}`,
-    `- repaired files: ${result.repairedFiles}`,
-    `- repaired lines: ${result.repairedLines}`,
-    `- backups: ${result.backups.length}${result.backupsDir ? ` (${result.backupsDir})` : ""}`,
-  ].join("\n");
 }
 
 function renderProfile(catalog, profileName, options = {}) {
@@ -1067,22 +980,20 @@ function mergeAppendSystemPrompt(args, prompt) {
   return next;
 }
 
-function appendLaunchRuntimePrompts(args, binary, mode, ccrConfig, restore) {
+function appendLaunchRuntimePrompts(args, binary, mode, ccrConfig, claudeModel) {
   if (!shouldAppendReusableRuntimeLessons(binary)) return args;
-  return appendRuntimePrompts(args, [airclaudeRoutingPrompt(mode, ccrConfig, restore)]);
+  return appendRuntimePrompts(args, [airclaudeRoutingPrompt(mode, ccrConfig, claudeModel)]);
 }
 
-// airclaude launchers must pass the masked restore model as `--model` so a FRESH
-// session gets the masked window (e.g. the `[1m]` 1M suffix) too. restore.model alone
-// only fixes RESUMED sessions — resolveRestoreRepairConfig rewrites persisted
-// message.model on resume, but a brand-new session has nothing to repair and would
-// otherwise fall back to Claude Code's default model (no `[1m]`) → a 200K window.
+// AirClaude launchers pass their Claude-compatible display model as `--model` for
+// this managed launch only. AirKit never persists it to Claude settings or session
+// transcripts, so Claude Code remains the owner of the user's saved model choice.
 // Appended (not prepended) so existing arg order is preserved; a user `--model` passed
 // after these base args (e.g. `airclaude -- --model …`) still wins.
-function withAirclaudeModelArg(args, binary, restore) {
-  if (!shouldAppendReusableRuntimeLessons(binary) || !restore?.model) return args;
+function withAirclaudeModelArg(args, binary, claudeModel) {
+  if (!shouldAppendReusableRuntimeLessons(binary) || !claudeModel) return args;
   if (args.includes("--model")) return args;
-  return [...args, "--model", restore.model];
+  return [...args, "--model", claudeModel];
 }
 
 function appendRuntimePrompts(args, prompts) {
@@ -1106,11 +1017,11 @@ function applyLaunchModeOverlay(ccrConfig, profile, mode, templateVars) {
   return mergeDeep(ccrConfig, renderTemplateValue(overlay, templateVars));
 }
 
-function launchTemplateVars(profile, configDir, mode, ccrConfig, restore) {
+function launchTemplateVars(profile, configDir, mode, ccrConfig, claudeModel) {
   const vars = {
     ...profileTemplateVars(profile, configDir),
     launchMode: mode,
-    restoreModel: restore?.model ?? "",
+    claudeModel: claudeModel ?? "",
     statuslineLabel: statuslineLabel(mode, ccrConfig),
   };
 
@@ -1126,27 +1037,26 @@ function launchTemplateVars(profile, configDir, mode, ccrConfig, restore) {
   return vars;
 }
 
-function airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, restore) {
+function airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, runtimeEnv = process.env) {
+  const home = runtimeEnv.CCR_INTERNAL_HOME_DIR ?? runtimeEnv.HOME ?? homedir();
   const env = {
     AIRCLAUDE_PROFILE: profile.name,
     AIRCLAUDE_MODE: mode,
     AIRCLAUDE_STATUSLINE_LABEL: statuslineLabel(mode, ccrConfig),
-    AIRCLAUDE_RESTORE_MODEL: restore?.model ?? "",
-    CLAUDE_STATUSLINE_CACHE_DIR: join(homedir(), ".claude", "cache", "airclaude", profile.name, mode),
+    CLAUDE_STATUSLINE_CACHE_DIR: join(home, ".claude", "cache", "airclaude", profile.name, mode),
     // NOTE: there is no env var that enables Claude Code's 1M context window. (ANTHROPIC_1M_CONTEXT
     // is a no-op — it does not appear in the 2.1.178 binary.) 1M is gated purely on the resolved
     // model string ending in the literal suffix `[1m]` (Jf = /\[1m\]/i, checked first in the window
     // resolver), with CLAUDE_CODE_DISABLE_1M_CONTEXT as the only opt-out. So 1M is achieved by giving
-    // the masked restore model a `[1m]` suffix (launch.restore.model: claude-sonnet-4-6[1m]); the API
+    // the launch model a `[1m]` suffix (launch.claudeModel: claude-sonnet-4-6[1m]); the API
     // id is normalized back to claude-sonnet-4-6 on the wire, so the suffix is a Claude-Code-local
-    // marker and the gateway never sees it. See resolveRestoreRepairConfig / the profile restore block.
+    // marker and the gateway never sees it. See resolveClaudeLaunchModel.
     // Claude Code sources the user's zsh snapshot in its non-interactive command shells. A
     // Powerlevel10k instant prompt there re-evals its git/dir segments and spams
     // "(eval): command not found: git/head/awk/dirname/basename". Quiet it for the launched
     // process only; the user's interactive P10k prompt and .zshrc are untouched.
     POWERLEVEL9K_INSTANT_PROMPT: "off",
   };
-
   const statuslineInputPrice = routeInputPrice(catalog, profile, ccrConfig.Router?.default);
   if (statuslineInputPrice !== null) {
     env.AIRCLAUDE_STATUSLINE_INPUT_PRICE_PER_MILLION = String(statuslineInputPrice);
@@ -1216,7 +1126,7 @@ function inputPriceFromValue(value) {
   return Number.isFinite(input) && input > 0 ? input : null;
 }
 
-function airclaudeRoutingPrompt(mode, ccrConfig, restore) {
+function airclaudeRoutingPrompt(mode, ccrConfig, claudeModel) {
   if (!ccrConfig?.Router || typeof ccrConfig.Router !== "object") return "";
 
   const routeLines = sortedRouterEntries(ccrConfig.Router).map(([key, route]) => {
@@ -1229,9 +1139,9 @@ function airclaudeRoutingPrompt(mode, ccrConfig, restore) {
     `- mode: ${mode}`,
     "- AirClaude mode is routing mode, not Claude Code permission mode.",
     ...routeLines,
-    restore?.model
-      ? `- Claude restore/display model is compatibility metadata only: ${restore.model}`
-      : "- Claude restore/display model is compatibility metadata only.",
+    claudeModel
+      ? `- Claude launch/display model is compatibility metadata only: ${claudeModel}`
+      : "- Claude launch/display model is compatibility metadata only.",
     "- Do not infer the active provider route from Claude Code's displayed model name.",
     "- background/tool-heavy work may use the background route when the runtime/router selects it.",
     "- When compacting, restoring, summarizing, or reporting status, preserve AirClaude mode and provider routes separately from Claude-compatible display metadata.",
@@ -1295,81 +1205,8 @@ function toEnvKey(value) {
     .toUpperCase();
 }
 
-function resolveRestoreRepairConfig(profile) {
-  const model = profile.launch?.restore?.model;
-  if (!model) return null;
-
-  const replaceModels = new Set(profile.launch?.restore?.models ?? []);
-  for (const provider of profile.ccr?.Providers ?? []) {
-    for (const providerModel of provider.models ?? []) {
-      replaceModels.add(providerModel);
-      if (provider.name) replaceModels.add(`${provider.name},${providerModel}`);
-    }
-  }
-  for (const routerModel of Object.values(profile.ccr?.Router ?? {})) {
-    if (typeof routerModel === "string") replaceModels.add(routerModel);
-  }
-  replaceModels.delete(model);
-  return { model, replaceModels };
-}
-
-function claudeRestoreProjectsDir() {
-  return join(homedir(), ".claude", "projects");
-}
-
-async function listClaudeSessionFiles(root) {
-  let entries;
-  try {
-    entries = await readdir(root, { withFileTypes: true });
-  } catch (error) {
-    if (error?.code === "ENOENT") return [];
-    throw error;
-  }
-
-  const files = [];
-  for (const entry of entries) {
-    const path = join(root, entry.name);
-    if (entry.isDirectory()) {
-      files.push(...(await listClaudeSessionFiles(path)));
-    } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
-      files.push(path);
-    }
-  }
-  return files.sort();
-}
-
-function repairClaudeSessionText(text, restore) {
-  let repairedLines = 0;
-  const lines = text.split("\n").map((line) => {
-    if (!line) return line;
-
-    let record;
-    try {
-      record = JSON.parse(line);
-    } catch {
-      return line;
-    }
-
-    if (!repairMessageModel(record, restore)) return line;
-    repairedLines += 1;
-    return JSON.stringify(record);
-  });
-
-  return { text: lines.join("\n"), repairedLines };
-}
-
-function repairMessageModel(record, restore) {
-  const message = record?.message;
-  if (!message || typeof message !== "object") return false;
-  if (typeof message.model !== "string") return false;
-  if (!restore.replaceModels.has(message.model)) return false;
-  message.model = restore.model;
-  return true;
-}
-
-function restoreBackupPath(backupsDir, projectsDir, file) {
-  const relativePath = relative(projectsDir, file).replaceAll(/[\\/]+/g, "__");
-  return join(backupsDir, `${relativePath}.bak`);
+function resolveClaudeLaunchModel(profile) {
+  return profile.launch?.claudeModel ?? null;
 }
 
 function timestampForPath() {
@@ -1634,7 +1471,7 @@ async function resolveProviderApiKeys(catalog, profileName, plan, options) {
   return apiKeys;
 }
 
-function createCcr3Client(options = {}) {
+export function createCcr3Client(options = {}) {
   const stateDir = defaultCcrStateDir(options.env);
   const runCommand = options.runCommand ?? runCommandSync;
   const fetchImpl = options.fetch ?? globalThis.fetch;
@@ -1664,6 +1501,7 @@ function createCcr3Client(options = {}) {
         method: "POST",
         headers: { "content-type": "application/json", origin: serviceUrl.origin, "x-ccr-web-auth": token },
         body: JSON.stringify({ method, args }),
+        signal: AbortSignal.timeout(options.rpcTimeoutMs ?? 5_000),
       });
     let response;
     try {
@@ -1684,7 +1522,49 @@ function createCcr3Client(options = {}) {
     getConfig: () => rpc("getConfig"),
     getVersion: async () => (await rpc("getAppInfo")).version,
     saveConfig: (config) => rpc("saveConfig", [config, { applyProfile: false }]),
+    ensureGateway: () => ensureCcr3Gateway({
+      fetchImpl,
+      getConfig: () => rpc("getConfig"),
+      healthTimeoutMs: options.gatewayHealthTimeoutMs,
+      pollAttempts: options.gatewayPollAttempts,
+      pollIntervalMs: options.gatewayPollIntervalMs,
+      startGateway: () => rpc("startGateway"),
+    }),
   };
+}
+
+export function resolveCcrGatewayEndpoint(config) {
+  const bindHost = config.gateway?.host ?? config.HOST;
+  const port = config.gateway?.port ?? config.PORT;
+  if (!bindHost || !Number.isInteger(Number(port))) {
+    throw new Error("CCR config does not define a gateway host and port");
+  }
+  const host = bindHost === "0.0.0.0" ? "127.0.0.1" : bindHost === "::" ? "::1" : bindHost;
+  const authority = host.includes(":") ? `[${host}]` : host;
+  return new URL(`http://${authority}:${port}`);
+}
+
+export async function ensureCcr3Gateway(options) {
+  const endpoint = resolveCcrGatewayEndpoint(await options.getConfig());
+  const healthUrl = new URL("/health", endpoint);
+  const healthy = async () => {
+    try {
+      return (await options.fetchImpl(healthUrl, {
+        signal: AbortSignal.timeout(options.healthTimeoutMs ?? 1_000),
+      })).ok;
+    } catch {
+      return false;
+    }
+  };
+  if (await healthy()) return endpoint.origin;
+  await options.startGateway();
+  const pollAttempts = options.pollAttempts ?? 50;
+  const pollIntervalMs = options.pollIntervalMs ?? 100;
+  for (let attempt = 0; attempt < pollAttempts; attempt += 1) {
+    if (await healthy()) return endpoint.origin;
+    if (pollIntervalMs > 0) await new Promise((done) => setTimeout(done, pollIntervalMs));
+  }
+  throw new Error(`CCR gateway is not healthy at ${endpoint.origin}`);
 }
 
 function renderManagedFiles(profile, options = {}) {
@@ -1803,7 +1683,7 @@ function commandExistsOnPath(command) {
 function runCommandSync(command, args = [], options = {}) {
   const result = spawnSync(command, args, {
     encoding: "utf8",
-    env: { ...process.env, ...(options.env ?? {}) },
+    env: options.env ?? process.env,
     timeout: options.timeoutMs ?? 30000,
   });
   const stderr = [result.stderr?.trim(), result.error?.message].filter(Boolean).join("\n");
@@ -1819,7 +1699,7 @@ function runCommandSync(command, args = [], options = {}) {
 function spawnCommandSync(command, args = [], options = {}) {
   return spawnSync(command, args, {
     stdio: options.stdio ?? "inherit",
-    env: { ...process.env, ...(options.env ?? {}) },
+    env: options.env ?? process.env,
   });
 }
 
@@ -1853,8 +1733,7 @@ function profileTemplateVars(profile, configDir = defaultConfigDir()) {
   return {
     configDir: resolve(configDir),
     profileName: profile.name,
-    // Restore repair uses this masked identity for persisted Claude session metadata.
-    restoreModel: profile.launch?.restore?.model ?? "",
+    claudeModel: profile.launch?.claudeModel ?? "",
   };
 }
 

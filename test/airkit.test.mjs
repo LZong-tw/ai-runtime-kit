@@ -15,7 +15,6 @@ import {
   installProfile,
   loadCatalog,
   prepareLaunch,
-  repairClaudeRestoreSessions,
   runAirclaudeCli,
   runCli,
   updateProfile,
@@ -44,6 +43,7 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
     "docs/profile-schema.md",
     "docs/runtime-lessons.md",
     "profiles",
+    "scripts/verify-ccr3-e2e.mjs",
     "src",
   ];
   const packageJson = JSON.parse(
@@ -57,6 +57,10 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
 
     assert.deepEqual(packageJson.files, expectedFiles);
     assert.deepEqual(exportedPackage.files, expectedFiles);
+    assert.equal(
+      await readFile(join(outDir, "scripts", "verify-ccr3-e2e.mjs"), "utf8"),
+      await readFile(resolve(import.meta.dirname, "..", "scripts", "verify-ccr3-e2e.mjs"), "utf8"),
+    );
   } finally {
     await rm(outDir, { force: true, recursive: true });
   }
@@ -90,7 +94,11 @@ test("CCR 3 merge creates CCR-only mode profiles and preserves unrelated configu
     launchCatalog(),
     "launch-example",
     current,
-    { apiKeys: { demo: "resolved-at-runtime" }, configDir: "/tmp/airkit-config" },
+    {
+      apiKeys: { demo: "resolved-at-runtime" },
+      configDir: "/tmp/airkit-config",
+      env: { HOME: "/tmp/airkit-isolated-home" },
+    },
   );
 
   assert.equal(merged.config.Providers[0].name, "unrelated");
@@ -128,6 +136,7 @@ test("CCR 3 merge creates CCR-only mode profiles and preserves unrelated configu
     candidate.id.startsWith("airkit-launch-example-"))) {
     assert.match(managedProfile.settingsFile, /^\/tmp\/airkit-config\/ccr-profiles\//);
     assert.notEqual(managedProfile.settingsFile, "~/.claude/settings.json");
+    assert.match(managedProfile.env.CLAUDE_STATUSLINE_CACHE_DIR, /^\/tmp\/airkit-isolated-home\//);
   }
   assert.ok(merged.config.profile.profiles.some((candidate) => candidate.id === "unrelated-profile"));
   assert.ok(merged.config.Router.rules.some((rule) => rule.id === "unrelated-rule"));
@@ -276,7 +285,6 @@ test("CCR 3 launch path uses the managed profile and never invokes CCR 2 command
 
   try {
     const result = await prepareLaunch(launchCatalog(), "launch-example", {
-      backupsDir: join(configDir, "backups"),
       ccrClient,
       commandExists: async (command) => ["ccr", "claude"].includes(command),
       configDir,
@@ -284,8 +292,6 @@ test("CCR 3 launch path uses the managed profile and never invokes CCR 2 command
       launch: false,
       liveCcrConfig: join(configDir, "live", "config.json"),
       mode: "pro",
-      projectsDir: join(configDir, "projects"),
-      repairRestore: false,
       runCommand: async (command, args) => {
         calls.push({ command, args });
         return {
@@ -394,7 +400,7 @@ test("airclaude launch injects reusable runtime lessons", async () => {
   assert.match(prompt, /default: openai-compatible,steady-coder \(model steady-coder\)/);
   assert.match(prompt, /background: openai-compatible,fast-coder \(model fast-coder\)/);
   assert.doesNotMatch(prompt, /- think:|- longContext:|- webSearch:/);
-  assert.match(prompt, /Claude restore\/display model is compatibility metadata only/);
+  assert.match(prompt, /Claude launch\/display model is compatibility metadata only/);
 });
 
 test("generated shell wrappers delegate to the managed CCR 3 launch path", async () => {
@@ -403,6 +409,8 @@ test("generated shell wrappers delegate to the managed CCR 3 launch path", async
 
   assert.match(snippet, /airclaude-example\(\)/);
   assert.match(snippet, /command airclaude --profile 'openai-compatible-example' --/);
+  assert.match(snippet, /local -x CCR_PROFILE=/);
+  assert.doesNotMatch(snippet, /\n  export CCR_PROFILE=/);
   assert.doesNotMatch(snippet, /\n  cclaude /);
 });
 
@@ -580,7 +588,7 @@ test("buildLaunchPlan applies pro mode CCR routing overlay without mutating the 
     ]);
     assert.match(
       plan.launch.args[6],
-      /AirClaude mode pro routes default to strong-coder while Claude restore uses claude-sonnet-4-6\./,
+      /AirClaude mode pro routes default to strong-coder while Claude launch uses claude-sonnet-4-6\./,
     );
     assert.match(plan.launch.args[6], /AirKit reusable runtime lessons/);
     assert.match(plan.launch.args[6], /AirClaude active routing/);
@@ -597,7 +605,7 @@ test("buildLaunchPlan applies pro mode CCR routing overlay without mutating the 
     assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_LONG_CONTEXT_MODEL, undefined);
     assert.equal(plan.launch.env.AIRCLAUDE_STATUSLINE_LABEL, "airclaude pro strong-coder");
     assert.equal(plan.launch.env.AIRCLAUDE_STATUSLINE_INPUT_PRICE_PER_MILLION, "2");
-    assert.equal(plan.launch.env.AIRCLAUDE_RESTORE_MODEL, "claude-sonnet-4-6");
+    assert.equal(plan.launch.env.AIRCLAUDE_RESTORE_MODEL, undefined);
     assert.match(plan.launch.env.CLAUDE_STATUSLINE_CACHE_DIR, /\/\.claude\/cache\/airclaude\/launch-example\/pro$/);
     assert.deepEqual(plan.launch.userArgs, []);
   } finally {
@@ -627,7 +635,7 @@ test("airclaude launch does not set the dead ANTHROPIC_1M_CONTEXT env (1M comes 
   try {
     const plan = buildLaunchPlan(catalog, "launch-example", { configDir });
     // 1M context is NOT enabled by any env var (ANTHROPIC_1M_CONTEXT is a no-op in Claude Code 2.1.178);
-    // it is gated on the resolved model string ending in `[1m]`, so the lever is launch.restore.model,
+    // it is gated on the resolved model string ending in `[1m]`, so the lever is launch.claudeModel,
     // not the launch env. Guard against re-introducing the dead env var.
     assert.equal(plan.launch.env.ANTHROPIC_1M_CONTEXT, undefined);
   } finally {
@@ -667,14 +675,16 @@ test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves
   const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-write-"));
   const spawned = [];
   const saved = [];
+  const launchEvents = [];
 
   try {
+    const ccrClient = ccrTestClient(saved);
+    ccrClient.ensureGateway = async () => launchEvents.push("gateway-ready");
     const result = await prepareLaunch(catalog, "launch-example", {
       configDir,
-      ccrClient: ccrTestClient(saved),
+      ccrClient,
       mode: "pro",
-      env: { DEMO_API_KEY: "runtime-secret" },
-      repairRestore: false,
+      env: { DEMO_API_KEY: "runtime-secret", HOME: "/tmp/airkit-isolated-home" },
       runtimeVersions: passingRuntimeVersions(),
       userArgs: ["--dangerously-skip-permissions"],
       commandExists: async (command) => ["ccr", "claude"].includes(command),
@@ -684,6 +694,7 @@ test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves
         stdout: command === "ccr" && args[0] === "activate" ? 'export ANTHROPIC_BASE_URL="http://127.0.0.1:3456"\n' : "",
       }),
       spawnCommand: (command, args, options) => {
+        launchEvents.push("profile-launch");
         spawned.push({ command, args, env: options.env });
         return { status: 0 };
       },
@@ -696,6 +707,7 @@ test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves
       "airkit-provider-launch-example-demo/strong-coder",
     );
     assert.equal(spawned.length, 1);
+    assert.deepEqual(launchEvents, ["gateway-ready", "profile-launch"]);
     assert.equal(spawned[0].command, "ccr");
     assert.deepEqual(spawned[0].args.slice(0, 6), [
       "airkit-launch-example-pro",
@@ -707,21 +719,22 @@ test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves
     ]);
     assert.match(
       spawned[0].args[6],
-      /AirClaude mode pro routes default to strong-coder while Claude restore uses claude-sonnet-4-6\./,
+      /AirClaude mode pro routes default to strong-coder while Claude launch uses claude-sonnet-4-6\./,
     );
     assert.match(spawned[0].args[6], /AirKit reusable runtime lessons/);
     assert.match(spawned[0].args[6], /AirClaude active routing/);
     assert.match(spawned[0].args[6], /mode: pro/);
     assert.match(spawned[0].args[6], /background: demo,cheap-coder \(model cheap-coder\)/);
-    // airclaude pins the masked restore model as --model so FRESH sessions get the
-  // masked window too; user passthrough args still follow (and would override).
+    // AirClaude selects its display model for this launch only; passthrough args
+    // still follow and can override it for the same process.
   assert.equal(spawned[0].args[7], "--model");
   assert.equal(spawned[0].args[8], "claude-sonnet-4-6");
   assert.equal(spawned[0].args.at(-1), "--dangerously-skip-permissions");
     assert.deepEqual(spawned[0].env, {
+      DEMO_API_KEY: "runtime-secret",
+      HOME: "/tmp/airkit-isolated-home",
       AIRCLAUDE_MODE: "pro",
       AIRCLAUDE_PROFILE: "launch-example",
-      AIRCLAUDE_RESTORE_MODEL: "claude-sonnet-4-6",
       AIRCLAUDE_ROUTE_BACKGROUND: "demo,cheap-coder",
       AIRCLAUDE_ROUTE_BACKGROUND_MODEL: "cheap-coder",
       AIRCLAUDE_ROUTE_BACKGROUND_PROVIDER: "demo",
@@ -730,7 +743,7 @@ test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves
       AIRCLAUDE_ROUTE_DEFAULT_PROVIDER: "demo",
       AIRCLAUDE_STATUSLINE_INPUT_PRICE_PER_MILLION: "2",
       AIRCLAUDE_STATUSLINE_LABEL: "airclaude pro strong-coder",
-      CLAUDE_STATUSLINE_CACHE_DIR: join(homedir(), ".claude", "cache", "airclaude", "launch-example", "pro"),
+      CLAUDE_STATUSLINE_CACHE_DIR: "/tmp/airkit-isolated-home/.claude/cache/airclaude/launch-example/pro",
       POWERLEVEL9K_INSTANT_PROMPT: "off",
       CCR_PROFILE: "launch-example",
     });
@@ -753,7 +766,6 @@ test("prepareLaunch resolves ccrTokenOpRef once for the CCR 3 config merge", asy
       commandExists: async (command) => ["ccr", "claude", "op"].includes(command),
       env: {},
       launch: false,
-      repairRestore: false,
       runtimeVersions: passingRuntimeVersions(),
       runCommand: async (command, args, options = {}) => {
         calls.push({ command, args, token: options.env?.ANTHROPIC_AUTH_TOKEN });
@@ -772,64 +784,6 @@ test("prepareLaunch resolves ccrTokenOpRef once for the CCR 3 config merge", asy
     );
   } finally {
     await rm(configDir, { force: true, recursive: true });
-  }
-});
-
-test("repairClaudeRestoreSessions rewrites persisted routed models and keeps a backup", async () => {
-  const catalog = launchCatalog();
-  const projectsDir = await mkdtemp(join(tmpdir(), "airkit-restore-projects-"));
-  const backupsDir = await mkdtemp(join(tmpdir(), "airkit-restore-backups-"));
-  const projectDir = join(projectsDir, "-Users-example-project");
-  const sessionPath = join(projectDir, "session.jsonl");
-
-  try {
-    await mkdir(projectDir, { recursive: true });
-    await writeFile(
-      sessionPath,
-      [
-        JSON.stringify({ type: "user", message: { role: "user", content: "hi" } }),
-        JSON.stringify({ type: "assistant", message: { role: "assistant", model: "steady-coder" } }),
-        JSON.stringify({ type: "assistant", message: { role: "assistant", model: "demo,strong-coder" } }),
-        JSON.stringify({ type: "assistant", message: { role: "assistant", model: "sonnet" } }),
-        JSON.stringify({ type: "assistant", message: { role: "assistant", model: "claude-sonnet-4-6" } }),
-        JSON.stringify({
-          type: "system",
-          subtype: "compact_boundary",
-          content: "Conversation compacted",
-          compactMetadata: { trigger: "manual" },
-        }),
-        JSON.stringify({
-          type: "user",
-          isCompactSummary: true,
-          message: { role: "user", content: "This session is being continued from a previous conversation." },
-        }),
-        "not json",
-        "",
-      ].join("\n"),
-    );
-
-    const result = await repairClaudeRestoreSessions(catalog, "launch-example", {
-      backupsDir,
-      projectsDir,
-      write: true,
-    });
-    const repaired = await readFile(sessionPath, "utf8");
-
-    assert.equal(result.scannedFiles, 1);
-    assert.equal(result.repairedFiles, 1);
-    assert.equal(result.repairedLines, 3);
-    assert.match(repaired, /"model":"claude-sonnet-4-6"/);
-    assert.doesNotMatch(repaired, /steady-coder/);
-    assert.doesNotMatch(repaired, /demo,strong-coder/);
-    assert.match(repaired, /claude-sonnet-4-6/);
-    assert.match(repaired, /"subtype":"compact_boundary"/);
-    assert.match(repaired, /"isCompactSummary":true/);
-    assert.match(repaired, /not json/);
-    assert.equal(result.backups.length, 1);
-    assert.match(await readFile(result.backups[0], "utf8"), /steady-coder/);
-  } finally {
-    await rm(projectsDir, { force: true, recursive: true });
-    await rm(backupsDir, { force: true, recursive: true });
   }
 });
 
@@ -860,47 +814,6 @@ test("prepareLaunch fails fast when credential resolution hangs", async () => {
   } finally {
     await rm(fakeBin, { force: true, recursive: true });
     await rm(configDir, { force: true, recursive: true });
-  }
-});
-
-test("prepareLaunch repairs restore metadata before launching", async () => {
-  const catalog = launchCatalog();
-  const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-restore-"));
-  const projectsDir = await mkdtemp(join(tmpdir(), "airkit-launch-restore-projects-"));
-  const backupsDir = await mkdtemp(join(tmpdir(), "airkit-launch-restore-backups-"));
-  const projectDir = join(projectsDir, "-Users-example-project");
-
-  try {
-    await mkdir(projectDir, { recursive: true });
-    await writeFile(
-      join(projectDir, "session.jsonl"),
-      `${JSON.stringify({ type: "assistant", message: { role: "assistant", model: "demo,strong-coder" } })}\n`,
-    );
-
-    const result = await prepareLaunch(catalog, "launch-example", {
-      backupsDir,
-      ccrClient: ccrTestClient([]),
-      commandExists: async (command) => ["ccr", "claude"].includes(command),
-      configDir,
-      env: { DEMO_API_KEY: "runtime-secret" },
-      liveCcrConfig: join(configDir, "live", "config.json"),
-      projectsDir,
-      runtimeVersions: passingRuntimeVersions(),
-      runCommand: async (command, args) => {
-        if (command === "ccr" && args[0] === "activate") {
-          return { ok: true, status: 0, stdout: 'export ANTHROPIC_AUTH_TOKEN="ccr-local"\n' };
-        }
-        return { ok: true, status: 0, stdout: "" };
-      },
-      spawnCommand: () => ({ status: 0 }),
-    });
-
-    assert.equal(result.restoreRepair.repairedFiles, 1);
-    assert.match(await readFile(join(projectDir, "session.jsonl"), "utf8"), /"model":"claude-sonnet-4-6"/);
-  } finally {
-    await rm(configDir, { force: true, recursive: true });
-    await rm(projectsDir, { force: true, recursive: true });
-    await rm(backupsDir, { force: true, recursive: true });
   }
 });
 
@@ -1022,40 +935,6 @@ test("runAirclaudeCli prints help without loading the catalog", async () => {
   }
 });
 
-test("runAirclaudeCli can repair restore metadata without launching", async () => {
-  const catalogPath = await writeLaunchCatalog();
-  const projectsDir = await mkdtemp(join(tmpdir(), "airkit-restore-cli-projects-"));
-  const backupsDir = await mkdtemp(join(tmpdir(), "airkit-restore-cli-backups-"));
-  const projectDir = join(projectsDir, "-Users-example-project");
-  const output = [];
-
-  try {
-    await mkdir(projectDir, { recursive: true });
-    await writeFile(
-      join(projectDir, "session.jsonl"),
-      `${JSON.stringify({ type: "assistant", message: { role: "assistant", model: "strong-coder" } })}\n`,
-    );
-
-    const exitCode = await runAirclaudeCli(["--repair-restore", "--profile", "launch-example"], {
-      backupsDir,
-      catalogPath,
-      projectsDir,
-      stdout: { write: (chunk) => output.push(chunk) },
-      spawnCommand: () => {
-        throw new Error("repair should not launch");
-      },
-    });
-
-    assert.equal(exitCode, 0);
-    assert.match(output.join(""), /repaired files: 1/);
-    assert.match(await readFile(join(projectDir, "session.jsonl"), "utf8"), /"model":"claude-sonnet-4-6"/);
-  } finally {
-    await rm(projectsDir, { force: true, recursive: true });
-    await rm(backupsDir, { force: true, recursive: true });
-    await rm(resolve(catalogPath, ".."), { force: true, recursive: true });
-  }
-});
-
 function runAirkitWithEnv(env, ...args) {
   return spawnSync(process.execPath, [resolve(import.meta.dirname, "..", "src", "airkit.mjs"), ...args], {
     encoding: "utf8",
@@ -1102,10 +981,10 @@ function launchCatalog() {
             "--settings",
             "{\"apiKeyHelper\":\"\"}",
             "--append-system-prompt",
-            "AirClaude mode {{launchMode}} routes default to {{routeDefaultModel}} while Claude restore uses {{restoreModel}}.",
+            "AirClaude mode {{launchMode}} routes default to {{routeDefaultModel}} while Claude launch uses {{claudeModel}}.",
           ],
           env: { CCR_PROFILE: "{{profileName}}" },
-          restore: { model: "claude-sonnet-4-6", models: ["sonnet"] },
+          claudeModel: "claude-sonnet-4-6",
           defaultMode: "auto",
           modes: {
             auto: {},
@@ -1158,6 +1037,7 @@ function ccrTestClient(saved) {
       Router: { builtInRules: {}, fallback: { mode: "off", models: [], retryCount: 1 }, rules: [] },
       profile: { enabled: true, profiles: [] },
     }),
+    ensureGateway: async () => {},
     getVersion: async () => "3.0.4",
     saveConfig: async (config) => saved.push(config),
   };

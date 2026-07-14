@@ -77,20 +77,22 @@ Legacy CCR 2 transformers are rejected before files or CCR state are written.
 Use a native CCR 3 provider type or gateway plugin when protocol adaptation is
 actually required.
 
-## Restore metadata is not route identity
+## Claude launch model is not route identity
 
-Claude Code session restore may require a Claude-recognized model ID, while the
-actual request is routed to a different provider model. Keep these separate:
+Claude Code needs a Claude-recognized model ID at launch, while the actual
+request may be routed to a different provider model. Keep these separate:
 
-- `launch.restore.model` controls compatible persisted session metadata.
+- `launch.claudeModel` is passed only as the launched Claude Code process's
+  `--model` argument.
 - `AIRCLAUDE_ROUTE_*` and the managed profile selectors describe the real
   provider route.
 
-Do not infer the active provider from Claude Code's displayed restore model.
-When repairing stored session metadata, back up the JSONL first and include all
-previously shipped aliases in the repair set.
+AirKit never writes `launch.claudeModel` into Claude settings or transcripts.
+Claude Code owns `/model` and its normal model-choice persistence; a routed
+launch must not replace the user's global choice. Do not infer the active
+provider from Claude Code's displayed launch model.
 
-The `[1m]` suffix is Claude Code-local restore/display metadata. It is not an
+The `[1m]` suffix is Claude Code-local launch/display metadata. It is not an
 upstream provider model ID and is not enabled by `ANTHROPIC_1M_CONTEXT`.
 
 ## Statusline and launch environment

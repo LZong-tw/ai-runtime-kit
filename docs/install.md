@@ -113,19 +113,23 @@ Legacy CCR 2 `transformers` are rejected before save because CCR 3 does not
 persist that contract. Remove them or replace them with a native CCR 3 gateway
 plugin before launching the profile.
 
-For airclaude launcher wrappers, the wrapper also exports the same launch
-environment the `node airkit.mjs` launch path applies (e.g.
+For airclaude launcher wrappers, the wrapper also sets function-local exported
+variables for the same launch environment the `node airkit.mjs` path applies (e.g.
 `POWERLEVEL9K_INSTANT_PROMPT=off`, which keeps the user's P10k zsh snapshot from
 spamming command-not-found in Claude Code's non-interactive shells), so a session
-started through the wrapper does not diverge from the node path. Prefer starting
-and resuming through the wrapper (`<wrapper> --resume`, `<wrapper> --continue`).
+started through the wrapper does not diverge from the node path and does not leave
+profile variables behind in the caller shell. Prefer starting and resuming through
+the wrapper (`<wrapper> --resume`, `<wrapper> --continue`).
 
 The 1M context window is **not** controlled by an env var (there is no such env
 var in Claude Code — `ANTHROPIC_1M_CONTEXT` is a no-op). Claude Code enables 1M
 only when the resolved model string ends in the literal `[1m]` suffix, so the
-masked context window is set via the profile's `launch.restore.model`
-(`claude-sonnet-4-6[1m]`); the suffix is stripped back to `claude-sonnet-4-6` for
-the on-wire API id, so the gateway never sees it.
+masked context window is selected per launch via the profile's
+`launch.claudeModel` (`claude-sonnet-4-6[1m]`). AirKit passes that value only as
+Claude Code's `--model` argument; it never writes a model into Claude settings
+or transcripts. Claude Code remains responsible for `/model` and its normal
+model-choice persistence. The suffix is stripped back to `claude-sonnet-4-6`
+for the on-wire API id, so the gateway never sees it.
 
 ## Run Doctor
 
