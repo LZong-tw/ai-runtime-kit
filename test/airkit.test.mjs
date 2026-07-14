@@ -110,6 +110,32 @@ test("CCR 3 merge rejects the removed CCR 2 transformer contract", () => {
   );
 });
 
+test("legacy transformer rejection happens before launch writes or CCR RPC", async () => {
+  const catalog = launchCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-legacy-transformer-"));
+  const calls = [];
+  catalog.profiles[0].ccr.transformers = [{ path: "/tmp/legacy.cjs" }];
+  try {
+    await assert.rejects(
+      () => prepareLaunch(catalog, "launch-example", {
+        ccrClient: {
+          getConfig: async () => calls.push("getConfig"),
+          getVersion: async () => calls.push("getVersion"),
+          saveConfig: async () => calls.push("saveConfig"),
+        },
+        configDir,
+        launch: false,
+        runtimeVersions: passingRuntimeVersions(),
+      }),
+      /legacy CCR transformers are unsupported by CCR 3/,
+    );
+    assert.deepEqual(calls, []);
+    await assert.rejects(readFile(join(configDir, "ccr", "launch-example.json")), { code: "ENOENT" });
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
 test("CCR 3 merge refuses to replace an unowned provider with the same name", () => {
   assert.throws(
     () => airkitRuntime.buildCcr3ManagedConfig(
@@ -561,20 +587,6 @@ test("airclaude launch does not set the dead ANTHROPIC_1M_CONTEXT env (1M comes 
     // it is gated on the resolved model string ending in `[1m]`, so the lever is launch.restore.model,
     // not the launch env. Guard against re-introducing the dead env var.
     assert.equal(plan.launch.env.ANTHROPIC_1M_CONTEXT, undefined);
-  } finally {
-    await rm(configDir, { force: true, recursive: true });
-  }
-});
-
-test("runtime ships its bundled transformer for any provider that lists it in transformer.use", async () => {
-  const catalog = launchCatalog();
-  catalog.profiles[0].ccr.Providers[0].transformer = { use: ["drop-reasoning"] };
-  const configDir = await mkdtemp(join(tmpdir(), "airkit-ship-transformer-"));
-
-  try {
-    const plan = buildLaunchPlan(catalog, "launch-example", { configDir });
-    const injected = plan.files.managedFiles.find((file) => /ccr\/transformers\/drop-reasoning\.js$/.test(file.path));
-    assert.ok(injected, "runtime should ship the drop-reasoning transformer it bundles when a provider uses it");
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }

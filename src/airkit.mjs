@@ -47,11 +47,7 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
   const modes = Object.keys(launch.modes ?? { auto: {} }).sort();
   const managedPrefix = `airkit-${slug(profile.name)}-`;
   const baseConfig = buildCcrConfig(catalog, profileName, { configDir });
-  const hasLegacyTransformers = (baseConfig.transformers?.length ?? 0) > 0
-    || baseConfig.Providers.some((provider) => (provider.transformer?.use?.length ?? 0) > 0);
-  if (hasLegacyTransformers) {
-    throw new Error("legacy CCR transformers are unsupported by CCR 3; remove them or migrate to a native CCR 3 gateway plugin");
-  }
+  assertCcr3Compatible(baseConfig);
   const managedProviders = baseConfig.Providers.map((provider) => ({
     ...provider,
     id: `airkit-provider-${slug(profile.name)}-${slug(provider.name)}`,
@@ -102,6 +98,14 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
     },
     profileIds: Object.fromEntries(modes.map((mode) => [mode, `${managedPrefix}${slug(mode)}`])),
   };
+}
+
+function assertCcr3Compatible(ccrConfig) {
+  const hasLegacyTransformers = (ccrConfig.transformers?.length ?? 0) > 0
+    || (ccrConfig.Providers ?? []).some((provider) => (provider.transformer?.use?.length ?? 0) > 0);
+  if (hasLegacyTransformers) {
+    throw new Error("legacy CCR transformers are unsupported by CCR 3; remove them or migrate to a native CCR 3 gateway plugin");
+  }
 }
 
 function mergeManagedConfigArrays(currentConfig, baseConfig, managedPrefix) {
@@ -296,6 +300,7 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
   const launch = resolveLaunchConfig(profile, templateVars);
   const mode = resolveLaunchMode(profile, launch, options.mode);
   const ccrConfig = applyLaunchModeOverlay(buildCcrConfig(catalog, profileName, { configDir }), profile, mode, templateVars);
+  assertCcr3Compatible(ccrConfig);
   const logOverride = resolveCcrLogOverride(options.env ?? process.env);
   if (logOverride !== undefined) ccrConfig.LOG = logOverride;
   const restore = resolveRestoreRepairConfig(profile);
