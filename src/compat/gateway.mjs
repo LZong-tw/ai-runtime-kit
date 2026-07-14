@@ -1,15 +1,22 @@
+import { once } from "node:events";
 import { readFileSync } from "node:fs";
 
 const SAFE_HEADER_NAMES = new Set([
   "accept",
   "anthropic-beta",
   "anthropic-version",
+  "b3",
   "baggage",
   "request-id",
   "traceparent",
   "tracestate",
   "user-agent",
   "x-amzn-trace-id",
+  "x-b3-flags",
+  "x-b3-parentspanid",
+  "x-b3-sampled",
+  "x-b3-spanid",
+  "x-b3-traceid",
   "x-cloud-trace-context",
   "x-datadog-origin",
   "x-datadog-parent-id",
@@ -61,7 +68,7 @@ function copySafeAnthropicHeaders(headers) {
   for (const [rawName, value] of new Headers(headers)) {
     const name = rawName.toLowerCase();
     if (name.startsWith("x-ccr-")) continue;
-    if (SAFE_HEADER_NAMES.has(name) || name.startsWith("x-b3-")) {
+    if (SAFE_HEADER_NAMES.has(name)) {
       safeHeaders[name] = value;
     }
   }
@@ -97,7 +104,30 @@ async function parseCoreMessageResponse(response) {
 
 async function pipeCoreResponse(result, response) {
   const headers = Object.fromEntries(result.headers);
-  const body = Buffer.from(await result.arrayBuffer());
   response.writeHead(result.status, headers);
-  response.end(body);
+  if (result.body === null) {
+    await endResponse(response);
+    return;
+  }
+
+  const reader = result.body.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!response.write(Buffer.from(value))) await once(response, "drain");
+    }
+    await endResponse(response);
+  } catch (error) {
+    await reader.cancel(error).catch(() => {});
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+async function endResponse(response) {
+  const finished = once(response, "finish");
+  response.end();
+  await finished;
 }

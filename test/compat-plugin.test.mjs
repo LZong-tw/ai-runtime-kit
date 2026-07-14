@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { createServer } from "node:http";
 import { test } from "node:test";
 import { createCoreClient } from "../src/compat/gateway.mjs";
@@ -19,12 +20,19 @@ test("core client uses generated x-ccr-core-auth without forwarding client secre
       cookie: "session=outer-secret",
       "anthropic-beta": "tool-search-tool-2025-11-19",
       "anthropic-version": "2023-06-01",
+      b3: "0123456789abcdef0123456789abcdef-0123456789abcdef-1",
       traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
       "user-agent": "fixture-agent",
       "x-api-key": "outer-key",
       "x-ccr-core-auth": "attacker-token",
       "x-ccr-extra": "attacker-value",
       "x-datadog-api-key": "trace-secret",
+      "x-b3-api-key": "b3-secret",
+      "x-b3-flags": "1",
+      "x-b3-parentspanid": "0123456789abcdef",
+      "x-b3-sampled": "1",
+      "x-b3-spanid": "fedcba9876543210",
+      "x-b3-traceid": "0123456789abcdef0123456789abcdef",
       "x-request-id": "request-123",
     },
   );
@@ -37,6 +45,19 @@ test("core client uses generated x-ccr-core-auth without forwarding client secre
   assert.notEqual(fixture.seen.headers.connection, "upgrade");
   assert.equal(fixture.seen.headers["x-ccr-extra"], undefined);
   assert.equal(fixture.seen.headers["x-datadog-api-key"], undefined);
+  assert.equal(fixture.seen.headers["x-b3-api-key"], undefined);
+  assert.equal(
+    fixture.seen.headers.b3,
+    "0123456789abcdef0123456789abcdef-0123456789abcdef-1",
+  );
+  assert.equal(fixture.seen.headers["x-b3-flags"], "1");
+  assert.equal(fixture.seen.headers["x-b3-parentspanid"], "0123456789abcdef");
+  assert.equal(fixture.seen.headers["x-b3-sampled"], "1");
+  assert.equal(fixture.seen.headers["x-b3-spanid"], "fedcba9876543210");
+  assert.equal(
+    fixture.seen.headers["x-b3-traceid"],
+    "0123456789abcdef0123456789abcdef",
+  );
   assert.equal(
     fixture.seen.headers["anthropic-beta"],
     "tool-search-tool-2025-11-19",
@@ -59,6 +80,90 @@ test("raw passthrough preserves ordinary request and response bytes", async (t) 
   assert.deepEqual(response.body, fixture.rawResponseBody);
   assert.equal(response.statusCode, 202);
   assert.equal(response.headers["content-type"], "application/octet-stream");
+});
+
+test("raw passthrough streams before upstream completion and waits for downstream drain", async () => {
+  const firstChunk = Buffer.from("first-");
+  const secondChunk = Buffer.from("second");
+  let releaseSecondChunk;
+  let upstreamCompleted = false;
+  const secondChunkGate = new Promise((resolve) => {
+    releaseSecondChunk = resolve;
+  });
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(firstChunk);
+      void secondChunkGate.then(() => {
+        controller.enqueue(secondChunk);
+        controller.close();
+        upstreamCompleted = true;
+      });
+    },
+  });
+  const client = createCoreClient({
+    config: {
+      gateway: {
+        coreHost: "127.0.0.1",
+        corePort: 43991,
+        generatedConfigFile: "/fixture/generated.json",
+      },
+    },
+    fetchImpl: async () => new Response(body, { status: 200 }),
+    readFile: () => generatedConfig(CORE_TOKEN),
+  });
+  const response = createRecordingResponse({ backpressure: true });
+  let settled = false;
+  const pending = client
+    .forwardRaw({ body: Buffer.from("request"), headers: {}, response })
+    .finally(() => {
+      settled = true;
+    });
+
+  const firstEvent = await Promise.race([
+    response.firstWrite.then(() => "write"),
+    new Promise((resolve) => setImmediate(() => resolve("turn-ended"))),
+  ]);
+  if (firstEvent !== "write") {
+    releaseSecondChunk();
+    response.releaseDrain();
+    await pending;
+  }
+  assert.equal(firstEvent, "write");
+  assert.equal(upstreamCompleted, false);
+  assert.deepEqual(response.body, firstChunk);
+
+  releaseSecondChunk();
+  await secondChunkGate;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(upstreamCompleted, true);
+  assert.equal(settled, false);
+  assert.deepEqual(response.body, firstChunk);
+
+  response.releaseDrain();
+  await pending;
+  assert.deepEqual(response.body, Buffer.concat([firstChunk, secondChunk]));
+  assert.equal(response.ended, true);
+});
+
+test("raw passthrough safely ends a response with no upstream body", async () => {
+  const client = createCoreClient({
+    config: {
+      gateway: {
+        coreHost: "127.0.0.1",
+        corePort: 43991,
+        generatedConfigFile: "/fixture/generated.json",
+      },
+    },
+    fetchImpl: async () => ({ body: null, headers: new Headers(), status: 204 }),
+    readFile: () => generatedConfig(CORE_TOKEN),
+  });
+  const response = createRecordingResponse();
+
+  await client.forwardRaw({ body: Buffer.from("request"), headers: {}, response });
+
+  assert.equal(response.statusCode, 204);
+  assert.equal(response.ended, true);
+  assert.deepEqual(response.body, Buffer.alloc(0));
 });
 
 test("core client converts wildcard core hosts to connectable loopback hosts", async (t) => {
@@ -216,10 +321,15 @@ function generatedConfig(tokenEntry) {
   return JSON.stringify({ auth: { staticApiKeys: { keys: [tokenEntry] } } });
 }
 
-function createRecordingResponse() {
+function createRecordingResponse({ backpressure = false } = {}) {
   const chunks = [];
-  return {
-    body: Buffer.alloc(0),
+  let notifyFirstWrite;
+  const firstWrite = new Promise((resolve) => {
+    notifyFirstWrite = resolve;
+  });
+  const response = Object.assign(new EventEmitter(), {
+    ended: false,
+    firstWrite,
     headers: {},
     statusCode: 200,
     writeHead(statusCode, headers) {
@@ -230,10 +340,21 @@ function createRecordingResponse() {
     },
     write(chunk) {
       chunks.push(Buffer.from(chunk));
+      notifyFirstWrite();
+      return !backpressure;
     },
     end(chunk) {
       if (chunk !== undefined) chunks.push(Buffer.from(chunk));
-      this.body = Buffer.concat(chunks);
+      this.ended = true;
+      this.emit("finish");
     },
-  };
+    releaseDrain() {
+      backpressure = false;
+      this.emit("drain");
+    },
+  });
+  Object.defineProperty(response, "body", {
+    get: () => Buffer.concat(chunks),
+  });
+  return response;
 }
