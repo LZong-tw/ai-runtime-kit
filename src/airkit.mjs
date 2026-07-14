@@ -2,7 +2,7 @@
 
 import { access, chmod, copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1027,13 +1027,7 @@ function resolveLaunchConfig(profile, templateVars) {
       modes: { auto: {} },
     });
   }
-  return withReusableRuntimeLessons({
-    binary: "ccr",
-    args: ["code"],
-    env: { CCR_PROFILE: "{{profileName}}" },
-    defaultMode: "auto",
-    modes: { auto: {} },
-  });
+  throw new Error(`profile "${profile.name}" must define launch or a shell wrapper for CCR 3`);
 }
 
 function withReusableRuntimeLessons(launch) {

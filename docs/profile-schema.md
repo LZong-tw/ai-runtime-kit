@@ -1,12 +1,13 @@
 # Profile Schema
 
 Profiles live in `profiles/catalog.json`. The catalog is the source of truth for
-rendered CCR config, shell helpers, and public model/provider metadata.
+public model metadata, rendered profile files, and the CCR 3 providers and
+managed profiles created by `airclaude`.
 
-Runtime state is not stored in this repo. Do not add Claude sessions, CCR daemon
-state, caches, login state, rendered files, or secret values to the catalog.
+Runtime state is never stored here. Do not commit Claude sessions, CCR SQLite
+state, caches, login state, rendered files, private endpoints, or secret values.
 
-## Catalog Schema 1
+## Catalog schema 1
 
 ```json
 {
@@ -16,119 +17,96 @@ state, caches, login state, rendered files, or secret values to the catalog.
     {
       "name": "openai-compatible-example",
       "visibility": "public",
-      "summary": "Public example for an OpenAI-compatible chat completions gateway.",
+      "summary": "Public OpenAI-compatible example.",
       "shell": {},
+      "launch": {},
       "ccr": {}
     }
   ]
 }
 ```
 
-Fields:
+- `schema`: required and currently `1`.
+- `modelCatalog`: optional public provider, model, gateway, and routing
+  metadata.
+- `profiles`: required array. Profile names must be unique.
 
-- `schema`: required. Must be `1`.
-- `modelCatalog`: optional public provider, model, gateway, and routing metadata.
-- `profiles`: required. Array of profile objects.
+## Model catalog
 
-Profile names must be unique across the catalog. `airkit` rejects missing or
-duplicate names before rendering anything.
+`modelCatalog` is a public seed, not a complete model database. It may contain
+public source URLs, capability levels, task labels, provider/model facts,
+LiteLLM patterns, Azure base-model metadata, and routing presets.
 
-## Model Catalog
+Do not commit tenant-specific deployment names, regions, quotas, negotiated
+prices, or private gateway details. Task labels such as `think` and
+`longContext` describe model suitability only; they are not CCR 3 Router keys.
 
-`modelCatalog` is a public seed for task-mode routing and provider mapping. It
-is not meant to be a complete model database.
+## Profile fields
 
-Fields currently used:
+- `name`: required lookup key and generated-file identifier.
+- `visibility`: required; `public` or `internal`.
+- `summary`: short operational description.
+- `shell`: optional generated shell functions.
+- `launch`: required for a CCR-backed profile unless a shell wrapper supplies
+  the launch command.
+- `ccr`: optional CCR 3 provider and route template.
+- `managedFiles`: optional public-safe files rendered under the AirKit config
+  directory.
 
-- `schema`: required inside `modelCatalog`. Must be `1`.
-- `lastReviewed`: date when public provider facts were last checked.
-- `sources`: map of source IDs to public documentation URLs.
-- `capabilityLevels`: allowed broad capability bands such as `economy`,
-  `balanced`, `frontier`, and `specialist`.
-- `taskModes`: task labels such as `default`, `background`, `think`,
-  `longContext`, `webSearch`, and `coding`.
-- `gateways`: gateway-specific routing metadata, including LiteLLM and Azure
-  OpenAI.
-- `providers`: provider entries and model facts.
-- `routingPresets`: optional named model-candidate presets for common workflows.
+Profiles may use environment placeholders such as `$ANTHROPIC_AUTH_TOKEN`.
+Never commit credential values.
 
-Provider model entries may include:
-
-- `id`: provider model ID or public base-model family.
-- `litellm`: LiteLLM model string or pattern.
-- `baseModel` / `baseModelFamily`: base model used when a gateway routes by
-  deployment name.
-- `level`: one of the catalog capability levels.
-- `taskFit`: task modes where the model is a reasonable candidate.
-- `contextWindow`: public context window when available.
-- `maxOutputTokens`: public maximum output tokens when available.
-- `pricingUsdPer1M`: public USD per 1M token prices when stable enough to seed.
-- `pricingNotes`: caveats for provider-, region-, or tier-dependent pricing.
-- `capabilities`: short public capability tags.
-- `sourceRefs`: keys from `modelCatalog.sources` supporting the entry.
-
-Azure entries should describe public base-model families and LiteLLM routing
-shape only. Do not commit tenant-specific deployment names, regions, quotas, or
-negotiated pricing.
-
-## Profile Fields
-
-- `name`: required string. Used for lookup, output file names, and generated
-  shell comments.
-- `visibility`: required. Must be `public` or `internal`.
-- `summary`: operational description. Included in install output and generated
-  shell comments.
-- `shell`: optional object for generated shell snippets.
-- `launch`: optional object for `airclaude` one-command setup and launch.
-- `ccr`: optional object. When present, it is rendered as the CCR JSON config
-  for the profile.
-
-Profiles may contain public endpoints and environment placeholders. Secret
-values must not be committed. Use placeholders such as `$ANTHROPIC_AUTH_TOKEN`.
-
-## Shell Fields
-
-`shell` controls generated shell snippets only. The snippet is written by
-`airkit init --profile <name> --write` and can also be rendered with
-`airkit render shell --profile <name>`.
+## CCR 3 fields
 
 ```json
 {
-  "shell": {
-    "ccrStartFunction": "airkit-ccr-start-openai-compatible-example",
-    "wrappers": [
+  "ccr": {
+    "APIKEY": "ccr-local",
+    "LOG": false,
+    "API_TIMEOUT_MS": 600000,
+    "Providers": [
       {
-        "name": "cclaude-example",
-        "command": "cclaude",
-        "env": {
-          "CCR_PROFILE": "openai-compatible-example"
-        }
+        "name": "openai-compatible",
+        "type": "openai_chat_completions",
+        "api_base_url": "https://example.test/v1/chat/completions",
+        "api_key": "$ANTHROPIC_AUTH_TOKEN",
+        "models": ["fast-coder", "steady-coder"]
       }
-    ]
+    ],
+    "Router": {
+      "default": "openai-compatible,steady-coder",
+      "background": "openai-compatible,fast-coder"
+    }
   }
 }
 ```
 
-Fields:
+Provider fields:
 
-- `ccrTokenOpRef`: optional credential-manager reference. Public profiles should
-  avoid committing provider-specific private references.
-- `ccrStartFunction`: optional shell function name. The generated function syncs
-  the rendered CCR config into CCR's live config before invoking `ccr-start`.
-- `wrappers`: optional array of shell wrapper functions.
-- `wrappers[].name`: generated shell function name.
-- `wrappers[].command`: command invoked by the wrapper.
-- `wrappers[].env`: environment variables exported before the command runs.
+- `name`: source name used by catalog Router values.
+- `type`: required CCR 3 gateway protocol, for example
+  `openai_chat_completions`, `openai_responses`, `anthropic_messages`, or
+  `gemini_generate_content`.
+- `api_base_url`: full upstream endpoint expected by the selected protocol.
+- `api_key`: environment placeholder; secret-looking literal keys are rejected.
+- `models`: upstream model IDs.
 
-The catalog stores snippet inputs, not generated shell. Do not hand-write
-runtime shell files into the repo.
+Active CCR Router fields are only:
 
-## Launch Fields
+- `default`: normal model route.
+- `background`: small/background model route.
 
-`launch` controls the `airclaude` daily entrypoint. Unlike shell wrappers,
-`airclaude` automatically writes managed files, syncs the selected CCR config to
-CCR's live config path, starts CCR when needed, and then launches the configured
-Claude Code command.
+Router values use `provider,model`. CCR 2 `think`, `longContext`,
+`longContextThreshold`, `webSearch`, and transformer fields are unsupported.
+AirKit rejects legacy transformers before writing files or calling CCR.
+
+During merge, AirKit creates a stable managed provider identity and intentionally
+sets its CCR `id` and `name` to the same value. CCR 3 resolves profile selectors
+through its management layer, while the generated gateway performs adapter
+lookup by provider name; differing values produce `Target adapter is not
+registered` failures.
+
+## Launch fields
 
 ```json
 {
@@ -142,10 +120,7 @@ Claude Code command.
       "CCR_PROFILE": "{{profileName}}"
     },
     "restore": {
-      "model": "claude-sonnet-4-6",
-      "models": [
-        "sonnet"
-      ]
+      "model": "claude-sonnet-4-6"
     },
     "defaultMode": "auto",
     "modes": {
@@ -153,9 +128,7 @@ Claude Code command.
       "pro": {
         "ccr": {
           "Router": {
-            "default": "openai-compatible,reasoning-coder",
-            "think": "openai-compatible,reasoning-coder",
-            "longContext": "openai-compatible,long-context-coder"
+            "default": "openai-compatible,reasoning-coder"
           }
         }
       }
@@ -164,106 +137,59 @@ Claude Code command.
 }
 ```
 
-Fields:
+- `binary`: Claude-compatible command, normally `claude`.
+- `args`: base arguments before user passthrough arguments.
+- `env`: non-secret launch environment. Values may use `{{profileName}}`,
+  `{{configDir}}`, `{{launchMode}}`, `{{restoreModel}}`,
+  `{{statuslineLabel}}`, and default/background route variables.
+- `restore.model`: Claude-recognized model used for persisted-session repair.
+- `restore.models`: optional previously stored aliases to repair.
+- `defaultMode`: mode selected by plain `airclaude`.
+- `modes.<name>.ccr`: partial CCR overlay for that managed mode.
 
-- `binary`: command to execute after CCR setup, usually `claude`.
-- `args`: arguments passed before user-provided Claude Code arguments.
-  CCR-backed Claude Code launches should include `--settings` with
-  `{"apiKeyHelper":""}` when the user's normal Claude setup may define a global
-  `apiKeyHelper`; this keeps the CCR auth token as the only active auth source
-  for the launch.
-  Do not add `--strict-mcp-config` by default: preserving Claude Code's normal
-  MCP and plugin configuration keeps tool use, installed plugins, and compact
-  behavior aligned with the user's regular CLI.
-- `env`: additional environment variables for the launched command. Values may
-  use `{{profileName}}`, `{{configDir}}`, and launch-aware variables such as
-  `{{launchMode}}`, `{{restoreModel}}`, `{{statuslineLabel}}`,
-  `{{routeDefault}}`, `{{routeDefaultProvider}}`, `{{routeDefaultModel}}`,
-  `{{routeThink}}`, and `{{routeLongContextModel}}`. These variables are
-  rendered after the mode-specific CCR overlay is applied.
-- `restore.model`: optional Claude Code model ID used only for persisted session
-  metadata repair. Use a full Claude Code-recognized model ID, not a short alias
-  such as `sonnet`; aliases can launch but may not restore from session JSONL.
-- `restore.models`: optional extra persisted model strings to repair. Use this
-  for legacy aliases or previously shipped invalid restore values.
-- `defaultMode`: mode used by plain `airclaude`; defaults to `auto`.
-- `modes`: map of mode names. `auto` is the normal mode. `pro` is the
-  convention for stronger routing.
-- `modes.<name>.ccr`: partial CCR config overlay applied only to the live CCR
-  config for that launch. It does not create a separate profile.
+`airclaude` resolves credentials, merges only AirKit-owned state through the CCR
+3 management API, and launches `ccr <managed-profile> cli -- ...`. Each mode is
+a separate `scope: "ccr"` profile whose model selectors reference the managed
+provider identity. It does not sync a live CCR JSON file or invoke CCR 2
+start/restart/activate commands.
 
-`airclaude` also applies CCR's own activation environment internally. Do not put
-real provider API keys in `launch.env`.
+When `restore.model` is present, AirKit may repair persisted Claude session
+metadata after backing it up. Provider credentials are passed to CCR management
+state and are never written to rendered profile files or command output.
 
-For `claude` and `cclaude` launches, `airclaude` appends reusable runtime
-lessons to the effective `--append-system-prompt`. These lessons are public-safe
-guardrails for recurring tool mistakes: treat durable notes and user
-corrections as hard constraints; record repeatable lessons as
-`Symptom/Cause/Rule/Action/Verify` when a workspace provides durable notes;
-avoid writing secrets or private endpoints into shared notes; verify Athena-like
-query context and result locations instead of assuming defaults; and rule out
-local shell wrappers before diagnosing remote service failures. Profile prompts
-may add environment-specific guidance, but shared prompts must stay free of
-private identifiers.
+## Shell fields
 
-`airclaude` injects non-secret runtime metadata into the launched Claude Code
-process for statusline widgets, compact-aware prompts, and local hooks:
-`AIRCLAUDE_PROFILE`, `AIRCLAUDE_MODE`, `AIRCLAUDE_STATUSLINE_LABEL`,
-`AIRCLAUDE_RESTORE_MODEL`, and `AIRCLAUDE_ROUTE_<ROUTE>` values such as
-`AIRCLAUDE_ROUTE_DEFAULT_MODEL`. It also scopes `CLAUDE_STATUSLINE_CACHE_DIR`
-by profile and mode so a routed launch does not reuse a stale normal-Claude
-statusline cache.
+```json
+{
+  "shell": {
+    "wrappers": [
+      {
+        "name": "airclaude-example",
+        "command": "airclaude",
+        "env": {
+          "CCR_PROFILE": "openai-compatible-example"
+        }
+      }
+    ]
+  }
+}
+```
 
-When a profile defines `shell.ccrTokenOpRef`, `airclaude` resolves that
-reference with `op read` during launch and passes the token only to `ccr
-restart`. The token is not written to managed files, the live CCR config, or
-normal command output.
+- `ccrTokenOpRef`: optional credential-manager reference; omit private
+  references from public profiles.
+- `wrappers`: generated shell functions.
+- `wrappers[].name`: shell function name.
+- `wrappers[].command`, `args`, and `env`: launch inputs.
 
-When `launch.restore.model` is present, `airclaude` repairs persisted Claude Code
-session JSONL before launching so previously routed provider model names do not
-break session restore. The repair targets the profile's CCR provider models and
-router values, writes a backup under `~/.claude/backups`, and can be run manually
-with `airclaude --repair-restore`.
+For CCR-backed profiles, generated wrappers delegate once to `airclaude`; they
+do not add a daemon-control wrapper layer.
 
-## CCR Fields
+## Author checklist
 
-`ccr` is rendered directly as JSON. Keep it compatible with CCR config shape.
-Current profiles use these fields:
-
-- `APIKEY`: local CCR API key placeholder.
-- `LOG`: boolean CCR logging switch.
-- `API_TIMEOUT_MS`: request timeout in milliseconds.
-- `Providers`: provider definitions.
-- `Router`: route selection for model categories.
-
-Provider fields currently used:
-
-- `name`: provider identifier used by router entries.
-- `api_base_url`: provider chat completions endpoint.
-- `api_key`: environment placeholder or non-secret reference. Do not embed real
-  API keys. Values starting with `sk-` are rejected by catalog validation.
-- `models`: model names exposed by the provider.
-- `transformer.use`: CCR transformer list.
-
-Router fields currently used:
-
-- `default`: provider and model for normal requests.
-- `background`: provider and model for background work.
-- `think`: provider and model for thinking-heavy requests.
-- `longContext`: provider and model for long-context requests.
-- `longContextThreshold`: token threshold for long-context routing.
-- `webSearch`: provider and model for web-search work.
-
-Router values use `provider,model` format and should reference a provider
-`name` plus one model listed on that provider.
-
-## Author Checklist
-
-- Keep `schema` at `1`.
-- Keep `modelCatalog.lastReviewed` current when model facts change.
-- Use public documentation for public provider facts.
-- Add one profile with a unique `name`.
-- Use environment placeholders for credentials.
-- Never commit real token values or secret-looking provider `api_key` values.
-- Keep generated shell snippets and rendered CCR configs out of the catalog.
-- Run `node src/airkit.mjs doctor --profile <name>` after rendering locally.
+- Keep shared behavior and public facts free of company identifiers.
+- Require Node.js 22+, Claude Code 2.1.208+, and CCR 3.0.4 through latest 3.x.
+- Declare an explicit provider `type`.
+- Use only `default` and `background` in active CCR Router config.
+- Define an explicit Claude launch contract.
+- Keep provider API keys as environment placeholders.
+- Run `npm test`, `npm run check`, and an isolated CCR 3 smoke test.

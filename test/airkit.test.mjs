@@ -8,7 +8,6 @@ import assert from "node:assert/strict";
 import * as airkitRuntime from "../src/airkit.mjs";
 
 import {
-  buildCcrConfig,
   buildLaunchPlan,
   buildShellSnippet,
   doctorProfile,
@@ -110,6 +109,16 @@ test("CCR 3 merge rejects the removed CCR 2 transformer contract", () => {
   assert.throws(
     () => airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {}),
     /legacy CCR transformers are unsupported by CCR 3/,
+  );
+});
+
+test("CCR 3 profiles require an explicit launch contract", () => {
+  const catalog = launchCatalog();
+  delete catalog.profiles[0].launch;
+
+  assert.throws(
+    () => airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {}),
+    /must define launch or a shell wrapper for CCR 3/,
   );
 });
 

@@ -51,9 +51,8 @@ For LLM-guided installation or debugging, start with `CLAUDE.md`. The
 management flow remains inspectable: dry run first, then `--write` after the
 user confirms the target paths.
 
-For hard-won operational lessons — CCR lifecycle behavior, the
-provider transformer (usage synthesis, reasoning stripping), statusline
-integration, model masking, and route selection — see
+For current CCR 3 lifecycle, provider identity, statusline, model masking, and
+route-selection guidance, see
 [`docs/runtime-lessons.md`](docs/runtime-lessons.md).
 
 ## Public model catalog
@@ -75,24 +74,11 @@ entries include enough metadata to drive task-mode routing:
 
 ## Troubleshooting
 
-### `API Error: Content block is not a text block` on a reasoning model
+If CCR reports `Target adapter is not registered`, confirm that the provider has
+an explicit CCR 3 protocol `type` and that the managed provider `id` and `name`
+are identical. AirKit enforces this identity contract because CCR 3 resolves the
+profile through its management layer before the generated gateway performs the
+adapter lookup.
 
-This is thrown by Claude Code's own response accumulator, not by the gateway: a
-`text_delta` arrived for a content block that was opened as a non-text type
-(`thinking` or `tool_use`). It shows up when you route Claude Code to an
-OpenAI-format reasoning model (anything that streams `reasoning_content` /
-`reasoning` on the delta) through CCR. CCR turns that reasoning into an Anthropic
-`thinking` block and advances the content-block index, so a later text delta can
-land on the thinking block and trip the accumulator.
-
-The bundled `drop-reasoning` transformer prevents this by stripping
-`reasoning_content` / `reasoning` from every response shape — JSON, Anthropic
-SSE, and OpenAI SSE — before CCR converts the stream. If you write your own
-transformer, strip reasoning on the streaming path too, not only the JSON path.
-
-CCR loads transformers into memory at startup, so relaunch through `airclaude`
-after updating a transformer. The CCR 3 profile launch path owns gateway startup
-and applies the current managed profile.
-
-For more runtime traps and their fixes, see
-[`docs/runtime-lessons.md`](docs/runtime-lessons.md).
+Legacy CCR 2 transformers are intentionally unsupported. Implement protocol
+adaptation with CCR 3 provider types or a native gateway plugin.

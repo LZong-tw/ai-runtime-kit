@@ -1,285 +1,120 @@
 # Runtime Lessons
 
-Hard-won operational lessons for the `ai-runtime-kit` low-cost launcher
-(`airclaude`) and its Claude Code Router (CCR) integration. These are
-**runtime/behavioral** lessons that apply to any provider, not profile data.
+Current operational guidance for `airclaude`, Claude Code, and Claude Code
+Router 3. Shared lessons stay provider-neutral; private endpoints, credentials,
+prices, and company identifiers belong in a private overlay.
 
-- Profile/route specifics (which provider, which model, prices, endpoints) live
-  in your private profile catalog, never here.
-- Claude Code's own internal mechanisms (1M-context gating, auto-compaction
-  math, model resolution) are documented separately as reverse-engineering notes
-  and are linked inline as "Claude Code internals" where relevant.
+## One launch path
 
-Throughout, `<provider,model>` is a placeholder for a CCR route target; the
-"routed model" is whatever low-cost model your profile points a route at.
+- Use `airclaude` as the daily entrypoint. It resolves credentials, merges
+  AirKit-owned state through the CCR 3 management API, and launches
+  `ccr <managed-profile> cli -- ...`.
+- Generated CCR-backed shell functions delegate once to `airclaude`. Do not
+  add start/restart/activate wrappers or live JSON synchronization.
+- Preserve the user's normal Claude MCP and plugin configuration. Do not add an
+  empty strict MCP config merely to simplify routing.
+- Routing mode and Claude permission mode are unrelated. `airclaude pro`
+  selects a model route; `--permission-mode auto` controls permission prompts.
 
-## Launcher design & harness discipline
+## Isolate development state
 
-- **One entrypoint, not a pile of chores.** Don't expose routing, wrappers, and
-  model mapping as separate user steps. The primary path is a single CLI that
-  installs, configures, verifies, and launches the runtime.
-- **Preserve the user's normal MCP/plugin config by default.** Do not pass an
-  empty `--strict-mcp-config` (or `--mcp-config`) as a shortcut — that silently
-  strips the user's tools. Only isolate when explicitly asked.
-- **Don't disable built-in slash commands.** `/btw` and other mid-turn control
-  commands are built-ins; do not add `--bare`, `--safe-mode`,
-  `--disable-slash-commands`, or equivalent disabling env vars as shortcuts.
-- **Permission auto-mode is a launch flag, not a UI toggle.** "Allow all edits
-  in this session" is not a reliable boundary; launch with `--permission-mode
-  auto` so the auto-mode classifier can release safe read/edit/test/build actions
-  from the start. (Note: a session still honors the user's `autoMode` allow/deny
-  rules — prompts for those are the classifier working, not a failure.)
-- **Routing mode ≠ permission mode.** A launcher's own "auto" routing mode (which
-  provider route to pick) is unrelated to Claude Code's `--permission-mode auto`
-  (which reduces permission prompts). Never let the two names blur.
-- **Bake harness discipline into the launch prompt.** Append a system prompt that
-  tells the model to: use native file tools with literal absolute paths (never
-  `sed`/`$f` shell-variable edits); never prefix shell commands with `!`; and
-  when sandbox/network/permission boundaries block work, request
-  permission/escalation or pick a safe in-sandbox alternative instead of trying
-  to bypass. Record durable lessons in `Symptom/Cause/Rule/Action/Verify` form,
-  and never put secrets, private endpoints, or company identifiers in shared
-  notes.
+CCR 3 can write an API helper and localhost gateway URLs into Claude settings
+when a profile takes over the global scope. A development run against shared
+`~/.claude` or `~/.claude-code-router` can therefore break unrelated aliases.
 
-## Two model identities (masking)
+Tests and runtime probes must set all of these to a temporary root:
 
-A low-cost launcher needs **two** model identities and must never let one stand
-in for the other:
+```text
+HOME
+CCR_INTERNAL_HOME_DIR
+CCR_INTERNAL_APP_DATA_DIR
+CCR_INTERNAL_USER_DATA_DIR
+AIRKIT_CONFIG_DIR
+```
 
-1. **Restore/display metadata** — a Claude-compatible model id Claude Code's
-   internals accept (context window, restore, statusline rendering).
-2. **Route metadata** — the actual provider route, surfaced separately in the
-   statusline label, compact summaries, hooks, and user-facing explanations.
+Before an intentional global cutover, back up shared settings, apply the
+change, smoke-test the user's normal Claude path and routed path, and retain the
+backup until both pass.
 
-- **Repair persisted session state, not just future responses.** If Claude Code
-  has already written invalid model metadata into a session transcript (JSONL),
-  fixing only future proxy responses leaves resumed sessions broken — repair the
-  persisted `message.model` too.
-- **Restore-repair migrations must cover every previously shipped bad string,**
-  including bad aliases introduced by your own earlier fix, not just provider
-  model ids. (See Claude Code internals → model resolution / restore.)
-- The `[1m]` context-window marker is a **Claude-Code-local** suffix on the model
-  string; it is normalized off for the on-wire API id, so the gateway never sees
-  it. How 1M is gated (and why it is the suffix, not an env var) is a Claude Code
-  internal — see the internals notes. The launcher's job is only to put the
-  marker on the restore/display model so resumed sessions get the right window.
-- **"Issue with the selected model" usually means a dead CCR provider, not a bad
-  model.** Claude Code's banner *"There's an issue with the selected model (X). It
-  may not exist or you may not have access to it"* + every turn ending `Worked for
-  0s` is raised from a **404 response** (`status === 404`) on the message request —
-  and the model name `X` in the message is just whatever was selected, not the
-  cause. If CCR's provider failed to register, **every** `/v1/messages` returns
-  `404 {"error":"Provider '<name>' not found"}` regardless of the model, and Claude
-  Code mislabels that provider-404 as a model problem. Do not chase the model
-  string (the `[1m]` suffix, an alias, entitlement). **Diagnose by curling CCR
-  directly** with any model: `POST /v1/messages` → if you get `Provider '…' not
-  found`, it is a dead daemon. Two traps: (a) `POST /v1/messages/count_tokens`
-  still returns `200` because CCR answers it locally without the provider — a green
-  count-tokens does **not** mean routing works; (b) the orphan-reaper only kills a
-  daemon whose `/health` *fails*, so a daemon that answers `/health` but has the
-  provider unregistered survives and 404s every turn. Verify with a real routed
-  curl, never `ccr status` or `/health`. (Misdiagnosed as a `[1m]` model-validation
-  problem on 2026-06-17; the actual cause was the provider 404 — `[1m]` and a bare
-  model id returned the *identical* `Provider not found` error.)
-- **Pass options to a custom (path-loaded) transformer via the top-level
-  `transformers[].options`, never the `[name, {options}]` form in a provider's
-  `transformer.use`.** This is the concrete cause of the provider-404 above. CCR
-  registers a path transformer by instantiating it once at load —
-  `new Require(path)(entry.options)` — and stores the **instance** under its
-  `name`. So `transformer.use: ["cleancache", "drop-reasoning"]` (string) resolves
-  to that instance correctly (CCR checks `typeof o === "function" ? new o : o`).
-  But `transformer.use: ["cleancache", ["drop-reasoning", {opt}]]` (array form)
-  runs `new o(opt)` **without** the function check — and `o` is already an
-  instance, so it throws `TypeError: o is not a constructor`, the whole
-  `registerProvider` try/catch swallows it, and the provider is silently dropped →
-  every request 404s `Provider not found`. The array form only works for **built-in**
-  transformers (stored as classes), not custom ones. So options for a bundled
-  transformer (e.g. the restore-model the response mask pins) belong on the
-  `transformers` entry: `{path, options:{restoreModel:"…[1m]"}}` + string-form
-  `use`. (Shipped the array form 2026-06-17 → killed CCR registration; the symptom
-  read as a Claude Code model error, three layers removed from the cause.)
+## Provider identity and protocol
 
-## CCR routing
+Every provider needs an explicit CCR 3 protocol `type`. For an OpenAI-compatible
+chat endpoint use `openai_chat_completions`; do not depend on protocol guessing.
 
-- **`longContextThreshold` compares estimated input tokens, not input +
-  `max_tokens`.** Keep it below the default route model's window minus large
-  output budgets, or compact/post-compact requests can overflow the default
-  route.
-- **Choose the `longContext` route by WINDOW SIZE first, then strength.** This
-  route catches every request over the threshold — including compaction, which on
-  a 1M-masked session can carry hundreds of thousands of tokens. A model that is
-  stronger/cheaper but has a *smaller* window is **not** eligible: it overflows on
-  large compactions. Pick a model whose window comfortably exceeds the largest
-  request the route will see.
-- **A Workflow's `opts.model` cannot redirect a CCR route.** CCR's `longContext`
-  routing overrides the model by estimated input-token count regardless of what
-  model Claude Code requested. The only lever is the CCR Router target itself.
-- **Compact requests can carry every enabled tool.** A real compaction request
-  has been observed bundling 140+ MCP/plugin tools. Don't route
-  `longContext`/compact to a provider/model with a low tool cap (e.g. a 128-tool
-  limit), or the compaction request is rejected.
+AirKit-managed providers deliberately use the same stable string for `id` and
+`name`. CCR 3 resolves a profile model through its management layer, then sends
+the provider name to the generated gateway. The gateway registers its adapter
+under the managed provider identity. If those values differ, a request can fail
+with:
 
-## CCR daemon operations
+```text
+Target adapter is not registered for provider: <name>
+```
 
-CCR is a **persistent daemon** that loads transformers and config into memory at
-startup. This causes three recurring traps:
+Verify this path with a real request, not only service health:
 
-- **`ccr start` is a no-op when already running** → a redeployed transformer or
-  config is silently ignored until a real reload. Exiting/reopening Claude does
-  not reload it. Only `ccr restart` / `ccr stop`+start reloads. Fix: have the
-  launcher hash the live config + bundled transformers against a marker and
-  `ccr stop` **only when they changed**, so updates auto-reload without
-  disrupting an unchanged healthy daemon.
-- **Orphaned port squatter.** A crash can leave a daemon process holding the port
-  with no pid file, so `ccr status` says "not running" yet every `ccr start` dies
-  with `EADDRINUSE` — and the launcher then silently falls through to the real
-  upstream API. Symptom: the startup banner shows real first-party billing.
-  (The statusline label is **not** proof of routing; verify with a real request
-  through CCR.) Fix: a reaper that kills a port listener **only when** its
-  `/health` check fails, preserving a genuinely healthy daemon.
-- **Never bare `ccr start`/`ccr restart` just to "check the port".** If the
-  provider `api_key` in the config is an env placeholder (e.g.
-  `$SOME_AUTH_TOKEN`) and you start without that env resolved, the daemon sends
-  the literal placeholder string upstream → a 401 from the gateway. Worse, a
-  `/health` 200 on such a broken daemon makes the launcher reuse it (skipping its
-  own authenticated start), so every turn 401-retries. Only the launcher's
-  authenticated start path can bring up a working daemon.
+1. Inspect the managed provider and profile without printing credentials.
+2. Confirm the profile model begins with the managed provider identity.
+3. Confirm generated gateway config uses the same provider name and protocol.
+4. Send one minimal `/v1/messages` request through the isolated gateway.
+5. Confirm the upstream receives the expected model and the response converts
+   back to Anthropic message shape.
 
-## Provider transformer
+## CCR 3 routing contract
 
-For an OpenAI-compatible gateway, a CCR provider transformer often has to fix
-three things. Keep transformer source as a single bundled file shipped by the
-runtime (registered via the provider's `transformer.use` + a `ccr.transformers`
-entry); do not re-embed transformer content in profile data.
+Active managed routing uses two model selectors:
 
-- **Tool-metadata rejection.** OpenAI-compatible providers can reject MCP/plugin
-  tool metadata before the model runs. Keep provider-facing tool aliases within
-  64 chars and valid function-name characters, preserve the original Claude Code
-  tool name in the description, and restore the original name before Claude Code
-  executes the tool.
-- **Missing usage counts.** Many OpenAI-compatible gateways emit zero/missing
-  `usage`, which blanks the statusline's token widgets. A provider transformer's
-  `transformResponseOut` runs on the **raw provider** response **before** CCR's
-  OpenAI→Anthropic conversion, so for a `/v1/chat/completions` provider it sees
-  **OpenAI** streaming shape (`chat.completion.chunk`, `choices[].delta.content`),
-  not Anthropic events. Synthesize usage in OpenAI shape: count output from the
-  deltas, estimate input from the request body, and inject
-  `usage:{prompt_tokens,completion_tokens}` onto the `finish_reason` chunk **only
-  when the gateway reported none**. To make a gateway emit real counts, set
-  `stream_options:{include_usage:true}` inside the transformer's
-  `transformRequestIn` (it receives the OpenAI body) — do **not** add CCR's
-  built-in `streamoptions` transformer to `transformer.use`, which can break
-  provider registration entirely. Never write the real provider model into the
-  session model field (breaks resume); usage is safe to fill.
-- **Reasoning leakage → "Content block is not a text block".** This mid-turn
-  error on a reasoning model is thrown by Claude Code's own SDK stream
-  accumulator when a `text_delta` lands on a block started as `thinking`/
-  `tool_use`. Cause: stripping `reasoning_content` only in the JSON/Anthropic-SSE
-  branches but **not** the live OpenAI-SSE branch. The surviving
-  `delta.reasoning_content` reaches CCR's `transformResponseIn`, which makes it a
-  `thinking` block and increments the choice index, desyncing block indices. Fix:
-  strip `reasoning_content`/`reasoning` from **every** stream chunk's
-  delta/message in the OpenAI-SSE path too. (The provider `transformer.use` runs
-  `transformResponseOut` before CCR's format `transformResponseIn`, so stripping
-  there preempts CCR.) After editing the bundled transformer, redeploy **and**
-  reload the daemon (see CCR daemon operations).
-- **Second cause of the same error: a trailing whitespace `content` delta after
-  tool_calls.** deepseek-v3.2 streams parallel tool_calls and then emits a
-  `content:"\n"` after the final tool_call's arguments. CCR's converter appends that
-  as a `text_delta` to the still-open `tool_use` block → same "Content block is not
-  a text block" throw, but **intermittent** (only when the model emits the trailing
-  newline). Diagnose without a repro: scan an existing CCR `LOG` for a
-  `content_block_delta` whose `delta.type==="text_delta"` lands on an `index` opened
-  as `tool_use` (per `reqId`). Fix in the OpenAI-SSE branch: once any tool_call has
-  streamed, drop a whitespace-only `content` delta before CCR sees it (real text,
-  before tool_calls or non-whitespace, is untouched). Non-whitespace text after a
-  tool_call would still trip CCR's index reuse — unobserved so far, and a harder fix
-  (it would need a genuinely new text block), so left as a known residual.
-- **Thinking-depth control can't be bolted on if the gateway drops `reasoning_effort`.**
-  Claude Code sends the depth signal as `thinking:{type:"adaptive"|"disabled"}` plus
-  `output_config:{effort:"low|medium|high|xhigh"}` — note the effort is nested in
-  `output_config`, **not** a top-level `request.effort`. The transformer strips
-  `thinking` (the gateway speaks OpenAI, not Anthropic thinking). The obvious remap —
-  translate effort → OpenAI `reasoning_effort` on the outgoing body — only helps if the
-  gateway actually honors it. **Test before building, with a bogus enum value:** curl the
-  route through CCR with `reasoning_effort:"high"`, omitted, and `reasoning_effort:"zzz"`.
-  If the bogus value does **not** 400, the gateway isn't validating the enum — it is
-  silently dropping the param (LiteLLM `drop_params`), so forwarding it is inert: harmless
-  but zero depth control. Observed 2026-06-17 on a LiteLLM gateway: all three returned
-  `200`, so `reasoning_effort` is dead config there. Depth control is a gateway
-  capability — a transformer cannot synthesize it. (To distinguish "gateway dropped it"
-  from "CCR stripped it before the gateway" you need CCR `LOG` on and to read the raw
-  outgoing request + the response's `completion_tokens_details.reasoning_tokens`; both
-  outcomes mean no control reaches the model, so it rarely matters which.)
+- `default`: normal traffic.
+- `background`: small/background traffic.
 
-## Statusline integration
+Each launch mode becomes a separate `scope: "ccr"` managed profile with its own
+default and small model. CCR 2 automatic categories such as `think`,
+`longContext`, `longContextThreshold`, and `webSearch` are not active Router
+fields. Generic model-catalog task labels with similar names remain descriptive
+metadata only.
 
-- **`/context` and auto-compaction use Claude Code's own local tokenization, not
-  the API `usage` field.** So a gateway returning `usage=0` blanks the
-  statusline's usage/cost widgets but does **not** break auto-compaction —
-  context is counted locally. Do not conflate "statusline shows nothing" with
-  "compaction is broken"; verify with `/context`.
-- **Prompt-cache widgets need a cache signal the gateway may never send.** Verified
-  against real responses: with `include_usage` the gateway returns true
-  `prompt_tokens`/`completion_tokens` (so token/context tracking is accurate), but
-  sends **zero** cache data — no `prompt_tokens_details.cached_tokens`, no
-  provider-native fields (e.g. DeepSeek `prompt_cache_hit_tokens`/`miss_tokens`),
-  and `cache_read_input_tokens=0` in every chunk. So cache-hit/ROI widgets have no
-  real input — a gateway limitation, not a bug. The transformer **only preserves**
-  real cache when `prompt_tokens_details.cached_tokens > 0`; it never fabricates it.
-  Corollary: a **non-zero** cache % showing on a gateway-only session is **not real
-  gateway cache** — suspect a cumulative/cross-session statusline cache store
-  polluted by any turns that fell through to the first-party API (which does report
-  cache). Don't trust a cache ratio for a masked low-cost route.
-- **Turn/cache glyph widgets look broken with no cache signal.** A per-turn
-  widget that draws cache hit/miss dots will render all-empty when there is no
-  cache data. Fall back to input-volume glyphs **only** when read+creation
-  cache == 0, so real first-party sessions stay byte-identical; bump the widget's
-  cache version to invalidate stale per-turn caches.
+Legacy CCR 2 transformers are rejected before files or CCR state are written.
+Use a native CCR 3 provider type or gateway plugin when protocol adaptation is
+actually required.
 
-## Launch environment
+## Restore metadata is not route identity
 
-- **Quiet git-aware zsh prompts in non-interactive shells.** Claude Code sources
-  the user's zsh snapshot in its non-interactive command shells; a Powerlevel10k
-  (or similar) instant prompt then re-evals its git/dir segments and spams
-  `command not found: git/head/awk/...`. Export `POWERLEVEL9K_INSTANT_PROMPT=off`
-  in the launch env for the launched process only — never edit the user's theme
-  or `.zshrc`. If noise remains, it's the regular precmd segment, not instant
-  prompt.
+Claude Code session restore may require a Claude-recognized model ID, while the
+actual request is routed to a different provider model. Keep these separate:
 
-## Single source of truth for routes
+- `launch.restore.model` controls compatible persisted session metadata.
+- `AIRCLAUDE_ROUTE_*` and the managed profile selectors describe the real
+  provider route.
 
-- **Do not hand-write route/statusline env into a wrapper's `env`.** The launch
-  env (`AIRCLAUDE_ROUTE_*`, `AIRCLAUDE_STATUSLINE_*`, the restore model, the
-  statusline cache dir) is **derived** from the CCR Router (+ mode overlay +
-  pricing) by `airclaudeLaunchEnv`, and `buildShellSnippet` applies the computed
-  env only as defaults (`if (key in wrapperEnv) continue`). So any hand-written
-  copy **wins and silently goes stale** on the next route change — actual routing
-  and the statusline display then disagree. Keep only true per-wrapper knobs in
-  `shell.wrappers[].env` (the mode selector and the CCR profile name). With that,
-  the Router is the single source of truth, and bridging to a new/stronger model
-  is a three-place edit: add the id to the provider's `models`, point a route (or
-  a mode overlay) at it, and add its statusline price. Both the node and shell
-  launch paths then render the display from the Router automatically.
+Do not infer the active provider from Claude Code's displayed restore model.
+When repairing stored session metadata, back up the JSONL first and include all
+previously shipped aliases in the repair set.
 
-## Test isolation
+The `[1m]` suffix is Claude Code-local restore/display metadata. It is not an
+upstream provider model ID and is not enabled by `ANTHROPIC_1M_CONTEXT`.
 
-- **`op://` resolution errors in launch tests are usually shell leakage, not a
-  missing `op`.** The default `env` is `process.env`, so a dev shell that
-  exported the launcher's token op-ref leaks it into the test; combined with a
-  `commandExists` mock returning false, you hit a misleading "op not found"
-  branch. Pass an explicit `env: {}` to isolate launch tests from the runner's
-  shell.
+## Statusline and launch environment
 
-## See also (Claude Code internals)
+Route and statusline variables are derived from the selected Router and mode.
+Do not duplicate `AIRCLAUDE_ROUTE_*` or `AIRCLAUDE_STATUSLINE_*` values in a
+wrapper; duplicated values drift when routing changes.
 
-These are reverse-engineering notes on Claude Code's own behavior, not part of
-this runtime:
+Claude Code may source cached zsh state in non-interactive command shells.
+Setting `POWERLEVEL9K_INSTANT_PROMPT=off` for the launched process prevents
+git-aware prompt fragments from polluting tool output without changing the
+user's interactive shell.
 
-- **1M context window gating** — the `[1m]` model-name suffix, why
-  `ANTHROPIC_1M_CONTEXT` is a no-op, and the auto-1M model set.
-- **Auto-compaction math** — when compaction fires; `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`
-  is a percentage that scales with the window.
-- **The 1M rate-limit latch** — a per-session flag that hard-caps the window to
-  200K after the server signals the 1M long-context allowance is exhausted;
-  resets only on a fresh session.
+## Verification contract
+
+Before release:
+
+1. Run `npm test` and `npm run check` in OSS and the private overlay.
+2. Run the runtime version gate for Node.js, Claude Code, and CCR.
+3. Build a fresh isolated CCR state from the committed profile.
+4. Perform a mock-provider end-to-end request.
+5. For a private overlay, perform one minimal real-provider request without
+   printing credentials or request logs.
+6. Confirm shared Claude settings and aliases are unchanged.
+
+`ccr start`, management RPC success, generated files, and `/health` are useful
+component checks, but none alone proves routed inference works.
