@@ -18,6 +18,11 @@ const TOOL_SEARCH_INPUT_ERROR_CODES = new Set([
   "tool_search_query_too_long",
   "invalid_tool_definition",
 ]);
+const TOOL_SEARCH_PUBLIC_ERROR_MESSAGES = {
+  unavailable: "ToolSearch is unavailable",
+  too_many_requests: "ToolSearch rate limit exceeded",
+  execution_time_exceeded: "ToolSearch execution timed out",
+};
 
 export class CompatibilityProtocolError extends Error {
   constructor(code, message) {
@@ -76,7 +81,7 @@ export function searchDeferredTools({ tools = [], type, query, limit = 5 }) {
     const pattern = compileSafePythonRegex(value);
     matches = deferred
       .filter((tool) => safePythonRegexMatches(pattern, searchableToolText(tool)))
-      .sort((left, right) => left.name.localeCompare(right.name));
+      .sort((left, right) => compareCodeUnits(left.name, right.name));
   } else if (type === "tool_search_tool_bm25_20251119") {
     if (value.length > 500) {
       throw new CompatibilityProtocolError(
@@ -223,7 +228,6 @@ function isEscaped(source, index) {
 }
 
 function assertSupportedPythonRegex(query) {
-  const escapedLiterals = new Set("\\.^$|*+?()[]{}-");
   const unsupportedEscapes = new Set("dDsSwWAZbBAbfnrtvaxuUN");
   let atAlternativeStart = true;
   for (let index = 0; index < query.length; index += 1) {
@@ -234,7 +238,7 @@ function assertSupportedPythonRegex(query) {
       if (unsupportedEscapes.has(escaped) || /[0-9]/.test(escaped)) {
         throw toolSearchFallback("Python regex feature requires provider ToolSearch");
       }
-      if (!escapedLiterals.has(escaped)) throw invalidToolSearchQuery();
+      if (/[A-Za-z]/.test(escaped)) throw invalidToolSearchQuery();
       atAlternativeStart = false;
       index += 1;
       continue;
@@ -338,8 +342,17 @@ function rankToolsByBm25(tools, query) {
       tool,
     }))
     .filter(({ score }) => score > 0)
-    .sort((left, right) => right.score - left.score || left.tool.name.localeCompare(right.tool.name))
+    .sort(
+      (left, right) =>
+        right.score - left.score || compareCodeUnits(left.tool.name, right.tool.name),
+    )
     .map(({ tool }) => tool);
+}
+
+function compareCodeUnits(left, right) {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
 }
 
 function bm25Score(terms, queryTerms, documentFrequency, documentCount, averageLength) {
@@ -441,7 +454,8 @@ export function createToolSearchErrorResult({
 
 export function mapToolSearchError({ toolUseId, error } = {}) {
   if (error?.code === "tool_search_fallback_required") throw error;
-  const errorCode = TOOL_SEARCH_INPUT_ERROR_CODES.has(error?.code)
+  const isSafeInputError = TOOL_SEARCH_INPUT_ERROR_CODES.has(error?.code);
+  const errorCode = isSafeInputError
     ? "invalid_tool_input"
     : TOOL_SEARCH_ERROR_CODES.has(error?.code)
       ? error.code
@@ -449,7 +463,9 @@ export function mapToolSearchError({ toolUseId, error } = {}) {
   return createToolSearchErrorResult({
     toolUseId,
     errorCode,
-    errorMessage: error?.message,
+    errorMessage: isSafeInputError
+      ? error?.message
+      : TOOL_SEARCH_PUBLIC_ERROR_MESSAGES[errorCode] ?? "ToolSearch request failed",
   });
 }
 
