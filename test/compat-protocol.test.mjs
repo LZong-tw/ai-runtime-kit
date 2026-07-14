@@ -3,6 +3,8 @@ import { test } from "node:test";
 
 import {
   assertAnthropicFamilyModel,
+  createAdvisorToolResult,
+  createToolSearchResult,
   inspectCompatibilityRequest,
   searchDeferredTools,
 } from "../src/compat/protocol.mjs";
@@ -138,5 +140,61 @@ test("ToolSearch rejects invalid types, patterns, and query lengths", () => {
       query: "x".repeat(501),
     }),
     /ToolSearch BM25 query exceeds 500 characters/,
+  );
+});
+
+test("advisor result construction preserves success and typed error variants", () => {
+  assert.deepEqual(
+    createAdvisorToolResult({
+      toolUseId: "srvtoolu_advisor",
+      text: "Inspect the failure boundary first.",
+      stopReason: "end_turn",
+    }),
+    {
+      type: "advisor_tool_result",
+      tool_use_id: "srvtoolu_advisor",
+      content: {
+        type: "advisor_result",
+        text: "Inspect the failure boundary first.",
+        stop_reason: "end_turn",
+      },
+    },
+  );
+  assert.deepEqual(
+    createAdvisorToolResult({ toolUseId: "srvtoolu_advisor", errorCode: "overloaded" }),
+    {
+      type: "advisor_tool_result",
+      tool_use_id: "srvtoolu_advisor",
+      content: { type: "advisor_tool_result_error", error_code: "overloaded" },
+    },
+  );
+});
+
+test("ToolSearch result construction nests canonical tool references", () => {
+  assert.deepEqual(
+    createToolSearchResult({
+      toolUseId: "srvtoolu_search",
+      toolReferences: [{ type: "tool_reference", tool_name: "search_files" }],
+    }),
+    {
+      type: "tool_search_tool_result",
+      tool_use_id: "srvtoolu_search",
+      content: {
+        type: "tool_search_tool_search_result",
+        tool_references: [{ type: "tool_reference", tool_name: "search_files" }],
+      },
+    },
+  );
+});
+
+test("result construction rejects missing IDs and unsupported advisor errors", () => {
+  assert.throws(() => createAdvisorToolResult({ text: "missing id" }), /toolUseId is required/);
+  assert.throws(
+    () => createAdvisorToolResult({ toolUseId: "srvtoolu", errorCode: "unknown" }),
+    /unsupported advisor error code/,
+  );
+  assert.throws(
+    () => createToolSearchResult({ toolUseId: "", toolReferences: [] }),
+    /toolUseId is required/,
   );
 });

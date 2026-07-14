@@ -126,3 +126,47 @@ function bm25Score(terms, queryTerms, documentFrequency, documentCount, averageL
 function tokenize(value) {
   return String(value).toLowerCase().match(/[a-z0-9_]+/g) ?? [];
 }
+
+const ADVISOR_ERROR_CODES = new Set([
+  "max_uses_exceeded",
+  "too_many_requests",
+  "overloaded",
+  "prompt_too_long",
+  "execution_time_exceeded",
+  "unavailable",
+]);
+
+export function createAdvisorToolResult({ toolUseId, text, stopReason, errorCode } = {}) {
+  assertToolUseId(toolUseId);
+  if (errorCode !== undefined) {
+    if (!ADVISOR_ERROR_CODES.has(errorCode)) {
+      throw new CompatibilityProtocolError("invalid_advisor_error", "unsupported advisor error code");
+    }
+    return {
+      type: "advisor_tool_result",
+      tool_use_id: toolUseId,
+      content: { type: "advisor_tool_result_error", error_code: errorCode },
+    };
+  }
+  const content = { type: "advisor_result", text: String(text ?? "") };
+  if (stopReason !== undefined) content.stop_reason = stopReason;
+  return { type: "advisor_tool_result", tool_use_id: toolUseId, content };
+}
+
+export function createToolSearchResult({ toolUseId, toolReferences = [] } = {}) {
+  assertToolUseId(toolUseId);
+  return {
+    type: "tool_search_tool_result",
+    tool_use_id: toolUseId,
+    content: {
+      type: "tool_search_tool_search_result",
+      tool_references: structuredClone(toolReferences),
+    },
+  };
+}
+
+function assertToolUseId(toolUseId) {
+  if (typeof toolUseId !== "string" || toolUseId.length === 0) {
+    throw new CompatibilityProtocolError("missing_tool_use_id", "toolUseId is required");
+  }
+}
