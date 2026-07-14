@@ -55,7 +55,12 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
   }));
   const managedProviderNames = new Set(managedProviders.map((provider) => provider.name));
   for (const provider of currentConfig.Providers ?? []) {
-    if (managedProviderNames.has(provider.name) && !provider.id?.startsWith(`airkit-provider-${slug(profile.name)}-`)) {
+    const managedProvider = managedProviders.find((candidate) => candidate.name === provider.name);
+    const isOwned = provider.id?.startsWith(`airkit-provider-${slug(profile.name)}-`);
+    const isMatchingCcrImport = managedProvider && provider.id?.startsWith(`provider-${slug(provider.name)}-`)
+      && provider.api_base_url === managedProvider.api_base_url
+      && JSON.stringify([...(provider.models ?? [])].sort()) === JSON.stringify([...(managedProvider.models ?? [])].sort());
+    if (managedProviderNames.has(provider.name) && !isOwned && !isMatchingCcrImport) {
       throw new Error(`unowned CCR provider name collision: ${provider.name}`);
     }
   }
@@ -822,7 +827,7 @@ Commands:
   doctor [--profile <name>] [--config-dir <dir>]
   render ccr --profile <name> [--out <path>]
   render shell --profile <name> [--out <path>]
-  airclaude [auto|pro] [options] [-- <claude-args>]
+  airclaude [mode] [options] [-- <claude-args>]
   export-oss --out <dir>
 
 Options:
@@ -848,16 +853,15 @@ function renderRuntimeUpdate(result) {
 }
 
 function renderAirclaudeHelp() {
-  return `Usage: airclaude [auto|pro] [options] [-- <claude-args>]
+  return `Usage: airclaude [mode] [options] [-- <claude-args>]
 
 Modes:
-  auto          Use the profile's default low-friction routing.
-  pro           Apply the profile's stronger routing overlay.
+  mode          Select any profile-defined routing mode (for example auto, pro, or glm).
 
 Options:
   --profile <name>       Select a launch-capable profile.
   --config-dir <dir>     Use a custom ai-runtime-kit config directory.
-  --mode <auto|pro>      Select a mode without positional syntax.
+  --mode <mode>          Select a profile-defined mode without positional syntax.
   --dry-run              Render and report the launch plan without writing or launching.
   --doctor               Run launch preflight checks without launching.
   --repair-restore       Repair persisted Claude Code session model metadata and exit.

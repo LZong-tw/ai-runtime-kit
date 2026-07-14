@@ -148,6 +148,51 @@ test("CCR 3 merge refuses to replace an unowned provider with the same name", ()
   );
 });
 
+test("CCR 3 merge adopts a matching provider imported from CCR 2", () => {
+  const catalog = launchCatalog();
+  const [expected] = airkitRuntime.buildCcrConfig(catalog, "launch-example").Providers;
+  const merged = airkitRuntime.buildCcr3ManagedConfig(
+    catalog,
+    "launch-example",
+    {
+      Providers: [{
+        ...expected,
+        api_key: "legacy-secret",
+        id: "provider-demo-imported",
+        transformer: { use: ["legacy"] },
+      }],
+    },
+    { apiKeys: { demo: "runtime-secret" } },
+  );
+  const provider = merged.config.Providers.find((candidate) => candidate.name === "demo");
+
+  assert.equal(provider.id, "airkit-provider-launch-example-demo");
+  assert.equal(provider.api_key, "runtime-secret");
+  assert.equal(provider.transformer, undefined);
+});
+
+test("CCR 3 merge rejects near-match providers instead of adopting them", () => {
+  const catalog = launchCatalog();
+  const [expected] = airkitRuntime.buildCcrConfig(catalog, "launch-example").Providers;
+  const nearMatches = [
+    { ...expected, id: "user-provider" },
+    { ...expected, api_base_url: "https://other.example.test/v1", id: "provider-demo-imported" },
+    { ...expected, id: "provider-demo-imported", models: [...expected.models, "unexpected-model"] },
+  ];
+
+  for (const provider of nearMatches) {
+    assert.throws(
+      () => airkitRuntime.buildCcr3ManagedConfig(
+        catalog,
+        "launch-example",
+        { Providers: [provider] },
+        { apiKeys: { demo: "runtime-secret" } },
+      ),
+      /unowned CCR provider name collision: demo/,
+    );
+  }
+});
+
 test("CCR 3 launch path uses the managed profile and never invokes CCR 2 commands", async () => {
   const configDir = await mkdtemp(join(tmpdir(), "airkit-ccr3-launch-"));
   const calls = [];
@@ -508,9 +553,11 @@ test("runCli prints help without loading the catalog", async () => {
     });
 
     assert.equal(exitCode, 0);
-    assert.match(output.join(""), /Usage: airkit/);
-    assert.match(output.join(""), /airclaude/);
-    assert.match(output.join(""), /init --profile/);
+    const help = output.join("");
+    assert.match(help, /Usage: airkit/);
+    assert.match(help, /airclaude \[mode\]/);
+    assert.doesNotMatch(help, /airclaude \[auto\|pro\]/);
+    assert.match(help, /init --profile/);
   }
 });
 
@@ -1345,9 +1392,12 @@ test("runAirclaudeCli prints help without loading the catalog", async () => {
     });
 
     assert.equal(exitCode, 0);
-    assert.match(output.join(""), /Usage: airclaude/);
-    assert.match(output.join(""), /airclaude pro/);
-    assert.match(output.join(""), /--doctor/);
+    const help = output.join("");
+    assert.match(help, /Usage: airclaude \[mode\]/);
+    assert.match(help, /profile-defined routing mode/);
+    assert.doesNotMatch(help, /\[auto\|pro\]/);
+    assert.match(help, /airclaude pro/);
+    assert.match(help, /--doctor/);
   }
 });
 
