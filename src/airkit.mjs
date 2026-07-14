@@ -46,6 +46,9 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
   const launch = resolveLaunchConfig(profile, templateVars);
   const modes = Object.keys(launch.modes ?? { auto: {} }).sort();
   const managedPrefix = `airkit-${slug(profile.name)}-`;
+  const providerBaseUrl = String(
+    options.providerBaseUrl ?? options.env?.AIRCLAUDE_PROVIDER_BASE_URL ?? "",
+  ).trim();
   const baseConfig = buildCcrConfig(catalog, profileName, { configDir });
   assertCcr3Compatible(baseConfig);
   const managedProviderEntries = baseConfig.Providers.map((provider) => {
@@ -54,6 +57,7 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
       sourceName: provider.name,
       config: {
         ...provider,
+        api_base_url: providerBaseUrl || provider.api_base_url,
         id,
         name: id,
         api_key: options.apiKeys?.[provider.name] ?? provider.api_key,
@@ -395,6 +399,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
   const managed = buildCcr3ManagedConfig(catalog, profileName, currentConfig, {
     apiKeys,
     configDir: plan.configDir,
+    env: options.env,
   });
   if (JSON.stringify(managed.config) !== JSON.stringify(currentConfig)) {
     await ccrClient.saveConfig(managed.config);

@@ -133,6 +133,23 @@ test("CCR 3 merge creates CCR-only mode profiles and preserves unrelated configu
   assert.ok(merged.config.Router.rules.some((rule) => rule.id === "unrelated-rule"));
 });
 
+test("CCR 3 managed providers can route upstream through a per-launch proxy", () => {
+  const merged = airkitRuntime.buildCcr3ManagedConfig(
+    launchCatalog(),
+    "launch-example",
+    {},
+    {
+      apiKeys: { demo: "resolved-at-runtime" },
+      env: { AIRCLAUDE_PROVIDER_BASE_URL: "http://127.0.0.1:8804/v1/chat/completions" },
+    },
+  );
+
+  assert.equal(
+    merged.config.Providers[0].api_base_url,
+    "http://127.0.0.1:8804/v1/chat/completions",
+  );
+});
+
 test("CCR 3 merge rejects the removed CCR 2 transformer contract", () => {
   const catalog = launchCatalog();
   catalog.profiles[0].ccr.transformers = [{ path: "/tmp/legacy.cjs" }];
