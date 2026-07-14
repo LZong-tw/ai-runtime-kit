@@ -105,6 +105,14 @@ management API, preserving unrelated providers, profiles, and routing rules.
 It then delegates to `ccr <managed-profile> cli -- ...`; there is no CCR 2
 `restart`, `activate`, or live `config.json` overwrite path.
 
+Each managed profile sets the mode's default model and small/background model.
+CCR 2's automatic `think`, `longContextThreshold`, and `webSearch` categories
+are outside this hard-cut contract; use an explicit AirClaude mode when a
+stronger default route is required.
+Legacy CCR 2 `transformers` are rejected before save because CCR 3 does not
+persist that contract. Remove them or replace them with a native CCR 3 gateway
+plugin before launching the profile.
+
 For airclaude launcher wrappers, the wrapper also exports the same launch
 environment the `node airkit.mjs` launch path applies (e.g.
 `POWERLEVEL9K_INSTANT_PROMPT=off`, which keeps the user's P10k zsh snapshot from

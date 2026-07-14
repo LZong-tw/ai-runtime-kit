@@ -47,6 +47,11 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
   const modes = Object.keys(launch.modes ?? { auto: {} }).sort();
   const managedPrefix = `airkit-${slug(profile.name)}-`;
   const baseConfig = buildCcrConfig(catalog, profileName, { configDir });
+  const hasLegacyTransformers = (baseConfig.transformers?.length ?? 0) > 0
+    || baseConfig.Providers.some((provider) => (provider.transformer?.use?.length ?? 0) > 0);
+  if (hasLegacyTransformers) {
+    throw new Error("legacy CCR transformers are unsupported by CCR 3; remove them or migrate to a native CCR 3 gateway plugin");
+  }
   const managedProviders = baseConfig.Providers.map((provider) => ({
     ...provider,
     id: `airkit-provider-${slug(profile.name)}-${slug(provider.name)}`,
@@ -101,7 +106,7 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
 
 function mergeManagedConfigArrays(currentConfig, baseConfig, managedPrefix) {
   const merged = {};
-  for (const key of ["transformers", "plugins", "providerPlugins", "virtualModelProfiles"]) {
+  for (const key of ["plugins", "providerPlugins", "virtualModelProfiles"]) {
     if (!Array.isArray(baseConfig[key])) continue;
     const managed = baseConfig[key].map((entry, index) => ({
       ...entry,
@@ -932,10 +937,7 @@ mode: ${result.mode}
 
 Routes:
 - default: ${result.ccrConfig.Router?.default ?? "unset"}
-- think: ${result.ccrConfig.Router?.think ?? "unset"}
-- longContext: ${result.ccrConfig.Router?.longContext ?? "unset"}
 - background: ${result.ccrConfig.Router?.background ?? "unset"}
-- webSearch: ${result.ccrConfig.Router?.webSearch ?? "unset"}
 
 Files:
 ${fileLines.join("\n")}
@@ -1112,8 +1114,7 @@ function airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, restore) {
     env.AIRCLAUDE_STATUSLINE_INPUT_PRICE_PER_MILLION = String(statuslineInputPrice);
   }
 
-  for (const [key, route] of Object.entries(ccrConfig.Router ?? {})) {
-    if (typeof route !== "string") continue;
+  for (const [key, route] of managedRouterEntries(ccrConfig.Router)) {
     const envKey = `AIRCLAUDE_ROUTE_${toEnvKey(key)}`;
     const { provider, model } = splitRoute(route);
     env[envKey] = route;
@@ -1200,19 +1201,13 @@ function airclaudeRoutingPrompt(mode, ccrConfig, restore) {
 }
 
 function sortedRouterEntries(router) {
-  const preferred = ["default", "think", "longContext", "background", "webSearch"];
-  const entries = Object.entries(router)
-    .filter(([, route]) => typeof route === "string");
-  const byKey = new Map(entries);
-  const sorted = preferred
-    .filter((key) => byKey.has(key))
-    .map((key) => [key, byKey.get(key)]);
+  return managedRouterEntries(router);
+}
 
-  for (const [key, route] of entries) {
-    if (!preferred.includes(key)) sorted.push([key, route]);
-  }
-
-  return sorted;
+function managedRouterEntries(router = {}) {
+  return ["default", "background"]
+    .filter((key) => typeof router[key] === "string")
+    .map((key) => [key, router[key]]);
 }
 
 function statuslineLabel(mode, ccrConfig) {

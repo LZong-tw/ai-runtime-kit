@@ -36,6 +36,12 @@ versions, and validate them.
 profiles into CCR 3 through its management API, preserves unrelated CCR state,
 and launches `ccr <managed-profile> cli -- ...`.
 `airclaude pro` applies the profile's stronger routing overlay before launch.
+Managed CCR 3 profiles own the selected mode's default model and small/background
+model. CCR 2's automatic `think`, `longContextThreshold`, and `webSearch` router
+categories are not presented as active CCR 3 routes.
+Legacy CCR 2 `transformers` are rejected instead of being silently discarded by
+CCR 3 persistence; remove them or migrate the behavior to a native CCR 3 gateway
+plugin.
 Claude launches also receive reusable runtime lessons for recurring tool
 mistakes, such as preserving durable lessons, recording repeatable corrections
 without secrets, verifying Athena-style query context instead of assuming

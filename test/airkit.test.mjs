@@ -38,11 +38,8 @@ test("runtime requirements hard-cut to Node 22, Claude Code 2.1.208, and CCR 3.0
 });
 
 test("CCR 3 merge creates CCR-only mode profiles and preserves unrelated configuration", () => {
-  const catalog = launchCatalog();
-  catalog.profiles[0].ccr.transformers = [{ options: { restoreModel: "masked" }, path: "/tmp/airkit/managed.cjs" }];
   const current = {
     Providers: [{ id: "provider-unrelated", name: "unrelated", models: ["keep-me"] }],
-    transformers: [{ options: {}, path: "/tmp/user/unrelated.cjs" }],
     Router: {
       builtInRules: { "claude-code": { enabled: true }, codex: { enabled: true } },
       fallback: { mode: "off", models: [], retryCount: 1 },
@@ -65,7 +62,7 @@ test("CCR 3 merge creates CCR-only mode profiles and preserves unrelated configu
   };
 
   const merged = airkitRuntime.buildCcr3ManagedConfig(
-    catalog,
+    launchCatalog(),
     "launch-example",
     current,
     { apiKeys: { demo: "resolved-at-runtime" } },
@@ -100,10 +97,17 @@ test("CCR 3 merge creates CCR-only mode profiles and preserves unrelated configu
   );
   assert.ok(merged.config.profile.profiles.some((candidate) => candidate.id === "unrelated-profile"));
   assert.ok(merged.config.Router.rules.some((rule) => rule.id === "unrelated-rule"));
-  assert.deepEqual(merged.config.transformers.map((transformer) => transformer.path), [
-    "/tmp/user/unrelated.cjs",
-    "/tmp/airkit/managed.cjs",
-  ]);
+});
+
+test("CCR 3 merge rejects the removed CCR 2 transformer contract", () => {
+  const catalog = launchCatalog();
+  catalog.profiles[0].ccr.transformers = [{ path: "/tmp/legacy.cjs" }];
+  catalog.profiles[0].ccr.Providers[0].transformer = { use: ["legacy"] };
+
+  assert.throws(
+    () => airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {}),
+    /legacy CCR transformers are unsupported by CCR 3/,
+  );
 });
 
 test("CCR 3 merge refuses to replace an unowned provider with the same name", () => {
@@ -253,9 +257,8 @@ test("airclaude launch injects reusable runtime lessons", async () => {
   assert.match(prompt, /AirClaude active routing/);
   assert.match(prompt, /mode: auto/);
   assert.match(prompt, /default: openai-compatible,steady-coder \(model steady-coder\)/);
-  assert.match(prompt, /think: openai-compatible,reasoning-coder \(model reasoning-coder\)/);
-  assert.match(prompt, /longContext: openai-compatible,long-context-coder \(model long-context-coder\)/);
   assert.match(prompt, /background: openai-compatible,fast-coder \(model fast-coder\)/);
+  assert.doesNotMatch(prompt, /- think:|- longContext:|- webSearch:/);
   assert.match(prompt, /Claude restore\/display model is compatibility metadata only/);
 });
 
@@ -514,16 +517,15 @@ test("buildLaunchPlan applies pro mode CCR routing overlay without mutating the 
     assert.match(plan.launch.args[6], /AirClaude active routing/);
     assert.match(plan.launch.args[6], /mode: pro/);
     assert.match(plan.launch.args[6], /default: demo,strong-coder \(model strong-coder\)/);
-    assert.match(plan.launch.args[6], /think: demo,strong-coder \(model strong-coder\)/);
-    assert.match(plan.launch.args[6], /longContext: demo,strong-coder \(model strong-coder\)/);
     assert.match(plan.launch.args[6], /background: demo,cheap-coder \(model cheap-coder\)/);
+    assert.doesNotMatch(plan.launch.args[6], /- think:|- longContext:|- webSearch:/);
     assert.match(plan.launch.args[6], /Do not infer the active provider route from Claude Code's displayed model name/);
     assert.equal(plan.launch.env.AIRCLAUDE_PROFILE, "launch-example");
     assert.equal(plan.launch.env.AIRCLAUDE_MODE, "pro");
     assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_DEFAULT, "demo,strong-coder");
     assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_DEFAULT_MODEL, "strong-coder");
-    assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_THINK, "demo,strong-coder");
-    assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_LONG_CONTEXT_MODEL, "strong-coder");
+    assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_THINK, undefined);
+    assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_LONG_CONTEXT_MODEL, undefined);
     assert.equal(plan.launch.env.AIRCLAUDE_STATUSLINE_LABEL, "airclaude pro strong-coder");
     assert.equal(plan.launch.env.AIRCLAUDE_STATUSLINE_INPUT_PRICE_PER_MILLION, "2");
     assert.equal(plan.launch.env.AIRCLAUDE_RESTORE_MODEL, "claude-sonnet-4-6");
@@ -1049,12 +1051,6 @@ test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves
       AIRCLAUDE_ROUTE_DEFAULT: "demo,strong-coder",
       AIRCLAUDE_ROUTE_DEFAULT_MODEL: "strong-coder",
       AIRCLAUDE_ROUTE_DEFAULT_PROVIDER: "demo",
-      AIRCLAUDE_ROUTE_LONG_CONTEXT: "demo,strong-coder",
-      AIRCLAUDE_ROUTE_LONG_CONTEXT_MODEL: "strong-coder",
-      AIRCLAUDE_ROUTE_LONG_CONTEXT_PROVIDER: "demo",
-      AIRCLAUDE_ROUTE_THINK: "demo,strong-coder",
-      AIRCLAUDE_ROUTE_THINK_MODEL: "strong-coder",
-      AIRCLAUDE_ROUTE_THINK_PROVIDER: "demo",
       AIRCLAUDE_STATUSLINE_INPUT_PRICE_PER_MILLION: "2",
       AIRCLAUDE_STATUSLINE_LABEL: "airclaude pro strong-coder",
       CLAUDE_STATUSLINE_CACHE_DIR: join(homedir(), ".claude", "cache", "airclaude", "launch-example", "pro"),
