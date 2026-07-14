@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { createServer } from "node:http";
 import { test } from "node:test";
-import { createCoreClient } from "../src/compat/gateway.mjs";
+import {
+  createCoreClient,
+  handleCompatibilityMessage,
+  writeAnthropicMessage,
+} from "../src/compat/gateway.mjs";
 
 const CORE_TOKEN = "generated-core-token";
 const RAW_RESPONSE_BODY = Buffer.from([0, 1, 2, 255, 10]);
@@ -383,6 +387,544 @@ test("raw passthrough propagates abort signals to the core request", async (t) =
   await assert.rejects(pending, (error) => error.name === "AbortError");
   assert.equal(response.body.length, 0);
 });
+
+test("advisor bridge consults the configured Anthropic model and resumes the executor", async () => {
+  const fixture = createBridgeFixture([
+    message({
+      id: "msg_executor_1",
+      content: [
+        { type: "text", text: "I will consult the advisor." },
+        { type: "tool_use", id: "toolu_advisor", name: "airkit_advisor", input: {} },
+      ],
+      usage: { input_tokens: 10, output_tokens: 4 },
+    }),
+    message({
+      id: "msg_advisor",
+      model: "anthropic/claude-opus-4-8",
+      content: [{ type: "text", text: "Inspect the failure boundary first." }],
+      usage: { input_tokens: 100, output_tokens: 20 },
+    }),
+    message({
+      id: "msg_executor_2",
+      content: [{ type: "text", text: "The boundary is now clear." }],
+      usage: { input_tokens: 12, output_tokens: 6 },
+    }),
+  ]);
+
+  const result = await handleCompatibilityMessage(fixture.input);
+
+  assert.deepEqual(result.content.map((block) => block.type), [
+    "text",
+    "server_tool_use",
+    "advisor_tool_result",
+    "text",
+  ]);
+  assert.equal(fixture.calls[0].body.model, "executor-model");
+  assert.deepEqual(fixture.calls[0].body.tools.map((tool) => tool.name), [
+    "ordinary_tool",
+    "airkit_advisor",
+    "airkit_tool_search",
+  ]);
+  assert.equal(fixture.calls[1].body.model, "anthropic/claude-opus-4-8");
+  assert.equal(fixture.calls[1].body.tools, undefined);
+  assert.match(fixture.calls[1].body.messages[0].content, /<transcript>/);
+  assert.match(fixture.calls[1].body.messages[0].content, /Please investigate/);
+  assert.equal(fixture.calls[2].body.model, "executor-model");
+  assert.equal(fixture.calls[2].body.messages.at(-1).role, "user");
+  assert.match(fixture.calls[2].body.messages.at(-1).content[0].content, /failure boundary/);
+  assert.equal(result.id, "msg_executor_2");
+  assert.equal(result.model, "executor-model");
+  assert.deepEqual(result.usage, {
+    input_tokens: 22,
+    output_tokens: 10,
+    iterations: {
+      advisor: [{ input_tokens: 100, output_tokens: 20 }],
+      executor: [
+        { input_tokens: 10, output_tokens: 4 },
+        { input_tokens: 12, output_tokens: 6 },
+      ],
+    },
+  });
+});
+
+test("ToolSearch bridge keeps deferred tools out until a local match", async () => {
+  const fixture = createBridgeFixture([
+    message({
+      content: [
+        {
+          type: "tool_use",
+          id: "toolu_search",
+          name: "airkit_tool_search",
+          input: { query: "weather" },
+        },
+      ],
+    }),
+    message({
+      content: [{ type: "tool_use", id: "toolu_weather", name: "get_weather", input: {} }],
+      stop_reason: "tool_use",
+    }),
+  ]);
+
+  const result = await handleCompatibilityMessage(fixture.input);
+
+  assert.equal(fixture.calls[0].body.tools.some((tool) => tool.name === "get_weather"), false);
+  assert.equal(fixture.calls[1].body.tools.some((tool) => tool.name === "get_weather"), true);
+  assert.equal(fixture.calls[1].body.tools.some((tool) => tool.name === "search_files"), false);
+  assert.deepEqual(result.content.map((block) => block.type), [
+    "server_tool_use",
+    "tool_search_tool_result",
+    "tool_use",
+  ]);
+  assert.deepEqual(result.content[1].content.tool_references, [
+    { type: "tool_reference", tool_name: "get_weather" },
+  ]);
+});
+
+test("prior native result blocks become bounded history and reactivate referenced tools", async () => {
+  const fixture = createBridgeFixture([
+    message({ content: [{ type: "text", text: "History understood." }] }),
+  ], {
+    body: {
+      messages: [
+        { role: "user", content: "Earlier question" },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "server_tool_use",
+              id: "srvtoolu_prior_advisor",
+              name: "advisor",
+              input: {},
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "advisor_tool_result",
+              tool_use_id: "srvtoolu_prior_advisor",
+              content: {
+                type: "advisor_result",
+                text: "Use the prior evidence.",
+                stop_reason: "end_turn",
+              },
+            },
+          ],
+        },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "server_tool_use",
+              id: "srvtoolu_prior_search",
+              name: "tool_search_tool_regex",
+              input: { query: "files" },
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_search_tool_result",
+              tool_use_id: "srvtoolu_prior_search",
+              content: {
+                type: "tool_search_tool_search_result",
+                tool_references: [{ type: "tool_reference", tool_name: "search_files" }],
+              },
+            },
+          ],
+        },
+      ],
+    },
+  });
+
+  await handleCompatibilityMessage(fixture.input);
+
+  assert.equal(fixture.calls[0].body.tools.some((tool) => tool.name === "search_files"), true);
+  const normalizedHistory = JSON.stringify(fixture.calls[0].body.messages);
+  assert.doesNotMatch(normalizedHistory, /advisor_tool_result|tool_search_tool_result/);
+  assert.match(normalizedHistory, /Use the prior evidence/);
+  assert.match(normalizedHistory, /search_files/);
+});
+
+test("mixed compatibility and normal client tool calls return the client call without executing it", async () => {
+  const fixture = createBridgeFixture([
+    message({
+      content: [
+        { type: "text", text: "Before advisor." },
+        { type: "tool_use", id: "toolu_advisor", name: "airkit_advisor", input: {} },
+        { type: "text", text: "After advisor." },
+        { type: "tool_use", id: "toolu_client", name: "ordinary_tool", input: { value: 1 } },
+      ],
+      stop_reason: "tool_use",
+    }),
+    message({
+      model: "anthropic/claude-opus-4-8",
+      content: [{ type: "text", text: "Use the ordinary tool next." }],
+    }),
+  ]);
+
+  const result = await handleCompatibilityMessage(fixture.input);
+
+  assert.equal(fixture.calls.length, 2);
+  assert.deepEqual(result.content.map((block) => block.type), [
+    "text",
+    "server_tool_use",
+    "advisor_tool_result",
+    "text",
+    "tool_use",
+  ]);
+  assert.equal(result.content.at(-1).name, "ordinary_tool");
+});
+
+test("advisor max_uses returns a canonical error without another advisor call", async () => {
+  const fixture = createBridgeFixture([
+    message({
+      content: [{ type: "tool_use", id: "toolu_advisor_1", name: "airkit_advisor", input: {} }],
+    }),
+    message({
+      model: "anthropic/claude-opus-4-8",
+      content: [{ type: "text", text: "One consultation only." }],
+    }),
+    message({
+      content: [{ type: "tool_use", id: "toolu_advisor_2", name: "airkit_advisor", input: {} }],
+    }),
+    message({ content: [{ type: "text", text: "Continuing without another consultation." }] }),
+  ], { advisorMaxUses: 1 });
+
+  const result = await handleCompatibilityMessage(fixture.input);
+
+  assert.equal(fixture.calls.filter((call) => call.body.model.includes("opus")).length, 1);
+  assert.equal(result.content[3].type, "advisor_tool_result");
+  assert.equal(result.content[3].content.error_code, "max_uses_exceeded");
+});
+
+test("invalid ToolSearch input returns a bounded typed result and resumes", async () => {
+  const fixture = createBridgeFixture([
+    message({
+      content: [
+        {
+          type: "tool_use",
+          id: "toolu_bad_search",
+          name: "airkit_tool_search",
+          input: { query: "[" },
+        },
+      ],
+    }),
+    message({ content: [{ type: "text", text: "Search input was rejected safely." }] }),
+  ]);
+
+  const result = await handleCompatibilityMessage(fixture.input);
+
+  assert.equal(result.content[1].content.error_code, "invalid_tool_input");
+  assert.match(result.content[1].content.error_message, /invalid ToolSearch regex/);
+  assert.ok(result.content[1].content.error_message.length <= 256);
+});
+
+test("unsupported native history falls back for only this request with a visible warning", async () => {
+  const fixture = createBridgeFixture([
+    message({
+      id: "msg_fallback",
+      model: "anthropic/claude-opus-4-8",
+      content: [{ type: "text", text: "Fallback response." }],
+    }),
+  ], {
+    body: {
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "server_tool_use",
+              id: "srvtoolu_web_search",
+              name: "web_search",
+              input: { query: "public protocol" },
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "advisor_tool_result",
+              tool_use_id: "srvtoolu_missing",
+              content: { type: "advisor_result", text: "orphan" },
+            },
+          ],
+        },
+      ],
+    },
+  });
+
+  const result = await handleCompatibilityMessage(fixture.input);
+
+  assert.equal(fixture.calls.length, 1);
+  assert.equal(fixture.calls[0].body.model, "anthropic/claude-opus-4-8");
+  assert.equal(fixture.calls[0].body.tools.some((tool) => tool.type?.startsWith("advisor_")), false);
+  assert.equal(fixture.calls[0].body.tools.some((tool) => tool.defer_loading === true), false);
+  assert.equal(fixture.calls[0].body.tools.some((tool) => tool.name === "get_weather"), true);
+  assert.match(JSON.stringify(fixture.calls[0].body.messages), /srvtoolu_web_search/);
+  assert.equal(result.content[0].type, "text");
+  assert.match(result.content[0].text, /compatibility fallback/i);
+});
+
+test("fallback rejects a configured non-Anthropic model before calling core", async () => {
+  const fixture = createBridgeFixture([], {
+    body: {
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "advisor_tool_result",
+              tool_use_id: "srvtoolu_missing",
+              content: { type: "advisor_result", text: "orphan" },
+            },
+          ],
+        },
+      ],
+    },
+    fallbackModel: "openai/gpt-5.4",
+  });
+
+  await assert.rejects(
+    handleCompatibilityMessage(fixture.input),
+    /fallbackModel must be an Anthropic-family model/,
+  );
+  assert.equal(fixture.calls.length, 0);
+});
+
+test("executor loop cap falls back after eight iterations", async () => {
+  const repeatedSearches = Array.from({ length: 8 }, (_, index) =>
+    message({
+      id: `msg_loop_${index}`,
+      content: [
+        {
+          type: "tool_use",
+          id: `toolu_loop_${index}`,
+          name: "airkit_tool_search",
+          input: { query: "no_match" },
+        },
+      ],
+    }),
+  );
+  const fixture = createBridgeFixture([
+    ...repeatedSearches,
+    message({
+      id: "msg_loop_fallback",
+      model: "anthropic/claude-opus-4-8",
+      content: [{ type: "text", text: "Loop fallback response." }],
+    }),
+  ]);
+
+  const result = await handleCompatibilityMessage(fixture.input);
+
+  assert.equal(fixture.calls.filter((call) => call.body.model === "executor-model").length, 8);
+  assert.equal(fixture.calls.at(-1).body.model, "anthropic/claude-opus-4-8");
+  assert.match(result.content[0].text, /compatibility fallback/i);
+  assert.equal(result.usage.iterations.executor.length, 9);
+});
+
+test("bridge errors are bounded and never expose provider payloads", async () => {
+  const fixture = createBridgeFixture([]);
+  fixture.input.coreClient.requestMessage = async () => {
+    throw new Error("credential=secret provider-payload /private/runtime/path");
+  };
+
+  await assert.rejects(handleCompatibilityMessage(fixture.input), (error) => {
+    assert.match(error.message, /CCR executor request failed/);
+    assert.ok(error.message.length <= 256);
+    assert.doesNotMatch(error.message, /secret|provider-payload|private\/runtime/);
+    return true;
+  });
+});
+
+test("Anthropic JSON and SSE writers preserve canonical result ordering", async () => {
+  const outbound = message({
+    id: "msg_serialized",
+    content: [
+      { type: "text", text: "Before" },
+      {
+        type: "server_tool_use",
+        id: "srvtoolu_advisor_serialized",
+        name: "advisor",
+        input: {},
+      },
+      {
+        type: "advisor_tool_result",
+        tool_use_id: "srvtoolu_advisor_serialized",
+        content: { type: "advisor_result", text: "Advice" },
+      },
+      {
+        type: "server_tool_use",
+        id: "srvtoolu_search_serialized",
+        name: "tool_search_tool_regex",
+        input: { query: "weather" },
+      },
+      {
+        type: "tool_search_tool_result",
+        tool_use_id: "srvtoolu_search_serialized",
+        content: {
+          type: "tool_search_tool_search_result",
+          tool_references: [{ type: "tool_reference", tool_name: "get_weather" }],
+        },
+      },
+      { type: "tool_use", id: "toolu_client", name: "get_weather", input: {} },
+    ],
+    stop_reason: "tool_use",
+    usage: { input_tokens: 5, output_tokens: 7 },
+  });
+  const jsonResponse = createMessageResponse();
+  const streamResponse = createMessageResponse();
+
+  await writeAnthropicMessage(jsonResponse, outbound, false);
+  await writeAnthropicMessage(streamResponse, outbound, true);
+
+  assert.equal(jsonResponse.headers["content-type"], "application/json");
+  assert.deepEqual(JSON.parse(jsonResponse.body), outbound);
+  assert.equal(streamResponse.headers["content-type"], "text/event-stream");
+  const frames = parseSse(streamResponse.body);
+  assert.equal(frames[0].event, "message_start");
+  assert.equal(frames.at(-1).event, "message_stop");
+  const starts = frames.filter((frame) => frame.event === "content_block_start");
+  assert.deepEqual(starts.map((frame) => frame.data.content_block.type), outbound.content.map((b) => b.type));
+  for (const resultType of ["advisor_tool_result", "tool_search_tool_result"]) {
+    const resultStart = frames.findIndex(
+      (frame) =>
+        frame.event === "content_block_start" && frame.data.content_block.type === resultType,
+    );
+    const matchingUseStop = frames.findLastIndex(
+      (frame, index) => frame.event === "content_block_stop" && index < resultStart,
+    );
+    assert.ok(matchingUseStop >= 0 && matchingUseStop < resultStart);
+    assert.deepEqual(
+      frames[resultStart].data.content_block,
+      outbound.content.find((block) => block.type === resultType),
+    );
+  }
+  assert.equal(frames.some((frame) => frame.event === "message_delta"), true);
+});
+
+function createBridgeFixture(script, options = {}) {
+  const calls = [];
+  const queue = [...script];
+  const advisorMaxUses = options.advisorMaxUses ?? 2;
+  const body = {
+    model: "executor-model",
+    max_tokens: 2048,
+    messages: [{ role: "user", content: "Please investigate the current failure." }],
+    tools: [
+      {
+        type: "advisor_20260301",
+        name: "advisor",
+        max_uses: advisorMaxUses,
+        max_tokens: 512,
+      },
+      {
+        type: "tool_search_tool_regex_20251119",
+        name: "tool_search_tool_regex",
+      },
+      {
+        name: "get_weather",
+        description: "Get current weather",
+        defer_loading: true,
+        input_schema: { type: "object", properties: {} },
+      },
+      {
+        name: "search_files",
+        description: "Search files",
+        defer_loading: true,
+        input_schema: { type: "object", properties: {} },
+      },
+      {
+        name: "ordinary_tool",
+        description: "An ordinary client tool",
+        input_schema: { type: "object", properties: {} },
+      },
+    ],
+    ...options.body,
+  };
+  const coreClient = {
+    async requestMessage(requestBody, headers) {
+      calls.push({ body: structuredClone(requestBody), headers: structuredClone(headers ?? {}) });
+      assert.ok(queue.length > 0, "scripted core received an unexpected request");
+      return structuredClone(queue.shift());
+    },
+  };
+  return {
+    calls,
+    input: {
+      body,
+      headers: { "anthropic-beta": "tool-search-tool-2025-11-19" },
+      config: {
+        advisor: {
+          mode: "bridge",
+          model: "anthropic/claude-opus-4-8",
+          fallbackModel: options.fallbackModel ?? "anthropic/claude-opus-4-8",
+        },
+        toolSearch: { mode: "bridge" },
+      },
+      coreClient,
+      createId: (() => {
+        let next = 0;
+        return (prefix) => `${prefix}_${++next}`;
+      })(),
+    },
+  };
+}
+
+function message(overrides = {}) {
+  return {
+    id: "msg_fixture",
+    type: "message",
+    role: "assistant",
+    model: "executor-model",
+    content: [],
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: 0, output_tokens: 0 },
+    ...overrides,
+  };
+}
+
+function createMessageResponse() {
+  const chunks = [];
+  return {
+    headers: {},
+    statusCode: 200,
+    writeHead(statusCode, headers) {
+      this.statusCode = statusCode;
+      this.headers = Object.fromEntries(
+        Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value]),
+      );
+    },
+    write(chunk) {
+      chunks.push(String(chunk));
+      return true;
+    },
+    end(chunk) {
+      if (chunk !== undefined) chunks.push(String(chunk));
+    },
+    get body() {
+      return chunks.join("");
+    },
+  };
+}
+
+function parseSse(body) {
+  return body
+    .trim()
+    .split("\n\n")
+    .map((frame) => {
+      const lines = frame.split("\n");
+      return {
+        event: lines.find((line) => line.startsWith("event: ")).slice(7),
+        data: JSON.parse(lines.find((line) => line.startsWith("data: ")).slice(6)),
+      };
+    });
+}
 
 async function createCoreFixture(t, { coreHost = "127.0.0.1", tokenEntry = CORE_TOKEN } = {}) {
   let notifyRequestStarted;
