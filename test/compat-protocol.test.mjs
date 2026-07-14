@@ -154,6 +154,27 @@ test("safe regex subset preserves escaped literal metacharacters", () => {
   );
 });
 
+test("safe regex subset accepts Python-valid escaped punctuation as literals", () => {
+  const cases = [
+    ["path\\/to", "path/to"],
+    ["hello\\ world", "hello world"],
+    ["foo\\#bar", "foo#bar"],
+    ["a\\,b", "a,b"],
+    ["a\\_b", "a_b"],
+  ];
+
+  for (const [query, description] of cases) {
+    assert.deepEqual(
+      searchDeferredTools({
+        tools: [{ name: "escaped_literal", description, defer_loading: true }],
+        type: "tool_search_tool_regex_20251119",
+        query,
+      }),
+      [{ type: "tool_reference", tool_name: "escaped_literal" }],
+    );
+  }
+});
+
 test("BM25 ToolSearch ranks matching deferred tools deterministically", () => {
   assert.deepEqual(
     searchDeferredTools({
@@ -199,6 +220,26 @@ test("BM25 ToolSearch ranks competing scores and breaks ties by tool name", () =
       { type: "tool_reference", tool_name: "zeta_search" },
     ],
   );
+});
+
+test("ToolSearch tie ordering is independent of the process locale", () => {
+  const tools = [
+    { name: "äther", description: "shared", defer_loading: true },
+    { name: "zeta", description: "shared", defer_loading: true },
+  ];
+
+  for (const type of [
+    "tool_search_tool_regex_20251119",
+    "tool_search_tool_bm25_20251119",
+  ]) {
+    assert.deepEqual(
+      searchDeferredTools({ tools, type, query: "shared" }),
+      [
+        { type: "tool_reference", tool_name: "zeta" },
+        { type: "tool_reference", tool_name: "äther" },
+      ],
+    );
+  }
 });
 
 test("ToolSearch returns at most five results and handles empty queries", () => {
@@ -533,6 +574,23 @@ test("ToolSearch error mapping converts local input failures and preserves fallb
     () => mapToolSearchError({ toolUseId: "srvtoolu_search", error: fallback }),
     (error) => error === fallback,
   );
+});
+
+test("ToolSearch error mapping does not expose operational error details", () => {
+  for (const error of [
+    new Error("sensitive internal path /private/runtime"),
+    Object.assign(new Error("private provider endpoint"), { code: "unavailable" }),
+  ]) {
+    assert.deepEqual(mapToolSearchError({ toolUseId: "srvtoolu_search", error }), {
+      type: "tool_search_tool_result",
+      tool_use_id: "srvtoolu_search",
+      content: {
+        type: "tool_search_tool_result_error",
+        error_code: "unavailable",
+        error_message: "ToolSearch is unavailable",
+      },
+    });
+  }
 });
 
 test("result construction rejects missing IDs and unsupported advisor errors", () => {

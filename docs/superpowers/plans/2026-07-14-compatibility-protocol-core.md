@@ -282,104 +282,30 @@ Expected: FAIL because `searchDeferredTools` is not exported.
 
 - [ ] **Step 3: Implement bounded regex and BM25 search**
 
-Append these functions to `src/compat/protocol.mjs`:
+Implement `searchDeferredTools` with the following hard contract:
 
-```js
-export function searchDeferredTools({ tools = [], type, query, limit = 5 }) {
-  const deferred = tools.filter((tool) => tool?.defer_loading === true && tool?.name);
-  const boundedLimit = Number.isInteger(limit) ? Math.max(0, Math.min(limit, 5)) : 5;
-  const value = typeof query === "string" ? query : "";
-  let matches;
+- Accept only an array of at most 512 tools and validate every deferred tool's
+  name, description, and schema shape before searching.
+- Cap the searchable text assembled from each tool at 4,096 characters and
+  traverse at most 1,024 schema nodes. Reject cycles and malformed definitions.
+- Treat the regex query as Python `re.search()` syntax, but execute only a safe
+  local subset: literal text, escaped literal punctuation, alternation, and
+  start/end anchors at alternative boundaries. Never execute caller input with
+  JavaScript `RegExp` or another backtracking regex engine.
+- Return `tool_search_fallback_required` for valid Python regex features outside
+  the safe subset. Return `invalid_tool_search_query` only for syntax that is
+  genuinely invalid in Python. This distinction is what lets the gateway reroute
+  only the affected request to the Anthropic-family fallback.
+- Enforce the protocol's exact 200-character regex and 500-character BM25 limits.
+- Search bounded tool names, descriptions, schema property names, and schema
+  descriptions. Return no more than five `tool_reference` blocks.
+- Rank BM25 matches locally and use code-unit comparison for ties in both search
+  modes so results do not vary with the host's ICU locale.
 
-  if (type === "tool_search_tool_regex_20251119") {
-    if (value.length > 200) {
-      throw new CompatibilityProtocolError(
-        "tool_search_query_too_long",
-        "ToolSearch regex exceeds 200 characters",
-      );
-    }
-    let pattern;
-    try {
-      pattern = new RegExp(value, "i");
-    } catch {
-      throw new CompatibilityProtocolError("invalid_tool_search_query", "invalid ToolSearch regex");
-    }
-    matches = deferred
-      .filter((tool) => pattern.test(searchableToolText(tool)))
-      .sort((left, right) => left.name.localeCompare(right.name));
-  } else if (type === "tool_search_tool_bm25_20251119") {
-    if (value.length > 500) {
-      throw new CompatibilityProtocolError(
-        "tool_search_query_too_long",
-        "ToolSearch BM25 query exceeds 500 characters",
-      );
-    }
-    matches = rankToolsByBm25(deferred, value);
-  } else {
-    throw new CompatibilityProtocolError("unsupported_tool_search", "unsupported ToolSearch type");
-  }
-
-  return matches.slice(0, boundedLimit).map((tool) => ({
-    type: "tool_reference",
-    tool_name: tool.name,
-  }));
-}
-
-function searchableToolText(tool) {
-  return [tool.name, tool.description, JSON.stringify(tool.input_schema ?? {})]
-    .filter(Boolean)
-    .join("\n");
-}
-
-function rankToolsByBm25(tools, query) {
-  const queryTerms = tokenize(query);
-  if (queryTerms.length === 0 || tools.length === 0) return [];
-  const documents = tools.map((tool) => tokenize(searchableToolText(tool)));
-  const averageLength = documents.reduce((sum, terms) => sum + terms.length, 0) / documents.length;
-  const documentFrequency = new Map();
-  for (const terms of documents) {
-    for (const term of new Set(terms)) {
-      documentFrequency.set(term, (documentFrequency.get(term) ?? 0) + 1);
-    }
-  }
-
-  return tools
-    .map((tool, index) => ({
-      score: bm25Score(
-        documents[index],
-        queryTerms,
-        documentFrequency,
-        documents.length,
-        averageLength,
-      ),
-      tool,
-    }))
-    .filter(({ score }) => score > 0)
-    .sort((left, right) => right.score - left.score || left.tool.name.localeCompare(right.tool.name))
-    .map(({ tool }) => tool);
-}
-
-function bm25Score(terms, queryTerms, documentFrequency, documentCount, averageLength) {
-  const counts = new Map();
-  for (const term of terms) counts.set(term, (counts.get(term) ?? 0) + 1);
-  let score = 0;
-  for (const term of new Set(queryTerms)) {
-    const frequency = counts.get(term) ?? 0;
-    if (frequency === 0) continue;
-    const documentsWithTerm = documentFrequency.get(term) ?? 0;
-    const inverseFrequency = Math.log(
-      1 + (documentCount - documentsWithTerm + 0.5) / (documentsWithTerm + 0.5),
-    );
-    const lengthRatio = averageLength === 0 ? 1 : terms.length / averageLength;
-    score += inverseFrequency * ((frequency * 2.2) / (frequency + 1.2 * (0.25 + 0.75 * lengthRatio)));
-  }
-  return score;
-}
-
-function tokenize(value) {
-  return String(value).toLowerCase().match(/[a-z0-9_]+/g) ?? [];
-}
-```
+Add focused cases for schema-only matches, escaped punctuation, unsupported
+Python features, malformed definitions, cyclic and oversized schemas, exact
+query boundaries, five-result truncation, competing BM25 scores, and
+locale-independent tie ordering.
 
 - [ ] **Step 4: Run the focused tests and verify GREEN**
 
@@ -389,7 +315,7 @@ Run:
 node --test test/compat-protocol.test.mjs
 ```
 
-Expected: 6 tests pass, 0 fail.
+Expected: all focused search tests pass, including the safety and boundary cases.
 
 - [ ] **Step 5: Commit deferred-tool search**
 
@@ -405,14 +331,17 @@ git commit -m "feat: search deferred Claude tools locally"
 - Modify: `src/compat/protocol.mjs`
 
 **Interfaces:**
-- Produces: `createAdvisorToolResult({ toolUseId, text?, stopReason?, errorCode? })`.
+- Produces: `createAdvisorToolResult({ toolUseId, text?, encryptedContent?, stopReason?, errorCode? })`.
 - Produces: `createToolSearchResult({ toolUseId, toolReferences })`.
+- Produces: `createToolSearchErrorResult({ toolUseId, errorCode, errorMessage? })`.
+- Produces: `mapToolSearchError({ toolUseId, error })`.
 - Consumes: already-validated bridge outputs; does not perform provider calls.
 
 - [ ] **Step 1: Append failing content-block tests**
 
-Update the import list to include `createAdvisorToolResult` and
-`createToolSearchResult`, then append:
+Update the import list to include `createAdvisorToolResult`,
+`createToolSearchResult`, `createToolSearchErrorResult`, and
+`mapToolSearchError`, then append the canonical content-block cases.
 
 ```js
 test("advisor result construction preserves success and typed error variants", () => {
@@ -480,57 +409,30 @@ Run:
 node --test test/compat-protocol.test.mjs
 ```
 
-Expected: FAIL because the two constructors are not exported.
+Expected: FAIL because the new result helpers are not exported.
 
 - [ ] **Step 3: Implement canonical result constructors**
 
-Append to `src/compat/protocol.mjs`:
+Implement the complete result unions rather than only the plaintext success
+path:
 
-```js
-const ADVISOR_ERROR_CODES = new Set([
-  "max_uses_exceeded",
-  "too_many_requests",
-  "overloaded",
-  "prompt_too_long",
-  "execution_time_exceeded",
-  "unavailable",
-]);
+- `createAdvisorToolResult` must construct plaintext `advisor_result`, opaque
+  `advisor_redacted_result` with `encrypted_content`, and every documented
+  `advisor_tool_result_error`. Plaintext and encrypted content are mutually
+  exclusive, and opaque content is preserved verbatim.
+- `createToolSearchResult` must nest cloned `tool_reference` values under
+  `tool_search_tool_search_result`.
+- `createToolSearchErrorResult` must support exactly `invalid_tool_input`,
+  `unavailable`, `too_many_requests`, and `execution_time_exceeded` inside an
+  HTTP-200 `tool_search_tool_result_error` block.
+- `mapToolSearchError` must rethrow `tool_search_fallback_required`, map safe
+  local input failures to `invalid_tool_input`, and sanitize all operational or
+  unknown error messages so paths, endpoints, and provider details cannot leak.
+- Every constructor must reject a missing `toolUseId`.
 
-export function createAdvisorToolResult({ toolUseId, text, stopReason, errorCode } = {}) {
-  assertToolUseId(toolUseId);
-  if (errorCode !== undefined) {
-    if (!ADVISOR_ERROR_CODES.has(errorCode)) {
-      throw new CompatibilityProtocolError("invalid_advisor_error", "unsupported advisor error code");
-    }
-    return {
-      type: "advisor_tool_result",
-      tool_use_id: toolUseId,
-      content: { type: "advisor_tool_result_error", error_code: errorCode },
-    };
-  }
-  const content = { type: "advisor_result", text: String(text ?? "") };
-  if (stopReason !== undefined) content.stop_reason = stopReason;
-  return { type: "advisor_tool_result", tool_use_id: toolUseId, content };
-}
-
-export function createToolSearchResult({ toolUseId, toolReferences = [] } = {}) {
-  assertToolUseId(toolUseId);
-  return {
-    type: "tool_search_tool_result",
-    tool_use_id: toolUseId,
-    content: {
-      type: "tool_search_tool_search_result",
-      tool_references: structuredClone(toolReferences),
-    },
-  };
-}
-
-function assertToolUseId(toolUseId) {
-  if (typeof toolUseId !== "string" || toolUseId.length === 0) {
-    throw new CompatibilityProtocolError("missing_tool_use_id", "toolUseId is required");
-  }
-}
-```
+Add focused cases for plaintext and redacted advisor results, all official
+ToolSearch error codes, typed local-error mapping, fallback preservation, raw
+operational-message sanitization, and invalid IDs or error variants.
 
 - [ ] **Step 4: Run focused and full verification**
 
@@ -543,7 +445,7 @@ npm run check
 npm run pack:check
 ```
 
-Expected: 9 focused tests pass; all repository tests, syntax checks, and package
+Expected: 22 focused tests pass; all repository tests, syntax checks, and package
 allowlist checks pass with no warnings.
 
 - [ ] **Step 5: Scan the Phase 1 diff for private identifiers**
@@ -553,11 +455,12 @@ Run:
 ```bash
 git diff --check
 git diff --name-only main...HEAD
-rg -n "oneportal|kkcompany|op://|anthropic_auth_token" src/compat test/compat-protocol.test.mjs docs/superpowers
+git grep -n -i -f "$AIRKIT_PRIVATE_IDENTIFIER_FILE" -- src/compat test/compat-protocol.test.mjs docs/superpowers
 ```
 
 Expected: `git diff --check` is silent; changed files are limited to the four
-Phase 1 files; the private-identifier scan returns no matches.
+Phase 1 files; with a local, unpublished identifier list supplied through
+`AIRKIT_PRIVATE_IDENTIFIER_FILE`, the private-identifier scan returns no matches.
 
 - [ ] **Step 6: Commit the result-block contract**
 
