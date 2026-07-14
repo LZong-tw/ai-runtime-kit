@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   assertAnthropicFamilyModel,
   inspectCompatibilityRequest,
+  searchDeferredTools,
 } from "../src/compat/protocol.mjs";
 
 test("inspection finds advisor, ToolSearch, and deferred tools without mutation", () => {
@@ -58,5 +59,84 @@ test("fallback validation accepts only Anthropic-family model identifiers", () =
   assert.throws(
     () => assertAnthropicFamilyModel("", "advisor.model"),
     /advisor\.model must be an Anthropic-family model/,
+  );
+});
+
+const deferredTools = [
+  {
+    name: "get_weather",
+    description: "Get current weather for a city",
+    defer_loading: true,
+    input_schema: {
+      type: "object",
+      properties: { location: { type: "string", description: "City name" } },
+    },
+  },
+  {
+    name: "search_files",
+    description: "Search workspace source files",
+    defer_loading: true,
+    input_schema: {
+      type: "object",
+      properties: { query: { type: "string", description: "Text to find" } },
+    },
+  },
+  {
+    name: "always_loaded",
+    description: "Not deferred",
+    input_schema: { type: "object", properties: {} },
+  },
+];
+
+test("regex ToolSearch searches names, descriptions, and schema text", () => {
+  assert.deepEqual(
+    searchDeferredTools({
+      tools: deferredTools,
+      type: "tool_search_tool_regex_20251119",
+      query: "weather|location",
+    }),
+    [{ type: "tool_reference", tool_name: "get_weather" }],
+  );
+});
+
+test("BM25 ToolSearch ranks matching deferred tools deterministically", () => {
+  assert.deepEqual(
+    searchDeferredTools({
+      tools: deferredTools,
+      type: "tool_search_tool_bm25_20251119",
+      query: "workspace file search query",
+    }),
+    [{ type: "tool_reference", tool_name: "search_files" }],
+  );
+});
+
+test("ToolSearch rejects invalid types, patterns, and query lengths", () => {
+  assert.throws(
+    () => searchDeferredTools({ tools: deferredTools, type: "unknown", query: "file" }),
+    /unsupported ToolSearch type/,
+  );
+  assert.throws(
+    () => searchDeferredTools({
+      tools: deferredTools,
+      type: "tool_search_tool_regex_20251119",
+      query: "[",
+    }),
+    /invalid ToolSearch regex/,
+  );
+  assert.throws(
+    () => searchDeferredTools({
+      tools: deferredTools,
+      type: "tool_search_tool_regex_20251119",
+      query: "x".repeat(201),
+    }),
+    /ToolSearch regex exceeds 200 characters/,
+  );
+  assert.throws(
+    () => searchDeferredTools({
+      tools: deferredTools,
+      type: "tool_search_tool_bm25_20251119",
+      query: "x".repeat(501),
+    }),
+    /ToolSearch BM25 query exceeds 500 characters/,
   );
 });
