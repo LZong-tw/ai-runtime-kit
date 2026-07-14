@@ -69,7 +69,11 @@ test("CCR 3 merge creates CCR-only mode profiles and preserves unrelated configu
   );
 
   assert.equal(merged.config.Providers[0].name, "unrelated");
-  assert.equal(merged.config.Providers.find((provider) => provider.name === "demo").api_key, "resolved-at-runtime");
+  const managedProvider = merged.config.Providers.find(
+    (provider) => provider.id === "airkit-provider-launch-example-demo",
+  );
+  assert.equal(managedProvider.name, managedProvider.id);
+  assert.equal(managedProvider.api_key, "resolved-at-runtime");
   assert.deepEqual(
     merged.config.profile.profiles
       .filter((candidate) => candidate.id.startsWith("airkit-launch-example-"))
@@ -77,19 +81,19 @@ test("CCR 3 merge creates CCR-only mode profiles and preserves unrelated configu
     [
       {
         id: "airkit-launch-example-auto",
-        model: "demo/steady-coder",
+        model: "airkit-provider-launch-example-demo/steady-coder",
         scope: "ccr",
         surface: "cli",
       },
       {
         id: "airkit-launch-example-fast",
-        model: "demo/cheap-coder",
+        model: "airkit-provider-launch-example-demo/cheap-coder",
         scope: "ccr",
         surface: "cli",
       },
       {
         id: "airkit-launch-example-pro",
-        model: "demo/strong-coder",
+        model: "airkit-provider-launch-example-demo/strong-coder",
         scope: "ccr",
         surface: "cli",
       },
@@ -164,9 +168,12 @@ test("CCR 3 merge adopts a matching provider imported from CCR 2", () => {
     },
     { apiKeys: { demo: "runtime-secret" } },
   );
-  const provider = merged.config.Providers.find((candidate) => candidate.name === "demo");
+  const provider = merged.config.Providers.find(
+    (candidate) => candidate.id === "airkit-provider-launch-example-demo",
+  );
 
   assert.equal(provider.id, "airkit-provider-launch-example-demo");
+  assert.equal(provider.name, provider.id);
   assert.equal(provider.api_key, "runtime-secret");
   assert.equal(provider.transformer, undefined);
 });
@@ -1076,7 +1083,10 @@ test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves
 
     assert.equal(result.write, true);
     assert.equal(result.liveCcrConfig.status, "managed");
-    assert.equal(saved[0].profile.profiles.find((candidate) => candidate.id.endsWith("-pro")).model, "demo/strong-coder");
+    assert.equal(
+      saved[0].profile.profiles.find((candidate) => candidate.id.endsWith("-pro")).model,
+      "airkit-provider-launch-example-demo/strong-coder",
+    );
     assert.equal(spawned.length, 1);
     assert.equal(spawned[0].command, "ccr");
     assert.deepEqual(spawned[0].args.slice(0, 6), [
@@ -1148,7 +1158,10 @@ test("prepareLaunch resolves ccrTokenOpRef once for the CCR 3 config merge", asy
     assert.deepEqual(calls, [
       { command: "op", args: ["read", "op://Test/API/token", "--no-newline"], token: undefined },
     ]);
-    assert.equal(saved[0].Providers.find((provider) => provider.name === "demo").api_key, "resolved-token");
+    assert.equal(
+      saved[0].Providers.find((provider) => provider.id === "airkit-provider-launch-example-demo").api_key,
+      "resolved-token",
+    );
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }

@@ -48,24 +48,45 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
   const managedPrefix = `airkit-${slug(profile.name)}-`;
   const baseConfig = buildCcrConfig(catalog, profileName, { configDir });
   assertCcr3Compatible(baseConfig);
-  const managedProviders = baseConfig.Providers.map((provider) => ({
-    ...provider,
-    id: `airkit-provider-${slug(profile.name)}-${slug(provider.name)}`,
-    api_key: options.apiKeys?.[provider.name] ?? provider.api_key,
-  }));
-  const managedProviderNames = new Set(managedProviders.map((provider) => provider.name));
+  const managedProviderEntries = baseConfig.Providers.map((provider) => {
+    const id = `airkit-provider-${slug(profile.name)}-${slug(provider.name)}`;
+    return {
+      sourceName: provider.name,
+      config: {
+        ...provider,
+        id,
+        name: id,
+        api_key: options.apiKeys?.[provider.name] ?? provider.api_key,
+      },
+    };
+  });
+  const managedProviders = managedProviderEntries.map((entry) => entry.config);
+  const managedProviderIds = new Map(managedProviderEntries.map((entry) => [entry.sourceName, entry.config.id]));
+  const managedRouteSelector = (route) => {
+    const selector = routeSelector(route);
+    const separator = selector.indexOf("/");
+    const providerName = selector.slice(0, separator);
+    const providerId = managedProviderIds.get(providerName);
+    if (!providerId) throw new Error(`CCR route references unmanaged provider: ${providerName}`);
+    return `${providerId}/${selector.slice(separator + 1)}`;
+  };
+  const managedProviderNames = new Set(managedProviderEntries.map((entry) => entry.sourceName));
+  const managedProviderIdSet = new Set(managedProviders.map((provider) => provider.id));
   for (const provider of currentConfig.Providers ?? []) {
-    const managedProvider = managedProviders.find((candidate) => candidate.name === provider.name);
-    const isOwned = provider.id?.startsWith(`airkit-provider-${slug(profile.name)}-`);
-    const isMatchingCcrImport = managedProvider && provider.id?.startsWith(`provider-${slug(provider.name)}-`)
-      && provider.api_base_url === managedProvider.api_base_url
-      && JSON.stringify([...(provider.models ?? [])].sort()) === JSON.stringify([...(managedProvider.models ?? [])].sort());
+    const managedEntry = managedProviderEntries.find((candidate) => candidate.sourceName === provider.name);
+    const isOwned = managedProviderIdSet.has(provider.id);
+    const isMatchingCcrImport = managedEntry && provider.id?.startsWith(`provider-${slug(provider.name)}-`)
+      && provider.api_base_url === managedEntry.config.api_base_url
+      && JSON.stringify([...(provider.models ?? [])].sort()) === JSON.stringify([...(managedEntry.config.models ?? [])].sort());
     if (managedProviderNames.has(provider.name) && !isOwned && !isMatchingCcrImport) {
+      throw new Error(`unowned CCR provider name collision: ${provider.name}`);
+    }
+    if (managedProviderIdSet.has(provider.name) && !isOwned) {
       throw new Error(`unowned CCR provider name collision: ${provider.name}`);
     }
   }
   const preservedProviders = (currentConfig.Providers ?? []).filter(
-    (provider) => !managedProviderNames.has(provider.name),
+    (provider) => !managedProviderNames.has(provider.name) && !managedProviderIdSet.has(provider.id),
   );
   const managedProfiles = modes.map((mode) => {
     const modeConfig = applyLaunchModeOverlay(structuredClone(baseConfig), profile, mode, templateVars);
@@ -80,11 +101,11 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
         CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
       },
       id: `${managedPrefix}${slug(mode)}`,
-      model: routeSelector(modeConfig.Router?.default),
+      model: managedRouteSelector(modeConfig.Router?.default),
       name: `AirKit ${profile.name} ${mode}`,
       scope: "ccr",
       settingsFile: "~/.claude/settings.json",
-      smallFastModel: routeSelector(modeConfig.Router?.background ?? modeConfig.Router?.default),
+      smallFastModel: managedRouteSelector(modeConfig.Router?.background ?? modeConfig.Router?.default),
       surface: "cli",
     };
   });
