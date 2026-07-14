@@ -104,7 +104,7 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
       model: managedRouteSelector(modeConfig.Router?.default),
       name: `AirKit ${profile.name} ${mode}`,
       scope: "ccr",
-      settingsFile: "~/.claude/settings.json",
+      settingsFile: join(configDir, "ccr-profiles", `${managedPrefix}${slug(mode)}`, "settings.json"),
       smallFastModel: managedRouteSelector(modeConfig.Router?.background ?? modeConfig.Router?.default),
       surface: "cli",
     };

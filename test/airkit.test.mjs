@@ -90,7 +90,7 @@ test("CCR 3 merge creates CCR-only mode profiles and preserves unrelated configu
     launchCatalog(),
     "launch-example",
     current,
-    { apiKeys: { demo: "resolved-at-runtime" } },
+    { apiKeys: { demo: "resolved-at-runtime" }, configDir: "/tmp/airkit-config" },
   );
 
   assert.equal(merged.config.Providers[0].name, "unrelated");
@@ -124,6 +124,11 @@ test("CCR 3 merge creates CCR-only mode profiles and preserves unrelated configu
       },
     ],
   );
+  for (const managedProfile of merged.config.profile.profiles.filter((candidate) =>
+    candidate.id.startsWith("airkit-launch-example-"))) {
+    assert.match(managedProfile.settingsFile, /^\/tmp\/airkit-config\/ccr-profiles\//);
+    assert.notEqual(managedProfile.settingsFile, "~/.claude/settings.json");
+  }
   assert.ok(merged.config.profile.profiles.some((candidate) => candidate.id === "unrelated-profile"));
   assert.ok(merged.config.Router.rules.some((rule) => rule.id === "unrelated-rule"));
 });
