@@ -148,6 +148,38 @@ test("CCR 3 launch path uses the managed profile and never invokes CCR 2 command
   }
 });
 
+test("runtime check reports installed versions against the hard-cut requirements", async () => {
+  const output = [];
+  const exitCode = await runCli(["runtime", "check"], {
+    runtimeVersions: { claudeCode: "2.1.208", claudeCodeRouter: "3.0.4", node: "24.11.1" },
+    stdout: { write: (chunk) => output.push(chunk) },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.join(""), /Node\.js\s+24\.11\.1\s+required >=22\s+ok/);
+  assert.match(output.join(""), /Claude Code\s+2\.1\.208\s+required >=2\.1\.208\s+ok/);
+  assert.match(output.join(""), /Claude Code Router\s+3\.0\.4\s+required >=3\.0\.4 <4\s+ok/);
+});
+
+test("runtime update previews explicit installs without changing global packages", async () => {
+  const calls = [];
+  const output = [];
+  const exitCode = await runCli(["runtime", "update"], {
+    runCommand: async (command, args) => {
+      calls.push({ command, args });
+      return { ok: true, status: 0, stdout: "" };
+    },
+    stdout: { write: (chunk) => output.push(chunk) },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.deepEqual(calls, []);
+  assert.match(output.join(""), /Preview only/);
+  assert.match(output.join(""), /@anthropic-ai\/claude-code@2\.1\.208/);
+  assert.match(output.join(""), /@musistudio\/claude-code-router@3\.0\.4/);
+  assert.match(output.join(""), /Re-run with --write/);
+});
+
 test("airclaude launch injects reusable runtime lessons", async () => {
   const catalog = await loadCatalog();
   const plan = buildLaunchPlan(catalog, profile, { configDir: "/tmp/airkit-test" });
