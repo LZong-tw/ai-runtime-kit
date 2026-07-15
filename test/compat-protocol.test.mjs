@@ -102,6 +102,27 @@ const deferredTools = [
   },
 ];
 
+test("inspection feeds undated ToolSearch aliases into their local algorithms", () => {
+  const cases = [
+    ["tool_search_tool_regex", "weather|location", "get_weather"],
+    ["tool_search_tool_bm25", "workspace file search query", "search_files"],
+  ];
+
+  for (const [type, query, expectedToolName] of cases) {
+    const body = { tools: [{ type }, ...deferredTools] };
+    const inspection = inspectCompatibilityRequest(body);
+
+    assert.deepEqual(
+      searchDeferredTools({
+        tools: inspection.deferredTools,
+        type: inspection.toolSearch.type,
+        query,
+      }),
+      [{ type: "tool_reference", tool_name: expectedToolName }],
+    );
+  }
+});
+
 test("regex ToolSearch searches names, descriptions, and schema text", () => {
   assert.deepEqual(
     searchDeferredTools({

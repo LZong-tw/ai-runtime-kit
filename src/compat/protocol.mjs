@@ -75,9 +75,15 @@ export function searchDeferredTools({ tools = [], type, query, limit = 5 }) {
   const boundedLimit = Number.isInteger(limit) ? Math.max(0, Math.min(limit, 5)) : 5;
   if (typeof query !== "string") throw invalidToolSearchQuery();
   const value = query;
+  const algorithmType =
+    type === "tool_search_tool_regex"
+      ? "tool_search_tool_regex_20251119"
+      : type === "tool_search_tool_bm25"
+        ? "tool_search_tool_bm25_20251119"
+        : type;
   let matches;
 
-  if (type === "tool_search_tool_regex_20251119") {
+  if (algorithmType === "tool_search_tool_regex_20251119") {
     if (value.length > 200) {
       throw new CompatibilityProtocolError(
         "tool_search_query_too_long",
@@ -89,7 +95,7 @@ export function searchDeferredTools({ tools = [], type, query, limit = 5 }) {
     matches = deferred
       .filter((tool) => safePythonRegexMatches(pattern, searchableToolText(tool)))
       .sort((left, right) => compareCodeUnits(left.name, right.name));
-  } else if (type === "tool_search_tool_bm25_20251119") {
+  } else if (algorithmType === "tool_search_tool_bm25_20251119") {
     if (value.length > 500) {
       throw new CompatibilityProtocolError(
         "tool_search_query_too_long",
