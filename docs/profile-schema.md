@@ -210,6 +210,14 @@ a separate `scope: "ccr"` profile whose model selectors reference the managed
 provider identity. It does not sync a live CCR JSON file or invoke CCR 2
 start/restart/activate commands.
 
+For Claude-backed AirClaude launches, AirKit also renders a session-scoped
+plugin under `{{configDir}}/plugins/airkit-context` and passes it with
+`--plugin-dir`. Its `UserPromptSubmit` hook adds at most 512 characters of
+factual route and durable-task-state context beside each new prompt. The hook
+does not echo the prompt, transcript path, session identifier, provider name,
+endpoint, credential, or token. Plugin hooks merge with existing user and
+project hooks; AirKit does not replace or rewrite Claude settings.
+
 AirKit starts a missing management service only with `ccr start --no-gateway`,
 reads live configuration before later operations, and saves with
 `applyProfile: false`. Enabled global Codex profiles targeting Codex

@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 
 import * as airkitRuntime from "../src/airkit.mjs";
 import * as ccrVerifier from "../scripts/verify-ccr3-e2e.mjs";
+import { buildHeartbeatResponse } from "../src/context-heartbeat.mjs";
 
 import {
   buildLaunchPlan,
@@ -185,12 +186,13 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
       await readFile(join(outDir, "src", "codex-takeover-guard.mjs"), "utf8"),
       await readFile(resolve(import.meta.dirname, "..", "src", "codex-takeover-guard.mjs"), "utf8"),
     );
-    for (const module of ["gateway.mjs", "plugin.mjs", "protocol.mjs"]) {
+    for (const module of ["gateway.mjs", "plugin.mjs", "protocol.mjs", "server-tools.mjs"]) {
       assert.equal(
         await readFile(join(outDir, "src", "compat", module), "utf8"),
         await readFile(resolve(import.meta.dirname, "..", "src", "compat", module), "utf8"),
       );
     }
+    assert.ok(await import(join(outDir, "src", "airkit.mjs")));
   } finally {
     await rm(outDir, { force: true, recursive: true });
   }
@@ -902,6 +904,96 @@ test("airclaude launch scopes proactive compaction policy to the managed child",
     assert.equal(managedProfile.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "300000");
     assert.equal(managedProfile.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, "");
     assert.equal(env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, "40");
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("AirClaude heartbeat is child-only, bounded, factual, and excludes hook/provider payloads", () => {
+  const hookInput = {
+    cwd: "/private/workspace",
+    hook_event_name: "UserPromptSubmit",
+    permission_mode: "auto",
+    prompt: "private user prompt that must never be repeated",
+    session_id: "private-session-id",
+    transcript_path: "/private/transcript.jsonl",
+  };
+  const env = {
+    AIRCLAUDE_MODE: "auto",
+    AIRCLAUDE_PROFILE: "example-profile",
+    AIRCLAUDE_ROUTE_BACKGROUND: "private-provider,fast-model",
+    AIRCLAUDE_ROUTE_BACKGROUND_MODEL: "fast-model",
+    AIRCLAUDE_ROUTE_DEFAULT: "private-provider,strong-model",
+    AIRCLAUDE_ROUTE_DEFAULT_MODEL: "strong-model",
+    AIRKIT_COMPATIBILITY_MCP_TOKEN: "private-token",
+  };
+
+  const response = buildHeartbeatResponse(hookInput, env);
+  const context = response.hookSpecificOutput.additionalContext;
+
+  assert.equal(response.hookSpecificOutput.hookEventName, "UserPromptSubmit");
+  assert.ok(context.length <= 512);
+  assert.match(context, /AirClaude session context is active/);
+  assert.match(context, /routing mode is auto/);
+  assert.match(context, /default model is strong-model/);
+  assert.match(context, /background model is fast-model/);
+  assert.match(context, /Durable task state consists of/);
+  assert.doesNotMatch(JSON.stringify(response), /private user prompt|private-session-id|private\/transcript|private-provider|private-token/);
+  assert.equal(buildHeartbeatResponse(hookInput, {}), null);
+  assert.equal(buildHeartbeatResponse({ ...hookInput, hook_event_name: "SessionStart" }, env), null);
+});
+
+test("AirClaude renders an additive session plugin for the heartbeat", async () => {
+  const catalog = launchCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-heartbeat-plugin-"));
+
+  try {
+    const plan = buildLaunchPlan(catalog, "launch-example", {
+      configDir,
+      userArgs: ["--resume", "session-id"],
+    });
+    const pluginIndex = plan.launch.args.indexOf("--plugin-dir");
+    assert.notEqual(pluginIndex, -1);
+    assert.equal(plan.launch.args[pluginIndex + 1], join(configDir, "plugins", "airkit-context"));
+    assert.deepEqual(plan.launch.userArgs, ["--resume", "session-id"]);
+
+    const managed = plan.files.managedFiles;
+    const manifest = managed.find((file) => file.path.endsWith("/.claude-plugin/plugin.json"));
+    const hooks = managed.find((file) => file.path.endsWith("/hooks/hooks.json"));
+    const script = managed.find((file) => file.path.endsWith("/scripts/user-prompt-submit.mjs"));
+    assert.ok(manifest);
+    assert.ok(hooks);
+    assert.ok(script);
+
+    await installProfile(catalog, "launch-example", { configDir, force: true, write: true });
+    const hookInput = JSON.stringify({
+      hook_event_name: "UserPromptSubmit",
+      prompt: "ordinary prompt",
+      session_id: "session-id",
+    });
+    const active = spawnSync(process.execPath, [script.path], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        AIRCLAUDE_MODE: "auto",
+        AIRCLAUDE_PROFILE: "launch-example",
+        AIRCLAUDE_ROUTE_BACKGROUND_MODEL: "cheap-coder",
+        AIRCLAUDE_ROUTE_DEFAULT_MODEL: "balanced-coder",
+      },
+      input: hookInput,
+    });
+    assert.equal(active.status, 0);
+    assert.deepEqual(JSON.parse(active.stdout).hookSpecificOutput.hookEventName, "UserPromptSubmit");
+    assert.equal(active.stderr, "");
+
+    const inactive = spawnSync(process.execPath, [script.path], {
+      encoding: "utf8",
+      env: { ...process.env, AIRCLAUDE_PROFILE: "" },
+      input: hookInput,
+    });
+    assert.equal(inactive.status, 0);
+    assert.equal(inactive.stdout, "");
+    assert.equal(inactive.stderr, "");
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }
