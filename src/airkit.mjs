@@ -8,6 +8,8 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 
+import { inspectCodexTakeover, repairCodexTakeover } from "./codex-takeover-guard.mjs";
+
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
 const defaultCatalogPath = join(repoRoot, "profiles", "catalog.json");
@@ -216,6 +218,7 @@ export async function exportOssRelease({ outDir }) {
   const binPath = join(outDir, "src", "airkit.mjs");
   await writeFile(binPath, await readFile(fileURLToPath(import.meta.url), "utf8"));
   await chmod(binPath, 0o755);
+  await copyFile(join(here, "codex-takeover-guard.mjs"), join(outDir, "src", "codex-takeover-guard.mjs"));
   await writeFile(join(outDir, "profiles", "catalog.json"), `${JSON.stringify(publicCatalog, null, 2)}\n`);
   await writeFile(
     join(outDir, "scripts", "verify-ccr3-e2e.mjs"),
@@ -395,12 +398,15 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     };
   }
 
-  const ccrClient = options.ccrClient ?? createCcr3Client(options);
+  assertNoCodexTakeover(await inspectCodexTakeoverFiles(options.env ?? process.env));
+  const createCcrClient = options.createCcrClient ?? createCcr3Client;
+  const ccrClient = options.ccrClient ?? createCcrClient(options);
   const runtime = await checkLaunchRuntime(plan, { ...options, ccrClient });
   if (!runtime.ccr.ok) throw new Error(runtime.ccr.reason);
   if (!runtime.launch.ok) throw new Error(runtime.launch.reason);
   await writeLaunchFiles(plan, rendered);
   const currentConfig = await ccrClient.getConfig();
+  assertNoCodexTakeover(inspectCodexTakeover({ ccrConfig: currentConfig }));
   const apiKeys = await resolveProviderApiKeys(catalog, profileName, plan, options);
   const managed = buildCcr3ManagedConfig(catalog, profileName, currentConfig, {
     apiKeys,
@@ -599,6 +605,24 @@ export async function runCli(argv = process.argv.slice(2), options = {}) {
     return 0;
   }
 
+  if (command === "repair" && subcommand === "codex-takeover") {
+    const write = hasFlag(rest, "--write");
+    const createCcrClient = options.createCcrClient ?? createCcr3Client;
+    const ccrClient = createCcrClient({ ...options, autoStart: write });
+    const repair = options.repairCodexTakeover ?? repairCodexTakeover;
+    const repairOptions = {
+      ccrClient,
+      env: options.env ?? process.env,
+      write,
+      ...(options.codexTakeoverIo ? { io: options.codexTakeoverIo } : {}),
+      ...(options.codexTakeoverNonce ? { nonce: options.codexTakeoverNonce } : {}),
+      ...(options.codexTakeoverNow ? { now: options.codexTakeoverNow } : {}),
+    };
+    const result = await repair(repairOptions);
+    stdout.write(renderCodexTakeoverRepair(result));
+    return 0;
+  }
+
   const catalog = command === "export-oss" ? null : await loadCatalog(options.catalogPath ?? defaultCatalogPath);
 
   if (command === "init") {
@@ -789,12 +813,36 @@ function ccrRuntimePaths(env = process.env) {
   return { appDataDir: join(appData, "Claude Code Router"), configDir, home, userDataDir };
 }
 
+async function inspectCodexTakeoverFiles(env) {
+  const codexHome = env?.CODEX_HOME ?? (env?.HOME ? join(env.HOME, ".codex") : join(homedir(), ".codex"));
+  const codexConfigText = await readOptionalText(join(codexHome, "config.toml"));
+  const takeoverText = await readOptionalText(join(defaultCcrStateDir(env), "global-profile-takeover.json"));
+  return inspectCodexTakeover({ codexConfigText, takeoverText });
+}
+
+async function readOptionalText(path) {
+  try {
+    return await readFile(path, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function assertNoCodexTakeover(inspection) {
+  if (!inspection.hazardous) return;
+  throw new Error(
+    "Codex takeover detected; preview with airkit repair codex-takeover, then apply with airkit repair codex-takeover --write",
+  );
+}
+
 function renderAirkitHelp() {
   return `Usage: airkit <command> [options]
 
 Commands:
   runtime check
   runtime update [--write]
+  repair codex-takeover [--write]
   list [--visibility all|public|internal]
   init --profile <name> [--write] [--force] [--config-dir <dir>]
   update --profile <name> [--write] [--config-dir <dir>] [--preview-dir <dir>]
@@ -824,6 +872,18 @@ function renderRuntimeUpdate(result) {
   const paths = result.statePaths.map((path) => `- ${path}`).join("\n");
   if (!result.write) return `Preview only\nCommand: npm install --global ${result.packages.join(" ")}\nCCR state to back up:\n${paths}\nPackages:\n${packages}\nRe-run with --write to update global packages.\n`;
   return `Updated runtime packages\n${packages}\nBackup: ${result.backupDir}\n${renderRuntimeReport(result.report)}`;
+}
+
+function renderCodexTakeoverRepair(result) {
+  const affectedPaths = [...new Set([result.codexConfigPath, ...result.inspection.affectedPaths].filter(Boolean))];
+  const pathLines = affectedPaths.length > 0 ? affectedPaths.map((path) => `- ${path}`).join("\n") : "- none";
+  const actionLines = result.inspection.actions.length > 0
+    ? result.inspection.actions.map((action) => `- ${action}`).join("\n")
+    : "- none";
+  if (!result.write) {
+    return `Preview Codex takeover repair\nAffected paths:\n${pathLines}\nActions:\n${actionLines}\nNo changes written.\nRe-run with airkit repair codex-takeover --write to apply.\n`;
+  }
+  return `Repaired Codex takeover\nBackup: ${result.backupPath}\nRestored: ${result.restoredPath}\nAffected paths:\n${pathLines}\nActions:\n${actionLines}\n`;
 }
 
 function renderAirclaudeHelp() {
@@ -1477,17 +1537,28 @@ export function createCcr3Client(options = {}) {
   const fetchImpl = options.fetch ?? globalThis.fetch;
   let service;
 
-  async function loadService(forceStart = false) {
-    if (forceStart) {
-      const started = await runCommand("ccr", ["start", "--no-gateway"], { env: options.env, timeoutMs: options.commandTimeoutMs ?? 30000 });
-      if (!started.ok) throw new Error(`unable to start CCR 3 management service${started.stderr ? `: ${started.stderr}` : ""}`);
+  function serviceUnavailable() {
+    return new Error("CCR 3 management service is not running; start it explicitly and retry");
+  }
+
+  async function startService() {
+    if (options.autoStart === false) throw serviceUnavailable();
+    const started = await runCommand("ccr", ["start", "--no-gateway"], {
+      env: options.env,
+      timeoutMs: options.commandTimeoutMs ?? 30000,
+    });
+    if (!started.ok) {
+      throw new Error(`unable to start CCR 3 management service${started.stderr ? `: ${started.stderr}` : ""}`);
     }
+  }
+
+  async function loadService(forceStart = false) {
+    if (forceStart) await startService();
     try {
       return JSON.parse(await readFile(join(stateDir, "service.json"), "utf8"));
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
-      const started = await runCommand("ccr", ["start", "--no-gateway"], { env: options.env, timeoutMs: options.commandTimeoutMs ?? 30000 });
-      if (!started.ok) throw new Error(`unable to start CCR 3 management service${started.stderr ? `: ${started.stderr}` : ""}`);
+      await startService();
       return JSON.parse(await readFile(join(stateDir, "service.json"), "utf8"));
     }
   }
@@ -1507,6 +1578,7 @@ export function createCcr3Client(options = {}) {
     try {
       response = await request();
     } catch {
+      if (options.autoStart === false) throw serviceUnavailable();
       service = await loadService(true);
       serviceUrl = new URL(service.url);
       token = serviceUrl.searchParams.get("ccr_web_token");

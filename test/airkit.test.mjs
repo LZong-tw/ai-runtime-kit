@@ -61,6 +61,10 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
       await readFile(join(outDir, "scripts", "verify-ccr3-e2e.mjs"), "utf8"),
       await readFile(resolve(import.meta.dirname, "..", "scripts", "verify-ccr3-e2e.mjs"), "utf8"),
     );
+    assert.equal(
+      await readFile(join(outDir, "src", "codex-takeover-guard.mjs"), "utf8"),
+      await readFile(resolve(import.meta.dirname, "..", "src", "codex-takeover-guard.mjs"), "utf8"),
+    );
   } finally {
     await rm(outDir, { force: true, recursive: true });
   }
@@ -288,7 +292,7 @@ test("CCR 3 launch path uses the managed profile and never invokes CCR 2 command
       ccrClient,
       commandExists: async (command) => ["ccr", "claude"].includes(command),
       configDir,
-      env: { DEMO_API_KEY: "runtime-secret" },
+      env: { DEMO_API_KEY: "runtime-secret", HOME: configDir },
       launch: false,
       liveCcrConfig: join(configDir, "live", "config.json"),
       mode: "pro",
@@ -670,6 +674,314 @@ test("prepareLaunch dry run reports stale files and does not write targets", asy
   }
 });
 
+for (const evidence of ["managed marker", "takeover record"]) {
+  test(`Codex takeover ${evidence} blocks launch before client construction or RPC`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "airkit-codex-takeover-preflight-"));
+    const home = join(root, "home");
+    const configDir = join(root, "airkit");
+    const codexDir = join(home, ".codex");
+    const ccrDir = join(home, ".claude-code-router");
+    const calls = [];
+    const options = {
+      commandExists: async () => calls.push("commandExists"),
+      configDir,
+      env: { DEMO_API_KEY: "runtime-secret", HOME: home },
+      get ccrClient() {
+        calls.push("createCcr3Client");
+        return {
+          getConfig: async () => calls.push("getConfig"),
+          getVersion: async () => calls.push("getVersion"),
+          saveConfig: async () => calls.push("saveConfig"),
+          ensureGateway: async () => calls.push("ensureGateway"),
+        };
+      },
+      runCommand: async () => {
+        calls.push("credential-resolution");
+        return { ok: true, status: 0, stdout: "private credential" };
+      },
+      runtimeVersions: passingRuntimeVersions(),
+      spawnCommand: () => calls.push("spawn"),
+    };
+
+    try {
+      await mkdir(codexDir, { recursive: true });
+      await mkdir(ccrDir, { recursive: true });
+      await writeFile(join(codexDir, "config.toml"), evidence === "managed marker"
+        ? "# BEGIN CCR managed profile\nprivate-value = \"do-not-leak\"\n# END CCR managed profile\n"
+        : "theme = \"dark\"\n");
+      if (evidence === "takeover record") {
+        await writeFile(join(ccrDir, "global-profile-takeover.json"), JSON.stringify({
+          profiles: [{
+            agent: "codex",
+            configFile: join(codexDir, "config.toml"),
+            providerId: "do-not-leak",
+          }],
+        }));
+      }
+
+      await assert.rejects(
+        prepareLaunch(launchCatalog(), "launch-example", options),
+        (error) => {
+          assert.match(error.message, /airkit repair codex-takeover/);
+          assert.match(error.message, /airkit repair codex-takeover --write/);
+          assert.doesNotMatch(error.message, /do-not-leak|private-value|providerId/);
+          return true;
+        },
+      );
+
+      assert.deepEqual(calls, []);
+      await assert.rejects(readFile(join(configDir, "ccr", "launch-example.json")), { code: "ENOENT" });
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+}
+
+test("Codex takeover in live CCR config blocks before credential resolution or save", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-codex-takeover-live-"));
+  const home = join(root, "home");
+  const calls = [];
+  const catalog = launchCatalog();
+  catalog.profiles[0].shell = { ccrTokenOpRef: ["op:", "//Test/API/token"].join("") };
+  const ccrClient = {
+    getVersion: async () => {
+      calls.push("getVersion");
+      return "3.0.4";
+    },
+    getConfig: async () => {
+      calls.push("getConfig");
+      return {
+        profile: {
+          profiles: [{
+            agent: "codex",
+            configFile: join(home, ".codex", "config.toml"),
+            enabled: true,
+            privateValue: "do-not-leak",
+            scope: "global",
+          }],
+        },
+      };
+    },
+    saveConfig: async () => calls.push("saveConfig"),
+    ensureGateway: async () => calls.push("ensureGateway"),
+  };
+
+  try {
+    await mkdir(join(home, ".codex"), { recursive: true });
+    await writeFile(join(home, ".codex", "config.toml"), "theme = \"dark\"\n");
+
+    await assert.rejects(
+      prepareLaunch(catalog, "launch-example", {
+        ccrClient,
+        commandExists: async () => true,
+        configDir: join(root, "airkit"),
+        env: { HOME: home },
+        launch: false,
+        runCommand: async () => {
+          calls.push("credential-resolution");
+          return { ok: true, status: 0, stdout: "private credential" };
+        },
+        runtimeVersions: passingRuntimeVersions(),
+        spawnCommand: () => calls.push("spawn"),
+      }),
+      (error) => {
+        assert.match(error.message, /airkit repair codex-takeover/);
+        assert.match(error.message, /airkit repair codex-takeover --write/);
+        assert.doesNotMatch(error.message, /do-not-leak|privateValue/);
+        return true;
+      },
+    );
+
+    assert.deepEqual(calls, ["getVersion", "getConfig"]);
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("createCcr3Client autoStart false rejects missing and stale services without invoking runner", async () => {
+  for (const serviceState of ["missing", "stale"]) {
+    const root = await mkdtemp(join(tmpdir(), `airkit-ccr-auto-start-${serviceState}-`));
+    const calls = [];
+    try {
+      if (serviceState === "stale") {
+        const stateDir = join(root, ".claude-code-router");
+        await mkdir(stateDir, { recursive: true });
+        await writeFile(join(stateDir, "service.json"), JSON.stringify({
+          url: "http://127.0.0.1:9/?ccr_web_token=synthetic-token",
+        }));
+      }
+      const client = airkitRuntime.createCcr3Client({
+        autoStart: false,
+        env: { HOME: root },
+        fetch: async () => {
+          calls.push("fetch");
+          throw new Error("synthetic stale service");
+        },
+        runCommand: async () => {
+          calls.push("runner");
+          return { ok: true, status: 0, stdout: "" };
+        },
+      });
+
+      await assert.rejects(client.getConfig(), /CCR 3 management service is not running/);
+      assert.ok(!calls.includes("runner"));
+      assert.deepEqual(calls, serviceState === "missing" ? [] : ["fetch"]);
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  }
+});
+
+test("codex-takeover preview uses a non-starting client and performs zero writes", async () => {
+  const codexPath = "/synthetic/home/.codex/config.toml";
+  const output = [];
+  const calls = [];
+  const io = {
+    readFile: async (path) => {
+      calls.push(`read:${path}`);
+      return Buffer.from([
+        "# BEGIN CCR managed profile",
+        "private-value = \"do-not-leak\"",
+        "# END CCR managed profile",
+        "",
+      ].join("\n"));
+    },
+    rename: async () => calls.push("rename"),
+    stat: async () => ({ mode: 0o100600 }),
+    unlink: async () => calls.push("unlink"),
+    writeFile: async () => calls.push("write"),
+  };
+
+  const exitCode = await runCli(["repair", "codex-takeover"], {
+    catalogPath: "/does/not/exist/catalog.json",
+    codexTakeoverIo: io,
+    createCcrClient: (clientOptions) => {
+      calls.push(`client:autoStart=${clientOptions.autoStart}`);
+      return {
+        getConfig: async () => {
+          calls.push("getConfig");
+          return {
+            profile: {
+              profiles: [{
+                agent: "codex",
+                configFile: codexPath,
+                enabled: true,
+                privateValue: "do-not-leak",
+                scope: "global",
+              }],
+            },
+          };
+        },
+      };
+    },
+    env: { HOME: "/synthetic/home" },
+    stdout: { write: (chunk) => output.push(chunk) },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.deepEqual(calls, [
+    "client:autoStart=false",
+    `read:${codexPath}`,
+    "getConfig",
+  ]);
+  assert.match(output.join(""), /Preview.*Codex takeover/i);
+  assert.match(output.join(""), new RegExp(codexPath.replaceAll(".", "\\.")));
+  assert.match(output.join(""), /remove-managed-codex-blocks/);
+  assert.match(output.join(""), /scope-codex-profiles-to-ccr/);
+  assert.match(output.join(""), /airkit repair codex-takeover --write/);
+  assert.doesNotMatch(output.join(""), /do-not-leak|private-value|privateValue/);
+  assert.ok(!calls.some((call) => ["write", "rename", "unlink"].includes(call)));
+});
+
+test("codex-takeover --write backs up exact bytes before RPC and reports only safe paths", async () => {
+  const codexPath = "/synthetic/home/.codex/config.toml";
+  const timestamp = "2026-07-15T01-02-03-004Z";
+  const backupPath = `${codexPath}.backup-${timestamp}`;
+  const temporaryPath = `${codexPath}.airkit-repair-${timestamp}-cli-nonce.tmp`;
+  const latest = Buffer.from([
+    "theme = \"private-theme\"",
+    "# BEGIN CCR managed profile",
+    "private-value = \"do-not-leak\"",
+    "# END CCR managed profile",
+    "",
+  ].join("\n"));
+  const files = new Map([[codexPath, latest]]);
+  const modes = new Map([[codexPath, 0o100640]]);
+  const events = [];
+  const output = [];
+  const io = {
+    readFile: async (path) => {
+      events.push(`read:${path}`);
+      return Buffer.from(files.get(path));
+    },
+    rename: async (from, to) => {
+      events.push(`rename:${from}->${to}`);
+      files.set(to, files.get(from));
+      modes.set(to, modes.get(from));
+      files.delete(from);
+      modes.delete(from);
+    },
+    stat: async (path) => {
+      events.push(`stat:${path}`);
+      return { mode: modes.get(path) };
+    },
+    unlink: async (path) => {
+      events.push(`unlink:${path}`);
+      files.delete(path);
+      modes.delete(path);
+    },
+    writeFile: async (path, value, options) => {
+      events.push(`write:${path}`);
+      assert.equal(options.flag, "wx");
+      files.set(path, Buffer.from(value));
+      modes.set(path, options.mode);
+    },
+  };
+  const hazardousConfig = {
+    profile: {
+      profiles: [{
+        agent: "codex",
+        configFile: codexPath,
+        enabled: true,
+        privateValue: "do-not-leak",
+        scope: "global",
+      }],
+    },
+  };
+
+  const exitCode = await runCli(["repair", "codex-takeover", "--write"], {
+    catalogPath: "/does/not/exist/catalog.json",
+    codexTakeoverIo: io,
+    codexTakeoverNonce: () => "cli-nonce",
+    codexTakeoverNow: () => new Date("2026-07-15T01:02:03.004Z"),
+    createCcrClient: (clientOptions) => {
+      events.push(`client:autoStart=${clientOptions.autoStart}`);
+      return {
+        getConfig: async () => {
+          events.push("getConfig-or-start");
+          return structuredClone(hazardousConfig);
+        },
+        saveConfig: async (config) => {
+          events.push("saveConfig");
+          assert.equal(config.profile.profiles[0].scope, "ccr");
+          assert.equal(config.profile.profiles[0].showAllSessions, true);
+        },
+      };
+    },
+    env: { HOME: "/synthetic/home" },
+    stdout: { write: (chunk) => output.push(chunk) },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.ok(events.indexOf(`write:${backupPath}`) < events.indexOf("getConfig-or-start"));
+  assert.deepEqual(files.get(backupPath), latest);
+  assert.equal(files.get(codexPath).toString("utf8"), "theme = \"private-theme\"\n");
+  assert.ok(!files.has(temporaryPath));
+  assert.match(output.join(""), new RegExp(backupPath.replaceAll(".", "\\.")));
+  assert.match(output.join(""), new RegExp(codexPath.replaceAll(".", "\\.")));
+  assert.doesNotMatch(output.join(""), /do-not-leak|private-theme|private-value|privateValue/);
+});
+
 test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves passthrough args", async () => {
   const catalog = launchCatalog();
   const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-write-"));
@@ -764,7 +1076,7 @@ test("prepareLaunch resolves ccrTokenOpRef once for the CCR 3 config merge", asy
       configDir,
       ccrClient: ccrTestClient(saved),
       commandExists: async (command) => ["ccr", "claude", "op"].includes(command),
-      env: {},
+      env: { HOME: configDir },
       launch: false,
       runtimeVersions: passingRuntimeVersions(),
       runCommand: async (command, args, options = {}) => {
@@ -805,7 +1117,7 @@ test("prepareLaunch fails fast when credential resolution hangs", async () => {
           commandExists: async (command) => ["ccr", "claude", "op"].includes(command),
           commandTimeoutMs: 50,
           configDir,
-          env: { PATH: fakeBin },
+          env: { HOME: configDir, PATH: fakeBin },
           liveCcrConfig: join(configDir, "live", "config.json"),
           runtimeVersions: passingRuntimeVersions(),
         }),
