@@ -1,8 +1,7 @@
-export const ADVISOR_TOOL_TYPE = "advisor_20260301";
-export const TOOL_SEARCH_TYPES = new Set([
-  "tool_search_tool_regex_20251119",
-  "tool_search_tool_bm25_20251119",
-]);
+import { SERVER_TOOL_TYPES, classifyToolDefinition } from "./server-tools.mjs";
+
+export const ADVISOR_TOOL_TYPE = SERVER_TOOL_TYPES.advisor[0];
+export const TOOL_SEARCH_TYPES = new Set(SERVER_TOOL_TYPES.toolSearch);
 export const MAX_DEFERRED_TOOL_COUNT = 512;
 export const MAX_SEARCHABLE_TOOL_TEXT_LENGTH = 4096;
 
@@ -33,11 +32,19 @@ export class CompatibilityProtocolError extends Error {
 }
 
 export function inspectCompatibilityRequest(body = {}) {
-  const tools = Array.isArray(body.tools) ? body.tools : [];
+  const tools = Array.isArray(body?.tools) ? body.tools : [];
+  const classifiedTools = tools.map((tool) => ({
+    classification: classifyToolDefinition(tool),
+    tool,
+  }));
   return {
-    advisor: tools.find((tool) => tool?.type === ADVISOR_TOOL_TYPE) ?? null,
+    advisor:
+      classifiedTools.find(({ classification }) => classification.family === "advisor")?.tool ??
+      null,
     deferredTools: tools.filter((tool) => tool?.defer_loading === true),
-    toolSearch: tools.find((tool) => TOOL_SEARCH_TYPES.has(tool?.type)) ?? null,
+    toolSearch:
+      classifiedTools.find(({ classification }) => classification.family === "toolSearch")
+        ?.tool ?? null,
   };
 }
 
