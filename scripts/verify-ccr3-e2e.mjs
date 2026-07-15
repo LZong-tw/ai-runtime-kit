@@ -36,6 +36,22 @@ export function createIsolatedEnvironment(root, baseEnv = process.env) {
   };
 }
 
+export function configureIsolatedGateway(config, { corePort, gatewayPort }) {
+  return {
+    ...config,
+    HOST: "127.0.0.1",
+    PORT: gatewayPort,
+    routerEndpoint: `http://127.0.0.1:${gatewayPort}`,
+    gateway: {
+      ...config.gateway,
+      host: "127.0.0.1",
+      port: gatewayPort,
+      coreHost: "127.0.0.1",
+      corePort,
+    },
+  };
+}
+
 export function assertIsolatedEnvironment(root, env, realHome) {
   const isolatedRoot = `${resolve(root)}/`;
   const resolvedRealHome = realHome ? `${resolve(realHome)}/` : null;
@@ -167,7 +183,10 @@ async function main() {
     fakeProvider = await startFakeProvider(fakeBin, providerPort, join(root, "fake-provider-request.json"), env);
     env.FAKE_PROVIDER_PROBE_URL = `http://127.0.0.1:${providerPort}/health`;
     const gatewayPort = await reservePort();
+    let corePort = await reservePort();
+    while (corePort === gatewayPort || corePort === 3457) corePort = await reservePort();
     assert.notEqual(gatewayPort, 3456);
+    assert.notEqual(corePort, 3457);
 
     const sentinelPath = join(env.HOME, ".codex", "config.toml");
     const sentinelBytes = Buffer.from("CCR_CONTRACT_SENTINEL = \"must-remain-byte-exact\"\n");
@@ -189,13 +208,7 @@ async function main() {
       enabled: true,
       scope: "global",
     };
-    const configured = {
-      ...initialConfig,
-      HOST: "127.0.0.1",
-      PORT: gatewayPort,
-      routerEndpoint: `http://127.0.0.1:${gatewayPort}`,
-      gateway: { ...initialConfig.gateway, host: "127.0.0.1", port: gatewayPort },
-    };
+    const configured = configureIsolatedGateway(initialConfig, { corePort, gatewayPort });
     ({ rpc } = await verifyDangerousCodexPersistence({
       ccr,
       dangerousProfile,

@@ -50,6 +50,24 @@ test("isolated CCR environment keeps every writable state path below one root", 
   }
 });
 
+test("isolated CCR gateway uses dedicated external and core loopback ports", () => {
+  const configured = verifier.configureIsolatedGateway({
+    HOST: "0.0.0.0",
+    PORT: 3456,
+    gateway: { host: "0.0.0.0", port: 3456, coreHost: "127.0.0.1", corePort: 3457 },
+  }, { corePort: 43990, gatewayPort: 43989 });
+
+  assert.equal(configured.HOST, "127.0.0.1");
+  assert.equal(configured.PORT, 43989);
+  assert.equal(configured.routerEndpoint, "http://127.0.0.1:43989");
+  assert.deepEqual(configured.gateway, {
+    host: "127.0.0.1",
+    port: 43989,
+    coreHost: "127.0.0.1",
+    corePort: 43990,
+  });
+});
+
 test("gateway endpoint follows the configured non-default CCR gateway address", () => {
   const endpoint = airkitRuntime.resolveCcrGatewayEndpoint({
     HOST: "127.0.0.1",
