@@ -400,13 +400,18 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
 
   assertNoCodexTakeover(await inspectCodexTakeoverFiles(options.env ?? process.env));
   const createCcrClient = options.createCcrClient ?? createCcr3Client;
-  const ccrClient = options.ccrClient ?? createCcrClient(options);
+  const safetyClient = options.ccrClient ?? createCcrClient({ ...options, autoStart: false });
+  let currentConfig = await readCcrConfigSafely(safetyClient);
+  assertNoCodexTakeover(inspectCodexTakeover({ ccrConfig: currentConfig }));
+  const ccrClient = options.ccrClient ?? createCcrClient({ ...options, autoStart: true });
   const runtime = await checkLaunchRuntime(plan, { ...options, ccrClient });
   if (!runtime.ccr.ok) throw new Error(runtime.ccr.reason);
   if (!runtime.launch.ok) throw new Error(runtime.launch.reason);
+  if (ccrClient !== safetyClient) {
+    currentConfig = await readCcrConfigSafely(ccrClient);
+    assertNoCodexTakeover(inspectCodexTakeover({ ccrConfig: currentConfig }));
+  }
   await writeLaunchFiles(plan, rendered);
-  const currentConfig = await ccrClient.getConfig();
-  assertNoCodexTakeover(inspectCodexTakeover({ ccrConfig: currentConfig }));
   const apiKeys = await resolveProviderApiKeys(catalog, profileName, plan, options);
   const managed = buildCcr3ManagedConfig(catalog, profileName, currentConfig, {
     apiKeys,
@@ -618,7 +623,15 @@ export async function runCli(argv = process.argv.slice(2), options = {}) {
       ...(options.codexTakeoverNonce ? { nonce: options.codexTakeoverNonce } : {}),
       ...(options.codexTakeoverNow ? { now: options.codexTakeoverNow } : {}),
     };
-    const result = await repair(repairOptions);
+    let result;
+    try {
+      result = await repair(repairOptions);
+    } catch (error) {
+      if (write) throw error;
+      throw new Error(
+        "Codex takeover repair preview failed; preview never starts CCR. Run airkit repair codex-takeover --write to back up and repair safely",
+      );
+    }
     stdout.write(renderCodexTakeoverRepair(result));
     return 0;
   }
@@ -834,6 +847,16 @@ function assertNoCodexTakeover(inspection) {
   throw new Error(
     "Codex takeover detected; preview with airkit repair codex-takeover, then apply with airkit repair codex-takeover --write",
   );
+}
+
+async function readCcrConfigSafely(ccrClient) {
+  try {
+    return await ccrClient.getConfig();
+  } catch {
+    throw new Error(
+      "Unable to inspect CCR configuration safely; CCR was not started. Run airkit repair codex-takeover --write to back up and repair safely",
+    );
+  }
 }
 
 function renderAirkitHelp() {
