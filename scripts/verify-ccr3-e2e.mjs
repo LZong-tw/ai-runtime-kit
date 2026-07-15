@@ -52,6 +52,16 @@ export function configureIsolatedGateway(config, { corePort, gatewayPort }) {
   };
 }
 
+export async function finalizeIsolatedRoot(root, failed, options = {}) {
+  if (failed) {
+    const report = options.report ?? ((message) => process.stderr.write(message));
+    report(`Isolated E2E artifacts retained at ${root}\n`);
+    return;
+  }
+  const remove = options.remove ?? rm;
+  await remove(root, { force: true, recursive: true });
+}
+
 export function assertIsolatedEnvironment(root, env, realHome) {
   const isolatedRoot = `${resolve(root)}/`;
   const resolvedRealHome = realHome ? `${resolve(realHome)}/` : null;
@@ -141,6 +151,7 @@ async function main() {
   env.FAKE_PROVIDER_API_KEY = "fixture-key";
   assertIsolatedEnvironment(root, env, homedir());
 
+  let failed = false;
   let fakeProvider;
   try {
     await Promise.all(ISOLATED_PATH_VARIABLES.map((name) => mkdir(env[name], { recursive: true })));
@@ -296,6 +307,9 @@ async function main() {
       realHomeReferenced: false,
       sqliteFiles: sqliteAfterInit.length,
     }, null, 2)}\n`);
+  } catch (error) {
+    failed = true;
+    throw error;
   } finally {
     const ccr = join(runtimeRoot, "node_modules", ".bin", "ccr");
     run(ccr, ["stop"], env, 30_000, true);
@@ -307,7 +321,7 @@ async function main() {
         await waitForExit(fakeProvider.child, 2_000);
       }
     }
-    await rm(root, { force: true, recursive: true });
+    await finalizeIsolatedRoot(root, failed);
   }
 }
 

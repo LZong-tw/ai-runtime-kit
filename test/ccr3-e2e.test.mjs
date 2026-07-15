@@ -50,6 +50,29 @@ test("isolated CCR environment keeps every writable state path below one root", 
   }
 });
 
+test("failed isolated CCR verification retains its root for diagnosis", async () => {
+  const removed = [];
+  const reports = [];
+
+  await verifier.finalizeIsolatedRoot("/tmp/airkit-failed", true, {
+    remove: async (...args) => removed.push(args),
+    report: (message) => reports.push(message),
+  });
+
+  assert.deepEqual(removed, []);
+  assert.deepEqual(reports, ["Isolated E2E artifacts retained at /tmp/airkit-failed\n"]);
+});
+
+test("successful isolated CCR verification removes its root", async () => {
+  const removed = [];
+
+  await verifier.finalizeIsolatedRoot("/tmp/airkit-passed", false, {
+    remove: async (...args) => removed.push(args),
+  });
+
+  assert.deepEqual(removed, [["/tmp/airkit-passed", { force: true, recursive: true }]]);
+});
+
 test("isolated CCR gateway uses dedicated external and core loopback ports", () => {
   const configured = verifier.configureIsolatedGateway({
     HOST: "0.0.0.0",
