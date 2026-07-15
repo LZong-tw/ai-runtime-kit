@@ -14,6 +14,7 @@ import {
   repairCodexTakeover,
 } from "./codex-takeover-guard.mjs";
 import { assertAnthropicFamilyModel } from "./compat/protocol.mjs";
+import { renderHeartbeatManagedFiles } from "./context-heartbeat.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
@@ -235,7 +236,8 @@ export async function exportOssRelease({ outDir }) {
   await writeFile(binPath, await readFile(fileURLToPath(import.meta.url), "utf8"));
   await chmod(binPath, 0o755);
   await copyFile(join(here, "codex-takeover-guard.mjs"), join(outDir, "src", "codex-takeover-guard.mjs"));
-  for (const module of ["gateway.mjs", "plugin.mjs", "protocol.mjs"]) {
+  await copyFile(join(here, "context-heartbeat.mjs"), join(outDir, "src", "context-heartbeat.mjs"));
+  for (const module of ["gateway.mjs", "plugin.mjs", "protocol.mjs", "server-tools.mjs"]) {
     await copyFile(join(here, "compat", module), join(outDir, "src", "compat", module));
   }
   await writeFile(join(outDir, "profiles", "catalog.json"), `${JSON.stringify(publicCatalog, null, 2)}\n`);
@@ -367,16 +369,20 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
   const managedProfileId = `airkit-${slug(profile.name)}-${slug(mode)}`;
   const renderedLaunchArgs = (launch.args ?? []).map((arg) => renderTemplateValue(arg, launchVars));
   assertNoManagedApiKeyHelperOverride(renderedLaunchArgs);
-  const claudeArgs = appendLaunchRuntimePrompts(
-    withAirclaudeModelArg(
-      renderedLaunchArgs,
+  const claudeArgs = withHeartbeatPluginArg(
+    appendLaunchRuntimePrompts(
+      withAirclaudeModelArg(
+        renderedLaunchArgs,
+        launch.binary,
+        claudeModel,
+      ),
       launch.binary,
+      mode,
+      ccrConfig,
       claudeModel,
     ),
     launch.binary,
-    mode,
-    ccrConfig,
-    claudeModel,
+    configDir,
   );
 
   return {
@@ -1247,6 +1253,11 @@ function appendLaunchRuntimePrompts(args, binary, mode, ccrConfig, claudeModel) 
   return appendRuntimePrompts(args, [airclaudeRoutingPrompt(mode, ccrConfig, claudeModel)]);
 }
 
+function withHeartbeatPluginArg(args, binary, configDir) {
+  if (!shouldAppendReusableRuntimeLessons(binary)) return args;
+  return [...args, "--plugin-dir", join(configDir, "plugins", "airkit-context")];
+}
+
 // AirClaude launchers pass their Claude-compatible display model as `--model` for
 // this managed launch only. AirKit never persists it to Claude settings or session
 // transcripts, so Claude Code remains the owner of the user's saved model choice.
@@ -1886,7 +1897,12 @@ function renderManagedFiles(profile, options = {}) {
     content: renderTemplateValue(file.content, vars),
   }));
 
-  return explicit;
+  const binary = profile.launch?.binary ?? profile.shell?.wrappers?.[0]?.command;
+  const heartbeat = profile.ccr && shouldAppendReusableRuntimeLessons(binary)
+    ? renderHeartbeatManagedFiles(configDir)
+    : [];
+
+  return [...explicit, ...heartbeat];
 }
 
 async function writeTextFile(path, content, { force }) {
