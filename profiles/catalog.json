@@ -724,10 +724,7 @@
       },
       "launch": {
         "binary": "claude",
-        "args": [
-          "--settings",
-          "{\"apiKeyHelper\":\"\"}"
-        ],
+        "args": [],
         "env": {
           "CCR_PROFILE": "{{profileName}}"
         },

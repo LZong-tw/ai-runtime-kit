@@ -50,6 +50,14 @@ test("isolated CCR environment keeps every writable state path below one root", 
   }
 });
 
+test("fake Claude enforces launch-time apiKeyHelper precedence", () => {
+  assert.throws(
+    () => verifier.assertNoApiKeyHelperOverride(["--settings", "{\"apiKeyHelper\":\"\"}"]),
+    /must not override CCR managed apiKeyHelper/,
+  );
+  assert.doesNotThrow(() => verifier.assertNoApiKeyHelperOverride(["--permission-mode", "auto"]));
+});
+
 test("failed isolated CCR verification retains its root for diagnosis", async () => {
   const removed = [];
   const reports = [];
