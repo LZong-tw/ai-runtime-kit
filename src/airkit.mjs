@@ -1434,6 +1434,7 @@ function airclaudeRoutingPrompt(mode, ccrConfig, claudeModel) {
     "- Do not infer the active provider route from Claude Code's displayed model name.",
     "- background/tool-heavy work may use the background route when the runtime/router selects it.",
     "- When compacting, restoring, summarizing, or reporting status, preserve AirClaude mode and provider routes separately from Claude-compatible display metadata.",
+    "- Every manual or automatic compact summary ends with the following seven-field, single-line-value capsule. Never include credentials or provider-private payloads in the capsule.\n[AIRKIT_TASK_CAPSULE]\nobjective: current objective\nconstraints: accepted constraints\ndecisions: accepted decisions\nchanged_files: changed files\nverification: verification state\nrepository_state: repository and worktree state\nnext_action: next concrete action\n[/AIRKIT_TASK_CAPSULE]",
   ].join(" ");
 }
 
