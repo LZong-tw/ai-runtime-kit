@@ -106,6 +106,50 @@ through its management layer, while the generated gateway performs adapter
 lookup by provider name; differing values produce `Target adapter is not
 registered` failures.
 
+## Compatibility plugin opt-in
+
+Compatibility is disabled unless a profile declares an `airkit-compatibility`
+entry in `ccr.plugins`:
+
+```json
+{
+  "id": "airkit-compatibility",
+  "module": "@lzong/ai-runtime-kit/compatibility-plugin",
+  "config": {
+    "advisor": {
+      "mode": "bridge",
+      "model": "anthropic/claude-opus",
+      "fallbackModel": "anthropic/claude-opus"
+    },
+    "toolSearch": { "mode": "bridge" },
+    "webSearch": {
+      "mode": "mcp",
+      "model": "anthropic/claude-sonnet"
+    }
+  }
+}
+```
+
+The model strings above are schema examples, not defaults. Each opted-in
+profile must select real models for its provider mapping. Advisor, fallback,
+and WebSearch models must be `claude-*` or `anthropic/claude-*`; AirKit rejects
+other model families before writing files or calling CCR.
+
+At render time AirKit replaces the catalog's compatibility `module` marker
+with `src/compat/plugin.mjs` from the installed AirKit package. It replaces only
+the managed plugin ID and preserves unrelated CCR plugins.
+
+When `webSearch.mode` is `mcp`, AirKit adds one non-strict `--mcp-config` JSON
+argument for the launched Claude process. The entry uses
+`${AIRKIT_COMPATIBILITY_MCP_URL}` and
+`Bearer ${AIRKIT_COMPATIBILITY_MCP_TOKEN}` placeholders; their values are
+child-only environment variables derived from the active CCR gateway endpoint
+and `APIKEY`, including exact `$ENV` references. The token is not placed in
+argv, and AirKit does not use `--strict-mcp-config`, replace Claude settings, or
+discard user MCP/plugin configuration. Doctor reports Advisor, ToolSearch, and
+WebSearch independently; WebSearch remains `unverified` without a live MCP
+probe.
+
 ## Launch fields
 
 ```json

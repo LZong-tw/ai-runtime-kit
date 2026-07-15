@@ -13,10 +13,13 @@ import {
   inspectCodexTakeover,
   repairCodexTakeover,
 } from "./codex-takeover-guard.mjs";
+import { assertAnthropicFamilyModel } from "./compat/protocol.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
 const defaultCatalogPath = join(repoRoot, "profiles", "catalog.json");
+const compatibilityPluginId = "airkit-compatibility";
+const compatibilityPluginModule = join(here, "compat", "plugin.mjs");
 export const RUNTIME_REQUIREMENTS = Object.freeze({
   claudeCode: ">=2.1.208",
   claudeCodeRouter: ">=3.0.4 <4",
@@ -43,7 +46,13 @@ export function buildCcrConfig(catalog, profileName, options = {}) {
   if (!profile.ccr) {
     throw new Error(`profile "${profileName}" does not define a CCR config`);
   }
-  return renderTemplateValue(structuredClone(profile.ccr), profileTemplateVars(profile, options.configDir));
+  const config = renderTemplateValue(structuredClone(profile.ccr), profileTemplateVars(profile, options.configDir));
+  validateCompatibilityPlugin(config);
+  if (!Array.isArray(config.plugins)) return config;
+  config.plugins = config.plugins.map((plugin) => plugin?.id === compatibilityPluginId
+    ? { ...plugin, module: compatibilityPluginModule }
+    : plugin);
+  return config;
 }
 
 export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {}, options = {}) {
@@ -217,12 +226,16 @@ export async function exportOssRelease({ outDir }) {
   };
 
   await mkdir(join(outDir, "src"), { recursive: true });
+  await mkdir(join(outDir, "src", "compat"), { recursive: true });
   await mkdir(join(outDir, "profiles"), { recursive: true });
   await mkdir(join(outDir, "scripts"), { recursive: true });
   const binPath = join(outDir, "src", "airkit.mjs");
   await writeFile(binPath, await readFile(fileURLToPath(import.meta.url), "utf8"));
   await chmod(binPath, 0o755);
   await copyFile(join(here, "codex-takeover-guard.mjs"), join(outDir, "src", "codex-takeover-guard.mjs"));
+  for (const module of ["gateway.mjs", "plugin.mjs", "protocol.mjs"]) {
+    await copyFile(join(here, "compat", module), join(outDir, "src", "compat", module));
+  }
   await writeFile(join(outDir, "profiles", "catalog.json"), `${JSON.stringify(publicCatalog, null, 2)}\n`);
   await writeFile(
     join(outDir, "scripts", "verify-ccr3-e2e.mjs"),
@@ -446,6 +459,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     configDir: plan.configDir,
     env: options.env,
   });
+  const compatibilityLaunch = buildCompatibilityLaunch(managed.config, options.env ?? process.env);
   if (!isDeepStrictEqual(managed.config, currentConfig)) {
     await ccrClient.saveConfig(managed.config, { applyProfile: false });
   }
@@ -453,8 +467,12 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
   if (options.launch !== false) {
     await ccrClient.ensureGateway();
     const spawnCommand = options.spawnCommand ?? spawnCommandSync;
-    child = spawnCommand(plan.launch.command, [...plan.launch.args, ...plan.launch.userArgs], {
-      env: { ...(options.env ?? process.env), ...plan.launch.env },
+    child = spawnCommand(plan.launch.command, [
+      ...plan.launch.args,
+      ...compatibilityLaunch.args,
+      ...plan.launch.userArgs,
+    ], {
+      env: { ...(options.env ?? process.env), ...plan.launch.env, ...compatibilityLaunch.env },
       stdio: "inherit",
     });
   }
@@ -482,6 +500,7 @@ export async function doctorProfile(catalog, profileName, options = {}) {
   };
   const runtime = {
     ccr: await checkCcrAvailability(profile, options.commandExists ?? commandExistsOnPath),
+    compatibility: compatibilityCapabilityStatus(profile.ccr),
     shellSource: files.shellSnippet.ok
       ? await checkShellSourceability(plan.files.shellSnippet, profile, options.sourceShellSnippet ?? sourceShellSnippet)
       : { ok: true, skipped: true, path: plan.files.shellSnippet },
@@ -523,6 +542,81 @@ function validateCcr(profileName, ccr) {
       throw new Error(`profile "${profileName}" embeds a secret-looking API key`);
     }
   }
+  validateCompatibilityPlugin(ccr);
+}
+
+function validateCompatibilityPlugin(ccrConfig) {
+  const config = ccrConfig.plugins?.find((plugin) => plugin?.id === compatibilityPluginId)?.config;
+  if (!config) return;
+  for (const capability of ["advisor", "toolSearch", "webSearch"]) {
+    const settings = config[capability];
+    if (!settings || typeof settings !== "object" || Array.isArray(settings)) continue;
+    for (const field of ["model", "fallbackModel"]) {
+      if (settings[field] !== undefined) {
+        assertAnthropicFamilyModel(settings[field], `${capability}.${field}`);
+      }
+    }
+  }
+  if (config.advisor?.mode === "bridge") {
+    assertAnthropicFamilyModel(config.advisor.model, "advisor.model");
+    assertAnthropicFamilyModel(config.advisor.fallbackModel, "advisor.fallbackModel");
+  }
+  if (config.webSearch?.mode === "mcp") {
+    assertAnthropicFamilyModel(config.webSearch.model, "webSearch.model");
+  }
+}
+
+function buildCompatibilityLaunch(ccrConfig, env) {
+  const config = ccrConfig.plugins?.find((plugin) => plugin?.id === compatibilityPluginId)?.config;
+  if (config?.webSearch?.mode !== "mcp") return { args: [], env: {} };
+
+  const host = expandEnvironmentReference(ccrConfig.gateway?.host ?? ccrConfig.HOST, env, "CCR gateway host");
+  const port = expandEnvironmentReference(ccrConfig.gateway?.port ?? ccrConfig.PORT, env, "CCR gateway port");
+  const token = expandEnvironmentReference(ccrConfig.APIKEY, env, "CCR gateway API key");
+  if (typeof token !== "string" || token.length === 0) {
+    throw new Error("CCR compatibility MCP requires a gateway API key");
+  }
+  const endpoint = resolveCcrGatewayEndpoint({ gateway: { host, port } });
+  const mcpConfig = {
+    mcpServers: {
+      [compatibilityPluginId]: {
+        headers: { Authorization: "Bearer ${AIRKIT_COMPATIBILITY_MCP_TOKEN}" },
+        type: "http",
+        url: "${AIRKIT_COMPATIBILITY_MCP_URL}",
+      },
+    },
+  };
+  return {
+    args: ["--mcp-config", JSON.stringify(mcpConfig)],
+    env: {
+      AIRKIT_COMPATIBILITY_MCP_TOKEN: token,
+      AIRKIT_COMPATIBILITY_MCP_URL: new URL("/airkit/compatibility/mcp", endpoint).toString(),
+    },
+  };
+}
+
+function compatibilityCapabilityStatus(ccrConfig) {
+  const config = ccrConfig?.plugins?.find((plugin) => plugin?.id === compatibilityPluginId)?.config;
+  if (!config) return { capabilities: {}, ok: true, skipped: true };
+  return {
+    capabilities: {
+      advisor: config.advisor?.mode === "bridge" ? "bridged" : "unavailable",
+      toolSearch: config.toolSearch?.mode === "bridge" ? "bridged" : "unavailable",
+      webSearch: config.webSearch?.mode === "mcp" ? "unverified" : "unavailable",
+    },
+    ok: true,
+  };
+}
+
+function expandEnvironmentReference(value, env, fieldName) {
+  if (typeof value !== "string") return value;
+  const match = value.match(/^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))$/);
+  if (!match) return value;
+  const name = match[1] ?? match[2];
+  if (env?.[name] === undefined || env[name] === "") {
+    throw new Error(`${fieldName} references missing environment variable ${name}`);
+  }
+  return env[name];
 }
 
 function validateManagedFiles(profile) {
@@ -1838,6 +1932,11 @@ function renderDoctorResult(result) {
     `${statusOf(result.runtime.ccr)} CCR availability: ${result.runtime.ccr.command}`,
     `${statusOf(result.runtime.shellSource)} shell source: ${result.runtime.shellSource.path}`,
   ];
+  if (!result.runtime.compatibility.skipped) {
+    for (const [capability, status] of Object.entries(result.runtime.compatibility.capabilities)) {
+      lines.push(`${status} compatibility ${capability}`);
+    }
+  }
   for (const failure of result.failures) {
     lines.push(`- ${failure}`);
   }
