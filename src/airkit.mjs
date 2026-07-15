@@ -407,10 +407,8 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
   const runtime = await checkLaunchRuntime(plan, { ...options, ccrClient });
   if (!runtime.ccr.ok) throw new Error(runtime.ccr.reason);
   if (!runtime.launch.ok) throw new Error(runtime.launch.reason);
-  if (ccrClient !== safetyClient) {
-    currentConfig = await readCcrConfigSafely(ccrClient);
-    assertNoCodexTakeover(inspectCodexTakeover({ ccrConfig: currentConfig }));
-  }
+  currentConfig = await readCcrConfigSafely(ccrClient);
+  assertNoCodexTakeover(inspectCodexTakeover({ ccrConfig: currentConfig }));
   await writeLaunchFiles(plan, rendered);
   const apiKeys = await resolveProviderApiKeys(catalog, profileName, plan, options);
   const managed = buildCcr3ManagedConfig(catalog, profileName, currentConfig, {
@@ -854,7 +852,7 @@ async function readCcrConfigSafely(ccrClient) {
     return await ccrClient.getConfig();
   } catch {
     throw new Error(
-      "Unable to inspect CCR configuration safely; CCR was not started. Run airkit repair codex-takeover --write to back up and repair safely",
+      "Unable to inspect CCR configuration safely. Run airkit repair codex-takeover --write to back up and repair safely",
     );
   }
 }

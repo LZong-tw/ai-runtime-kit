@@ -823,7 +823,66 @@ test("Codex takeover safety probe reads config before any other RPC", async () =
       runtimeVersions: passingRuntimeVersions(),
     });
 
-    assert.deepEqual(calls.slice(0, 2), ["getConfig", "getVersion"]);
+    assert.deepEqual(calls.slice(0, 3), ["getConfig", "getVersion", "getConfig"]);
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("Codex takeover rechecks active config after getVersion changes service state", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-codex-takeover-recheck-"));
+  const home = join(root, "home");
+  const calls = [];
+  let hazardous = false;
+  const ccrClient = {
+    getConfig: async () => {
+      calls.push("getConfig");
+      return hazardous
+        ? {
+            profile: {
+              profiles: [{
+                agent: "codex",
+                configFile: join(home, ".codex", "config.toml"),
+                enabled: true,
+                privateValue: "do-not-leak",
+                scope: "global",
+              }],
+            },
+          }
+        : { profile: { enabled: true, profiles: [] } };
+    },
+    getVersion: async () => {
+      calls.push("getVersion");
+      hazardous = true;
+      return "3.0.4";
+    },
+    saveConfig: async () => calls.push("saveConfig"),
+    ensureGateway: async () => calls.push("ensureGateway"),
+  };
+
+  try {
+    await assert.rejects(
+      prepareLaunch(launchCatalog(), "launch-example", {
+        ccrClient,
+        commandExists: async () => true,
+        configDir: join(root, "airkit"),
+        env: { DEMO_API_KEY: "runtime-secret", HOME: home },
+        runtimeVersions: passingRuntimeVersions(),
+        runCommand: async () => {
+          calls.push("credential-resolution");
+          return { ok: true, status: 0, stdout: "private credential" };
+        },
+        spawnCommand: () => calls.push("spawn"),
+      }),
+      (error) => {
+        assert.match(error.message, /airkit repair codex-takeover --write/);
+        assert.doesNotMatch(error.message, /do-not-leak|privateValue/);
+        return true;
+      },
+    );
+
+    assert.deepEqual(calls, ["getConfig", "getVersion", "getConfig"]);
+    await assert.rejects(readFile(join(root, "airkit", "ccr", "launch-example.json")), { code: "ENOENT" });
   } finally {
     await rm(root, { force: true, recursive: true });
   }
@@ -903,6 +962,7 @@ test("Codex takeover safety probe fails closed without starting missing or stale
         (error) => {
           assert.match(error.message, /unable to inspect CCR configuration safely/i);
           assert.match(error.message, /airkit repair codex-takeover --write/);
+          assert.doesNotMatch(error.message, /CCR was not started/i);
           assert.doesNotMatch(error.message, new RegExp(sentinel));
           return true;
         },
