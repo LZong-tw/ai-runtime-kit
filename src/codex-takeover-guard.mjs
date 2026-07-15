@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmod, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { isAbsolute, join, normalize } from "node:path";
 
 const managedBlocks = [
@@ -99,7 +99,7 @@ export function repairCcrCodexProfiles(config) {
   return repaired;
 }
 
-const defaultIo = { chmod, readFile, realpath, rename, stat, unlink, writeFile };
+const defaultIo = { chmod, mkdtemp, readFile, realpath, rename, stat, writeFile };
 
 function resolveCodexConfigPath(env) {
   const codexHome = env?.CODEX_HOME || (env?.HOME ? join(env.HOME, ".codex") : null);
@@ -154,7 +154,13 @@ function parsedTakeover(text) {
   if (!text) return null;
   try {
     const value = JSON.parse(text);
-    return value && typeof value === "object" ? value : null;
+    return value
+      && typeof value === "object"
+      && !Array.isArray(value)
+      && value.version === 1
+      && Array.isArray(value.profiles)
+      ? value
+      : null;
   } catch {
     return null;
   }
@@ -165,6 +171,17 @@ function withoutCodexTakeoverEntries(text) {
   if (!value || !Array.isArray(value.profiles)) return text;
   value.profiles = value.profiles.filter((profile) => profile?.agent !== "codex");
   return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+function restoreOriginalCodexEntries(originalText, latestText) {
+  const original = parsedTakeover(originalText);
+  const latest = parsedTakeover(latestText);
+  if (!original || !latest) return null;
+  latest.profiles = [
+    ...latest.profiles.filter((profile) => profile?.agent !== "codex"),
+    ...original.profiles.filter((profile) => profile?.agent === "codex"),
+  ];
+  return `${JSON.stringify(latest, null, 2)}\n`;
 }
 
 function takeoverTargets(text) {
@@ -189,15 +206,7 @@ function repairNonce(nonce) {
   return value;
 }
 
-async function cleanupExclusiveFile(io, path) {
-  try {
-    await io.unlink(path);
-  } catch {
-    // Cleanup is best-effort; the primary failure remains sanitized below.
-  }
-}
-
-function transactionError(code, message, backupPaths, restoredPaths, failedPaths = []) {
+function transactionError(code, message, backupPaths, restoredPaths, failedPaths = [], conflictPaths = []) {
   const error = new Error(message);
   error.code = code;
   error.backupPath = backupPaths[0] ?? null;
@@ -205,6 +214,7 @@ function transactionError(code, message, backupPaths, restoredPaths, failedPaths
   error.restoredPath = restoredPaths[0] ?? null;
   error.restoredPaths = restoredPaths;
   error.failedPaths = failedPaths;
+  error.conflictPaths = conflictPaths;
   return error;
 }
 
@@ -215,38 +225,68 @@ async function exclusiveSnapshot(io, path, bytes, mode, suffix) {
   return backupPath;
 }
 
-async function snapshotConflict(io, path, bytes, mode, suffix, nonce) {
-  const conflictPath = `${path}.conflict-${suffix}-${repairNonce(nonce)}`;
-  await io.writeFile(conflictPath, bytes, { flag: "wx", mode });
-  await io.chmod(conflictPath, mode);
-  return conflictPath;
+async function restoreCapturedPath(io, path, capturedPath, capturedBytes, mode) {
+  try {
+    await io.writeFile(path, capturedBytes, { flag: "wx", mode });
+    await io.chmod(path, mode);
+  } catch {
+    // A concurrent writer owns the active path. Never overwrite it.
+  }
+  return capturedPath;
+}
+
+async function captureIfUnchanged(io, path, expected, suffix, nonce) {
+  const swapDir = await io.mkdtemp(`${path}.airkit-swap-${suffix}-${repairNonce(nonce)}-`);
+  await io.chmod(swapDir, 0o700);
+  const capturedPath = join(swapDir, "captured");
+  await io.rename(path, capturedPath);
+  const capturedMode = (await io.stat(capturedPath)).mode & 0o777;
+  const capturedBytes = Buffer.from(await io.readFile(capturedPath));
+  if (!capturedBytes.equals(expected)) {
+    await restoreCapturedPath(io, path, capturedPath, capturedBytes, capturedMode);
+    throw Object.assign(new Error("concurrent target change"), {
+      code: "AIRKIT_REPAIR_CONFLICT",
+      conflictPath: capturedPath,
+    });
+  }
+  return { capturedBytes, capturedMode, capturedPath };
 }
 
 async function replaceIfUnchanged(io, path, expected, bytes, mode, suffix, nonce) {
-  const temporaryPath = `${path}.airkit-repair-${suffix}-${repairNonce(nonce)}.tmp`;
-  let created = false;
-  try {
-    try {
-      await io.writeFile(temporaryPath, bytes, { flag: "wx", mode });
-      created = true;
-    } catch (error) {
-      created = error?.code !== "EEXIST";
-      throw error;
-    }
-    await io.chmod(temporaryPath, mode);
-    const current = await readOptionalBytes(io, path);
-    const unchanged = current === null ? expected === null : expected !== null && current.equals(expected);
-    if (!unchanged) {
-      if (current) await snapshotConflict(io, path, current, mode, suffix, nonce);
-      throw Object.assign(new Error("concurrent target change"), { code: "AIRKIT_REPAIR_CONFLICT" });
-    }
-    await io.rename(temporaryPath, path);
-    created = false;
-    await io.chmod(path, mode);
-  } catch (error) {
-    if (created) await cleanupExclusiveFile(io, temporaryPath);
-    throw error;
+  let capturedPath = path;
+  let capturedBytes = null;
+  let replacementMode = mode;
+
+  if (expected !== null) {
+    ({ capturedBytes, capturedMode: replacementMode, capturedPath } = await captureIfUnchanged(
+      io,
+      path,
+      expected,
+      suffix,
+      nonce,
+    ));
+  } else if (await readOptionalBytes(io, path)) {
+    throw Object.assign(new Error("concurrent target creation"), {
+      code: "AIRKIT_REPAIR_CONFLICT",
+      conflictPath: path,
+    });
   }
+
+  try {
+    await io.writeFile(path, bytes, { flag: "wx", mode: replacementMode });
+    await io.chmod(path, replacementMode);
+  } catch (error) {
+    if (capturedBytes) await restoreCapturedPath(io, path, capturedPath, capturedBytes, replacementMode);
+    throw Object.assign(new Error("exclusive target replacement failed"), {
+      code: error?.code === "EEXIST" ? "AIRKIT_REPAIR_CONFLICT" : "AIRKIT_REPAIR_REPLACE_FAILED",
+      conflictPath: capturedPath,
+    });
+  }
+  return capturedPath;
+}
+
+async function quarantineIfUnchanged(io, path, expected, suffix, nonce) {
+  return (await captureIfUnchanged(io, path, expected, suffix, nonce)).capturedPath;
 }
 
 export async function repairCodexTakeover({
@@ -272,10 +312,14 @@ export async function repairCodexTakeover({
       [],
     );
   }
-  const takeoverPath = requestedTakeoverPath ?? codexSafetyPaths(env).takeoverPath;
+  const takeoverPath = await canonicalTargetPath(
+    requestedTakeoverPath ?? codexSafetyPaths(env).takeoverPath,
+    env,
+    io,
+  );
   const takeoverBytes = await readOptionalBytes(io, takeoverPath);
   const takeoverText = takeoverBytes?.toString("utf8");
-  if (takeoverText?.trim() && !parsedTakeover(takeoverText)) {
+  if (takeoverBytes !== null && !parsedTakeover(takeoverText)) {
     throw transactionError(
       "CODEX_TAKEOVER_INVALID",
       "Codex takeover state could not be verified safely",
@@ -351,6 +395,7 @@ export async function repairCodexTakeover({
   }
 
   const failedPaths = [];
+  const conflictPaths = [];
   for (const target of targetsWithState) {
     try {
       const latest = await readOptionalBytes(io, target.path);
@@ -364,8 +409,9 @@ export async function repairCodexTakeover({
         throw new Error("target verification failed");
       }
       restoredPaths.push(target.path);
-    } catch {
+    } catch (error) {
       failedPaths.push(target.path);
+      if (error?.conflictPath) conflictPaths.push(error.conflictPath);
     }
   }
 
@@ -373,14 +419,32 @@ export async function repairCodexTakeover({
     const latest = await readOptionalBytes(io, takeoverPath);
     if (rpcFailed) {
       if (takeoverBytes) {
-        if (!latest?.equals(takeoverBytes)) {
-          await replaceIfUnchanged(io, takeoverPath, latest, takeoverBytes, takeoverMode, timestamp, nonce);
+        if (!latest || !latest.equals(takeoverBytes)) {
+          let restored = takeoverBytes;
+          if (latest) {
+            const merged = restoreOriginalCodexEntries(takeoverText, latest.toString("utf8"));
+            if (merged) {
+              restored = Buffer.from(merged);
+            } else {
+              const captured = await replaceIfUnchanged(
+                io,
+                takeoverPath,
+                latest,
+                takeoverBytes,
+                takeoverMode,
+                timestamp,
+                nonce,
+              );
+              conflictPaths.push(captured);
+              restored = null;
+            }
+          }
+          if (restored) await replaceIfUnchanged(io, takeoverPath, latest, restored, takeoverMode, timestamp, nonce);
         }
       } else if (latest) {
         const parsed = parsedTakeover(latest.toString("utf8"));
         if (!parsed) {
-          await snapshotConflict(io, takeoverPath, latest, (await io.stat(takeoverPath)).mode & 0o777, timestamp, nonce);
-          await io.unlink(takeoverPath);
+          conflictPaths.push(await quarantineIfUnchanged(io, takeoverPath, latest, timestamp, nonce));
         } else {
           const pruned = Buffer.from(withoutCodexTakeoverEntries(latest.toString("utf8")));
           await replaceIfUnchanged(io, takeoverPath, latest, pruned, (await io.stat(takeoverPath)).mode & 0o777, timestamp, nonce);
@@ -388,11 +452,18 @@ export async function repairCodexTakeover({
       }
     } else if (latest) {
       if (!parsedTakeover(latest.toString("utf8"))) {
-        await snapshotConflict(io, takeoverPath, latest, (await io.stat(takeoverPath)).mode & 0o777, timestamp, nonce);
         if (takeoverBytes) {
-          await replaceIfUnchanged(io, takeoverPath, latest, takeoverBytes, takeoverMode, timestamp, nonce);
+          conflictPaths.push(await replaceIfUnchanged(
+            io,
+            takeoverPath,
+            latest,
+            takeoverBytes,
+            takeoverMode,
+            timestamp,
+            nonce,
+          ));
         } else {
-          await io.unlink(takeoverPath);
+          conflictPaths.push(await quarantineIfUnchanged(io, takeoverPath, latest, timestamp, nonce));
         }
         failedPaths.push(takeoverPath);
       } else {
@@ -403,8 +474,9 @@ export async function repairCodexTakeover({
         restoredPaths.push(takeoverPath);
       }
     }
-  } catch {
+  } catch (error) {
     failedPaths.push(takeoverPath);
+    if (error?.conflictPath) conflictPaths.push(error.conflictPath);
   }
 
   if (failedPaths.length > 0) {
@@ -414,6 +486,7 @@ export async function repairCodexTakeover({
       backupPaths,
       restoredPaths,
       [...new Set(failedPaths)],
+      [...new Set(conflictPaths)],
     );
   }
 
@@ -423,6 +496,8 @@ export async function repairCodexTakeover({
       "CCR configuration repair failed; sanitized Codex snapshots were restored",
       backupPaths,
       restoredPaths,
+      [],
+      [...new Set(conflictPaths)],
     );
   }
 

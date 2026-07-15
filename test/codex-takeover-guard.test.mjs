@@ -120,7 +120,7 @@ test("detects only enabled global Codex profiles targeting the real Codex config
   assert.doesNotMatch(JSON.stringify(inspection), /must-not-leak|privateValue|"id"/);
 });
 
-test("inspects only Codex entries in the takeover file's top-level profiles array", () => {
+test("inspects only Codex entries in the takeover file's strict top-level profiles array", () => {
   const takeoverText = JSON.stringify({
     version: 1,
     profiles: [
@@ -207,12 +207,16 @@ function transactionFixture({ backupCollision = false, failAt } = {}) {
   let activeConfig = structuredClone(hazardousConfig);
   const concurrentText = `${managedCodexText}concurrent = "preserved"\n`;
   const concurrentSanitized = Buffer.from(stripCcrManagedCodexBlocks(concurrentText));
-  const mutateTarget = () => files.set(codexPath, Buffer.from(concurrentText));
+  const mutateTarget = () => {
+    files.set(codexPath, Buffer.from(concurrentText));
+    modes.set(codexPath, 0o100600);
+  };
   const io = {
     chmod: async (path, mode) => {
       modes.set(path, mode);
     },
     mkdir: async () => {},
+    mkdtemp: async (prefix) => `${prefix}fixture-swap`,
     readFile: async (path) => {
       events.push(`read:${path}`);
       if (!files.has(path)) throw Object.assign(new Error("missing"), { code: "ENOENT" });
@@ -228,6 +232,10 @@ function transactionFixture({ backupCollision = false, failAt } = {}) {
       modes.set(to, modes.get(from));
       files.delete(from);
       modes.delete(from);
+      if (failAt === "swapConcurrent" && from === codexPath) {
+        files.set(codexPath, Buffer.from("user_edit = \"wins\"\n"));
+        modes.set(codexPath, 0o600);
+      }
     },
     realpath: async (path) => {
       if (!files.has(path)) throw Object.assign(new Error("missing"), { code: "ENOENT" });
@@ -253,6 +261,9 @@ function transactionFixture({ backupCollision = false, failAt } = {}) {
       writeOptions.set(path, { ...options });
       if (failAt === "tempWrite" && path === temporaryPath) {
         throw new Error("temporary write failed with private bytes");
+      }
+      if (failAt === "targetWrite" && path === codexPath && events.some((event) => event.startsWith(`rename:${codexPath}->`))) {
+        throw new Error("target write failed with private bytes");
       }
       if (failAt === "concurrent" && path === temporaryPath) {
         files.set(codexPath, Buffer.from("user_edit = \"wins\"\n"));
@@ -318,14 +329,12 @@ test("write repair reads live config first, then backs up latest bytes before mu
     "saveConfig",
     `read:${fixture.codexPath}`,
   ]);
-  assert.ok(fixture.events.includes(
-    `write:${fixture.temporaryPath}`,
-  ));
+  assert.ok(fixture.events.some((event) => event.startsWith(`rename:${fixture.codexPath}->`) && event.endsWith("/captured")));
   assert.deepEqual(fixture.files.get(fixture.backupPath), fixture.latest);
   assert.deepEqual(fixture.files.get(fixture.codexPath), fixture.concurrentSanitized);
-  assert.equal(fixture.modes.get(fixture.codexPath), 0o640);
+  assert.equal(fixture.modes.get(fixture.codexPath), 0o600);
   assert.deepEqual(fixture.writeOptions.get(fixture.backupPath), { flag: "wx", mode: 0o640 });
-  assert.deepEqual(fixture.writeOptions.get(fixture.temporaryPath), { flag: "wx", mode: 0o640 });
+  assert.deepEqual(fixture.writeOptions.get(fixture.codexPath), { flag: "wx", mode: 0o600 });
   assert.equal(result.backupPath, fixture.backupPath);
   assert.equal(result.restoredPath, fixture.codexPath);
   assert.equal(result.write, true);
@@ -355,7 +364,7 @@ for (const failAt of ["saveConfig"]) {
 
     assert.deepEqual(fixture.files.get(fixture.backupPath), fixture.latest);
     assert.deepEqual(fixture.files.get(fixture.codexPath), fixture.concurrentSanitized);
-    assert.equal(fixture.modes.get(fixture.codexPath), 0o640);
+    assert.equal(fixture.modes.get(fixture.codexPath), 0o600);
     assert.ok(fixture.events.includes(`read:${fixture.codexPath}`));
   });
 }
@@ -416,8 +425,8 @@ test("an existing unique backup fails safely before mutation-capable save", asyn
   ]);
 });
 
-for (const failAt of ["tempWrite", "rename", "verification"]) {
-  test(`cleans the exclusive temporary file after ${failAt} failure`, async () => {
+for (const failAt of ["targetWrite", "rename", "verification"]) {
+  test(`retains rollback evidence after ${failAt} failure`, async () => {
     const fixture = transactionFixture({ failAt });
 
     await assert.rejects(
@@ -440,10 +449,10 @@ for (const failAt of ["tempWrite", "rename", "verification"]) {
       },
     );
 
-    assert.ok(fixture.files.has(fixture.codexPath));
     assert.deepEqual(fixture.files.get(fixture.backupPath), fixture.latest);
-    assert.ok(!fixture.files.has(fixture.temporaryPath));
-    if (failAt !== "verification") assert.ok(fixture.events.includes(`unlink:${fixture.temporaryPath}`));
+    if (failAt !== "rename") {
+      assert.ok([...fixture.files.keys()].some((path) => path.endsWith("/captured")));
+    }
   });
 }
 
@@ -469,7 +478,7 @@ test("repairs every live and recorded target before save, preserves symlinks and
     await chmod(realDefault, 0o640);
     await chmod(custom, 0o640);
     const takeover = {
-      version: 7,
+      version: 1,
       profiles: [
         { agent: "claude-code", settingsFile: "~/.claude/settings.json", keep: true },
           { agent: "codex", codexHome: codexDir },
@@ -524,7 +533,7 @@ test("repairs every live and recorded target before save, preserves symlinks and
     assert.doesNotMatch(await readFile(realDefault, "utf8"), /BEGIN CCR managed/);
     assert.doesNotMatch(await readFile(custom, "utf8"), /BEGIN CCR managed/);
     const repairedTakeover = JSON.parse(await readFile(takeoverPath, "utf8"));
-    assert.equal(repairedTakeover.version, 7);
+    assert.equal(repairedTakeover.version, 1);
     assert.deepEqual(repairedTakeover.profiles, [takeover.profiles[0], { agent: "claude-code", id: "concurrent" }]);
     assert.deepEqual(repairedTakeover.untouched, takeover.untouched);
     assert.equal((await stat(result.backupPaths[0])).mode & 0o777, 0o640);
@@ -604,9 +613,8 @@ test("sanitizes an initially missing live target created by save on success and 
   }
 });
 
-test("retains a conflict snapshot and does not clobber a concurrent edit during temp creation", async () => {
-  const fixture = transactionFixture({ failAt: "concurrent" });
-  const conflictPath = `${fixture.codexPath}.conflict-2026-07-15T01-02-03-004Z-fixture-nonce`;
+test("retains swap-time bytes and does not clobber a writer in the former compare-rename window", async () => {
+  const fixture = transactionFixture({ failAt: "swapConcurrent" });
   await assert.rejects(
     repairCodexTakeover({
       ccrClient: fixture.ccrClient,
@@ -620,8 +628,34 @@ test("retains a conflict snapshot and does not clobber a concurrent edit during 
       && error.failedPaths.includes(fixture.codexPath),
   );
   assert.equal(fixture.files.get(fixture.codexPath).toString("utf8"), "user_edit = \"wins\"\n");
-  assert.equal(fixture.files.get(conflictPath).toString("utf8"), "user_edit = \"wins\"\n");
-  assert.ok(!fixture.files.has(fixture.temporaryPath));
+  const capturedPath = [...fixture.files.keys()].find((path) => path.endsWith("/captured"));
+  assert.ok(capturedPath);
+  assert.deepEqual(fixture.files.get(capturedPath), Buffer.from(`${managedCodexText}concurrent = "preserved"\n`));
+});
+
+test("rejects malformed takeover shapes before mutation-capable save", async () => {
+  const invalidTexts = [
+    "",
+    ...[[], {}, { profiles: [] }, { version: "1", profiles: [] }, { version: 2, profiles: [] }].map(JSON.stringify),
+  ];
+  for (const text of invalidTexts) {
+    const fixture = transactionFixture();
+    const takeoverPath = "/home/example/.claude-code-router/global-profile-takeover.json";
+    fixture.files.set(takeoverPath, Buffer.from(text));
+    fixture.modes.set(takeoverPath, 0o100600);
+    await assert.rejects(
+      repairCodexTakeover({
+        ccrClient: fixture.ccrClient,
+        env: fixture.env,
+        io: fixture.io,
+        nonce: fixture.nonce,
+        now: fixture.now,
+        write: true,
+      }),
+      (error) => error.code === "CODEX_TAKEOVER_INVALID",
+    );
+    assert.ok(!fixture.events.includes("saveConfig"));
+  }
 });
 
 test("quarantines a newly-created malformed takeover record and fails without data loss", async () => {
@@ -643,14 +677,64 @@ test("quarantines a newly-created malformed takeover record and fails without da
         await writeFile(takeoverPath, malformed, { mode: 0o600 });
       },
     };
+    const io = {
+      chmod,
+      mkdtemp,
+      readFile,
+      realpath,
+      rename: async (from, to) => {
+        await fsRename(from, to);
+        if (from === takeoverPath) await writeFile(takeoverPath, "writer = \"wins\"\n", { mode: 0o600 });
+      },
+      stat,
+      writeFile,
+    };
     await assert.rejects(
-      repairCodexTakeover({ ccrClient, env: { HOME: home }, write: true }),
+      repairCodexTakeover({ ccrClient, env: { HOME: home }, io, write: true }),
       (error) => error.code === "CODEX_TAKEOVER_RESTORE_FAILED" && error.failedPaths.includes(takeoverPath),
     );
-    await assert.rejects(readFile(takeoverPath), { code: "ENOENT" });
-    const quarantine = (await readdir(stateDir)).find((name) => name.includes(".conflict-"));
-    assert.ok(quarantine);
-    assert.equal(await readFile(join(stateDir, quarantine), "utf8"), malformed);
+    assert.equal(await readFile(takeoverPath, "utf8"), "writer = \"wins\"\n");
+    const swapDir = (await readdir(stateDir)).find((name) => name.includes(".airkit-swap-"));
+    assert.ok(swapDir);
+    assert.equal(await readFile(join(stateDir, swapDir, "captured"), "utf8"), malformed);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("save failure restores original Codex entries while preserving concurrent non-Codex takeover data", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-guard-record-merge-"));
+  const home = join(root, "home");
+  const stateDir = join(home, ".claude-code-router");
+  const takeoverPath = join(stateDir, "global-profile-takeover.json");
+  const originalCodex = { agent: "codex", configFile: join(home, ".codex", "config.toml") };
+  const original = { version: 1, profiles: [originalCodex, { agent: "claude-code", id: "original" }], meta: "original" };
+  let activeConfig = { profile: { profiles: [{ ...originalCodex, enabled: true, scope: "global" }] } };
+  try {
+    await mkdir(join(home, ".codex"), { recursive: true });
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(join(home, ".codex", "config.toml"), managedCodexText);
+    await writeFile(takeoverPath, JSON.stringify(original));
+    const ccrClient = {
+      getConfig: async () => structuredClone(activeConfig),
+      saveConfig: async (config, options) => {
+        assert.deepEqual(options, { applyProfile: false });
+        activeConfig = structuredClone(config);
+        await writeFile(takeoverPath, JSON.stringify({
+          version: 1,
+          profiles: [{ agent: "codex", configFile: "/mutated/config.toml" }, { agent: "claude-code", id: "concurrent" }],
+          meta: "concurrent",
+        }));
+        throw new Error("private save failure");
+      },
+    };
+    await assert.rejects(
+      repairCodexTakeover({ ccrClient, env: { HOME: home }, write: true }),
+      (error) => error.code === "CODEX_TAKEOVER_REPAIR_FAILED",
+    );
+    const repaired = JSON.parse(await readFile(takeoverPath, "utf8"));
+    assert.equal(repaired.meta, "concurrent");
+    assert.deepEqual(repaired.profiles, [{ agent: "claude-code", id: "concurrent" }, originalCodex]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -674,16 +758,17 @@ test("continues cleanup across every target and takeover record when one restore
     await mkdir(stateDir, { recursive: true });
     await writeFile(defaultPath, managedCodexText);
     await writeFile(customPath, managedCodexText);
-    await writeFile(takeoverPath, JSON.stringify({ profiles: [
+    await writeFile(takeoverPath, JSON.stringify({ version: 1, profiles: [
       { agent: "codex", configFile: customPath },
       { agent: "claude-code", settingsFile: "~/.claude/settings.json" },
     ] }));
     const io = {
       chmod,
+      mkdtemp,
       readFile,
       realpath,
       rename: async (from, to) => {
-        if (to === await realpath(defaultPath)) throw new Error("private rename failure");
+        if (from === await realpath(defaultPath)) throw new Error("private rename failure");
         await fsRename(from, to);
       },
       stat,
@@ -705,6 +790,7 @@ test("continues cleanup across every target and takeover record when one restore
     );
     assert.doesNotMatch(await readFile(customPath, "utf8"), /BEGIN CCR managed/);
     const record = JSON.parse(await readFile(takeoverPath, "utf8"));
+    assert.equal(record.version, 1);
     assert.deepEqual(record.profiles, [{ agent: "claude-code", settingsFile: "~/.claude/settings.json" }]);
   } finally {
     await rm(root, { recursive: true, force: true });

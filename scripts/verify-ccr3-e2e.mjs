@@ -48,6 +48,13 @@ export function assertIsolatedEnvironment(root, env, realHome) {
   }
 }
 
+export function isSupportedCcrVersion(version) {
+  const match = String(version ?? "").match(/^(\d+)\.(\d+)\.(\d+)$/);
+  if (!match) return false;
+  const [major, minor, patch] = match.slice(1).map(Number);
+  return major === 3 && (minor > 0 || patch >= 4);
+}
+
 async function main() {
   const childNonce = process.argv[2] === "--sandbox-child" ? process.argv[3] : null;
   if (!childNonce || childNonce !== process.env.AIRKIT_E2E_SANDBOX_NONCE) {
@@ -77,6 +84,8 @@ async function main() {
     const packed = run("npm", ["pack", repositoryRoot, "--pack-destination", root], env, 120_000);
     assert.equal(packed.status, 0, `AirKit package build failed: ${packed.stderr}`);
     const packageArchive = join(root, packed.stdout.trim().split("\n").at(-1));
+    const requestedCcrVersion = process.env.AIRKIT_CCR_E2E_VERSION ?? "3.0.4";
+    assert.equal(isSupportedCcrVersion(requestedCcrVersion), true, "requested CCR verifier version is outside >=3.0.4 <4");
     const install = run("npm", [
       "install",
       "--prefix",
@@ -84,7 +93,7 @@ async function main() {
       "--no-package-lock",
       "--no-audit",
       "--no-fund",
-      "@musistudio/claude-code-router@3.0.4",
+      `@musistudio/claude-code-router@${requestedCcrVersion}`,
       packageArchive,
     ], env, 120_000);
     assert.equal(install.status, 0, `isolated npm install failed: ${install.stderr}`);
@@ -98,7 +107,11 @@ async function main() {
       join(runtimeRoot, "node_modules", "@musistudio", "claude-code-router", "package.json"),
       "utf8",
     ));
-    assert.equal(ccrPackage.version, "3.0.4");
+    assert.equal(
+      isSupportedCcrVersion(ccrPackage.version),
+      true,
+      `CCR ${ccrPackage.version} does not satisfy >=3.0.4 <4`,
+    );
 
     const providerPort = await reservePort();
     fakeProvider = await startFakeProvider(fakeBin, providerPort, join(root, "fake-provider-request.json"), env);
@@ -106,10 +119,32 @@ async function main() {
     const gatewayPort = await reservePort();
     assert.notEqual(gatewayPort, 3456);
 
+    const sentinelPath = join(env.HOME, ".codex", "config.toml");
+    const sentinelBytes = Buffer.from("CCR_CONTRACT_SENTINEL = \"must-remain-byte-exact\"\n");
+    await mkdir(dirname(sentinelPath), { recursive: true });
+    await writeFile(sentinelPath, sentinelBytes, { mode: 0o600 });
+
     const management = run(ccr, ["start", "--no-gateway"], env);
     assert.equal(management.status, 0, `CCR management start failed: ${management.stderr}`);
     const rpc = await createRpcClient(env);
     const initialConfig = await rpc("getConfig");
+    assert.deepEqual(await readFile(sentinelPath), sentinelBytes, "management start/getConfig mutated Codex sentinel");
+    const dangerousProfile = {
+      agent: "codex",
+      configFile: sentinelPath,
+      enabled: true,
+      id: "airkit-contract-dangerous-codex",
+      name: "AirKit isolated dangerous Codex contract probe",
+      scope: "global",
+    };
+    await rpc("saveConfig", [{
+      ...initialConfig,
+      profile: {
+        ...(initialConfig.profile ?? {}),
+        profiles: [...(initialConfig.profile?.profiles ?? []), dangerousProfile],
+      },
+    }, { applyProfile: false }]);
+    assert.deepEqual(await readFile(sentinelPath), sentinelBytes, "applyProfile:false mutated Codex sentinel");
     const configured = {
       ...initialConfig,
       HOST: "127.0.0.1",
@@ -118,6 +153,7 @@ async function main() {
       gateway: { ...initialConfig.gateway, host: "127.0.0.1", port: gatewayPort },
     };
     await rpc("saveConfig", [configured, { applyProfile: false }]);
+    assert.deepEqual(await readFile(sentinelPath), sentinelBytes, "safe applyProfile:false save mutated Codex sentinel");
 
     const sqliteAfterInit = await findFiles(root, (path) => path.endsWith(".sqlite"));
     assert.ok(sqliteAfterInit.length > 0, "CCR must initialize SQLite inside the isolated root");
@@ -145,7 +181,7 @@ async function main() {
       fetch: trackedFetch,
       launch: false,
       mode: "auto",
-      runtimeVersions: { claudeCode: "2.1.208", claudeCodeRouter: "3.0.4", node: process.versions.node },
+      runtimeVersions: { claudeCode: "2.1.208", claudeCodeRouter: ccrPackage.version, node: process.versions.node },
     };
     await installedRuntime.prepareLaunch(catalog, "ccr3-e2e", prepareOptions);
     assert.equal(managedSaves, 1, "first prepare must persist the AirKit-managed config once");

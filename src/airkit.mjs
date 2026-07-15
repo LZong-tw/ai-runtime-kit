@@ -835,9 +835,16 @@ async function inspectCodexTakeoverFiles(env) {
   const codexHome = env?.CODEX_HOME ?? (env?.HOME ? join(env.HOME, ".codex") : join(homedir(), ".codex"));
   const { takeoverPath } = codexSafetyPaths(env);
   const takeoverText = await readOptionalText(takeoverPath);
-  if (takeoverText?.trim()) {
+  if (takeoverText !== undefined) {
     try {
-      JSON.parse(takeoverText);
+      const takeover = JSON.parse(takeoverText);
+      if (!takeover
+        || typeof takeover !== "object"
+        || Array.isArray(takeover)
+        || takeover.version !== 1
+        || !Array.isArray(takeover.profiles)) {
+        throw new Error("invalid takeover shape");
+      }
     } catch {
       throw new Error(
         "Codex takeover state could not be verified; run airkit repair codex-takeover --write",
