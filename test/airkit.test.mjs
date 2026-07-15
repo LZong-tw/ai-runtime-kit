@@ -6,6 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import * as airkitRuntime from "../src/airkit.mjs";
+import * as ccrVerifier from "../scripts/verify-ccr3-e2e.mjs";
 
 import {
   buildLaunchPlan,
@@ -33,6 +34,19 @@ test("runtime requirements hard-cut to Node 22, Claude Code 2.1.208, and CCR 3.0
     claudeCodeRouter: ">=3.0.4 <4",
     node: ">=22",
   });
+});
+
+test("isolated verifier accepts the declared CCR 3 range and encodes the management-only sentinel gate", async () => {
+  assert.equal(ccrVerifier.isSupportedCcrVersion("3.0.4"), true);
+  assert.equal(ccrVerifier.isSupportedCcrVersion("3.9.99"), true);
+  assert.equal(ccrVerifier.isSupportedCcrVersion("3.0.3"), false);
+  assert.equal(ccrVerifier.isSupportedCcrVersion("4.0.0"), false);
+  const source = await readFile(resolve(import.meta.dirname, "..", "scripts", "verify-ccr3-e2e.mjs"), "utf8");
+  assert.match(source, /CCR_CONTRACT_SENTINEL/);
+  assert.match(source, /start.+--no-gateway/s);
+  assert.match(source, /saveConfig.+applyProfile:\s*false/s);
+  assert.match(source, /agent:\s*"codex"/);
+  assert.match(source, /scope:\s*"global"/);
 });
 
 test("OSS package allowlist excludes tests and migration artifacts", async () => {
@@ -711,6 +725,7 @@ for (const evidence of ["managed marker", "takeover record"]) {
         : "theme = \"dark\"\n");
       if (evidence === "takeover record") {
         await writeFile(join(ccrDir, "global-profile-takeover.json"), JSON.stringify({
+          version: 1,
           profiles: [{
             agent: "codex",
             configFile: join(codexDir, "config.toml"),
@@ -795,6 +810,33 @@ test("Codex takeover in live CCR config blocks before credential resolution or s
     assert.deepEqual(calls, ["getConfig"]);
   } finally {
     await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("launch fails closed on noncanonical takeover record shapes after the first management read", async () => {
+  const invalidTexts = ["", ...[[], {}, { arbitrary: true }, { version: "1", profiles: [] }].map(JSON.stringify)];
+  for (const [index, text] of invalidTexts.entries()) {
+    const root = await mkdtemp(join(tmpdir(), `airkit-invalid-takeover-${index}-`));
+    const stateDir = join(root, ".claude-code-router");
+    const calls = [];
+    try {
+      await mkdir(stateDir, { recursive: true });
+      await writeFile(join(stateDir, "global-profile-takeover.json"), text);
+      await assert.rejects(prepareLaunch(launchCatalog(), "launch-example", {
+        ccrClient: {
+          getConfig: async () => { calls.push("getConfig"); return { profile: { profiles: [] } }; },
+          getVersion: async () => { calls.push("getVersion"); return "3.0.4"; },
+        },
+        commandExists: async () => true,
+        configDir: join(root, "airkit"),
+        env: { DEMO_API_KEY: "runtime-secret", HOME: root },
+        launch: false,
+        runtimeVersions: passingRuntimeVersions(),
+      }), /codex takeover state could not be verified/i);
+      assert.deepEqual(calls, ["getConfig"]);
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
   }
 });
 
@@ -1056,6 +1098,7 @@ test("codex-takeover preview uses a non-starting client and performs zero writes
   const io = {
     chmod: async () => {},
     mkdir: async () => {},
+    mkdtemp: async (prefix) => `${prefix}fixture-swap`,
     readFile: async (path) => {
       calls.push(`read:${path}`);
       if (path !== codexPath) throw Object.assign(new Error("missing"), { code: "ENOENT" });
@@ -1126,6 +1169,7 @@ test("codex-takeover preview sanitizes CCR RPC failures", async () => {
       codexTakeoverIo: {
         chmod: async () => {},
         mkdir: async () => {},
+        mkdtemp: async (prefix) => `${prefix}fixture-swap`,
         readFile: async (path) => {
           if (path !== "/synthetic/home/.codex/config.toml") {
             throw Object.assign(new Error("missing"), { code: "ENOENT" });
@@ -1180,6 +1224,7 @@ test("codex-takeover --write backs up exact bytes before RPC and reports only sa
   const io = {
     chmod: async (path, mode) => modes.set(path, mode),
     mkdir: async () => {},
+    mkdtemp: async (prefix) => `${prefix}fixture-swap`,
     readFile: async (path) => {
       events.push(`read:${path}`);
       if (!files.has(path)) throw Object.assign(new Error("missing"), { code: "ENOENT" });
