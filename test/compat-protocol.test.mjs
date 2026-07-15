@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import * as protocol from "../src/compat/protocol.mjs";
+import * as toolSearch from "../src/compat/tool-search.mjs";
 
 import {
   MAX_DEFERRED_TOOL_COUNT,
@@ -12,6 +14,20 @@ import {
   mapToolSearchError,
   searchDeferredTools,
 } from "../src/compat/protocol.mjs";
+
+test("protocol preserves ToolSearch compatibility re-exports", () => {
+  for (const name of [
+    "CompatibilityProtocolError",
+    "TOOL_SEARCH_TYPES",
+    "bridgeToolSearch",
+    "createToolSearchErrorResult",
+    "createToolSearchResult",
+    "mapToolSearchError",
+    "searchDeferredTools",
+  ]) {
+    assert.equal(protocol[name], toolSearch[name]);
+  }
+});
 
 test("inspection finds advisor, ToolSearch, and deferred tools without mutation", () => {
   const body = {
