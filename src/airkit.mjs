@@ -1703,13 +1703,22 @@ export function resolveCcrGatewayEndpoint(config) {
 }
 
 export async function ensureCcr3Gateway(options) {
-  const endpoint = resolveCcrGatewayEndpoint(await options.getConfig());
-  const healthUrl = new URL("/health", endpoint);
+  const config = await options.getConfig();
+  const endpoint = resolveCcrGatewayEndpoint(config);
+  const coreEndpoint = resolveCcrGatewayEndpoint({
+    gateway: { host: config.gateway?.coreHost, port: config.gateway?.corePort },
+  });
   const healthy = async () => {
     try {
-      return (await options.fetchImpl(healthUrl, {
+      const outerHealth = await options.fetchImpl(new URL("/health", endpoint), {
         signal: AbortSignal.timeout(options.healthTimeoutMs ?? 1_000),
-      })).ok;
+      });
+      if (!outerHealth.ok) return false;
+      const coreHealth = await options.fetchImpl(new URL("/health", coreEndpoint), {
+        signal: AbortSignal.timeout(options.healthTimeoutMs ?? 1_000),
+      });
+      if (!coreHealth.ok) return false;
+      return (await coreHealth.json().catch(() => null))?.status === "ok";
     } catch {
       return false;
     }
