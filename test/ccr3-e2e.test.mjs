@@ -108,22 +108,85 @@ test("gateway endpoint converts wildcard bind hosts to connectable loopback host
 
 test("production gateway readiness uses bounded health requests and starts the configured endpoint", async () => {
   const events = [];
+  let started = false;
   const endpoint = await airkitRuntime.ensureCcr3Gateway({
     fetchImpl: async (url, options) => {
       events.push({ signal: options.signal, url: String(url) });
-      return { ok: events.length > 1 };
+      return { ok: started, json: async () => ({ status: "ok" }) };
     },
-    getConfig: async () => ({ gateway: { host: "0.0.0.0", port: 43993 } }),
+    getConfig: async () => ({
+      gateway: { host: "0.0.0.0", port: 43993, coreHost: "127.0.0.1", corePort: 43994 },
+    }),
     healthTimeoutMs: 25,
     pollAttempts: 2,
     pollIntervalMs: 0,
-    startGateway: async () => events.push({ started: true }),
+    startGateway: async () => {
+      started = true;
+      events.push({ started: true });
+    },
   });
 
   assert.equal(endpoint, "http://127.0.0.1:43993");
   assert.equal(events[0].url, "http://127.0.0.1:43993/health");
   assert.ok(events[0].signal instanceof AbortSignal);
   assert.deepEqual(events[1], { started: true });
+  assert.equal(events[2].url, "http://127.0.0.1:43993/health");
+  assert.equal(events[3].url, "http://127.0.0.1:43994/health");
+  assert.ok(events[2].signal instanceof AbortSignal);
+  assert.ok(events[3].signal instanceof AbortSignal);
+});
+
+test("production gateway readiness waits for the CCR core after the outer health endpoint is ready", async () => {
+  const events = [];
+  let coreChecks = 0;
+  const endpoint = await airkitRuntime.ensureCcr3Gateway({
+    fetchImpl: async (url) => {
+      const value = String(url);
+      events.push(value);
+      if (value === "http://127.0.0.1:43995/health") {
+        coreChecks += 1;
+        return { ok: coreChecks > 1, json: async () => ({ status: "ok" }) };
+      }
+      return { ok: true };
+    },
+    getConfig: async () => ({
+      gateway: { host: "127.0.0.1", port: 43994, coreHost: "127.0.0.1", corePort: 43995 },
+    }),
+    pollAttempts: 2,
+    pollIntervalMs: 0,
+    startGateway: async () => events.push("started"),
+  });
+
+  assert.equal(endpoint, "http://127.0.0.1:43994");
+  assert.deepEqual(events, [
+    "http://127.0.0.1:43994/health",
+    "http://127.0.0.1:43995/health",
+    "started",
+    "http://127.0.0.1:43994/health",
+    "http://127.0.0.1:43995/health",
+  ]);
+});
+
+test("production gateway readiness requires the CCR core health status to be ok", async () => {
+  let coreChecks = 0;
+  const endpoint = await airkitRuntime.ensureCcr3Gateway({
+    fetchImpl: async (url) => {
+      if (String(url) === "http://127.0.0.1:43997/health") {
+        coreChecks += 1;
+        return { ok: true, json: async () => ({ status: coreChecks > 1 ? "ok" : "starting" }) };
+      }
+      return { ok: true };
+    },
+    getConfig: async () => ({
+      gateway: { host: "127.0.0.1", port: 43996, coreHost: "127.0.0.1", corePort: 43997 },
+    }),
+    pollAttempts: 2,
+    pollIntervalMs: 0,
+    startGateway: async () => {},
+  });
+
+  assert.equal(endpoint, "http://127.0.0.1:43996");
+  assert.equal(coreChecks, 2);
 });
 
 test("CCR management RPC requests carry a bounded timeout signal", async () => {
