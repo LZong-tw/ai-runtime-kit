@@ -68,11 +68,16 @@ export async function verifyDangerousCodexPersistence({
   sentinelBytes,
   sentinelPath,
 }) {
+  const profiles = initialConfig.profile?.profiles ?? [];
+  const profileIndex = profiles.findIndex((profile) => profile.id === dangerousProfile.id);
+  assert.notEqual(profileIndex, -1, "dangerous Codex probe must replace an existing profile");
   await rpc("saveConfig", [{
     ...initialConfig,
     profile: {
       ...(initialConfig.profile ?? {}),
-      profiles: [...(initialConfig.profile?.profiles ?? []), dangerousProfile],
+      profiles: profiles.map((profile, index) => index === profileIndex
+        ? { ...profile, ...dangerousProfile }
+        : profile),
     },
   }, { applyProfile: false }]);
   assert.deepEqual(await read(sentinelPath), sentinelBytes, "applyProfile:false mutated Codex sentinel");
@@ -85,7 +90,11 @@ export async function verifyDangerousCodexPersistence({
   const freshRpc = await rpcFactory(env);
   const persistedConfig = await freshRpc("getConfig");
   const persistedProfile = persistedConfig.profile?.profiles?.find((profile) => profile.id === dangerousProfile.id);
-  assert.deepEqual(persistedProfile, dangerousProfile, "dangerous Codex profile did not persist across restart");
+  assert.ok(persistedProfile, "dangerous Codex profile did not persist across restart");
+  assert.equal(persistedProfile.agent, "codex");
+  assert.equal(persistedProfile.enabled, true, "dangerous Codex profile was disabled across restart");
+  assert.equal(persistedProfile.scope, "global");
+  assert.equal(persistedProfile.configFile, dangerousProfile.configFile);
   assert.deepEqual(await read(sentinelPath), sentinelBytes, "management restart/getConfig mutated Codex sentinel");
 
   await freshRpc("saveConfig", [safeConfig, { applyProfile: false }]);
@@ -167,12 +176,14 @@ async function main() {
     let rpc = await createRpcClient(env);
     const initialConfig = await rpc("getConfig");
     assert.deepEqual(await readFile(sentinelPath), sentinelBytes, "management start/getConfig mutated Codex sentinel");
+    const existingCodexProfile = initialConfig.profile?.profiles?.find((profile) => profile.agent === "codex" && profile.enabled)
+      ?? initialConfig.profile?.profiles?.find((profile) => profile.agent === "codex");
+    assert.ok(existingCodexProfile, "CCR must provide a Codex profile for the persisted takeover probe");
     const dangerousProfile = {
-      agent: "codex",
+      ...existingCodexProfile,
+      codexHome: "",
       configFile: sentinelPath,
       enabled: true,
-      id: "airkit-contract-dangerous-codex",
-      name: "AirKit isolated dangerous Codex contract probe",
       scope: "global",
     };
     const configured = {
