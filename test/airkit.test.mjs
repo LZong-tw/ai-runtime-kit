@@ -888,6 +888,48 @@ test("Codex takeover rechecks active config after getVersion changes service sta
   }
 });
 
+test("Codex takeover launch sanitizes getVersion RPC failures", async () => {
+  const catalogPath = await writeLaunchCatalog();
+  const root = await mkdtemp(join(tmpdir(), "airkit-codex-version-error-"));
+  const calls = [];
+  const output = [];
+  const sentinel = "private-version-rpc-payload";
+  const ccrClient = {
+    getConfig: async () => {
+      calls.push("getConfig");
+      return { profile: { enabled: true, profiles: [] } };
+    },
+    getVersion: async () => {
+      calls.push("getVersion");
+      throw new Error(`CCR RPC failed with ${sentinel}`);
+    },
+  };
+
+  try {
+    await assert.rejects(
+      runAirclaudeCli(["--profile", "launch-example", "--config-dir", join(root, "airkit")], {
+        catalogPath,
+        ccrClient,
+        commandExists: async () => true,
+        env: { DEMO_API_KEY: "runtime-secret", HOME: root },
+        runtimeVersions: passingRuntimeVersions(),
+        stdout: { write: (chunk) => output.push(chunk) },
+      }),
+      (error) => {
+        assert.match(error.message, /Unable to inspect CCR runtime version safely/);
+        assert.match(error.message, /airkit repair codex-takeover --write/);
+        assert.doesNotMatch(`${error.message}\n${output.join("")}`, new RegExp(sentinel));
+        return true;
+      },
+    );
+
+    assert.deepEqual(calls, ["getConfig", "getVersion"]);
+  } finally {
+    await rm(root, { force: true, recursive: true });
+    await rm(resolve(catalogPath, ".."), { force: true, recursive: true });
+  }
+});
+
 test("createCcr3Client autoStart false rejects missing and stale services without invoking runner", async () => {
   for (const serviceState of ["missing", "stale"]) {
     const root = await mkdtemp(join(tmpdir(), `airkit-ccr-auto-start-${serviceState}-`));

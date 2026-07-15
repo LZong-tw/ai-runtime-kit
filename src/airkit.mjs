@@ -1482,7 +1482,7 @@ async function checkLaunchRuntime(plan, options = {}) {
   const ccrExists = await commandExists("ccr");
   const versions = { ...(options.runtimeVersions ?? await inspectRuntimeVersions(options)) };
   if (options.ccrClient && !options.dryRun && !options.doctor) {
-    versions.claudeCodeRouter = await options.ccrClient.getVersion();
+    versions.claudeCodeRouter = await readCcrVersionSafely(options.ccrClient);
   }
   const report = runtimeReport(versions);
   const runtime = {
@@ -1497,6 +1497,16 @@ async function checkLaunchRuntime(plan, options = {}) {
     runtime.ccr = { ok: false, command: "ccr", reason: `${failedVersion.label} ${failedVersion.version ?? "missing"} does not satisfy ${failedVersion.requirement}; run airkit runtime update --write` };
   }
   return runtime;
+}
+
+async function readCcrVersionSafely(ccrClient) {
+  try {
+    return await ccrClient.getVersion();
+  } catch {
+    throw new Error(
+      "Unable to inspect CCR runtime version safely. Run airkit repair codex-takeover --write to back up and repair safely",
+    );
+  }
 }
 
 async function resolveCcrAuthEnv(plan, { commandExists, env, runCommand, timeoutMs }) {
