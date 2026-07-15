@@ -52,6 +52,14 @@ plugin.
 Do not pass a JSON `--settings` override containing `apiKeyHelper` through a
 CCR-backed profile. CCR owns that helper for routed launches, and AirKit rejects
 launch arguments that would clear or replace it.
+CCR named profiles isolate Claude's user settings. At launch, AirKit therefore
+reads the active user's `statusLine` entry and forwards only that entry as a
+process-local settings overlay. It does not copy the user's model, permissions,
+hooks, credentials, or complete settings file into the managed profile.
+Claude Code permission rules still retain their native precedence: an explicit
+`permissions.ask` rule overrides `--permission-mode auto`. Remove an obsolete
+Ask rule with Claude Code's `/permissions` UI when auto mode should classify
+that command; AirKit does not silently weaken explicit Ask or Deny policy.
 Claude launches also receive reusable runtime lessons for recurring tool
 mistakes, such as preserving durable lessons, recording repeatable corrections
 without secrets, verifying Athena-style query context instead of assuming

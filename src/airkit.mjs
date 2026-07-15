@@ -421,6 +421,20 @@ export function assertNoManagedApiKeyHelperOverride(args) {
   }
 }
 
+async function inheritedStatusLineArgs(env = process.env) {
+  const home = env.HOME?.trim() || homedir();
+  const claudeConfigDir = env.CLAUDE_CONFIG_DIR?.trim() || join(home, ".claude");
+  try {
+    const settings = JSON.parse(await readFile(join(claudeConfigDir, "settings.json"), "utf8"));
+    if (!settings?.statusLine || typeof settings.statusLine !== "object" || Array.isArray(settings.statusLine)) {
+      return [];
+    }
+    return ["--settings", JSON.stringify({ statusLine: settings.statusLine })];
+  } catch {
+    return [];
+  }
+}
+
 export async function prepareLaunch(catalog, profileName, options = {}) {
   const plan = buildLaunchPlan(catalog, profileName, options);
   const rendered = renderProfile(catalog, profileName, {
@@ -467,9 +481,11 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
   if (options.launch !== false) {
     await ccrClient.ensureGateway();
     const spawnCommand = options.spawnCommand ?? spawnCommandSync;
+    const statusLineArgs = await inheritedStatusLineArgs(options.env ?? process.env);
     child = spawnCommand(plan.launch.command, [
       ...plan.launch.args,
       ...compatibilityLaunch.args,
+      ...statusLineArgs,
       ...plan.launch.userArgs,
     ], {
       env: { ...(options.env ?? process.env), ...plan.launch.env, ...compatibilityLaunch.env },
