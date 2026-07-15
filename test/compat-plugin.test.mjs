@@ -11,6 +11,19 @@ import plugin from "../src/compat/plugin.mjs";
 
 const CORE_TOKEN = "generated-core-token";
 const RAW_RESPONSE_BODY = Buffer.from([0, 1, 2, 255, 10]);
+const COMPLETE_PLUGIN_CONFIG = {
+  fallback: {
+    provider: "anthropic-messages",
+    model: "anthropic/claude-sonnet",
+    maxContinuationTurns: 8,
+  },
+  toolSearch: { mode: "bridge" },
+  webSearch: { mode: "native-first" },
+  webFetch: { mode: "native-first" },
+  codeExecution: { mode: "anthropic-fallback" },
+  advisor: { mode: "anthropic-fallback" },
+  mcpConnector: { mode: "anthropic-fallback" },
+};
 
 test("core client uses generated x-ccr-core-auth without forwarding client secrets", async (t) => {
   const fixture = await createCoreFixture(t, { tokenEntry: { key: CORE_TOKEN } });
@@ -805,7 +818,7 @@ test("compatibility plugin registers stable authenticated POST routes", async ()
   await plugin.setup({
     config: {},
     coreClient: {},
-    pluginConfig: {},
+    pluginConfig: structuredClone(COMPLETE_PLUGIN_CONFIG),
     registerGatewayRoute(route) {
       routes.push(route);
     },
@@ -830,7 +843,7 @@ test("compatibility plugin registers stable authenticated POST routes", async ()
   );
 });
 
-test("compatibility plugin validates configured models before registering routes", async () => {
+test("compatibility plugin rejects removed Advisor bridge configuration before registering routes", async () => {
   const routes = [];
 
   await assert.rejects(
@@ -838,13 +851,14 @@ test("compatibility plugin validates configured models before registering routes
       config: {},
       coreClient: createPluginCoreClient(),
       pluginConfig: {
+        ...structuredClone(COMPLETE_PLUGIN_CONFIG),
         advisor: { mode: "bridge", model: "other/executor", fallbackModel: "claude-opus" },
       },
       registerGatewayRoute(route) {
         routes.push(route);
       },
     }),
-    /advisor\.model must be an Anthropic-family model/,
+    /advisor\.mode "bridge" was removed/,
   );
   assert.deepEqual(routes, []);
 });
@@ -921,6 +935,90 @@ test("compatibility Messages requests bridge JSON and preserve the stream flag",
   assert.equal(parseSse(streamResponse.body).at(-1).event, "message_stop");
 });
 
+test("compatibility plugin streams typed server-tool fallback through the real response path", async () => {
+  const calls = [];
+  const signal = new AbortController().signal;
+  const fixture = await createPluginFixture({
+    coreClient: createPluginCoreClient({
+      async requestFallback(body, headers, receivedSignal) {
+        calls.push({ body: structuredClone(body), headers, signal: receivedSignal });
+        return new Response("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream",
+            "x-request-id": "typed-fallback",
+          },
+        });
+      },
+    }),
+  });
+  const response = createRecordingResponse();
+  const body = {
+    model: "executor-model",
+    max_tokens: 512,
+    messages: [{ role: "user", content: "run code" }],
+    stream: true,
+    tools: [{ type: "code_execution_20260521", name: "code_execution" }],
+  };
+
+  await fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify(body)), { signal }),
+    response,
+    fixture.helpers,
+  );
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].body.model, "anthropic/claude-sonnet");
+  assert.equal(calls[0].body.stream, true);
+  assert.deepEqual(calls[0].body.tools, body.tools);
+  assert.equal(calls[0].signal, signal);
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers["content-type"], "text/event-stream");
+  assert.equal(response.headers["x-request-id"], "typed-fallback");
+  assert.equal(response.body.toString("utf8"), "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+});
+
+test("compatibility plugin routes pending server history without a repeated tool definition", async () => {
+  const calls = [];
+  const fixture = await createPluginFixture({
+    coreClient: createPluginCoreClient({
+      async requestFallback(body) {
+        calls.push(structuredClone(body));
+        return new Response(JSON.stringify({ type: "error", error: { type: "overloaded_error" } }), {
+          status: 529,
+          headers: { "content-type": "application/json", "retry-after": "2" },
+        });
+      },
+    }),
+  });
+  const response = createRecordingResponse();
+  const body = {
+    model: "executor-model",
+    max_tokens: 512,
+    messages: [{
+      role: "assistant",
+      content: [{ type: "server_tool_use", id: "srvtoolu_pending", name: "advisor", input: {} }],
+    }],
+    stream: false,
+  };
+
+  await fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify(body))),
+    response,
+    fixture.helpers,
+  );
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].model, "anthropic/claude-sonnet");
+  assert.deepEqual(calls[0].messages, body.messages);
+  assert.equal(response.statusCode, 529);
+  assert.equal(response.headers["retry-after"], "2");
+  assert.deepEqual(JSON.parse(response.body), {
+    type: "error",
+    error: { type: "overloaded_error" },
+  });
+});
+
 test("MCP initialize, initialized notification, and tools/list are stateless", async () => {
   const fixture = await createPluginFixture();
   const initialized = await fixture.callMcp("initialize", {
@@ -977,7 +1075,7 @@ test("MCP web_search forces the configured model, server tool, and domain filter
   });
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].model, "anthropic/claude-sonnet-4-6");
+  assert.equal(calls[0].model, "anthropic/claude-sonnet");
   assert.equal(calls[0].stream, false);
   assert.deepEqual(calls[0].messages, [
     { role: "user", content: "current protocol release" },
@@ -986,7 +1084,7 @@ test("MCP web_search forces the configured model, server tool, and domain filter
     {
       type: "web_search_20250305",
       name: "web_search",
-      max_uses: 4,
+      max_uses: 5,
       allowed_domains: ["example.com"],
     },
   ]);
@@ -1161,13 +1259,7 @@ async function createPluginFixture(options = {}) {
       },
     }),
     pluginConfig: {
-      advisor: {
-        mode: "bridge",
-        model: "anthropic/claude-opus-4-8",
-        fallbackModel: "anthropic/claude-opus-4-8",
-      },
-      toolSearch: { mode: "bridge" },
-      webSearch: { mode: "mcp", model: "anthropic/claude-sonnet-4-6", maxUses: 4 },
+      ...structuredClone(COMPLETE_PLUGIN_CONFIG),
       ...options.pluginConfig,
     },
     registerGatewayRoute(route) {
@@ -1211,6 +1303,9 @@ function createPluginCoreClient(overrides = {}) {
     },
     async requestMessage() {
       throw new Error("unexpected core request");
+    },
+    async requestFallback() {
+      throw new Error("unexpected fallback request");
     },
     ...overrides,
   };
