@@ -52,6 +52,14 @@ test("inspection returns empty capability slots for ordinary requests", () => {
   });
 });
 
+test("inspection recognizes undated ToolSearch aliases", () => {
+  const regex = { type: "tool_search_tool_regex" };
+  const bm25 = { type: "tool_search_tool_bm25" };
+
+  assert.equal(inspectCompatibilityRequest({ tools: [regex] }).toolSearch, regex);
+  assert.equal(inspectCompatibilityRequest({ tools: [bm25] }).toolSearch, bm25);
+});
+
 test("fallback validation accepts only Anthropic-family model identifiers", () => {
   assert.equal(assertAnthropicFamilyModel("claude-opus-4-8"), "claude-opus-4-8");
   assert.equal(
