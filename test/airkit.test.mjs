@@ -42,10 +42,21 @@ test("isolated verifier restarts management-only before trusting persisted dange
   assert.equal(ccrVerifier.isSupportedCcrVersion("3.0.3"), false);
   assert.equal(ccrVerifier.isSupportedCcrVersion("4.0.0"), false);
   const sentinel = Buffer.from("sentinel");
-  const dangerousProfile = { agent: "codex", enabled: true, id: "danger", scope: "global" };
+  const existingCodexProfile = {
+    agent: "codex",
+    configFile: "/isolated/original/.codex/config.toml",
+    enabled: true,
+    id: "default-codex",
+    scope: "ccr",
+  };
+  const dangerousProfile = {
+    ...existingCodexProfile,
+    configFile: "/isolated/.codex/config.toml",
+    scope: "global",
+  };
   const safeConfig = { profile: { profiles: [] } };
   const events = [];
-  let persisted = { profile: { profiles: [] } };
+  let persisted = { profile: { profiles: [existingCodexProfile] } };
   const makeRpc = (generation) => async (method, args = []) => {
     events.push(`${generation}:${method}`);
     if (method === "saveConfig") persisted = structuredClone(args[0]);
