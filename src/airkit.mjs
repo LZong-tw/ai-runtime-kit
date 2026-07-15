@@ -15,6 +15,7 @@ import {
 } from "./codex-takeover-guard.mjs";
 import { assertAnthropicFamilyModel } from "./compat/protocol.mjs";
 import { renderHeartbeatManagedFiles } from "./context-heartbeat.mjs";
+import { buildContextObservability } from "./context-observability.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
@@ -237,6 +238,7 @@ export async function exportOssRelease({ outDir }) {
   await chmod(binPath, 0o755);
   await copyFile(join(here, "codex-takeover-guard.mjs"), join(outDir, "src", "codex-takeover-guard.mjs"));
   await copyFile(join(here, "context-heartbeat.mjs"), join(outDir, "src", "context-heartbeat.mjs"));
+  await copyFile(join(here, "context-observability.mjs"), join(outDir, "src", "context-observability.mjs"));
   for (const module of ["gateway.mjs", "plugin.mjs", "protocol.mjs", "server-tools.mjs"]) {
     await copyFile(join(here, "compat", module), join(outDir, "src", "compat", module));
   }
@@ -523,9 +525,20 @@ export async function doctorProfile(catalog, profileName, options = {}) {
       expected.managedFiles.map((file) => checkRenderedFile(file.path, file.content, file.label)),
     ),
   };
+  const ccrConfig = profile.ccr ? buildCcrConfig(catalog, profileName, { configDir: plan.configDir }) : null;
   const runtime = {
     ccr: await checkCcrAvailability(profile, options.commandExists ?? commandExistsOnPath),
     compatibility: compatibilityCapabilityStatus(profile.ccr),
+    context: {
+      ok: true,
+      ...buildContextObservability({
+        autoCompactWindow: profile.launch?.context?.autoCompactWindow,
+        modelCatalog: catalog.modelCatalog,
+        modelInfo: options.modelInfo,
+        route: ccrConfig?.Router?.default,
+        usage: options.completionUsage,
+      }),
+    },
     shellSource: files.shellSnippet.ok
       ? await checkShellSourceability(plan.files.shellSnippet, profile, options.sourceShellSnippet ?? sourceShellSnippet)
       : { ok: true, skipped: true, path: plan.files.shellSnippet },
@@ -1972,6 +1985,9 @@ function renderDoctorResult(result) {
     ),
     `${statusOf(result.runtime.ccr)} CCR availability: ${result.runtime.ccr.command}`,
     `${statusOf(result.runtime.shellSource)} shell source: ${result.runtime.shellSource.path}`,
+    renderContextWindow(result.runtime.context),
+    renderAutoCompactWindow(result.runtime.context),
+    renderCompletionUsage(result.runtime.context),
   ];
   if (!result.runtime.compatibility.skipped) {
     for (const [capability, status] of Object.entries(result.runtime.compatibility.capabilities)) {
@@ -1982,6 +1998,26 @@ function renderDoctorResult(result) {
     lines.push(`- ${failure}`);
   }
   return `${lines.join("\n")}\n`;
+}
+
+function renderContextWindow(context) {
+  const { source, tokens } = context.contextWindow;
+  return tokens === null
+    ? "info context window: unavailable"
+    : `info context window: ${tokens} tokens (${source}; metadata only)`;
+}
+
+function renderAutoCompactWindow(context) {
+  const { source, tokens } = context.autoCompactWindow;
+  return tokens === null
+    ? `info auto compact window: ${source}`
+    : `info auto compact window: ${tokens} tokens (${source})`;
+}
+
+function renderCompletionUsage(context) {
+  const { cacheDetails, inputTokens, totalTokens } = context.usage;
+  const accounting = inputTokens === null ? "unavailable" : `${inputTokens} input / ${totalTokens} total tokens`;
+  return `info completion usage: ${accounting}; cache details ${cacheDetails}`;
 }
 
 async function checkCcrAvailability(profile, commandExists) {
