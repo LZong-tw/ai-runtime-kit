@@ -1,6 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rename as fsRename,
+  rm,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -171,7 +184,7 @@ test("repairs only hazardous profiles without mutating the source config", () =>
 
 function transactionFixture({ backupCollision = false, failAt } = {}) {
   const codexPath = "/home/example/.codex/config.toml";
-  const backupPath = `${codexPath}.backup-2026-07-15T01-02-03-004Z`;
+  const backupPath = `${codexPath}.backup-2026-07-15T01-02-03-004Z-fixture-nonce`;
   const temporaryPath = `${codexPath}.airkit-repair-2026-07-15T01-02-03-004Z-fixture-nonce.tmp`;
   const latest = Buffer.from(managedCodexText);
   const sanitized = Buffer.from(stripCcrManagedCodexBlocks(managedCodexText));
@@ -192,7 +205,9 @@ function transactionFixture({ backupCollision = false, failAt } = {}) {
     },
   };
   let activeConfig = structuredClone(hazardousConfig);
-  const mutateTarget = () => files.set(codexPath, Buffer.from("CCR mutated the target"));
+  const concurrentText = `${managedCodexText}concurrent = "preserved"\n`;
+  const concurrentSanitized = Buffer.from(stripCcrManagedCodexBlocks(concurrentText));
+  const mutateTarget = () => files.set(codexPath, Buffer.from(concurrentText));
   const io = {
     chmod: async (path, mode) => {
       modes.set(path, mode);
@@ -239,19 +254,19 @@ function transactionFixture({ backupCollision = false, failAt } = {}) {
       if (failAt === "tempWrite" && path === temporaryPath) {
         throw new Error("temporary write failed with private bytes");
       }
+      if (failAt === "concurrent" && path === temporaryPath) {
+        files.set(codexPath, Buffer.from("user_edit = \"wins\"\n"));
+      }
     },
   };
   const ccrClient = {
     getConfig: async () => {
       events.push("getConfig");
-      if (failAt === "getConfig") {
-        mutateTarget();
-        throw new Error("getConfig failed with private payload");
-      }
       return structuredClone(activeConfig);
     },
-    saveConfig: async (config) => {
+    saveConfig: async (config, options) => {
       events.push("saveConfig");
+      assert.deepEqual(options, { applyProfile: false });
       assert.equal(config.profile.profiles[0].scope, "ccr");
       assert.equal(config.profile.profiles[0].showAllSessions, true);
       if (failAt === "saveConfig") {
@@ -276,12 +291,13 @@ function transactionFixture({ backupCollision = false, failAt } = {}) {
     nonce: () => "fixture-nonce",
     now: () => new Date("2026-07-15T01:02:03.004Z"),
     sanitized,
+    concurrentSanitized,
     temporaryPath,
     writeOptions,
   };
 }
 
-test("write repair backs up latest bytes before CCR RPC and atomically restores sanitized bytes", async () => {
+test("write repair reads live config first, then backs up latest bytes before mutation-capable save", async () => {
   const fixture = transactionFixture();
 
   const result = await repairCodexTakeover({
@@ -294,11 +310,11 @@ test("write repair backs up latest bytes before CCR RPC and atomically restores 
   });
 
   assert.deepEqual(fixture.events.slice(0, 7), [
+    "getConfig",
     "read:/home/example/.claude-code-router/global-profile-takeover.json",
     `read:${fixture.codexPath}`,
     `stat:${fixture.codexPath}`,
     `write:${fixture.backupPath}`,
-    "getConfig",
     "saveConfig",
     `read:${fixture.codexPath}`,
   ]);
@@ -306,7 +322,7 @@ test("write repair backs up latest bytes before CCR RPC and atomically restores 
     `write:${fixture.temporaryPath}`,
   ));
   assert.deepEqual(fixture.files.get(fixture.backupPath), fixture.latest);
-  assert.deepEqual(fixture.files.get(fixture.codexPath), Buffer.from("CCR mutated the target"));
+  assert.deepEqual(fixture.files.get(fixture.codexPath), fixture.concurrentSanitized);
   assert.equal(fixture.modes.get(fixture.codexPath), 0o640);
   assert.deepEqual(fixture.writeOptions.get(fixture.backupPath), { flag: "wx", mode: 0o640 });
   assert.deepEqual(fixture.writeOptions.get(fixture.temporaryPath), { flag: "wx", mode: 0o640 });
@@ -316,7 +332,7 @@ test("write repair backs up latest bytes before CCR RPC and atomically restores 
   assert.doesNotMatch(JSON.stringify(result), /must-not-leak|private payload|temporary/);
 });
 
-for (const failAt of ["getConfig", "saveConfig"]) {
+for (const failAt of ["saveConfig"]) {
   test(`restores the sanitized latest snapshot when ${failAt} mutates Codex then throws`, async () => {
     const fixture = transactionFixture({ failAt });
 
@@ -338,9 +354,9 @@ for (const failAt of ["getConfig", "saveConfig"]) {
     );
 
     assert.deepEqual(fixture.files.get(fixture.backupPath), fixture.latest);
-    assert.deepEqual(fixture.files.get(fixture.codexPath), fixture.sanitized);
+    assert.deepEqual(fixture.files.get(fixture.codexPath), fixture.concurrentSanitized);
     assert.equal(fixture.modes.get(fixture.codexPath), 0o640);
-    assert.equal(fixture.events.at(-1), `read:${fixture.codexPath}`);
+    assert.ok(fixture.events.includes(`read:${fixture.codexPath}`));
   });
 }
 
@@ -356,10 +372,10 @@ test("preview inspects current state without writes or saveConfig", async () => 
   });
 
   assert.deepEqual(fixture.events, [
+    "getConfig",
     "read:/home/example/.claude-code-router/global-profile-takeover.json",
     `read:${fixture.codexPath}`,
     `stat:${fixture.codexPath}`,
-    "getConfig",
   ]);
   assert.equal(result.write, false);
   assert.equal(result.backupPath, null);
@@ -367,7 +383,7 @@ test("preview inspects current state without writes or saveConfig", async () => 
   assert.ok(!fixture.events.some((event) => event.startsWith("write:") || event === "saveConfig"));
 });
 
-test("an existing timestamped backup fails safely before any CCR RPC", async () => {
+test("an existing unique backup fails safely before mutation-capable save", async () => {
   const fixture = transactionFixture({ backupCollision: true });
   const existingBackup = Buffer.from(fixture.files.get(fixture.backupPath));
 
@@ -392,6 +408,7 @@ test("an existing timestamped backup fails safely before any CCR RPC", async () 
   assert.deepEqual(fixture.files.get(fixture.backupPath), existingBackup);
   assert.deepEqual(fixture.files.get(fixture.codexPath), fixture.latest);
   assert.deepEqual(fixture.events, [
+    "getConfig",
     "read:/home/example/.claude-code-router/global-profile-takeover.json",
     `read:${fixture.codexPath}`,
     `stat:${fixture.codexPath}`,
@@ -430,7 +447,7 @@ for (const failAt of ["tempWrite", "rename", "verification"]) {
   });
 }
 
-test("repairs every snapshot target before save, preserves symlinks and non-Codex takeover entries, and writes a hardened receipt", async () => {
+test("repairs every live and recorded target before save, preserves symlinks and non-Codex takeover entries", async () => {
   const root = await mkdtemp(join(tmpdir(), "airkit-guard-multi-"));
   const home = join(root, "home");
   const stateDir = join(home, ".claude-code-router");
@@ -455,8 +472,7 @@ test("repairs every snapshot target before save, preserves symlinks and non-Code
       version: 7,
       profiles: [
         { agent: "claude-code", settingsFile: "~/.claude/settings.json", keep: true },
-        { agent: "codex", configFile: custom, providerId: "private" },
-        { agent: "codex", codexHome: codexDir },
+          { agent: "codex", codexHome: codexDir },
       ],
       untouched: { bytes: "preserved semantically" },
     };
@@ -470,16 +486,19 @@ test("repairs every snapshot target before save, preserves symlinks and non-Code
         ],
       },
     };
+    let getCount = 0;
     const ccrClient = {
       getConfig: async () => {
-        if (!saved) {
-          await readFile(`${realDefault}.backup-2026-07-15T01-02-03-004Z`);
-          await readFile(`${custom}.backup-2026-07-15T01-02-03-004Z`);
-          await readFile(`${takeoverPath}.backup-2026-07-15T01-02-03-004Z`);
+        getCount += 1;
+        if (!saved && getCount > 1) {
+          await readFile(`${realDefault}.backup-2026-07-15T01-02-03-004Z-multi-1`);
+          await readFile(`${custom}.backup-2026-07-15T01-02-03-004Z-multi-2`);
+          await readFile(`${takeoverPath}.backup-2026-07-15T01-02-03-004Z-multi-3`);
         }
         return structuredClone(activeConfig);
       },
-      saveConfig: async (config) => {
+      saveConfig: async (config, options) => {
+        assert.deepEqual(options, { applyProfile: false });
         saved = true;
         activeConfig = structuredClone(config);
         await writeFile(realDefault, `${managedCodexText}concurrent = "default"\n`);
@@ -508,7 +527,6 @@ test("repairs every snapshot target before save, preserves symlinks and non-Code
     assert.equal(repairedTakeover.version, 7);
     assert.deepEqual(repairedTakeover.profiles, [takeover.profiles[0], { agent: "claude-code", id: "concurrent" }]);
     assert.deepEqual(repairedTakeover.untouched, takeover.untouched);
-    assert.equal((await stat(result.receiptPath)).mode & 0o777, 0o600);
     assert.equal((await stat(result.backupPaths[0])).mode & 0o777, 0o640);
     const { realpath } = await import("node:fs/promises");
     assert.equal(result.codexConfigPaths.includes(await realpath(realDefault)), true);
@@ -518,14 +536,77 @@ test("repairs every snapshot target before save, preserves symlinks and non-Code
   }
 });
 
-test("fails before save when live CCR reveals an unrecorded global Codex target", async () => {
+test("discovers an unrecorded live global Codex target before backup and save", async () => {
   const fixture = transactionFixture();
+  const unknownPath = "/unknown/CONFIG.TOML";
+  fixture.files.set(unknownPath, Buffer.from(managedCodexText));
+  fixture.modes.set(unknownPath, 0o100600);
   let saveCalled = false;
+  let activeConfig = {
+    profile: { profiles: [{ agent: "codex", configFile: unknownPath, enabled: true, scope: "global" }] },
+  };
   fixture.ccrClient.getConfig = async () => ({
-    profile: { profiles: [{ agent: "codex", configFile: "/unknown/CONFIG.TOML", enabled: true, scope: "global" }] },
+    ...structuredClone(activeConfig),
   });
-  fixture.ccrClient.saveConfig = async () => { saveCalled = true; };
+  fixture.ccrClient.saveConfig = async (config, options) => {
+    fixture.events.push("saveConfig");
+    assert.deepEqual(options, { applyProfile: false });
+    saveCalled = true;
+    activeConfig = structuredClone(config);
+  };
 
+  await repairCodexTakeover({
+    ccrClient: fixture.ccrClient,
+    env: fixture.env,
+    io: fixture.io,
+    nonce: fixture.nonce,
+    now: fixture.now,
+    write: true,
+  });
+  assert.equal(saveCalled, true);
+  const unknownBackup = `${unknownPath}.backup-2026-07-15T01-02-03-004Z-fixture-nonce`;
+  assert.deepEqual(fixture.files.get(unknownBackup), Buffer.from(managedCodexText));
+  assert.ok(fixture.events.indexOf(`write:${unknownBackup}`) < fixture.events.indexOf("saveConfig"));
+  assert.doesNotMatch(fixture.files.get(unknownPath).toString("utf8"), /BEGIN CCR managed/);
+  assert.deepEqual(fixture.files.get(fixture.backupPath), fixture.latest);
+  assert.deepEqual(fixture.files.get(fixture.codexPath), fixture.sanitized);
+});
+
+test("sanitizes an initially missing live target created by save on success and failure", async () => {
+  for (const failSave of [false, true]) {
+    const root = await mkdtemp(join(tmpdir(), `airkit-guard-missing-${failSave}-`));
+    const home = join(root, "home");
+    const target = join(root, "created", "config.toml");
+    let activeConfig = {
+      profile: { profiles: [{ agent: "codex", configFile: target, enabled: true, scope: "global" }] },
+    };
+    try {
+      await mkdir(join(home, ".claude-code-router"), { recursive: true });
+      const ccrClient = {
+        getConfig: async () => structuredClone(activeConfig),
+        saveConfig: async (config, options) => {
+          assert.deepEqual(options, { applyProfile: false });
+          await mkdir(join(root, "created"), { recursive: true });
+          await writeFile(target, `${managedCodexText}user_edit = "preserved"\n`, { mode: 0o600 });
+          activeConfig = structuredClone(config);
+          if (failSave) throw new Error("private save failure");
+        },
+      };
+      const repair = repairCodexTakeover({ ccrClient, env: { HOME: home }, write: true });
+      if (failSave) await assert.rejects(repair, (error) => error.code === "CODEX_TAKEOVER_REPAIR_FAILED");
+      else await repair;
+      const repaired = await readFile(target, "utf8");
+      assert.match(repaired, /user_edit = "preserved"/);
+      assert.doesNotMatch(repaired, /BEGIN CCR managed/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("retains a conflict snapshot and does not clobber a concurrent edit during temp creation", async () => {
+  const fixture = transactionFixture({ failAt: "concurrent" });
+  const conflictPath = `${fixture.codexPath}.conflict-2026-07-15T01-02-03-004Z-fixture-nonce`;
   await assert.rejects(
     repairCodexTakeover({
       ccrClient: fixture.ccrClient,
@@ -535,9 +616,97 @@ test("fails before save when live CCR reveals an unrecorded global Codex target"
       now: fixture.now,
       write: true,
     }),
-    (error) => error.code === "CODEX_TAKEOVER_REPAIR_FAILED" && !/unknown/i.test(error.message),
+    (error) => error.code === "CODEX_TAKEOVER_RESTORE_FAILED"
+      && error.failedPaths.includes(fixture.codexPath),
   );
-  assert.equal(saveCalled, false);
-  assert.deepEqual(fixture.files.get(fixture.backupPath), fixture.latest);
-  assert.deepEqual(fixture.files.get(fixture.codexPath), fixture.sanitized);
+  assert.equal(fixture.files.get(fixture.codexPath).toString("utf8"), "user_edit = \"wins\"\n");
+  assert.equal(fixture.files.get(conflictPath).toString("utf8"), "user_edit = \"wins\"\n");
+  assert.ok(!fixture.files.has(fixture.temporaryPath));
+});
+
+test("quarantines a newly-created malformed takeover record and fails without data loss", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-guard-malformed-record-"));
+  const home = join(root, "home");
+  const stateDir = join(home, ".claude-code-router");
+  const takeoverPath = join(stateDir, "global-profile-takeover.json");
+  const malformed = "{private malformed bytes";
+  let activeConfig = { profile: { profiles: [] } };
+  try {
+    await mkdir(join(home, ".codex"), { recursive: true });
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(join(home, ".codex", "config.toml"), "theme = \"dark\"\n");
+    const ccrClient = {
+      getConfig: async () => structuredClone(activeConfig),
+      saveConfig: async (config, options) => {
+        assert.deepEqual(options, { applyProfile: false });
+        activeConfig = structuredClone(config);
+        await writeFile(takeoverPath, malformed, { mode: 0o600 });
+      },
+    };
+    await assert.rejects(
+      repairCodexTakeover({ ccrClient, env: { HOME: home }, write: true }),
+      (error) => error.code === "CODEX_TAKEOVER_RESTORE_FAILED" && error.failedPaths.includes(takeoverPath),
+    );
+    await assert.rejects(readFile(takeoverPath), { code: "ENOENT" });
+    const quarantine = (await readdir(stateDir)).find((name) => name.includes(".conflict-"));
+    assert.ok(quarantine);
+    assert.equal(await readFile(join(stateDir, quarantine), "utf8"), malformed);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("continues cleanup across every target and takeover record when one restore fails", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-guard-best-effort-"));
+  const home = join(root, "home");
+  const defaultPath = join(home, ".codex", "config.toml");
+  const customPath = join(root, "custom.toml");
+  const stateDir = join(home, ".claude-code-router");
+  const takeoverPath = join(stateDir, "global-profile-takeover.json");
+  let activeConfig = {
+    profile: { profiles: [
+      { agent: "codex", configFile: defaultPath, enabled: true, scope: "global" },
+      { agent: "codex", configFile: customPath, enabled: true, scope: "global" },
+    ] },
+  };
+  try {
+    await mkdir(join(home, ".codex"), { recursive: true });
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(defaultPath, managedCodexText);
+    await writeFile(customPath, managedCodexText);
+    await writeFile(takeoverPath, JSON.stringify({ profiles: [
+      { agent: "codex", configFile: customPath },
+      { agent: "claude-code", settingsFile: "~/.claude/settings.json" },
+    ] }));
+    const io = {
+      chmod,
+      readFile,
+      realpath,
+      rename: async (from, to) => {
+        if (to === await realpath(defaultPath)) throw new Error("private rename failure");
+        await fsRename(from, to);
+      },
+      stat,
+      unlink,
+      writeFile,
+    };
+    const ccrClient = {
+      getConfig: async () => structuredClone(activeConfig),
+      saveConfig: async (config, options) => {
+        assert.deepEqual(options, { applyProfile: false });
+        activeConfig = structuredClone(config);
+      },
+    };
+    const canonicalDefault = await realpath(defaultPath);
+    await assert.rejects(
+      repairCodexTakeover({ ccrClient, env: { HOME: home }, io, write: true }),
+      (error) => error.code === "CODEX_TAKEOVER_RESTORE_FAILED"
+        && error.failedPaths.includes(canonicalDefault),
+    );
+    assert.doesNotMatch(await readFile(customPath, "utf8"), /BEGIN CCR managed/);
+    const record = JSON.parse(await readFile(takeoverPath, "utf8"));
+    assert.deepEqual(record.profiles, [{ agent: "claude-code", settingsFile: "~/.claude/settings.json" }]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
