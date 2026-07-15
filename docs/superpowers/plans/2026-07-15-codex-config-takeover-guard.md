@@ -4,7 +4,7 @@
 
 **Goal:** Prevent CCR global Codex profiles from rewriting the user's real Codex configuration, and provide a preview-first, backup-backed repair command for machines already affected.
 
-**Architecture:** A focused guard module detects CCR takeover markers and enabled global Codex profiles, produces a pure repair plan, and applies the repair transaction only after preserving the latest Codex config bytes. `airkit` blocks ordinary launches before CCR RPC when takeover evidence exists, validates live CCR profiles before saving, and exposes `airkit repair codex-takeover [--write]`; preview mode may inspect an already-running management service but must never start CCR.
+**Architecture:** A focused guard module uses verified read-only CCR `getConfig`, the takeover record, and the environment default to inventory Codex targets before the first mutation-capable save. `airkit` may start CCR only as a management service with `ccr start --no-gateway`, makes `getConfig` its first RPC, blocks hazardous state before later RPCs or launch actions, and exposes `airkit repair codex-takeover [--write]`; preview remains non-starting and read-only.
 
 **Tech Stack:** Node.js 22 ESM, CCR 3 management RPC, TOML text block surgery, `node:test`.
 
@@ -115,11 +115,11 @@ git commit -m "fix: guard Codex config from CCR takeover"
 
 - [ ] **Step 1: Write failing launch-preflight tests**
 
-Assert that a managed marker or Codex entry in `global-profile-takeover.json` stops `prepareLaunch` before `createCcr3Client`, `getVersion`, `getConfig`, credential resolution, `saveConfig`, gateway start, or spawn. Assert that a running CCR config containing an enabled global Codex profile stops before `saveConfig`. Error text must name the preview/write repair command and contain no config content.
+Assert `getConfig` is the first RPC. After that read-only snapshot, a managed marker, takeover record, or enabled global Codex profile must stop `prepareLaunch` before `getVersion`, credential resolution, `saveConfig`, gateway start, or spawn. Error text must name the preview/write repair command and contain no config content.
 
 - [ ] **Step 2: Write failing client and repair CLI tests**
 
-Assert `createCcr3Client({ autoStart: false })` rejects a missing/stale service without calling the runner. Assert preview calls the guard with a non-starting client, prints affected paths/actions, and performs no writes. Assert `--write` uses the backup-first transaction and reports backup/restored paths without values.
+Assert `createCcr3Client({ autoStart: false })` rejects a missing/stale service without calling the runner. Assert normal launch starts a missing service with exactly `ccr start --no-gateway`, then calls `getConfig` before all other RPCs. Assert preview uses a non-starting client and performs no writes. Assert write repair inventories live targets first, backs up all existing targets before `saveConfig(config, { applyProfile: false })`, and reports all backup/restored paths without values.
 
 - [ ] **Step 3: Run targeted tests and verify RED**
 
@@ -133,7 +133,7 @@ Expected: fail because the preflight, client option, and CLI command are absent.
 
 - [ ] **Step 4: Implement the minimal integration**
 
-Run filesystem preflight only for non-dry-run/non-doctor launches and before constructing or calling the CCR client. After `getConfig`, reject any live hazardous profile before credential resolution or `saveConfig`. Handle `repair codex-takeover` before catalog loading. Preview uses `autoStart: false`; write mode may start CCR only inside the guard transaction after the byte-exact backup exists.
+For non-dry-run/non-doctor launches, construct the normal auto-start client and make read-only `getConfig` the first RPC. Then run filesystem preflight and reject live or filesystem hazards before version, credential, save, gateway, or spawn. Handle repair before catalog loading. Preview uses `autoStart: false`; write mode may start only the management service, inventories after `getConfig`, and backs up before `saveConfig(..., { applyProfile: false })`.
 
 - [ ] **Step 5: Verify the complete hotfix surface**
 
@@ -160,6 +160,39 @@ git commit -m "feat: add safe CCR Codex repair command"
 
 ## Live repair verification
 
+## Architecture correction: verified CCR 3 management-only boundary
+
+The installed CCR 3.0.4 bundle establishes a narrower and safer contract than
+the original plan assumed. The supported runtime range remains `>=3.0.4 <4`.
+
+- Management RPC `getConfig` is read-only and does not invoke global profile
+  reconciliation.
+- A missing management service is started only with
+  `ccr start --no-gateway`; web startup does not reconcile profiles when
+  `startGateway === false`.
+- AirKit calls `saveConfig(config, { applyProfile: false })`, which skips both
+  profile application and global reconciliation.
+- `startGateway` and profile CLI execution remain mutation-capable boundaries.
+
+Therefore ordinary launch may start the management-only service and must make
+`getConfig` its first RPC. It rejects hazardous live configuration before
+version inspection, save, gateway startup, or profile CLI/spawn, then re-reads
+configuration after version inspection and before filesystem/credential
+writes. No compatibility receipt or persisted trust token is used.
+
+Write repair also begins with management-only `getConfig`. That live snapshot,
+the takeover record, and the environment default form the complete target
+inventory. Existing targets and the takeover record are backed up before the
+first `saveConfig(..., { applyProfile: false })`. Initially missing targets are
+tracked so files created by save are sanitized on success or failure. All
+rollback attempts are best-effort across the complete inventory; failures are
+reported with public paths while backups and conflict snapshots remain.
+
+If a supported CCR 3.x release violates the verified `getConfig` or
+`--no-gateway` contract, the isolated runtime-update verifier must reject that
+release. AirKit cannot safely defend against mutation inside the operation
+that defines its read-only inventory boundary.
+
 After both tasks pass and independent review is clean:
 
 ```bash
@@ -173,5 +206,5 @@ The first command must be read-only and must not start CCR. The write command re
 
 - Spec coverage: prevents pre-RPC takeover, prevents live-config save takeover, repairs existing state, preserves latest bytes, and gives preview/write UX.
 - Placeholder scan: no deferred implementation or unspecified error behavior remains.
-- Type consistency: Task 2 consumes the exact Task 1 exports; repair client creation is delayed until after the snapshot/backup boundary.
+- Type consistency: Task 2 consumes the exact Task 1 exports; management-only `getConfig` defines the inventory boundary and all mutation-capable operations remain after backup.
 - Scope: five tracked files total in this phase; documentation and internal gotcha updates are deferred to the next approved phase.

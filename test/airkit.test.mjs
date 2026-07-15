@@ -675,7 +675,7 @@ test("prepareLaunch dry run reports stale files and does not write targets", asy
 });
 
 for (const evidence of ["managed marker", "takeover record"]) {
-  test(`Codex takeover ${evidence} blocks launch before client construction or RPC`, async () => {
+  test(`Codex takeover ${evidence} blocks after the first management read and before later actions`, async () => {
     const root = await mkdtemp(join(tmpdir(), "airkit-codex-takeover-preflight-"));
     const home = join(root, "home");
     const configDir = join(root, "airkit");
@@ -729,7 +729,7 @@ for (const evidence of ["managed marker", "takeover record"]) {
         },
       );
 
-      assert.deepEqual(calls, []);
+      assert.deepEqual(calls, ["createCcr3Client", "getConfig"]);
       await assert.rejects(readFile(join(configDir, "ccr", "launch-example.json")), { code: "ENOENT" });
     } finally {
       await rm(root, { force: true, recursive: true });
@@ -964,124 +964,86 @@ test("createCcr3Client autoStart false rejects missing and stale services withou
   }
 });
 
-test("Codex takeover safety probe fails closed without starting missing or stale CCR", async () => {
-  for (const serviceState of ["missing", "stale"]) {
-    const root = await mkdtemp(join(tmpdir(), `airkit-codex-probe-${serviceState}-`));
-    const stateDir = join(root, ".claude-code-router");
-    const calls = [];
-    const sentinel = `private-${serviceState}-rpc-payload`;
-
-    try {
-      if (serviceState === "stale") {
-        await mkdir(stateDir, { recursive: true });
-        await writeFile(join(stateDir, "service.json"), JSON.stringify({
-          url: "http://127.0.0.1:9/?ccr_web_token=synthetic-token",
-        }));
-      }
-
-      await assert.rejects(
-        prepareLaunch(launchCatalog(), "launch-example", {
-          commandExists: async () => true,
-          configDir: join(root, "airkit"),
-          createCcrClient: (clientOptions) => {
-            calls.push(`client:autoStart=${clientOptions.autoStart}`);
-            return airkitRuntime.createCcr3Client({
-              ...clientOptions,
-              fetch: async () => {
-                calls.push("fetch");
-                throw new Error(sentinel);
-              },
-              runCommand: async () => {
-                calls.push("runner");
-                return { ok: true, status: 0, stdout: "" };
-              },
-            });
-          },
-          env: { DEMO_API_KEY: "runtime-secret", HOME: root },
-          launch: false,
-          runtimeVersions: passingRuntimeVersions(),
-        }),
-        (error) => {
-          assert.match(error.message, /unable to inspect CCR configuration safely/i);
-          assert.match(error.message, /airkit repair codex-takeover --write/);
-          assert.doesNotMatch(error.message, /CCR was not started/i);
-          assert.doesNotMatch(error.message, new RegExp(sentinel));
-          return true;
+test("missing CCR starts management-only before getConfig and launch performs no later action before safety", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-codex-management-start-"));
+  const stateDir = join(root, ".claude-code-router");
+  const calls = [];
+  const safeConfig = { profile: { enabled: true, profiles: [] } };
+  try {
+    await prepareLaunch(launchCatalog(), "launch-example", {
+      commandExists: async () => true,
+      configDir: join(root, "airkit"),
+      createCcrClient: (clientOptions) => airkitRuntime.createCcr3Client({
+        ...clientOptions,
+        fetch: async (_url, request) => {
+          const { args, method } = JSON.parse(request.body);
+          calls.push(`rpc:${method}`);
+          if (method === "saveConfig") assert.deepEqual(args[1], { applyProfile: false });
+          const value = method === "getAppInfo" ? { version: "3.0.4" } : safeConfig;
+          return { ok: true, json: async () => ({ value }) };
         },
-      );
-
-      assert.equal(calls[0], "client:autoStart=false");
-      assert.ok(!calls.includes("runner"));
-      assert.ok(!calls.includes("client:autoStart=true"));
-      assert.deepEqual(calls, serviceState === "missing"
-        ? ["client:autoStart=false"]
-        : ["client:autoStart=false", "fetch"]);
-    } finally {
-      await rm(root, { force: true, recursive: true });
-    }
+        runCommand: async (command, args) => {
+          calls.push(`run:${command}:${args.join(":")}`);
+          await mkdir(stateDir, { recursive: true });
+          await writeFile(join(stateDir, "service.json"), JSON.stringify({
+            url: "http://127.0.0.1:9/?ccr_web_token=synthetic-token",
+          }));
+          return { ok: true, status: 0, stdout: "" };
+        },
+      }),
+      env: { DEMO_API_KEY: "runtime-secret", HOME: root },
+      launch: false,
+      runtimeVersions: passingRuntimeVersions(),
+    });
+    assert.deepEqual(calls.slice(0, 4), [
+      "run:ccr:start:--no-gateway",
+      "rpc:getConfig",
+      "rpc:getAppInfo",
+      "rpc:getConfig",
+    ]);
+    assert.ok(calls.indexOf("rpc:saveConfig") > calls.indexOf("rpc:getConfig"));
+  } finally {
+    await rm(root, { force: true, recursive: true });
   }
 });
 
-test("a verified receipt permits one guarded auto-start after reboot and new takeover evidence invalidates it", async () => {
-  const root = await mkdtemp(join(tmpdir(), "airkit-codex-receipt-reboot-"));
-  const home = join(root, "home");
-  const configDir = join(root, "airkit");
-  const safeConfig = { profile: { enabled: true, profiles: [] } };
-  const runningClient = {
-    getConfig: async () => structuredClone(safeConfig),
-    getVersion: async () => "3.0.4",
-    saveConfig: async () => {},
-  };
-
+test("management-only startup rejects hazardous first config before version, save, gateway, or spawn", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-codex-management-hazard-"));
+  const stateDir = join(root, ".claude-code-router");
+  const calls = [];
   try {
-    await prepareLaunch(launchCatalog(), "launch-example", {
-      ccrClient: runningClient,
-      commandExists: async () => true,
-      configDir,
-      env: { DEMO_API_KEY: "runtime-secret", HOME: home },
-      launch: false,
-      runtimeVersions: passingRuntimeVersions(),
-    });
-
-    const calls = [];
-    await prepareLaunch(launchCatalog(), "launch-example", {
-      commandExists: async () => true,
-      configDir,
-      createCcrClient: ({ autoStart }) => {
-        calls.push(`client:autoStart=${autoStart}`);
-        if (!autoStart) return { getConfig: async () => { calls.push("offline:getConfig"); throw new Error("stopped"); } };
-        return {
-          getVersion: async () => { calls.push("active:getVersion"); return "3.0.4"; },
-          getConfig: async () => { calls.push("active:getConfig"); return structuredClone(safeConfig); },
-          saveConfig: async () => calls.push("active:saveConfig"),
-        };
-      },
-      env: { DEMO_API_KEY: "runtime-secret", HOME: home },
-      launch: false,
-      runtimeVersions: passingRuntimeVersions(),
-    });
-    assert.deepEqual(calls.slice(0, 5), [
-      "client:autoStart=false",
-      "offline:getConfig",
-      "client:autoStart=true",
-      "active:getVersion",
-      "active:getConfig",
-    ]);
-
-    const stateDir = join(home, ".claude-code-router");
-    await writeFile(join(stateDir, "global-profile-takeover.json"), JSON.stringify({
-      profiles: [{ agent: "codex", configFile: join(home, ".codex", "config.toml") }],
-    }));
-    const blockedCalls = [];
     await assert.rejects(prepareLaunch(launchCatalog(), "launch-example", {
       commandExists: async () => true,
-      configDir,
-      createCcrClient: () => { blockedCalls.push("client"); return runningClient; },
-      env: { DEMO_API_KEY: "runtime-secret", HOME: home },
-      launch: false,
+      configDir: join(root, "airkit"),
+      createCcrClient: (clientOptions) => airkitRuntime.createCcr3Client({
+        ...clientOptions,
+        fetch: async (_url, request) => {
+          const { method } = JSON.parse(request.body);
+          calls.push(`rpc:${method}`);
+          return { ok: true, json: async () => ({ value: {
+            profile: { profiles: [{
+              agent: "codex",
+              configFile: join(root, ".codex", "config.toml"),
+              enabled: true,
+              privateValue: "must-not-leak",
+              scope: "global",
+            }] },
+          } }) };
+        },
+        runCommand: async (command, args) => {
+          calls.push(`run:${command}:${args.join(":")}`);
+          await mkdir(stateDir, { recursive: true });
+          await writeFile(join(stateDir, "service.json"), JSON.stringify({
+            url: "http://127.0.0.1:9/?ccr_web_token=synthetic-token",
+          }));
+          return { ok: true, status: 0, stdout: "" };
+        },
+      }),
+      env: { DEMO_API_KEY: "runtime-secret", HOME: root },
       runtimeVersions: passingRuntimeVersions(),
-    }), /codex-takeover --write/i);
-    assert.deepEqual(blockedCalls, []);
+      spawnCommand: () => calls.push("spawn"),
+    }), (error) => /codex-takeover --write/i.test(error.message) && !/must-not-leak/.test(error.message));
+    assert.deepEqual(calls, ["run:ccr:start:--no-gateway", "rpc:getConfig"]);
   } finally {
     await rm(root, { force: true, recursive: true });
   }
@@ -1140,9 +1102,9 @@ test("codex-takeover preview uses a non-starting client and performs zero writes
   assert.equal(exitCode, 0);
   assert.deepEqual(calls, [
     "client:autoStart=false",
+    "getConfig",
     "read:/synthetic/home/.claude-code-router/global-profile-takeover.json",
     `read:${codexPath}`,
-    "getConfig",
   ]);
   assert.match(output.join(""), /Preview.*Codex takeover/i);
   assert.match(output.join(""), new RegExp(codexPath.replaceAll(".", "\\.")));
@@ -1202,7 +1164,7 @@ test("codex-takeover preview sanitizes CCR RPC failures", async () => {
 test("codex-takeover --write backs up exact bytes before RPC and reports only safe paths", async () => {
   const codexPath = "/synthetic/home/.codex/config.toml";
   const timestamp = "2026-07-15T01-02-03-004Z";
-  const backupPath = `${codexPath}.backup-${timestamp}`;
+  const backupPath = `${codexPath}.backup-${timestamp}-cli-nonce`;
   const temporaryPath = `${codexPath}.airkit-repair-${timestamp}-cli-nonce.tmp`;
   const latest = Buffer.from([
     "theme = \"private-theme\"",
@@ -1288,7 +1250,8 @@ test("codex-takeover --write backs up exact bytes before RPC and reports only sa
   });
 
   assert.equal(exitCode, 0);
-  assert.ok(events.indexOf(`write:${backupPath}`) < events.indexOf("getConfig-or-start"));
+  assert.ok(events.indexOf("getConfig-or-start") < events.indexOf(`write:${backupPath}`));
+  assert.ok(events.indexOf(`write:${backupPath}`) < events.indexOf("saveConfig"));
   assert.deepEqual(files.get(backupPath), latest);
   assert.equal(files.get(codexPath).toString("utf8"), "theme = \"private-theme\"\n");
   assert.ok(!files.has(temporaryPath));

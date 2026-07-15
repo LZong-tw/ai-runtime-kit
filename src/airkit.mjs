@@ -11,9 +11,7 @@ import { isDeepStrictEqual } from "node:util";
 import {
   codexSafetyPaths,
   inspectCodexTakeover,
-  readCodexSafetyReceipt,
   repairCodexTakeover,
-  writeCodexSafetyReceipt,
 } from "./codex-takeover-guard.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -405,18 +403,11 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
   }
 
   const launchEnv = options.env ?? process.env;
-  const preflight = await inspectCodexTakeoverFiles(launchEnv);
-  assertNoCodexTakeover(preflight.inspection);
   const createCcrClient = options.createCcrClient ?? createCcr3Client;
-  const safetyClient = options.ccrClient ?? createCcrClient({ ...options, autoStart: false });
-  let currentConfig;
-  try {
-    currentConfig = await readCcrConfigSafely(safetyClient);
-  } catch (error) {
-    if (!preflight.receiptValid) throw error;
-  }
-  if (currentConfig) assertNoCodexTakeover(inspectCodexTakeover({ ccrConfig: currentConfig }));
   const ccrClient = options.ccrClient ?? createCcrClient({ ...options, autoStart: true });
+  let currentConfig = await readCcrConfigSafely(ccrClient);
+  assertNoCodexTakeover(inspectCodexTakeover({ ccrConfig: currentConfig }));
+  assertNoCodexTakeover((await inspectCodexTakeoverFiles(launchEnv)).inspection);
   const runtime = await checkLaunchRuntime(plan, { ...options, ccrClient });
   if (!runtime.ccr.ok) throw new Error(runtime.ccr.reason);
   if (!runtime.launch.ok) throw new Error(runtime.launch.reason);
@@ -424,10 +415,6 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
   assertNoCodexTakeover(inspectCodexTakeover({ ccrConfig: currentConfig }));
   const verifiedPreflight = await inspectCodexTakeoverFiles(launchEnv);
   assertNoCodexTakeover(verifiedPreflight.inspection);
-  await writeCodexSafetyReceipt({
-    codexConfigPaths: verifiedPreflight.codexConfigPaths,
-    path: verifiedPreflight.receiptPath,
-  });
   await writeLaunchFiles(plan, rendered);
   const apiKeys = await resolveProviderApiKeys(catalog, profileName, plan, options);
   const managed = buildCcr3ManagedConfig(catalog, profileName, currentConfig, {
@@ -436,7 +423,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     env: options.env,
   });
   if (!isDeepStrictEqual(managed.config, currentConfig)) {
-    await ccrClient.saveConfig(managed.config);
+    await ccrClient.saveConfig(managed.config, { applyProfile: false });
   }
   let child = null;
   if (options.launch !== false) {
@@ -846,7 +833,7 @@ function ccrRuntimePaths(env = process.env) {
 
 async function inspectCodexTakeoverFiles(env) {
   const codexHome = env?.CODEX_HOME ?? (env?.HOME ? join(env.HOME, ".codex") : join(homedir(), ".codex"));
-  const { receiptPath, takeoverPath } = codexSafetyPaths(env);
+  const { takeoverPath } = codexSafetyPaths(env);
   const takeoverText = await readOptionalText(takeoverPath);
   if (takeoverText?.trim()) {
     try {
@@ -883,8 +870,6 @@ async function inspectCodexTakeoverFiles(env) {
   return {
     codexConfigPaths,
     inspection: inspectCodexTakeover({ codexConfigText, takeoverText }),
-    receiptPath,
-    receiptValid: await readCodexSafetyReceipt(receiptPath, undefined, codexConfigPaths),
     takeoverPath,
   };
 }
@@ -967,7 +952,7 @@ function renderCodexTakeoverRepair(result) {
   }
   const backups = (result.backupPaths ?? [result.backupPath]).filter(Boolean).map((path) => `- ${path}`).join("\n") || "- none";
   const restored = (result.restoredPaths ?? [result.restoredPath]).filter(Boolean).map((path) => `- ${path}`).join("\n") || "- none";
-  return `Repaired Codex takeover\nBackups:\n${backups}\nRestored:\n${restored}\nAffected paths:\n${pathLines}\nActions:\n${actionLines}\nReceipt: ${result.receiptPath}\n`;
+  return `Repaired Codex takeover\nBackups:\n${backups}\nRestored:\n${restored}\nAffected paths:\n${pathLines}\nActions:\n${actionLines}\n`;
 }
 
 function renderAirclaudeHelp() {

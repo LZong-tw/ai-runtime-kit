@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, normalize } from "node:path";
+import { chmod, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { isAbsolute, join, normalize } from "node:path";
 
 const managedBlocks = [
   ["# BEGIN CCR managed profile", "# END CCR managed profile"],
@@ -99,7 +99,7 @@ export function repairCcrCodexProfiles(config) {
   return repaired;
 }
 
-const defaultIo = { chmod, mkdir, readFile, realpath, rename, stat, unlink, writeFile };
+const defaultIo = { chmod, readFile, realpath, rename, stat, unlink, writeFile };
 
 function resolveCodexConfigPath(env) {
   const codexHome = env?.CODEX_HOME || (env?.HOME ? join(env.HOME, ".codex") : null);
@@ -112,10 +112,7 @@ export function codexSafetyPaths(env = process.env) {
   if (!home) throw new Error("HOME is required to locate CCR state");
   const appData = env?.CCR_INTERNAL_APP_DATA_DIR || env?.XDG_CONFIG_HOME || join(home, ".config");
   const stateDir = process.platform === "win32" ? join(appData, "claude-code-router") : join(home, ".claude-code-router");
-  return {
-    receiptPath: join(stateDir, "airkit-codex-safety-receipt.json"),
-    takeoverPath: join(stateDir, "global-profile-takeover.json"),
-  };
+  return { takeoverPath: join(stateDir, "global-profile-takeover.json") };
 }
 
 function expandTargetPath(path, env) {
@@ -178,46 +175,6 @@ function liveTargets(config) {
   return ccrProfiles(config).filter(isHazardousCodexProfile).map(codexConfigPath);
 }
 
-function receiptDocument(paths, now) {
-  return Buffer.from(`${JSON.stringify({
-    schema: 1,
-    version: 1,
-    verifiedAt: now().toISOString(),
-    codexConfigPaths: [...paths].sort(),
-  }, null, 2)}\n`);
-}
-
-export async function readCodexSafetyReceipt(path, io = defaultIo, expectedPaths = null) {
-  const bytes = await readOptionalBytes(io, path);
-  if (!bytes) return false;
-  const value = parsedTakeover(bytes.toString("utf8"));
-  const structurallyValid = value?.schema === 1
-    && value?.version === 1
-    && typeof value?.verifiedAt === "string"
-    && Number.isFinite(Date.parse(value.verifiedAt))
-    && Array.isArray(value?.codexConfigPaths)
-    && value.codexConfigPaths.every((entry) => typeof entry === "string");
-  if (!structurallyValid) return false;
-  if (!expectedPaths) return true;
-  const recorded = value.codexConfigPaths.map(pathKey).sort();
-  const expected = expectedPaths.map(pathKey).sort();
-  return recorded.length === expected.length && recorded.every((entry, index) => entry === expected[index]);
-}
-
-export async function writeCodexSafetyReceipt({
-  codexConfigPaths = [],
-  io = defaultIo,
-  nonce = randomUUID,
-  now = () => new Date(),
-  path,
-} = {}) {
-  if (!path) throw new TypeError("receipt path is required");
-  await io.mkdir(dirname(path), { recursive: true });
-  await atomicReplace(io, path, receiptDocument(codexConfigPaths, now), 0o600, repairTimestamp(now), nonce);
-  if (!await readCodexSafetyReceipt(path, io)) throw new Error("Codex safety receipt verification failed");
-  return path;
-}
-
 function repairTimestamp(now) {
   const value = now();
   if (!(value instanceof Date) || Number.isNaN(value.valueOf())) throw new TypeError("now must return a valid Date");
@@ -240,13 +197,14 @@ async function cleanupExclusiveFile(io, path) {
   }
 }
 
-function transactionError(code, message, backupPaths, restoredPaths) {
+function transactionError(code, message, backupPaths, restoredPaths, failedPaths = []) {
   const error = new Error(message);
   error.code = code;
   error.backupPath = backupPaths[0] ?? null;
   error.backupPaths = backupPaths;
   error.restoredPath = restoredPaths[0] ?? null;
   error.restoredPaths = restoredPaths;
+  error.failedPaths = failedPaths;
   return error;
 }
 
@@ -257,7 +215,14 @@ async function exclusiveSnapshot(io, path, bytes, mode, suffix) {
   return backupPath;
 }
 
-async function atomicReplace(io, path, bytes, mode, suffix, nonce) {
+async function snapshotConflict(io, path, bytes, mode, suffix, nonce) {
+  const conflictPath = `${path}.conflict-${suffix}-${repairNonce(nonce)}`;
+  await io.writeFile(conflictPath, bytes, { flag: "wx", mode });
+  await io.chmod(conflictPath, mode);
+  return conflictPath;
+}
+
+async function replaceIfUnchanged(io, path, expected, bytes, mode, suffix, nonce) {
   const temporaryPath = `${path}.airkit-repair-${suffix}-${repairNonce(nonce)}.tmp`;
   let created = false;
   try {
@@ -269,6 +234,12 @@ async function atomicReplace(io, path, bytes, mode, suffix, nonce) {
       throw error;
     }
     await io.chmod(temporaryPath, mode);
+    const current = await readOptionalBytes(io, path);
+    const unchanged = current === null ? expected === null : expected !== null && current.equals(expected);
+    if (!unchanged) {
+      if (current) await snapshotConflict(io, path, current, mode, suffix, nonce);
+      throw Object.assign(new Error("concurrent target change"), { code: "AIRKIT_REPAIR_CONFLICT" });
+    }
     await io.rename(temporaryPath, path);
     created = false;
     await io.chmod(path, mode);
@@ -285,15 +256,23 @@ export async function repairCodexTakeover({
   io = defaultIo,
   nonce = randomUUID,
   now = () => new Date(),
-  receiptPath: requestedReceiptPath,
   takeoverPath: requestedTakeoverPath,
 } = {}) {
   if (!ccrClient || typeof ccrClient.getConfig !== "function") {
     throw new TypeError("ccrClient.getConfig is required");
   }
-  const safetyPaths = codexSafetyPaths(env);
-  const takeoverPath = requestedTakeoverPath ?? safetyPaths.takeoverPath;
-  const receiptPath = requestedReceiptPath ?? safetyPaths.receiptPath;
+  let ccrConfig;
+  try {
+    ccrConfig = await ccrClient.getConfig();
+  } catch {
+    throw transactionError(
+      "CODEX_TAKEOVER_INSPECTION_FAILED",
+      "CCR configuration could not be inspected safely",
+      [],
+      [],
+    );
+  }
+  const takeoverPath = requestedTakeoverPath ?? codexSafetyPaths(env).takeoverPath;
   const takeoverBytes = await readOptionalBytes(io, takeoverPath);
   const takeoverText = takeoverBytes?.toString("utf8");
   if (takeoverText?.trim() && !parsedTakeover(takeoverText)) {
@@ -304,7 +283,7 @@ export async function repairCodexTakeover({
       [],
     );
   }
-  const targetCandidates = [resolveCodexConfigPath(env), ...takeoverTargets(takeoverText)];
+  const targetCandidates = [resolveCodexConfigPath(env), ...takeoverTargets(takeoverText), ...liveTargets(ccrConfig)];
   const targets = [];
   const seenTargets = new Set();
   for (const candidate of targetCandidates) {
@@ -313,23 +292,21 @@ export async function repairCodexTakeover({
     seenTargets.add(pathKey(path));
     targets.push(path);
   }
-  const snapshots = [];
+  const targetsWithState = [];
   for (const path of targets) {
     const bytes = await readOptionalBytes(io, path);
-    if (!bytes) continue;
-    snapshots.push({ bytes, mode: (await io.stat(path)).mode & 0o777, path });
+    const mode = bytes ? (await io.stat(path)).mode & 0o777 : 0o600;
+    targetsWithState.push({ bytes, mode, path });
   }
-  const combinedText = snapshots.map(({ bytes }) => bytes.toString("utf8")).join("\n");
+  const combinedText = targetsWithState.filter(({ bytes }) => bytes).map(({ bytes }) => bytes.toString("utf8")).join("\n");
 
   if (!write) {
-    const ccrConfig = await ccrClient.getConfig();
     return {
       backupPath: null,
       backupPaths: [],
       codexConfigPath: targets[0],
       codexConfigPaths: targets,
       inspection: inspectCodexTakeover({ ccrConfig, codexConfigText: combinedText, takeoverText }),
-      receiptPath,
       restoredPath: null,
       restoredPaths: [],
       takeoverPath,
@@ -344,14 +321,16 @@ export async function repairCodexTakeover({
   let attemptedBackupPath = null;
   let takeoverMode = null;
   try {
-    for (const snapshot of snapshots) {
-      attemptedBackupPath = `${snapshot.path}.backup-${timestamp}`;
-      backupPaths.push(await exclusiveSnapshot(io, snapshot.path, snapshot.bytes, snapshot.mode, timestamp));
+    for (const snapshot of targetsWithState.filter(({ bytes }) => bytes)) {
+      const backupSuffix = `${timestamp}-${repairNonce(nonce)}`;
+      attemptedBackupPath = `${snapshot.path}.backup-${backupSuffix}`;
+      backupPaths.push(await exclusiveSnapshot(io, snapshot.path, snapshot.bytes, snapshot.mode, backupSuffix));
     }
     if (takeoverBytes) {
       takeoverMode = (await io.stat(takeoverPath)).mode & 0o777;
-      attemptedBackupPath = `${takeoverPath}.backup-${timestamp}`;
-      backupPaths.push(await exclusiveSnapshot(io, takeoverPath, takeoverBytes, takeoverMode, timestamp));
+      const backupSuffix = `${timestamp}-${repairNonce(nonce)}`;
+      attemptedBackupPath = `${takeoverPath}.backup-${backupSuffix}`;
+      backupPaths.push(await exclusiveSnapshot(io, takeoverPath, takeoverBytes, takeoverMode, backupSuffix));
     }
   } catch {
     const error = transactionError(
@@ -364,52 +343,77 @@ export async function repairCodexTakeover({
     throw error;
   }
 
-  let ccrConfig;
   let rpcFailed = false;
   try {
-    ccrConfig = await ccrClient.getConfig();
-    for (const candidate of liveTargets(ccrConfig)) {
-      const path = await canonicalTargetPath(candidate, env, io);
-      if (!seenTargets.has(pathKey(path))) {
-        throw new Error("unbacked Codex target");
-      }
-    }
-    await ccrClient.saveConfig(repairCcrCodexProfiles(ccrConfig));
+    await ccrClient.saveConfig(repairCcrCodexProfiles(ccrConfig), { applyProfile: false });
   } catch {
     rpcFailed = true;
   }
 
-  try {
-    for (const snapshot of snapshots) {
-      const source = rpcFailed ? snapshot.bytes : (await readOptionalBytes(io, snapshot.path) ?? snapshot.bytes);
-      const sanitized = Buffer.from(stripCcrManagedCodexBlocks(source.toString("utf8")));
-      await atomicReplace(io, snapshot.path, sanitized, snapshot.mode, timestamp, nonce);
-      const verified = await io.readFile(snapshot.path);
-      if (!Buffer.from(verified).equals(sanitized) || countManagedBlocks(Buffer.from(verified).toString("utf8")) !== 0) {
-        throw new Error("Codex config verification failed");
+  const failedPaths = [];
+  for (const target of targetsWithState) {
+    try {
+      const latest = await readOptionalBytes(io, target.path);
+      if (!latest) continue;
+      const sanitized = Buffer.from(stripCcrManagedCodexBlocks(latest.toString("utf8")));
+      if (!latest.equals(sanitized)) {
+        await replaceIfUnchanged(io, target.path, latest, sanitized, target.mode, timestamp, nonce);
       }
-      restoredPaths.push(snapshot.path);
+      const verified = await readOptionalBytes(io, target.path);
+      if (!verified?.equals(sanitized) || countManagedBlocks(verified.toString("utf8")) !== 0) {
+        throw new Error("target verification failed");
+      }
+      restoredPaths.push(target.path);
+    } catch {
+      failedPaths.push(target.path);
     }
-    if (takeoverBytes) {
-      const currentTakeoverBytes = rpcFailed
-        ? takeoverBytes
-        : (await readOptionalBytes(io, takeoverPath) ?? takeoverBytes);
-      const repairedText = rpcFailed
-        ? currentTakeoverBytes.toString("utf8")
-        : withoutCodexTakeoverEntries(currentTakeoverBytes.toString("utf8"));
-      await atomicReplace(io, takeoverPath, Buffer.from(repairedText), takeoverMode, timestamp, nonce);
-      restoredPaths.push(takeoverPath);
-      const verifiedRecord = await readOptionalBytes(io, takeoverPath);
-      if (!rpcFailed && takeoverRecords(verifiedRecord?.toString("utf8")).length !== 0) {
-        throw new Error("takeover record verification failed");
+  }
+
+  try {
+    const latest = await readOptionalBytes(io, takeoverPath);
+    if (rpcFailed) {
+      if (takeoverBytes) {
+        if (!latest?.equals(takeoverBytes)) {
+          await replaceIfUnchanged(io, takeoverPath, latest, takeoverBytes, takeoverMode, timestamp, nonce);
+        }
+      } else if (latest) {
+        const parsed = parsedTakeover(latest.toString("utf8"));
+        if (!parsed) {
+          await snapshotConflict(io, takeoverPath, latest, (await io.stat(takeoverPath)).mode & 0o777, timestamp, nonce);
+          await io.unlink(takeoverPath);
+        } else {
+          const pruned = Buffer.from(withoutCodexTakeoverEntries(latest.toString("utf8")));
+          await replaceIfUnchanged(io, takeoverPath, latest, pruned, (await io.stat(takeoverPath)).mode & 0o777, timestamp, nonce);
+        }
+      }
+    } else if (latest) {
+      if (!parsedTakeover(latest.toString("utf8"))) {
+        await snapshotConflict(io, takeoverPath, latest, (await io.stat(takeoverPath)).mode & 0o777, timestamp, nonce);
+        if (takeoverBytes) {
+          await replaceIfUnchanged(io, takeoverPath, latest, takeoverBytes, takeoverMode, timestamp, nonce);
+        } else {
+          await io.unlink(takeoverPath);
+        }
+        failedPaths.push(takeoverPath);
+      } else {
+        const pruned = Buffer.from(withoutCodexTakeoverEntries(latest.toString("utf8")));
+        if (!latest.equals(pruned)) {
+          await replaceIfUnchanged(io, takeoverPath, latest, pruned, (await io.stat(takeoverPath)).mode & 0o777, timestamp, nonce);
+        }
+        restoredPaths.push(takeoverPath);
       }
     }
   } catch {
+    failedPaths.push(takeoverPath);
+  }
+
+  if (failedPaths.length > 0) {
     throw transactionError(
       "CODEX_TAKEOVER_RESTORE_FAILED",
-      "Codex takeover restore failed after byte-exact backups were created",
+      "Codex takeover cleanup failed; backups and conflict snapshots were retained",
       backupPaths,
       restoredPaths,
+      [...new Set(failedPaths)],
     );
   }
 
@@ -432,7 +436,6 @@ export async function repairCodexTakeover({
       takeoverText: verifiedTakeover,
     });
     if (verification.hazardous) throw new Error("hazard remains");
-    await writeCodexSafetyReceipt({ codexConfigPaths: targets, io, nonce, now, path: receiptPath });
   } catch {
     throw transactionError(
       "CODEX_TAKEOVER_VERIFY_FAILED",
@@ -448,7 +451,6 @@ export async function repairCodexTakeover({
     codexConfigPath: targets[0],
     codexConfigPaths: targets,
     inspection: inspectCodexTakeover({ ccrConfig, codexConfigText: combinedText, takeoverText }),
-    receiptPath,
     restoredPath: restoredPaths[0] ?? null,
     restoredPaths,
     takeoverPath,
