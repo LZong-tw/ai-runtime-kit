@@ -1,4 +1,5 @@
-import { readFile, rename, stat, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const managedBlocks = [
@@ -100,7 +101,7 @@ export function repairCcrCodexProfiles(config) {
   return repaired;
 }
 
-const defaultIo = { readFile, rename, stat, writeFile };
+const defaultIo = { readFile, rename, stat, unlink, writeFile };
 
 function resolveCodexConfigPath(env) {
   const codexHome = env?.CODEX_HOME || (env?.HOME ? join(env.HOME, ".codex") : null);
@@ -114,10 +115,28 @@ function repairTimestamp(now) {
   return value.toISOString().replace(/[:.]/g, "-");
 }
 
-async function atomicReplace(io, path, bytes, mode, timestamp) {
-  const temporaryPath = `${path}.airkit-repair-${timestamp}.tmp`;
-  await io.writeFile(temporaryPath, bytes, { mode });
-  await io.rename(temporaryPath, path);
+function repairNonce(nonce) {
+  const value = nonce();
+  if (typeof value !== "string" || !/^[a-zA-Z0-9_-]+$/.test(value)) {
+    throw new TypeError("nonce must return a non-empty filesystem-safe string");
+  }
+  return value;
+}
+
+async function cleanupExclusiveFile(io, path) {
+  try {
+    await io.unlink(path);
+  } catch {
+    // Cleanup is best-effort; the primary failure remains sanitized below.
+  }
+}
+
+function sanitizedBackupError(backupPath) {
+  const error = new Error("Codex config backup could not be created exclusively");
+  error.code = "CODEX_TAKEOVER_BACKUP_FAILED";
+  error.backupPath = backupPath;
+  error.restoredPath = null;
+  return error;
 }
 
 function sanitizedRepairError(backupPath, restoredPath) {
@@ -133,6 +152,7 @@ export async function repairCodexTakeover({
   env = process.env,
   write = false,
   io = defaultIo,
+  nonce = randomUUID,
   now = () => new Date(),
 } = {}) {
   if (!ccrClient || typeof ccrClient.getConfig !== "function") {
@@ -157,8 +177,14 @@ export async function repairCodexTakeover({
 
   const fileMode = (await io.stat(codexPath)).mode & 0o777;
   const timestamp = repairTimestamp(now);
+  const temporaryPath = `${codexPath}.airkit-repair-${timestamp}-${repairNonce(nonce)}.tmp`;
   const backupPath = `${codexPath}.backup-${timestamp}`;
-  await io.writeFile(backupPath, latestBytes, { mode: fileMode });
+  try {
+    await io.writeFile(backupPath, latestBytes, { flag: "wx", mode: fileMode });
+  } catch (error) {
+    if (error?.code !== "EEXIST") await cleanupExclusiveFile(io, backupPath);
+    throw sanitizedBackupError(backupPath);
+  }
 
   let ccrConfig;
   let rpcFailed = false;
@@ -170,8 +196,16 @@ export async function repairCodexTakeover({
   }
 
   let restoredPath = null;
+  let temporaryMayBeOwned = false;
   try {
-    await atomicReplace(io, codexPath, sanitizedBytes, fileMode, timestamp);
+    try {
+      await io.writeFile(temporaryPath, sanitizedBytes, { flag: "wx", mode: fileMode });
+      temporaryMayBeOwned = true;
+    } catch (error) {
+      temporaryMayBeOwned = error?.code !== "EEXIST";
+      throw error;
+    }
+    await io.rename(temporaryPath, codexPath);
     restoredPath = codexPath;
     const verifiedBytes = await io.readFile(codexPath);
     const verifiedText = Buffer.from(verifiedBytes).toString("utf8");
@@ -179,6 +213,7 @@ export async function repairCodexTakeover({
       throw new Error("Codex config verification failed");
     }
   } catch {
+    if (temporaryMayBeOwned) await cleanupExclusiveFile(io, temporaryPath);
     const error = new Error("Codex config restore failed after a byte-exact backup was created");
     error.code = "CODEX_TAKEOVER_RESTORE_FAILED";
     error.backupPath = backupPath;

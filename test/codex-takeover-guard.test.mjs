@@ -166,15 +166,17 @@ test("repairs only hazardous profiles without mutating the source config", () =>
   assert.deepEqual(repaired.profile.profiles.slice(1), source.profile.profiles.slice(1));
 });
 
-function transactionFixture({ failAt } = {}) {
+function transactionFixture({ backupCollision = false, failAt } = {}) {
   const codexPath = "/home/example/.codex/config.toml";
   const backupPath = `${codexPath}.backup-2026-07-15T01-02-03-004Z`;
-  const temporaryPath = `${codexPath}.airkit-repair-2026-07-15T01-02-03-004Z.tmp`;
+  const temporaryPath = `${codexPath}.airkit-repair-2026-07-15T01-02-03-004Z-fixture-nonce.tmp`;
   const latest = Buffer.from(managedCodexText);
   const sanitized = Buffer.from(stripCcrManagedCodexBlocks(managedCodexText));
   const files = new Map([[codexPath, latest]]);
   const modes = new Map([[codexPath, 0o100640]]);
+  const writeOptions = new Map();
   const events = [];
+  if (backupCollision) files.set(backupPath, Buffer.from("existing backup must survive"));
   const hazardousConfig = {
     profile: {
       profiles: [{
@@ -191,10 +193,14 @@ function transactionFixture({ failAt } = {}) {
     readFile: async (path) => {
       events.push(`read:${path}`);
       if (!files.has(path)) throw Object.assign(new Error("missing"), { code: "ENOENT" });
+      if (failAt === "verification" && path === codexPath && events.some((event) => event.startsWith("rename:"))) {
+        return Buffer.from("verification failed with private bytes");
+      }
       return Buffer.from(files.get(path));
     },
     rename: async (from, to) => {
       events.push(`rename:${from}->${to}`);
+      if (failAt === "rename") throw new Error("rename failed with private path");
       files.set(to, files.get(from));
       modes.set(to, modes.get(from));
       files.delete(from);
@@ -204,10 +210,23 @@ function transactionFixture({ failAt } = {}) {
       events.push(`stat:${path}`);
       return { mode: modes.get(path) };
     },
+    unlink: async (path) => {
+      events.push(`unlink:${path}`);
+      if (!files.has(path)) throw Object.assign(new Error("missing"), { code: "ENOENT" });
+      files.delete(path);
+      modes.delete(path);
+    },
     writeFile: async (path, value, options = {}) => {
       events.push(`write:${path}`);
+      if (options.flag === "wx" && files.has(path)) {
+        throw Object.assign(new Error("exclusive collision with private path"), { code: "EEXIST" });
+      }
       files.set(path, Buffer.from(value));
       if (options.mode !== undefined) modes.set(path, options.mode);
+      writeOptions.set(path, { ...options });
+      if (failAt === "tempWrite" && path === temporaryPath) {
+        throw new Error("temporary write failed with private bytes");
+      }
     },
   };
   const ccrClient = {
@@ -241,9 +260,11 @@ function transactionFixture({ failAt } = {}) {
     io,
     latest,
     modes,
+    nonce: () => "fixture-nonce",
     now: () => new Date("2026-07-15T01:02:03.004Z"),
     sanitized,
     temporaryPath,
+    writeOptions,
   };
 }
 
@@ -254,6 +275,7 @@ test("write repair backs up latest bytes before CCR RPC and atomically restores 
     ccrClient: fixture.ccrClient,
     env: fixture.env,
     io: fixture.io,
+    nonce: fixture.nonce,
     now: fixture.now,
     write: true,
   });
@@ -271,6 +293,8 @@ test("write repair backs up latest bytes before CCR RPC and atomically restores 
   assert.deepEqual(fixture.files.get(fixture.backupPath), fixture.latest);
   assert.deepEqual(fixture.files.get(fixture.codexPath), fixture.sanitized);
   assert.equal(fixture.modes.get(fixture.codexPath), 0o640);
+  assert.deepEqual(fixture.writeOptions.get(fixture.backupPath), { flag: "wx", mode: 0o640 });
+  assert.deepEqual(fixture.writeOptions.get(fixture.temporaryPath), { flag: "wx", mode: 0o640 });
   assert.equal(result.backupPath, fixture.backupPath);
   assert.equal(result.restoredPath, fixture.codexPath);
   assert.equal(result.write, true);
@@ -286,6 +310,7 @@ for (const failAt of ["getConfig", "saveConfig"]) {
         ccrClient: fixture.ccrClient,
         env: fixture.env,
         io: fixture.io,
+        nonce: fixture.nonce,
         now: fixture.now,
         write: true,
       }),
@@ -321,3 +346,65 @@ test("preview inspects current state without writes or saveConfig", async () => 
   assert.equal(result.inspection.hazardous, true);
   assert.ok(!fixture.events.some((event) => event.startsWith("write:") || event === "saveConfig"));
 });
+
+test("an existing timestamped backup fails safely before any CCR RPC", async () => {
+  const fixture = transactionFixture({ backupCollision: true });
+  const existingBackup = Buffer.from(fixture.files.get(fixture.backupPath));
+
+  await assert.rejects(
+    repairCodexTakeover({
+      ccrClient: fixture.ccrClient,
+      env: fixture.env,
+      io: fixture.io,
+      nonce: fixture.nonce,
+      now: fixture.now,
+      write: true,
+    }),
+    (error) => {
+      assert.equal(error.code, "CODEX_TAKEOVER_BACKUP_FAILED");
+      assert.equal(error.backupPath, fixture.backupPath);
+      assert.equal(error.restoredPath, null);
+      assert.doesNotMatch(`${error.message} ${JSON.stringify(error)}`, /exclusive collision|private path/);
+      return true;
+    },
+  );
+
+  assert.deepEqual(fixture.files.get(fixture.backupPath), existingBackup);
+  assert.deepEqual(fixture.files.get(fixture.codexPath), fixture.latest);
+  assert.deepEqual(fixture.events, [
+    `read:${fixture.codexPath}`,
+    `stat:${fixture.codexPath}`,
+    `write:${fixture.backupPath}`,
+  ]);
+});
+
+for (const failAt of ["tempWrite", "rename", "verification"]) {
+  test(`cleans the exclusive temporary file after ${failAt} failure`, async () => {
+    const fixture = transactionFixture({ failAt });
+
+    await assert.rejects(
+      repairCodexTakeover({
+        ccrClient: fixture.ccrClient,
+        env: fixture.env,
+        io: fixture.io,
+        nonce: fixture.nonce,
+        now: fixture.now,
+        write: true,
+      }),
+      (error) => {
+        assert.equal(error.code, "CODEX_TAKEOVER_RESTORE_FAILED");
+        assert.equal(error.backupPath, fixture.backupPath);
+        assert.doesNotMatch(
+          `${error.message} ${JSON.stringify(error)}`,
+          /private bytes|private path|temporary write|verification failed|rename failed/,
+        );
+        return true;
+      },
+    );
+
+    assert.ok(fixture.files.has(fixture.codexPath));
+    assert.deepEqual(fixture.files.get(fixture.backupPath), fixture.latest);
+    assert.ok(!fixture.files.has(fixture.temporaryPath));
+    assert.ok(fixture.events.includes(`unlink:${fixture.temporaryPath}`));
+  });
+}
