@@ -156,6 +156,12 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
       await readFile(join(outDir, "src", "codex-takeover-guard.mjs"), "utf8"),
       await readFile(resolve(import.meta.dirname, "..", "src", "codex-takeover-guard.mjs"), "utf8"),
     );
+    for (const module of ["gateway.mjs", "plugin.mjs", "protocol.mjs"]) {
+      assert.equal(
+        await readFile(join(outDir, "src", "compat", module), "utf8"),
+        await readFile(resolve(import.meta.dirname, "..", "src", "compat", module), "utf8"),
+      );
+    }
   } finally {
     await rm(outDir, { force: true, recursive: true });
   }
@@ -251,6 +257,41 @@ test("CCR 3 managed providers can route upstream through a per-launch proxy", ()
   assert.equal(
     merged.config.Providers[0].api_base_url,
     "http://127.0.0.1:8804/v1/chat/completions",
+  );
+});
+
+test("CCR compatibility opt-in resolves the installed plugin and preserves unrelated plugins", () => {
+  const catalog = compatibilityCatalog();
+  const unrelated = { id: "user-plugin", module: "/user/plugin.mjs", config: { keep: true } };
+  const merged = airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {
+    Providers: [],
+    plugins: [unrelated],
+    profile: { profiles: [] },
+  }, { configDir: "/tmp/airkit-compatibility" });
+
+  assert.deepEqual(merged.config.plugins[0], unrelated);
+  assert.equal(merged.config.plugins[1].id, "airkit-compatibility");
+  assert.equal(merged.config.plugins[1].module, resolve(import.meta.dirname, "..", "src", "compat", "plugin.mjs"));
+  assert.doesNotMatch(merged.config.plugins[1].module, /airkit-compatibility\/plugins/);
+});
+
+test("CCR compatibility rejects invalid or missing Anthropic-family compatibility models", () => {
+  for (const path of ["advisor.model", "advisor.fallbackModel", "toolSearch.fallbackModel", "webSearch.model"]) {
+    const catalog = compatibilityCatalog();
+    const [capability, field] = path.split(".");
+    catalog.profiles[0].ccr.plugins[0].config[capability][field] = "openai/gpt-5.4";
+
+    assert.throws(
+      () => buildLaunchPlan(catalog, "launch-example", { configDir: "/tmp/airkit-compatibility" }),
+      new RegExp(`${path.replace(".", "\\.")} must be an Anthropic-family model`),
+    );
+  }
+
+  const missingFallback = compatibilityCatalog();
+  delete missingFallback.profiles[0].ccr.plugins[0].config.advisor.fallbackModel;
+  assert.throws(
+    () => buildLaunchPlan(missingFallback, "launch-example", { configDir: "/tmp/airkit-compatibility" }),
+    /advisor\.fallbackModel must be an Anthropic-family model/,
   );
 });
 
@@ -603,6 +644,29 @@ test("doctorProfile reports rendered file drift and runtime availability", async
     assert.equal(result.runtime.ccr.ok, false);
     assert.match(result.failures.join("\n"), /stale CCR config/);
     assert.match(result.failures.join("\n"), /missing command: ccr/);
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("doctorProfile reports each configured compatibility capability without a live-state claim", async () => {
+  const catalog = compatibilityCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-compatibility-doctor-"));
+
+  try {
+    await installProfile(catalog, "launch-example", { configDir, write: true });
+    const result = await doctorProfile(catalog, "launch-example", {
+      commandExists: async () => true,
+      configDir,
+      sourceShellSnippet: async () => ({ ok: true }),
+    });
+
+    assert.deepEqual(result.runtime.compatibility.capabilities, {
+      advisor: "bridged",
+      toolSearch: "bridged",
+      webSearch: "unverified",
+    });
+    assert.equal(result.runtime.compatibility.ok, true);
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }
@@ -1470,6 +1534,71 @@ test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves
   }
 });
 
+test("prepareLaunch registers compatibility MCP additively with child-only expanded gateway credentials", async () => {
+  const catalog = compatibilityCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-compatibility-launch-"));
+  const saved = [];
+  const spawned = [];
+  const unrelated = { id: "user-plugin", module: "/user/plugin.mjs" };
+  const currentConfig = {
+    APIKEY: "$CCR_GATEWAY_TOKEN",
+    HOST: "$CCR_GATEWAY_HOST",
+    PORT: "$CCR_GATEWAY_PORT",
+    Providers: [],
+    plugins: [unrelated],
+    profile: { enabled: true, profiles: [] },
+  };
+  const ccrClient = {
+    ensureGateway: async () => {},
+    getConfig: async () => structuredClone(currentConfig),
+    getVersion: async () => "3.0.4",
+    saveConfig: async (config) => saved.push(config),
+  };
+
+  try {
+    await prepareLaunch(catalog, "launch-example", {
+      ccrClient,
+      commandExists: async () => true,
+      configDir,
+      env: {
+        CCR_GATEWAY_HOST: "127.0.0.1",
+        CCR_GATEWAY_PORT: "4567",
+        CCR_GATEWAY_TOKEN: "fixture-gateway-token",
+        DEMO_API_KEY: "runtime-secret",
+        HOME: configDir,
+      },
+      runtimeVersions: passingRuntimeVersions(),
+      spawnCommand: (command, args, options) => {
+        spawned.push({ args, command, env: options.env });
+        return { status: 0 };
+      },
+    });
+
+    assert.equal(saved[0].plugins.some((plugin) => plugin.id === unrelated.id), true);
+    assert.equal(saved[0].plugins.find((plugin) => plugin.id === "airkit-compatibility").module,
+      resolve(import.meta.dirname, "..", "src", "compat", "plugin.mjs"));
+    const mcpIndex = spawned[0].args.indexOf("--mcp-config");
+    assert.notEqual(mcpIndex, -1);
+    assert.equal(spawned[0].args.includes("--strict-mcp-config"), false);
+    assert.equal(spawned[0].args.includes("--settings"), false);
+    assert.doesNotMatch(spawned[0].args.join(" "), /fixture-gateway-token/);
+    assert.deepEqual(JSON.parse(spawned[0].args[mcpIndex + 1]), {
+      mcpServers: {
+        "airkit-compatibility": {
+          headers: { Authorization: "Bearer ${AIRKIT_COMPATIBILITY_MCP_TOKEN}" },
+          type: "http",
+          url: "${AIRKIT_COMPATIBILITY_MCP_URL}",
+        },
+      },
+    });
+    assert.equal(spawned[0].env.AIRKIT_COMPATIBILITY_MCP_URL,
+      "http://127.0.0.1:4567/airkit/compatibility/mcp");
+    assert.equal(spawned[0].env.AIRKIT_COMPATIBILITY_MCP_TOKEN, "fixture-gateway-token");
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
 test("prepareLaunch resolves ccrTokenOpRef once for the CCR 3 config merge", async () => {
   const catalog = launchCatalog();
   catalog.profiles[0].shell = { ccrTokenOpRef: "op://Test/API/token" };
@@ -1740,6 +1869,29 @@ function launchCatalog() {
       },
     ],
   };
+}
+
+function compatibilityCatalog() {
+  const catalog = launchCatalog();
+  catalog.profiles[0].ccr.plugins = [{
+    id: "airkit-compatibility",
+    module: "@lzong/ai-runtime-kit/compatibility-plugin",
+    config: {
+      advisor: {
+        fallbackModel: "anthropic/claude-opus",
+        mode: "bridge",
+        model: "anthropic/claude-opus",
+        provider: "anthropic-messages",
+      },
+      toolSearch: { mode: "bridge" },
+      webSearch: {
+        mode: "mcp",
+        model: "anthropic/claude-sonnet",
+        provider: "anthropic-messages",
+      },
+    },
+  }];
+  return catalog;
 }
 
 function passingRuntimeVersions() {

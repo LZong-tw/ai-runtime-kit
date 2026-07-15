@@ -7,6 +7,7 @@ import {
   handleCompatibilityMessage,
   writeAnthropicMessage,
 } from "../src/compat/gateway.mjs";
+import plugin from "../src/compat/plugin.mjs";
 
 const CORE_TOKEN = "generated-core-token";
 const RAW_RESPONSE_BODY = Buffer.from([0, 1, 2, 255, 10]);
@@ -960,6 +961,476 @@ test("Anthropic SSE serializes thinking, redaction, citations, and unknown compl
     { type: "citations_delta", citation },
   ]);
 });
+
+test("compatibility plugin registers stable authenticated POST routes", async () => {
+  const routes = [];
+
+  await plugin.setup({
+    config: {},
+    coreClient: {},
+    pluginConfig: {},
+    registerGatewayRoute(route) {
+      routes.push(route);
+    },
+  });
+
+  assert.deepEqual(
+    routes.map(({ auth, id, method, path }) => ({ auth, id, method, path })),
+    [
+      {
+        auth: "gateway",
+        id: "airkit-compatibility-messages",
+        method: "POST",
+        path: "/v1/messages",
+      },
+      {
+        auth: "gateway",
+        id: "airkit-compatibility-mcp",
+        method: "POST",
+        path: "/airkit/compatibility/mcp",
+      },
+    ],
+  );
+});
+
+test("compatibility plugin validates configured models before registering routes", async () => {
+  const routes = [];
+
+  await assert.rejects(
+    plugin.setup({
+      config: {},
+      coreClient: createPluginCoreClient(),
+      pluginConfig: {
+        advisor: { mode: "bridge", model: "other/executor", fallbackModel: "claude-opus" },
+      },
+      registerGatewayRoute(route) {
+        routes.push(route);
+      },
+    }),
+    /advisor\.model must be an Anthropic-family model/,
+  );
+  assert.deepEqual(routes, []);
+});
+
+test("ordinary Messages requests preserve raw bytes and abort propagation", async () => {
+  const calls = [];
+  const fixture = await createPluginFixture({
+    coreClient: createPluginCoreClient({
+      async forwardRaw(input) {
+        calls.push(input);
+        input.response.writeHead(202, { "content-type": "application/octet-stream" });
+        input.response.end(Buffer.from("raw-response"));
+      },
+    }),
+  });
+  const body = Buffer.from([0, 255, 123, 125, 10]);
+  const signal = new AbortController().signal;
+  const request = createPluginRequest(body, { signal });
+  const response = createRecordingResponse();
+
+  await fixture.messages.handler(request, response, fixture.helpers);
+
+  assert.equal(fixture.readCount, 1);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].body, body);
+  assert.equal(calls[0].headers, request.headers);
+  assert.equal(calls[0].method, "POST");
+  assert.equal(calls[0].response, response);
+  assert.equal(calls[0].signal, signal);
+  assert.deepEqual(response.body, Buffer.from("raw-response"));
+});
+
+test("compatibility Messages requests bridge JSON and preserve the stream flag", async () => {
+  const calls = [];
+  const fixture = await createPluginFixture({
+    coreClient: createPluginCoreClient({
+      async requestMessage(body) {
+        calls.push(structuredClone(body));
+        return calls.length === 1
+          ? message({
+              content: [{
+                type: "tool_use",
+                id: "toolu_search",
+                name: "airkit_tool_search",
+                input: { query: "weather" },
+              }],
+              stop_reason: "tool_use",
+            })
+          : message({ content: [{ type: "text", text: "Sunny." }] });
+      },
+    }),
+  });
+  const jsonResponse = createMessageResponse();
+  const streamResponse = createMessageResponse();
+
+  await fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify(compatibilityRequestBody(false)))),
+    jsonResponse,
+    fixture.helpers,
+  );
+  calls.length = 0;
+  await fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify(compatibilityRequestBody(true)))),
+    streamResponse,
+    fixture.helpers,
+  );
+
+  assert.equal(jsonResponse.headers["content-type"], "application/json");
+  assert.deepEqual(
+    JSON.parse(jsonResponse.body).content.map((block) => block.type),
+    ["server_tool_use", "tool_search_tool_result", "text"],
+  );
+  assert.equal(streamResponse.headers["content-type"], "text/event-stream");
+  assert.equal(parseSse(streamResponse.body).at(-1).event, "message_stop");
+});
+
+test("MCP initialize, initialized notification, and tools/list are stateless", async () => {
+  const fixture = await createPluginFixture();
+  const initialized = await fixture.callMcp("initialize", {
+    protocolVersion: "2025-03-26",
+    capabilities: {},
+    clientInfo: { name: "fixture", version: "1" },
+  });
+  const notification = await fixture.callMcp("notifications/initialized", undefined, {
+    notification: true,
+  });
+  const tools = await fixture.callMcp("tools/list", {});
+
+  assert.equal(initialized.statusCode, 200);
+  assert.equal(initialized.json.result.protocolVersion, "2025-03-26");
+  assert.deepEqual(initialized.json.result.capabilities, { tools: {} });
+  assert.equal(notification.statusCode, 202);
+  assert.equal(notification.body.length, 0);
+  assert.deepEqual(tools.json.result.tools, [
+    {
+      name: "web_search",
+      description: "Search the current web through the configured Anthropic WebSearch model.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+          allowed_domains: { type: "array", items: { type: "string" } },
+          blocked_domains: { type: "array", items: { type: "string" } },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true },
+    },
+  ]);
+});
+
+test("MCP web_search forces the configured model, server tool, and domain filter", async () => {
+  const calls = [];
+  const fixture = await createPluginFixture({
+    coreClient: createPluginCoreClient({
+      async requestMessage(body) {
+        calls.push(structuredClone(body));
+        return webSearchMessage();
+      },
+    }),
+  });
+
+  const response = await fixture.callMcp("tools/call", {
+    name: "web_search",
+    arguments: {
+      query: "current protocol release",
+      allowed_domains: ["Example.COM"],
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].model, "anthropic/claude-sonnet-4-6");
+  assert.equal(calls[0].stream, false);
+  assert.deepEqual(calls[0].messages, [
+    { role: "user", content: "current protocol release" },
+  ]);
+  assert.deepEqual(calls[0].tools, [
+    {
+      type: "web_search_20250305",
+      name: "web_search",
+      max_uses: 4,
+      allowed_domains: ["example.com"],
+    },
+  ]);
+  assert.deepEqual(calls[0].tool_choice, { type: "tool", name: "web_search" });
+  assert.deepEqual(response.json.result.structuredContent.results, [
+    { title: "Protocol release", url: "https://example.com/release", pageAge: "today" },
+  ]);
+  assert.equal(response.json.result.structuredContent.summary, "Current release summary.");
+});
+
+test("MCP rejects invalid search input without calling the provider", async () => {
+  const fixture = await createPluginFixture();
+  const invalidArguments = [
+    { query: "   " },
+    { query: "x".repeat(1001) },
+    { query: "release", allowed_domains: "example.com" },
+    { query: "release", allowed_domains: ["https://example.com/path"] },
+    {
+      query: "release",
+      allowed_domains: ["example.com"],
+      blocked_domains: ["blocked.example"],
+    },
+  ];
+
+  for (const argumentsValue of invalidArguments) {
+    const response = await fixture.callMcp("tools/call", {
+      name: "web_search",
+      arguments: argumentsValue,
+    });
+    assert.equal(response.json.result.isError, true);
+    assert.deepEqual(response.json.result.content, [
+      { type: "text", text: "Invalid web search request." },
+    ]);
+  }
+  assert.equal(fixture.coreCalls.length, 0);
+});
+
+test("MCP returns bounded JSON-RPC errors for malformed requests and unknown operations", async () => {
+  const fixture = await createPluginFixture();
+  const malformedJson = await fixture.callRawMcp(Buffer.from('{"jsonrpc":'));
+  const invalidRequest = await fixture.callRawMcp(
+    Buffer.from(JSON.stringify({ jsonrpc: "1.0", id: 91, method: "tools/list" })),
+  );
+  const unknownMethod = await fixture.callMcp("resources/list", {});
+  const unknownTool = await fixture.callMcp("tools/call", {
+    name: "private_tool_name",
+    arguments: {},
+  });
+
+  assert.deepEqual(malformedJson.json, {
+    jsonrpc: "2.0",
+    id: null,
+    error: { code: -32700, message: "Parse error" },
+  });
+  assert.deepEqual(invalidRequest.json, {
+    jsonrpc: "2.0",
+    id: null,
+    error: { code: -32600, message: "Invalid Request" },
+  });
+  assert.deepEqual(unknownMethod.json.error, { code: -32601, message: "Method not found" });
+  assert.deepEqual(unknownTool.json.error, { code: -32602, message: "Unknown tool" });
+  assert.doesNotMatch(JSON.stringify(unknownTool.json), /private_tool_name/);
+});
+
+test("MCP converts canonical WebSearch error blocks to a fixed tool error", async () => {
+  const fixture = await createPluginFixture({
+    coreClient: createPluginCoreClient({
+      async requestMessage() {
+        return webSearchMessage({
+          content: [{
+            type: "web_search_tool_result",
+            tool_use_id: "srvtoolu_web",
+            content: {
+              type: "web_search_tool_result_error",
+              error_code: "too_many_requests",
+              provider_message: "account-secret",
+            },
+          }],
+        });
+      },
+    }),
+  });
+
+  const response = await fixture.callMcp("tools/call", {
+    name: "web_search",
+    arguments: { query: "release" },
+  });
+
+  assert.deepEqual(response.json.result, {
+    content: [{ type: "text", text: "Web search is unavailable." }],
+    isError: true,
+  });
+  assert.doesNotMatch(JSON.stringify(response.json), /account-secret|too_many_requests/);
+});
+
+test("MCP bounds public output and hides provider failures", async () => {
+  const success = await createPluginFixture({
+    coreClient: createPluginCoreClient({
+      async requestMessage() {
+        return webSearchMessage({
+          content: [
+            {
+              type: "web_search_tool_result",
+              tool_use_id: "srvtoolu_web",
+              provider_payload: "provider-secret",
+              content: [
+                {
+                  type: "web_search_result",
+                  title: "T".repeat(700),
+                  url: "https://example.com/release",
+                  encrypted_content: "opaque-secret",
+                },
+                { type: "web_search_result", title: "Unsafe", url: "file:///private/result" },
+                {
+                  type: "web_search_result",
+                  title: "Credential URL",
+                  url: "https://username:password@example.com/private",
+                },
+              ],
+            },
+            { type: "text", text: "S".repeat(5000) },
+          ],
+        });
+      },
+    }),
+  });
+  const sanitized = await success.callMcp("tools/call", {
+    name: "web_search",
+    arguments: { query: "release" },
+  });
+  const serialized = JSON.stringify(sanitized.json);
+
+  assert.equal(sanitized.json.result.structuredContent.results.length, 1);
+  assert.equal(sanitized.json.result.structuredContent.results[0].title.length, 512);
+  assert.equal(sanitized.json.result.structuredContent.summary.length, 4096);
+  assert.doesNotMatch(serialized, /provider-secret|opaque-secret|file:\/\/|username|password/);
+
+  const failure = await createPluginFixture({
+    coreClient: createPluginCoreClient({
+      async requestMessage() {
+        throw new Error("credential in /private/provider.json");
+      },
+    }),
+  });
+  const failed = await failure.callMcp("tools/call", {
+    name: "web_search",
+    arguments: { query: "release" },
+  });
+  assert.deepEqual(failed.json.result, {
+    content: [{ type: "text", text: "Web search is unavailable." }],
+    isError: true,
+  });
+  assert.doesNotMatch(JSON.stringify(failed.json), /credential|private|provider\.json/i);
+});
+
+async function createPluginFixture(options = {}) {
+  const routes = [];
+  const coreCalls = [];
+  let readCount = 0;
+  const helpers = {
+    async readBody(request) {
+      readCount += 1;
+      return request.body;
+    },
+  };
+  await plugin.setup({
+    config: {},
+    coreClient: options.coreClient ?? createPluginCoreClient({
+      async requestMessage(body, headers) {
+        coreCalls.push({ body: structuredClone(body), headers: structuredClone(headers ?? {}) });
+        return webSearchMessage();
+      },
+    }),
+    pluginConfig: {
+      advisor: {
+        mode: "bridge",
+        model: "anthropic/claude-opus-4-8",
+        fallbackModel: "anthropic/claude-opus-4-8",
+      },
+      toolSearch: { mode: "bridge" },
+      webSearch: { mode: "mcp", model: "anthropic/claude-sonnet-4-6", maxUses: 4 },
+      ...options.pluginConfig,
+    },
+    registerGatewayRoute(route) {
+      routes.push(route);
+    },
+  });
+  const mcp = routes.find((route) => route.path === "/airkit/compatibility/mcp");
+  return {
+    coreCalls,
+    helpers,
+    messages: routes.find((route) => route.path === "/v1/messages"),
+    mcp,
+    routes,
+    get readCount() {
+      return readCount;
+    },
+    async callMcp(method, params, { notification = false } = {}) {
+      return this.callRawMcp(Buffer.from(JSON.stringify({
+        jsonrpc: "2.0",
+        ...(notification ? {} : { id: 17 }),
+        method,
+        ...(params === undefined ? {} : { params }),
+      })));
+    },
+    async callRawMcp(body) {
+      const response = createRecordingResponse();
+      await mcp.handler(createPluginRequest(body), response, helpers);
+      return {
+        body: response.body,
+        json: response.body.length === 0 ? undefined : JSON.parse(response.body.toString("utf8")),
+        statusCode: response.statusCode,
+      };
+    },
+  };
+}
+
+function createPluginCoreClient(overrides = {}) {
+  return {
+    async forwardRaw() {
+      throw new Error("unexpected raw passthrough");
+    },
+    async requestMessage() {
+      throw new Error("unexpected core request");
+    },
+    ...overrides,
+  };
+}
+
+function createPluginRequest(body, { signal } = {}) {
+  return Object.assign(new EventEmitter(), {
+    body,
+    headers: { "content-type": "application/json", "x-request-id": "fixture-request" },
+    method: "POST",
+    signal,
+  });
+}
+
+function compatibilityRequestBody(stream) {
+  return {
+    model: "executor-model",
+    max_tokens: 512,
+    messages: [{ role: "user", content: "Search tools." }],
+    stream,
+    tools: [
+      { type: "tool_search_tool_regex_20251119", name: "tool_search_tool_regex" },
+      {
+        name: "get_weather",
+        description: "Get weather",
+        defer_loading: true,
+        input_schema: { type: "object", properties: {} },
+      },
+    ],
+  };
+}
+
+function webSearchMessage(overrides = {}) {
+  return message({
+    content: [
+      {
+        type: "server_tool_use",
+        id: "srvtoolu_web",
+        name: "web_search",
+        input: { query: "current protocol release" },
+      },
+      {
+        type: "web_search_tool_result",
+        tool_use_id: "srvtoolu_web",
+        content: [{
+          type: "web_search_result",
+          title: "Protocol release",
+          url: "https://example.com/release",
+          page_age: "today",
+          encrypted_content: "opaque-provider-value",
+        }],
+      },
+      { type: "text", text: "Current release summary." },
+    ],
+    ...overrides,
+  });
+}
 
 function createBridgeFixture(script, options = {}) {
   const calls = [];
