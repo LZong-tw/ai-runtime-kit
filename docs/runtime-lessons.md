@@ -11,6 +11,9 @@ prices, and company identifiers belong in a private overlay.
   `ccr <managed-profile> cli -- ...`.
 - Generated CCR-backed shell functions delegate once to `airclaude`. Do not
   add start/restart/activate wrappers or live JSON synchronization.
+- A missing CCR service is started only as a management service with
+  `ccr start --no-gateway`. Read `getConfig` before later RPCs or filesystem
+  writes, and persist managed changes with `applyProfile: false`.
 - Preserve the user's normal Claude MCP and plugin configuration. Do not add an
   empty strict MCP config merely to simplify routing.
 - Routing mode and Claude permission mode are unrelated. `airclaude pro`
@@ -35,6 +38,14 @@ AIRKIT_CONFIG_DIR
 Before an intentional global cutover, back up shared settings, apply the
 change, smoke-test the user's normal Claude path and routed path, and retain the
 backup until both pass.
+
+AirKit does not perform a global cutover. If preflight finds an enabled global
+Codex profile targeting Codex configuration, a takeover record, or exact
+CCR-managed Codex blocks, it stops before gateway startup or launch. Use
+`airkit repair codex-takeover` to preview paths and actions, then add `--write`
+only after review. Repair snapshots the latest bytes, scopes hazardous Codex
+profiles to CCR, preserves unrelated profiles, and never overwrites a
+concurrent writer that wins the active path.
 
 ## Provider identity and protocol
 
@@ -91,6 +102,10 @@ AirKit never writes `launch.claudeModel` into Claude settings or transcripts.
 Claude Code owns `/model` and its normal model-choice persistence; a routed
 launch must not replace the user's global choice. Do not infer the active
 provider from Claude Code's displayed launch model.
+
+CCR owns its routed `apiKeyHelper`. A wrapper or profile must not pass a JSON
+`--settings` override that defines `apiKeyHelper`; AirKit rejects the override
+instead of clearing or replacing CCR authentication state.
 
 The `[1m]` suffix is Claude Code-local launch/display metadata. It is not an
 upstream provider model ID and is not enabled by `ANTHROPIC_1M_CONTEXT`.

@@ -21,6 +21,8 @@ airkit --help
 airkit runtime check
 airkit runtime update
 airkit runtime update --write
+airkit repair codex-takeover
+airkit repair codex-takeover --write
 airkit init --profile openai-compatible-example
 airkit init --profile openai-compatible-example --write
 airkit render ccr --profile openai-compatible-example
@@ -35,6 +37,11 @@ versions, and validate them.
 `airclaude` is the daily entrypoint. It merges only AirKit-owned providers and
 profiles into CCR 3 through its management API, preserves unrelated CCR state,
 and launches `ccr <managed-profile> cli -- ...`.
+AirKit starts a missing CCR service only with `ccr start --no-gateway`, reads
+configuration before any mutation-capable operation, and saves managed state
+with profile application disabled. If it detects an enabled global Codex
+profile, a CCR takeover record, or CCR-managed blocks in Codex configuration,
+launch stops and directs the user to the preview-first takeover repair flow.
 `airclaude pro` applies the profile's stronger routing overlay before launch.
 Managed CCR 3 profiles own the selected mode's default model and small/background
 model. CCR 2's automatic `think`, `longContextThreshold`, and `webSearch` router
@@ -42,6 +49,9 @@ categories are not presented as active CCR 3 routes.
 Legacy CCR 2 `transformers` are rejected instead of being silently discarded by
 CCR 3 persistence; remove them or migrate the behavior to a native CCR 3 gateway
 plugin.
+Do not pass a JSON `--settings` override containing `apiKeyHelper` through a
+CCR-backed profile. CCR owns that helper for routed launches, and AirKit rejects
+launch arguments that would clear or replace it.
 Claude launches also receive reusable runtime lessons for recurring tool
 mistakes, such as preserving durable lessons, recording repeatable corrections
 without secrets, verifying Athena-style query context instead of assuming
@@ -82,3 +92,9 @@ adapter lookup.
 
 Legacy CCR 2 transformers are intentionally unsupported. Implement protocol
 adaptation with CCR 3 provider types or a native gateway plugin.
+
+If AirKit reports Codex takeover state, preview the affected paths and actions
+with `airkit repair codex-takeover`. Apply only after review with
+`airkit repair codex-takeover --write`; write mode creates rollback snapshots,
+scopes hazardous Codex profiles to CCR, removes only exact CCR-managed Codex
+blocks, and preserves unrelated CCR profiles and user-owned configuration.

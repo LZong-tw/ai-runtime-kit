@@ -14,6 +14,9 @@ node src/airkit.mjs airclaude --help
 node src/airkit.mjs airclaude --dry-run
 node src/airkit.mjs airclaude pro --dry-run
 node src/airkit.mjs list
+node src/airkit.mjs runtime check
+node src/airkit.mjs runtime update
+node src/airkit.mjs repair codex-takeover
 node src/airkit.mjs init --profile openai-compatible-example
 node src/airkit.mjs init --profile openai-compatible-example --write
 node src/airkit.mjs doctor
@@ -21,6 +24,18 @@ node src/airkit.mjs doctor
 
 The dry run prints every file path it would create. Do not edit runtime files
 directly unless the user explicitly asks for a manual repair.
+
+CCR-backed launch is a CCR 3-only path (`>=3.0.4 <4`). AirKit may start the
+management service with `ccr start --no-gateway`, but it reads live
+configuration before later RPCs or filesystem writes and persists managed
+configuration with profile application disabled. Never add CCR 2
+`restart`/`activate` synchronization or a live `config.json` overwrite path.
+
+If preflight reports Codex takeover state, run the read-only
+`repair codex-takeover` preview first. Use `--write` only after reviewing the
+affected paths; do not bypass the guard or manually clear the user's Codex
+configuration. CCR-backed launch arguments must not override the CCR-managed
+`apiKeyHelper` through Claude's JSON `--settings` argument.
 
 ## Public Model Catalog
 
