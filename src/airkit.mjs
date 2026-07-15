@@ -8,7 +8,13 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 
-import { inspectCodexTakeover, repairCodexTakeover } from "./codex-takeover-guard.mjs";
+import {
+  codexSafetyPaths,
+  inspectCodexTakeover,
+  readCodexSafetyReceipt,
+  repairCodexTakeover,
+  writeCodexSafetyReceipt,
+} from "./codex-takeover-guard.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
@@ -398,17 +404,30 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     };
   }
 
-  assertNoCodexTakeover(await inspectCodexTakeoverFiles(options.env ?? process.env));
+  const launchEnv = options.env ?? process.env;
+  const preflight = await inspectCodexTakeoverFiles(launchEnv);
+  assertNoCodexTakeover(preflight.inspection);
   const createCcrClient = options.createCcrClient ?? createCcr3Client;
   const safetyClient = options.ccrClient ?? createCcrClient({ ...options, autoStart: false });
-  let currentConfig = await readCcrConfigSafely(safetyClient);
-  assertNoCodexTakeover(inspectCodexTakeover({ ccrConfig: currentConfig }));
+  let currentConfig;
+  try {
+    currentConfig = await readCcrConfigSafely(safetyClient);
+  } catch (error) {
+    if (!preflight.receiptValid) throw error;
+  }
+  if (currentConfig) assertNoCodexTakeover(inspectCodexTakeover({ ccrConfig: currentConfig }));
   const ccrClient = options.ccrClient ?? createCcrClient({ ...options, autoStart: true });
   const runtime = await checkLaunchRuntime(plan, { ...options, ccrClient });
   if (!runtime.ccr.ok) throw new Error(runtime.ccr.reason);
   if (!runtime.launch.ok) throw new Error(runtime.launch.reason);
   currentConfig = await readCcrConfigSafely(ccrClient);
   assertNoCodexTakeover(inspectCodexTakeover({ ccrConfig: currentConfig }));
+  const verifiedPreflight = await inspectCodexTakeoverFiles(launchEnv);
+  assertNoCodexTakeover(verifiedPreflight.inspection);
+  await writeCodexSafetyReceipt({
+    codexConfigPaths: verifiedPreflight.codexConfigPaths,
+    path: verifiedPreflight.receiptPath,
+  });
   await writeLaunchFiles(plan, rendered);
   const apiKeys = await resolveProviderApiKeys(catalog, profileName, plan, options);
   const managed = buildCcr3ManagedConfig(catalog, profileName, currentConfig, {
@@ -617,6 +636,7 @@ export async function runCli(argv = process.argv.slice(2), options = {}) {
       ccrClient,
       env: options.env ?? process.env,
       write,
+      ...codexSafetyPaths(options.env ?? process.env),
       ...(options.codexTakeoverIo ? { io: options.codexTakeoverIo } : {}),
       ...(options.codexTakeoverNonce ? { nonce: options.codexTakeoverNonce } : {}),
       ...(options.codexTakeoverNow ? { now: options.codexTakeoverNow } : {}),
@@ -826,9 +846,47 @@ function ccrRuntimePaths(env = process.env) {
 
 async function inspectCodexTakeoverFiles(env) {
   const codexHome = env?.CODEX_HOME ?? (env?.HOME ? join(env.HOME, ".codex") : join(homedir(), ".codex"));
-  const codexConfigText = await readOptionalText(join(codexHome, "config.toml"));
-  const takeoverText = await readOptionalText(join(defaultCcrStateDir(env), "global-profile-takeover.json"));
-  return inspectCodexTakeover({ codexConfigText, takeoverText });
+  const { receiptPath, takeoverPath } = codexSafetyPaths(env);
+  const takeoverText = await readOptionalText(takeoverPath);
+  if (takeoverText?.trim()) {
+    try {
+      JSON.parse(takeoverText);
+    } catch {
+      throw new Error(
+        "Codex takeover state could not be verified; run airkit repair codex-takeover --write",
+      );
+    }
+  }
+  const recorded = inspectCodexTakeover({ takeoverText });
+  const expandPath = (path) => path.startsWith("~/") && env?.HOME ? join(env.HOME, path.slice(2)) : path;
+  const canonicalPath = (path) => {
+    try {
+      return realpathSync(path);
+    } catch (error) {
+      if (error?.code === "ENOENT") return path;
+      throw error;
+    }
+  };
+  const codexConfigPaths = [...new Map([
+    join(codexHome, "config.toml"),
+    ...recorded.affectedPaths.map(expandPath),
+  ].map(canonicalPath).map((path) => {
+    const normalized = path.replaceAll("\\", "/");
+    const key = process.platform === "win32" || /^[a-zA-Z]:\//.test(normalized)
+      ? normalized.toLowerCase()
+      : normalized;
+    return [key, path];
+  })).values()];
+  const codexConfigText = (await Promise.all(codexConfigPaths.map(readOptionalText)))
+    .filter((text) => text !== undefined)
+    .join("\n");
+  return {
+    codexConfigPaths,
+    inspection: inspectCodexTakeover({ codexConfigText, takeoverText }),
+    receiptPath,
+    receiptValid: await readCodexSafetyReceipt(receiptPath, undefined, codexConfigPaths),
+    takeoverPath,
+  };
 }
 
 async function readOptionalText(path) {
@@ -896,7 +954,10 @@ function renderRuntimeUpdate(result) {
 }
 
 function renderCodexTakeoverRepair(result) {
-  const affectedPaths = [...new Set([result.codexConfigPath, ...result.inspection.affectedPaths].filter(Boolean))];
+  const affectedPaths = [...new Set([
+    ...(result.codexConfigPaths ?? [result.codexConfigPath]),
+    ...result.inspection.affectedPaths,
+  ].filter(Boolean))];
   const pathLines = affectedPaths.length > 0 ? affectedPaths.map((path) => `- ${path}`).join("\n") : "- none";
   const actionLines = result.inspection.actions.length > 0
     ? result.inspection.actions.map((action) => `- ${action}`).join("\n")
@@ -904,7 +965,9 @@ function renderCodexTakeoverRepair(result) {
   if (!result.write) {
     return `Preview Codex takeover repair\nAffected paths:\n${pathLines}\nActions:\n${actionLines}\nNo changes written.\nRe-run with airkit repair codex-takeover --write to apply.\n`;
   }
-  return `Repaired Codex takeover\nBackup: ${result.backupPath}\nRestored: ${result.restoredPath}\nAffected paths:\n${pathLines}\nActions:\n${actionLines}\n`;
+  const backups = (result.backupPaths ?? [result.backupPath]).filter(Boolean).map((path) => `- ${path}`).join("\n") || "- none";
+  const restored = (result.restoredPaths ?? [result.restoredPath]).filter(Boolean).map((path) => `- ${path}`).join("\n") || "- none";
+  return `Repaired Codex takeover\nBackups:\n${backups}\nRestored:\n${restored}\nAffected paths:\n${pathLines}\nActions:\n${actionLines}\nReceipt: ${result.receiptPath}\n`;
 }
 
 function renderAirclaudeHelp() {

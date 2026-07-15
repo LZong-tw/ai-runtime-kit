@@ -1022,13 +1022,81 @@ test("Codex takeover safety probe fails closed without starting missing or stale
   }
 });
 
+test("a verified receipt permits one guarded auto-start after reboot and new takeover evidence invalidates it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-codex-receipt-reboot-"));
+  const home = join(root, "home");
+  const configDir = join(root, "airkit");
+  const safeConfig = { profile: { enabled: true, profiles: [] } };
+  const runningClient = {
+    getConfig: async () => structuredClone(safeConfig),
+    getVersion: async () => "3.0.4",
+    saveConfig: async () => {},
+  };
+
+  try {
+    await prepareLaunch(launchCatalog(), "launch-example", {
+      ccrClient: runningClient,
+      commandExists: async () => true,
+      configDir,
+      env: { DEMO_API_KEY: "runtime-secret", HOME: home },
+      launch: false,
+      runtimeVersions: passingRuntimeVersions(),
+    });
+
+    const calls = [];
+    await prepareLaunch(launchCatalog(), "launch-example", {
+      commandExists: async () => true,
+      configDir,
+      createCcrClient: ({ autoStart }) => {
+        calls.push(`client:autoStart=${autoStart}`);
+        if (!autoStart) return { getConfig: async () => { calls.push("offline:getConfig"); throw new Error("stopped"); } };
+        return {
+          getVersion: async () => { calls.push("active:getVersion"); return "3.0.4"; },
+          getConfig: async () => { calls.push("active:getConfig"); return structuredClone(safeConfig); },
+          saveConfig: async () => calls.push("active:saveConfig"),
+        };
+      },
+      env: { DEMO_API_KEY: "runtime-secret", HOME: home },
+      launch: false,
+      runtimeVersions: passingRuntimeVersions(),
+    });
+    assert.deepEqual(calls.slice(0, 5), [
+      "client:autoStart=false",
+      "offline:getConfig",
+      "client:autoStart=true",
+      "active:getVersion",
+      "active:getConfig",
+    ]);
+
+    const stateDir = join(home, ".claude-code-router");
+    await writeFile(join(stateDir, "global-profile-takeover.json"), JSON.stringify({
+      profiles: [{ agent: "codex", configFile: join(home, ".codex", "config.toml") }],
+    }));
+    const blockedCalls = [];
+    await assert.rejects(prepareLaunch(launchCatalog(), "launch-example", {
+      commandExists: async () => true,
+      configDir,
+      createCcrClient: () => { blockedCalls.push("client"); return runningClient; },
+      env: { DEMO_API_KEY: "runtime-secret", HOME: home },
+      launch: false,
+      runtimeVersions: passingRuntimeVersions(),
+    }), /codex-takeover --write/i);
+    assert.deepEqual(blockedCalls, []);
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
 test("codex-takeover preview uses a non-starting client and performs zero writes", async () => {
   const codexPath = "/synthetic/home/.codex/config.toml";
   const output = [];
   const calls = [];
   const io = {
+    chmod: async () => {},
+    mkdir: async () => {},
     readFile: async (path) => {
       calls.push(`read:${path}`);
+      if (path !== codexPath) throw Object.assign(new Error("missing"), { code: "ENOENT" });
       return Buffer.from([
         "# BEGIN CCR managed profile",
         "private-value = \"do-not-leak\"",
@@ -1037,6 +1105,7 @@ test("codex-takeover preview uses a non-starting client and performs zero writes
       ].join("\n"));
     },
     rename: async () => calls.push("rename"),
+    realpath: async (path) => path,
     stat: async () => ({ mode: 0o100600 }),
     unlink: async () => calls.push("unlink"),
     writeFile: async () => calls.push("write"),
@@ -1071,6 +1140,7 @@ test("codex-takeover preview uses a non-starting client and performs zero writes
   assert.equal(exitCode, 0);
   assert.deepEqual(calls, [
     "client:autoStart=false",
+    "read:/synthetic/home/.claude-code-router/global-profile-takeover.json",
     `read:${codexPath}`,
     "getConfig",
   ]);
@@ -1092,8 +1162,16 @@ test("codex-takeover preview sanitizes CCR RPC failures", async () => {
     runCli(["repair", "codex-takeover"], {
       catalogPath: "/does/not/exist/catalog.json",
       codexTakeoverIo: {
-        readFile: async () => Buffer.from("theme = \"dark\"\n"),
+        chmod: async () => {},
+        mkdir: async () => {},
+        readFile: async (path) => {
+          if (path !== "/synthetic/home/.codex/config.toml") {
+            throw Object.assign(new Error("missing"), { code: "ENOENT" });
+          }
+          return Buffer.from("theme = \"dark\"\n");
+        },
         rename: async () => calls.push("rename"),
+        realpath: async (path) => path,
         stat: async () => ({ mode: 0o100600 }),
         unlink: async () => calls.push("unlink"),
         writeFile: async () => calls.push("write"),
@@ -1138,8 +1216,11 @@ test("codex-takeover --write backs up exact bytes before RPC and reports only sa
   const events = [];
   const output = [];
   const io = {
+    chmod: async (path, mode) => modes.set(path, mode),
+    mkdir: async () => {},
     readFile: async (path) => {
       events.push(`read:${path}`);
+      if (!files.has(path)) throw Object.assign(new Error("missing"), { code: "ENOENT" });
       return Buffer.from(files.get(path));
     },
     rename: async (from, to) => {
@@ -1148,6 +1229,10 @@ test("codex-takeover --write backs up exact bytes before RPC and reports only sa
       modes.set(to, modes.get(from));
       files.delete(from);
       modes.delete(from);
+    },
+    realpath: async (path) => {
+      if (!files.has(path)) throw Object.assign(new Error("missing"), { code: "ENOENT" });
+      return path;
     },
     stat: async (path) => {
       events.push(`stat:${path}`);
@@ -1176,6 +1261,7 @@ test("codex-takeover --write backs up exact bytes before RPC and reports only sa
       }],
     },
   };
+  let activeRepairConfig = structuredClone(hazardousConfig);
 
   const exitCode = await runCli(["repair", "codex-takeover", "--write"], {
     catalogPath: "/does/not/exist/catalog.json",
@@ -1187,12 +1273,13 @@ test("codex-takeover --write backs up exact bytes before RPC and reports only sa
       return {
         getConfig: async () => {
           events.push("getConfig-or-start");
-          return structuredClone(hazardousConfig);
+          return structuredClone(activeRepairConfig);
         },
         saveConfig: async (config) => {
           events.push("saveConfig");
           assert.equal(config.profile.profiles[0].scope, "ccr");
           assert.equal(config.profile.profiles[0].showAllSessions, true);
+          activeRepairConfig = structuredClone(config);
         },
       };
     },
