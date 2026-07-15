@@ -1,0 +1,14 @@
+{
+  "capture": "automatic",
+  "claudeCodeVersion": "2.1.210",
+  "observed": false,
+  "attempts": [
+    {
+      "autoCompactPercentage": 70,
+      "autoCompactWindow": 100000,
+      "reportedInputTokens": 95000,
+      "ordinaryTurnsAfterThreshold": 2
+    }
+  ],
+  "result": "No automatic compaction request was emitted by the isolated Claude Code process."
+}
