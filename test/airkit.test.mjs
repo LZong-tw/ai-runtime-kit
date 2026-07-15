@@ -47,14 +47,31 @@ test("isolated verifier restarts management-only before trusting persisted dange
     configFile: "/isolated/original/.codex/config.toml",
     enabled: true,
     id: "default-codex",
-    scope: "ccr",
+    scope: "global",
   };
   const dangerousProfile = {
     ...existingCodexProfile,
     configFile: "/isolated/.codex/config.toml",
     scope: "global",
   };
-  const safeConfig = { profile: { profiles: [] } };
+  const postProbeConfig = {
+    HOST: "127.0.0.1",
+    profile: {
+      profiles: [
+        existingCodexProfile,
+        { agent: "claude-code", enabled: true, id: "default-claude", scope: "global" },
+      ],
+    },
+  };
+  const expectedSafeConfig = {
+    ...postProbeConfig,
+    profile: {
+      profiles: [
+        { ...existingCodexProfile, scope: "ccr", showAllSessions: true },
+        postProbeConfig.profile.profiles[1],
+      ],
+    },
+  };
   const events = [];
   let persisted = { profile: { profiles: [existingCodexProfile] } };
   const makeRpc = (generation) => async (method, args = []) => {
@@ -80,7 +97,7 @@ test("isolated verifier restarts management-only before trusting persisted dange
       events.push(`run:${args.join(" ")}`);
       return { status: 0, stderr: "" };
     },
-    safeConfig,
+    postProbeConfig,
     sentinelBytes: sentinel,
     sentinelPath: "/isolated/.codex/config.toml",
   });
@@ -94,7 +111,7 @@ test("isolated verifier restarts management-only before trusting persisted dange
     "fresh:saveConfig",
   ]);
   assert.equal(result.rpc, restartedRpc);
-  assert.deepEqual(persisted, safeConfig);
+  assert.deepEqual(persisted, expectedSafeConfig);
 
   const source = await readFile(resolve(import.meta.dirname, "..", "scripts", "verify-ccr3-e2e.mjs"), "utf8");
   const lifecycle = [

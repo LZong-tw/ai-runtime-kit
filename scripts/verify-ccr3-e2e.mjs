@@ -9,6 +9,8 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { repairCcrCodexProfiles } from "../src/codex-takeover-guard.mjs";
+
 const ISOLATED_PATH_VARIABLES = [
   "HOME",
   "XDG_CONFIG_HOME",
@@ -60,11 +62,11 @@ export async function verifyDangerousCodexPersistence({
   dangerousProfile,
   env,
   initialConfig,
+  postProbeConfig,
   read = readFile,
   rpc,
   rpcFactory = createRpcClient,
   runCommand = run,
-  safeConfig,
   sentinelBytes,
   sentinelPath,
 }) {
@@ -97,6 +99,7 @@ export async function verifyDangerousCodexPersistence({
   assert.equal(persistedProfile.configFile, dangerousProfile.configFile);
   assert.deepEqual(await read(sentinelPath), sentinelBytes, "management restart/getConfig mutated Codex sentinel");
 
+  const safeConfig = repairCcrCodexProfiles(postProbeConfig);
   await freshRpc("saveConfig", [safeConfig, { applyProfile: false }]);
   assert.deepEqual(await read(sentinelPath), sentinelBytes, "safe applyProfile:false save mutated Codex sentinel");
   return { persistedConfig, rpc: freshRpc };
@@ -198,8 +201,8 @@ async function main() {
       dangerousProfile,
       env,
       initialConfig,
+      postProbeConfig: configured,
       rpc,
-      safeConfig: configured,
       sentinelBytes,
       sentinelPath,
     }));
