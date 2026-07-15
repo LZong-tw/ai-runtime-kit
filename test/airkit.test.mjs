@@ -275,6 +275,16 @@ test("CCR 3 profiles require an explicit launch contract", () => {
   );
 });
 
+test("CCR 3 launch rejects args that clear the managed apiKeyHelper", () => {
+  const catalog = launchCatalog();
+  catalog.profiles[0].launch.args.unshift("--settings", "{\"apiKeyHelper\":\"\"}");
+
+  assert.throws(
+    () => buildLaunchPlan(catalog, "launch-example", { mode: "auto" }),
+    /must not override CCR managed apiKeyHelper/,
+  );
+});
+
 test("legacy transformer rejection happens before launch writes or CCR RPC", async () => {
   const catalog = launchCatalog();
   const configDir = await mkdtemp(join(tmpdir(), "airkit-legacy-transformer-"));
@@ -673,25 +683,23 @@ test("buildLaunchPlan applies pro mode CCR routing overlay without mutating the 
     assert.equal(plan.ccrConfig.Router.background, "demo,cheap-coder");
     assert.equal(catalog.profiles[0].ccr.Router.default, "demo,steady-coder");
     assert.equal(plan.launch.command, "ccr");
-    assert.deepEqual(plan.launch.args.slice(0, 6), [
+    assert.deepEqual(plan.launch.args.slice(0, 4), [
       "airkit-launch-example-pro",
       "cli",
       "--",
-      "--settings",
-      "{\"apiKeyHelper\":\"\"}",
       "--append-system-prompt",
     ]);
     assert.match(
-      plan.launch.args[6],
+      plan.launch.args[4],
       /AirClaude mode pro routes default to strong-coder while Claude launch uses claude-sonnet-4-6\./,
     );
-    assert.match(plan.launch.args[6], /AirKit reusable runtime lessons/);
-    assert.match(plan.launch.args[6], /AirClaude active routing/);
-    assert.match(plan.launch.args[6], /mode: pro/);
-    assert.match(plan.launch.args[6], /default: demo,strong-coder \(model strong-coder\)/);
-    assert.match(plan.launch.args[6], /background: demo,cheap-coder \(model cheap-coder\)/);
-    assert.doesNotMatch(plan.launch.args[6], /- think:|- longContext:|- webSearch:/);
-    assert.match(plan.launch.args[6], /Do not infer the active provider route from Claude Code's displayed model name/);
+    assert.match(plan.launch.args[4], /AirKit reusable runtime lessons/);
+    assert.match(plan.launch.args[4], /AirClaude active routing/);
+    assert.match(plan.launch.args[4], /mode: pro/);
+    assert.match(plan.launch.args[4], /default: demo,strong-coder \(model strong-coder\)/);
+    assert.match(plan.launch.args[4], /background: demo,cheap-coder \(model cheap-coder\)/);
+    assert.doesNotMatch(plan.launch.args[4], /- think:|- longContext:|- webSearch:/);
+    assert.match(plan.launch.args[4], /Do not infer the active provider route from Claude Code's displayed model name/);
     assert.equal(plan.launch.env.AIRCLAUDE_PROFILE, "launch-example");
     assert.equal(plan.launch.env.AIRCLAUDE_MODE, "pro");
     assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_DEFAULT, "demo,strong-coder");
@@ -1421,26 +1429,24 @@ test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves
     assert.equal(spawned.length, 1);
     assert.deepEqual(launchEvents, ["gateway-ready", "profile-launch"]);
     assert.equal(spawned[0].command, "ccr");
-    assert.deepEqual(spawned[0].args.slice(0, 6), [
+    assert.deepEqual(spawned[0].args.slice(0, 4), [
       "airkit-launch-example-pro",
       "cli",
       "--",
-      "--settings",
-      "{\"apiKeyHelper\":\"\"}",
       "--append-system-prompt",
     ]);
     assert.match(
-      spawned[0].args[6],
+      spawned[0].args[4],
       /AirClaude mode pro routes default to strong-coder while Claude launch uses claude-sonnet-4-6\./,
     );
-    assert.match(spawned[0].args[6], /AirKit reusable runtime lessons/);
-    assert.match(spawned[0].args[6], /AirClaude active routing/);
-    assert.match(spawned[0].args[6], /mode: pro/);
-    assert.match(spawned[0].args[6], /background: demo,cheap-coder \(model cheap-coder\)/);
+    assert.match(spawned[0].args[4], /AirKit reusable runtime lessons/);
+    assert.match(spawned[0].args[4], /AirClaude active routing/);
+    assert.match(spawned[0].args[4], /mode: pro/);
+    assert.match(spawned[0].args[4], /background: demo,cheap-coder \(model cheap-coder\)/);
     // AirClaude selects its display model for this launch only; passthrough args
     // still follow and can override it for the same process.
-  assert.equal(spawned[0].args[7], "--model");
-  assert.equal(spawned[0].args[8], "claude-sonnet-4-6");
+  assert.equal(spawned[0].args[5], "--model");
+  assert.equal(spawned[0].args[6], "claude-sonnet-4-6");
   assert.equal(spawned[0].args.at(-1), "--dangerously-skip-permissions");
     assert.deepEqual(spawned[0].env, {
       DEMO_API_KEY: "runtime-secret",
@@ -1690,8 +1696,6 @@ function launchCatalog() {
         launch: {
           binary: "claude",
           args: [
-            "--settings",
-            "{\"apiKeyHelper\":\"\"}",
             "--append-system-prompt",
             "AirClaude mode {{launchMode}} routes default to {{routeDefaultModel}} while Claude launch uses {{claudeModel}}.",
           ],

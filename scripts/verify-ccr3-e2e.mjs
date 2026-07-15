@@ -10,6 +10,9 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { repairCcrCodexProfiles } from "../src/codex-takeover-guard.mjs";
+import { assertNoManagedApiKeyHelperOverride } from "../src/airkit.mjs";
+
+export { assertNoManagedApiKeyHelperOverride as assertNoApiKeyHelperOverride };
 
 const ISOLATED_PATH_VARIABLES = [
   "HOME",
@@ -478,6 +481,8 @@ async function installFakeClaude(binDir) {
 import { execFileSync } from "node:child_process";
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+const assertNoManagedApiKeyHelperOverride = (${assertNoManagedApiKeyHelperOverride.toString()});
+assertNoManagedApiKeyHelperOverride(process.argv.slice(2));
 const baseUrl = process.env.ANTHROPIC_BASE_URL;
 const model = process.env.ANTHROPIC_MODEL;
 if (!baseUrl || !model) throw new Error("named CCR profile did not supply gateway URL and model");

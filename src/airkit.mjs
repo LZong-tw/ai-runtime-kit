@@ -350,9 +350,11 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
   const launchVars = launchTemplateVars(profile, configDir, mode, ccrConfig, claudeModel);
   const basePlan = planInstall(catalog, profileName, { configDir, write: true, force: true });
   const managedProfileId = `airkit-${slug(profile.name)}-${slug(mode)}`;
+  const renderedLaunchArgs = (launch.args ?? []).map((arg) => renderTemplateValue(arg, launchVars));
+  assertNoManagedApiKeyHelperOverride(renderedLaunchArgs);
   const claudeArgs = appendLaunchRuntimePrompts(
     withAirclaudeModelArg(
-      (launch.args ?? []).map((arg) => renderTemplateValue(arg, launchVars)),
+      renderedLaunchArgs,
       launch.binary,
       claudeModel,
     ),
@@ -382,6 +384,28 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
       userArgs: options.userArgs ?? [],
     },
   };
+}
+
+export function assertNoManagedApiKeyHelperOverride(args) {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = String(args[index]);
+    const value = arg === "--settings"
+      ? args[index + 1]
+      : arg.startsWith("--settings=")
+        ? arg.slice("--settings=".length)
+        : undefined;
+    if (typeof value !== "string" || !value.trim().startsWith("{")) continue;
+    let settings;
+    try {
+      settings = JSON.parse(value);
+    } catch {
+      continue;
+    }
+    if (settings && typeof settings === "object" && !Array.isArray(settings)
+      && Object.hasOwn(settings, "apiKeyHelper")) {
+      throw new Error("CCR-backed Claude launch args must not override CCR managed apiKeyHelper");
+    }
+  }
 }
 
 export async function prepareLaunch(catalog, profileName, options = {}) {
