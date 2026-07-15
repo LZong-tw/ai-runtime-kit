@@ -1,14 +1,12 @@
 import { readFileSync } from "node:fs";
 import {
   TOOL_SEARCH_TYPES,
-  createToolSearchResult,
   inspectCompatibilityRequest,
-  mapToolSearchError,
-  searchDeferredTools,
 } from "./protocol.mjs";
 import { createFallbackRouter } from "./fallback.mjs";
 import { inspectPendingServerHistory } from "./server-history.mjs";
 import { inspectServerToolRequest } from "./server-tools.mjs";
+import { bridgeToolSearch } from "./tool-search.mjs";
 
 const TOOL_SEARCH_BRIDGE_NAME = "airkit_tool_search";
 const MAX_EXECUTOR_ITERATIONS = 8;
@@ -150,20 +148,18 @@ export async function handleCompatibilityMessage({
       };
       outwardContent.push(serverUse);
 
-      let result;
-      try {
-        const references = searchDeferredTools({
-          tools: inspection.deferredTools,
-          type: inspection.toolSearch?.type,
-          query: call.input?.query,
-        });
-        for (const reference of references) activeDeferredTools.add(reference.tool_name);
-        result = createToolSearchResult({ toolUseId: serverUseId, toolReferences: references });
-      } catch (error) {
-        if (error?.code === "tool_search_fallback_required") {
-          return routeWholeRequestFallback({ body, headers, config, coreClient, response, signal });
-        }
-        result = mapToolSearchError({ toolUseId: serverUseId, error });
+      const bridged = bridgeToolSearch({
+        body,
+        definition: inspection.toolSearch,
+        query: call.input?.query,
+        toolUseId: serverUseId,
+      });
+      if (bridged.kind === "fallback") {
+        return routeWholeRequestFallback({ body, headers, config, coreClient, response, signal });
+      }
+      const result = bridged.block;
+      for (const reference of result.content.tool_references ?? []) {
+        activeDeferredTools.add(reference.tool_name);
       }
       outwardContent.push(result);
       resumeResults.push(bridgeResumeResult(call.id, toolSearchResultText(result)));
