@@ -792,7 +792,38 @@ test("Codex takeover in live CCR config blocks before credential resolution or s
       },
     );
 
-    assert.deepEqual(calls, ["getVersion", "getConfig"]);
+    assert.deepEqual(calls, ["getConfig"]);
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("Codex takeover safety probe reads config before any other RPC", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-codex-takeover-order-"));
+  const calls = [];
+  const ccrClient = {
+    getConfig: async () => {
+      calls.push("getConfig");
+      return { profile: { enabled: true, profiles: [] } };
+    },
+    getVersion: async () => {
+      calls.push("getVersion");
+      return "3.0.4";
+    },
+    saveConfig: async () => calls.push("saveConfig"),
+  };
+
+  try {
+    await prepareLaunch(launchCatalog(), "launch-example", {
+      ccrClient,
+      commandExists: async () => true,
+      configDir: join(root, "airkit"),
+      env: { DEMO_API_KEY: "runtime-secret", HOME: root },
+      launch: false,
+      runtimeVersions: passingRuntimeVersions(),
+    });
+
+    assert.deepEqual(calls.slice(0, 2), ["getConfig", "getVersion"]);
   } finally {
     await rm(root, { force: true, recursive: true });
   }
@@ -826,6 +857,63 @@ test("createCcr3Client autoStart false rejects missing and stale services withou
       await assert.rejects(client.getConfig(), /CCR 3 management service is not running/);
       assert.ok(!calls.includes("runner"));
       assert.deepEqual(calls, serviceState === "missing" ? [] : ["fetch"]);
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  }
+});
+
+test("Codex takeover safety probe fails closed without starting missing or stale CCR", async () => {
+  for (const serviceState of ["missing", "stale"]) {
+    const root = await mkdtemp(join(tmpdir(), `airkit-codex-probe-${serviceState}-`));
+    const stateDir = join(root, ".claude-code-router");
+    const calls = [];
+    const sentinel = `private-${serviceState}-rpc-payload`;
+
+    try {
+      if (serviceState === "stale") {
+        await mkdir(stateDir, { recursive: true });
+        await writeFile(join(stateDir, "service.json"), JSON.stringify({
+          url: "http://127.0.0.1:9/?ccr_web_token=synthetic-token",
+        }));
+      }
+
+      await assert.rejects(
+        prepareLaunch(launchCatalog(), "launch-example", {
+          commandExists: async () => true,
+          configDir: join(root, "airkit"),
+          createCcrClient: (clientOptions) => {
+            calls.push(`client:autoStart=${clientOptions.autoStart}`);
+            return airkitRuntime.createCcr3Client({
+              ...clientOptions,
+              fetch: async () => {
+                calls.push("fetch");
+                throw new Error(sentinel);
+              },
+              runCommand: async () => {
+                calls.push("runner");
+                return { ok: true, status: 0, stdout: "" };
+              },
+            });
+          },
+          env: { DEMO_API_KEY: "runtime-secret", HOME: root },
+          launch: false,
+          runtimeVersions: passingRuntimeVersions(),
+        }),
+        (error) => {
+          assert.match(error.message, /unable to inspect CCR configuration safely/i);
+          assert.match(error.message, /airkit repair codex-takeover --write/);
+          assert.doesNotMatch(error.message, new RegExp(sentinel));
+          return true;
+        },
+      );
+
+      assert.equal(calls[0], "client:autoStart=false");
+      assert.ok(!calls.includes("runner"));
+      assert.ok(!calls.includes("client:autoStart=true"));
+      assert.deepEqual(calls, serviceState === "missing"
+        ? ["client:autoStart=false"]
+        : ["client:autoStart=false", "fetch"]);
     } finally {
       await rm(root, { force: true, recursive: true });
     }
@@ -891,6 +979,44 @@ test("codex-takeover preview uses a non-starting client and performs zero writes
   assert.match(output.join(""), /airkit repair codex-takeover --write/);
   assert.doesNotMatch(output.join(""), /do-not-leak|private-value|privateValue/);
   assert.ok(!calls.some((call) => ["write", "rename", "unlink"].includes(call)));
+});
+
+test("codex-takeover preview sanitizes CCR RPC failures", async () => {
+  const sentinel = "private-preview-rpc-payload";
+  const calls = [];
+  const output = [];
+
+  await assert.rejects(
+    runCli(["repair", "codex-takeover"], {
+      catalogPath: "/does/not/exist/catalog.json",
+      codexTakeoverIo: {
+        readFile: async () => Buffer.from("theme = \"dark\"\n"),
+        rename: async () => calls.push("rename"),
+        stat: async () => ({ mode: 0o100600 }),
+        unlink: async () => calls.push("unlink"),
+        writeFile: async () => calls.push("write"),
+      },
+      createCcrClient: (clientOptions) => {
+        calls.push(`client:autoStart=${clientOptions.autoStart}`);
+        return {
+          getConfig: async () => {
+            calls.push("getConfig");
+            throw new Error(`CCR RPC failed with ${sentinel}`);
+          },
+        };
+      },
+      env: { HOME: "/synthetic/home" },
+      stdout: { write: (chunk) => output.push(chunk) },
+    }),
+    (error) => {
+      assert.match(error.message, /Codex takeover repair preview failed/);
+      assert.match(error.message, /airkit repair codex-takeover --write/);
+      assert.doesNotMatch(`${error.message}\n${output.join("")}`, new RegExp(sentinel));
+      return true;
+    },
+  );
+
+  assert.deepEqual(calls, ["client:autoStart=false", "getConfig"]);
 });
 
 test("codex-takeover --write backs up exact bytes before RPC and reports only safe paths", async () => {
