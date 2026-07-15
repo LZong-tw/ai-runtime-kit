@@ -1,23 +1,18 @@
 import { readFileSync } from "node:fs";
 import {
-  ADVISOR_TOOL_TYPE,
   TOOL_SEARCH_TYPES,
-  assertAnthropicFamilyModel,
-  createAdvisorToolResult,
   createToolSearchResult,
   inspectCompatibilityRequest,
   mapToolSearchError,
   searchDeferredTools,
 } from "./protocol.mjs";
+import { createFallbackRouter } from "./fallback.mjs";
+import { inspectPendingServerHistory } from "./server-history.mjs";
+import { inspectServerToolRequest } from "./server-tools.mjs";
 
-const ADVISOR_BRIDGE_NAME = "airkit_advisor";
 const TOOL_SEARCH_BRIDGE_NAME = "airkit_tool_search";
 const MAX_EXECUTOR_ITERATIONS = 8;
-const MAX_TRANSCRIPT_LENGTH = 32_768;
 const MAX_HISTORY_TEXT_LENGTH = 4_096;
-const FALLBACK_WARNING =
-  "Compatibility fallback active for this request; native server-tool behavior is unavailable.";
-const FALLBACK_HISTORY_NOTICE = "Compatibility history omitted for fallback.";
 
 const SAFE_HEADER_NAMES = new Set([
   "accept",
@@ -53,11 +48,20 @@ export function createCoreClient({ config, fetchImpl = fetch, readFile = readFil
   });
 
   return {
-    async requestMessage(body, headers) {
+    async requestFallback(body, headers, signal) {
+      return fetchImpl(endpoint, {
+        method: "POST",
+        headers: coreHeaders(headers),
+        body: JSON.stringify(body),
+        signal,
+      });
+    },
+    async requestMessage(body, headers, signal) {
       const result = await fetchImpl(endpoint, {
         method: "POST",
         headers: coreHeaders(headers),
         body: JSON.stringify({ ...body, stream: false }),
+        signal,
       });
       return parseCoreMessageResponse(result);
     },
@@ -79,21 +83,27 @@ export async function handleCompatibilityMessage({
   config,
   coreClient,
   createId = defaultCreateId,
+  response,
+  signal,
 }) {
+  const serverTools = inspectServerToolRequest(body);
+  const serverHistory = inspectPendingServerHistory(body);
+  if (requiresWholeRequestFallback({ body, config, serverHistory, serverTools })) {
+    return routeWholeRequestFallback({ body, headers, config, coreClient, response, signal });
+  }
+
   const inspection = inspectCompatibilityRequest(body);
   let normalized;
   try {
     normalized = normalizeCompatibilityHistory(body.messages);
   } catch {
-    return requestCompatibilityFallback({ body, headers, config, coreClient });
+    return routeWholeRequestFallback({ body, headers, config, coreClient, response, signal });
   }
 
   const activeDeferredTools = new Set(normalized.referencedTools);
   const executorUsage = [];
-  const advisorUsage = [];
   const outwardContent = [];
   const messages = normalized.messages;
-  let advisorUses = 0;
 
   for (let iteration = 0; iteration < MAX_EXECUTOR_ITERATIONS; iteration += 1) {
     const executorBody = {
@@ -107,18 +117,17 @@ export async function handleCompatibilityMessage({
       executorBody,
       headers,
       "CCR executor request failed",
+      signal,
     );
     executorUsage.push(copyUsage(executorMessage.usage));
 
     const bridgeCalls = executorMessage.content.filter(
-      (block) =>
-        block?.type === "tool_use" &&
-        (block.name === ADVISOR_BRIDGE_NAME || block.name === TOOL_SEARCH_BRIDGE_NAME),
+      (block) => block?.type === "tool_use" && block.name === TOOL_SEARCH_BRIDGE_NAME,
     );
 
     if (bridgeCalls.length === 0) {
       outwardContent.push(...executorMessage.content.map((block) => structuredClone(block)));
-      return finalizeMessage(executorMessage, outwardContent, executorUsage, advisorUsage);
+      return finalizeMessage(executorMessage, outwardContent, executorUsage);
     }
 
     const resumeResults = [];
@@ -126,104 +135,49 @@ export async function handleCompatibilityMessage({
     for (const call of executorMessage.content) {
       if (
         call?.type !== "tool_use" ||
-        (call.name !== ADVISOR_BRIDGE_NAME && call.name !== TOOL_SEARCH_BRIDGE_NAME)
+        call.name !== TOOL_SEARCH_BRIDGE_NAME
       ) {
         outwardContent.push(structuredClone(call));
         if (call?.type === "tool_use") hasNormalToolCall = true;
         continue;
       }
       const serverUseId = createId("srvtoolu");
-      if (call.name === ADVISOR_BRIDGE_NAME) {
-        const serverUse = {
-          type: "server_tool_use",
-          id: serverUseId,
-          name: inspection.advisor?.name ?? "advisor",
-          input: structuredClone(call.input ?? {}),
-        };
-        outwardContent.push(serverUse);
+      const serverUse = {
+        type: "server_tool_use",
+        id: serverUseId,
+        name: inspection.toolSearch?.name ?? "tool_search",
+        input: structuredClone(call.input ?? {}),
+      };
+      outwardContent.push(serverUse);
 
-        let result;
-        if (advisorUses >= advisorMaxUses(inspection.advisor)) {
-          result = createAdvisorToolResult({
-            toolUseId: serverUseId,
-            errorCode: "max_uses_exceeded",
-          });
-        } else {
-          advisorUses += 1;
-          const advisorMessage = await requestAdvisor({
-            body,
-            headers,
-            config,
-            coreClient,
-            messages,
-            executorMessage,
-            advisor: inspection.advisor,
-          });
-          if (advisorMessage === null) {
-            result = createAdvisorToolResult({ toolUseId: serverUseId, errorCode: "unavailable" });
-          } else {
-            advisorUsage.push(copyUsage(advisorMessage.usage));
-            result = createAdvisorToolResult({
-              toolUseId: serverUseId,
-              text: extractMessageText(advisorMessage),
-              stopReason: advisorMessage.stop_reason,
-            });
-          }
+      let result;
+      try {
+        const references = searchDeferredTools({
+          tools: inspection.deferredTools,
+          type: inspection.toolSearch?.type,
+          query: call.input?.query,
+        });
+        for (const reference of references) activeDeferredTools.add(reference.tool_name);
+        result = createToolSearchResult({ toolUseId: serverUseId, toolReferences: references });
+      } catch (error) {
+        if (error?.code === "tool_search_fallback_required") {
+          return routeWholeRequestFallback({ body, headers, config, coreClient, response, signal });
         }
-        outwardContent.push(result);
-        resumeResults.push(bridgeResumeResult(call.id, advisorResultText(result)));
-      } else {
-        const serverUse = {
-          type: "server_tool_use",
-          id: serverUseId,
-          name: inspection.toolSearch?.name ?? "tool_search",
-          input: structuredClone(call.input ?? {}),
-        };
-        outwardContent.push(serverUse);
-
-        let result;
-        try {
-          const references = searchDeferredTools({
-            tools: inspection.deferredTools,
-            type: inspection.toolSearch?.type,
-            query: call.input?.query,
-          });
-          for (const reference of references) activeDeferredTools.add(reference.tool_name);
-          result = createToolSearchResult({ toolUseId: serverUseId, toolReferences: references });
-        } catch (error) {
-          if (error?.code === "tool_search_fallback_required") {
-            return requestCompatibilityFallback({
-              body,
-              headers,
-              config,
-              coreClient,
-              executorUsage,
-              advisorUsage,
-            });
-          }
-          result = mapToolSearchError({ toolUseId: serverUseId, error });
-        }
-        outwardContent.push(result);
-        resumeResults.push(bridgeResumeResult(call.id, toolSearchResultText(result)));
+        result = mapToolSearchError({ toolUseId: serverUseId, error });
       }
+      outwardContent.push(result);
+      resumeResults.push(bridgeResumeResult(call.id, toolSearchResultText(result)));
     }
 
     if (hasNormalToolCall) {
-      return finalizeMessage(executorMessage, outwardContent, executorUsage, advisorUsage);
+      return finalizeMessage(executorMessage, outwardContent, executorUsage);
     }
 
     messages.push({ role: "assistant", content: structuredClone(executorMessage.content) });
     messages.push({ role: "user", content: resumeResults });
   }
 
-  return requestCompatibilityFallback({
-    body,
-    headers,
-    config,
-    coreClient,
-    executorUsage,
-    advisorUsage,
-  });
+  return routeWholeRequestFallback({ body, headers, config, coreClient, response, signal });
 }
 
 export function writeAnthropicMessage(response, message, stream) {
@@ -272,19 +226,12 @@ export function writeAnthropicMessage(response, message, stream) {
 function createExecutorTools(tools = [], inspection, activeDeferredTools) {
   const executorTools = [];
   for (const tool of Array.isArray(tools) ? tools : []) {
-    if (tool?.type === ADVISOR_TOOL_TYPE || TOOL_SEARCH_TYPES.has(tool?.type)) continue;
+    if (TOOL_SEARCH_TYPES.has(tool?.type)) continue;
     if (tool?.defer_loading === true) {
       if (activeDeferredTools.has(tool.name)) executorTools.push(expandDeferredTool(tool));
       continue;
     }
     executorTools.push(structuredClone(tool));
-  }
-  if (inspection.advisor !== null) {
-    executorTools.push({
-      name: ADVISOR_BRIDGE_NAME,
-      description: "Consult the configured advisor for this request.",
-      input_schema: { type: "object", properties: {}, additionalProperties: false },
-    });
   }
   if (inspection.toolSearch !== null) {
     executorTools.push({
@@ -320,9 +267,6 @@ function normalizeCompatibilityHistory(source) {
         if (typeof block.id !== "string" || pendingUses.has(block.id)) throw unsupportedHistory();
         pendingUses.set(block.id, compatibilityServerUseKind(block));
         content.push({ type: "text", text: boundedHistoryText(`Compatibility request: ${block.name}`) });
-      } else if (block?.type === "advisor_tool_result") {
-        consumePendingUse(pendingUses, block.tool_use_id, "advisor");
-        content.push({ type: "text", text: boundedHistoryText(advisorHistoryText(block)) });
       } else if (block?.type === "tool_search_tool_result") {
         consumePendingUse(pendingUses, block.tool_use_id, "tool_search");
         const references = block.content?.tool_references;
@@ -347,7 +291,6 @@ function isCompatibilityServerUse(block) {
 }
 
 function compatibilityServerUseKind(block) {
-  if (block.name === "advisor") return "advisor";
   if (String(block.name ?? "").startsWith("tool_search_tool_")) return "tool_search";
   return null;
 }
@@ -355,16 +298,6 @@ function compatibilityServerUseKind(block) {
 function consumePendingUse(pendingUses, toolUseId, expectedKind) {
   if (pendingUses.get(toolUseId) !== expectedKind) throw unsupportedHistory();
   pendingUses.delete(toolUseId);
-}
-
-function advisorHistoryText(block) {
-  const content = block.content;
-  if (content?.type === "advisor_result") return `Advisor result: ${String(content.text ?? "")}`;
-  if (content?.type === "advisor_tool_result_error") {
-    return `Advisor result error: ${String(content.error_code ?? "unavailable")}`;
-  }
-  if (content?.type === "advisor_redacted_result") return "Advisor result: [redacted]";
-  throw unsupportedHistory();
 }
 
 function toolSearchHistoryText(block) {
@@ -388,67 +321,6 @@ function unsupportedHistory() {
   return new Error("Unsupported compatibility history");
 }
 
-async function requestAdvisor({
-  body,
-  headers,
-  config,
-  coreClient,
-  messages,
-  executorMessage,
-  advisor,
-}) {
-  const model = assertAnthropicFamilyModel(config.advisor?.model, "advisor.model");
-  const transcript = boundedTranscript([...messages, { role: "assistant", content: executorMessage.content }]);
-  try {
-    const result = await coreClient.requestMessage(
-      {
-        model,
-        max_tokens: advisor?.max_tokens ?? body.max_tokens,
-        messages: [
-          {
-            role: "user",
-            content:
-              "Review this quoted conversation transcript and return advisor text only.\n" +
-              `<transcript>\n${transcript}\n</transcript>`,
-          },
-        ],
-        stream: false,
-      },
-      headers,
-    );
-    assertMessageResponse(result);
-    return result;
-  } catch {
-    return null;
-  }
-}
-
-function boundedTranscript(messages) {
-  let serialized;
-  try {
-    serialized = JSON.stringify(messages);
-  } catch {
-    serialized = "[unavailable transcript]";
-  }
-  return serialized.slice(0, MAX_TRANSCRIPT_LENGTH);
-}
-
-function extractMessageText(message) {
-  return message.content
-    .filter((block) => block?.type === "text")
-    .map((block) => String(block.text ?? ""))
-    .join("");
-}
-
-function advisorMaxUses(advisor) {
-  return Number.isInteger(advisor?.max_uses) ? Math.max(0, advisor.max_uses) : 1;
-}
-
-function advisorResultText(result) {
-  if (result.content.type === "advisor_result") return result.content.text;
-  return `Advisor unavailable: ${result.content.error_code}`;
-}
-
 function toolSearchResultText(result) {
   if (result.content.type === "tool_search_tool_search_result") {
     const names = result.content.tool_references.map((reference) => reference.tool_name);
@@ -465,85 +337,24 @@ function bridgeResumeResult(toolUseId, text) {
   };
 }
 
-async function requestCompatibilityFallback({
-  body,
-  headers,
-  config,
-  coreClient,
-  executorUsage = [],
-  advisorUsage = [],
-}) {
-  const fallbackModel = assertAnthropicFamilyModel(
-    config.advisor?.fallbackModel,
-    "advisor.fallbackModel",
-  );
-  const fallbackBody = {
-    ...body,
-    model: fallbackModel,
-    messages: stripCompatibilityHistory(body.messages),
-    tools: expandFallbackTools(body.tools),
-    stream: false,
-  };
-  const result = await requestCoreMessage(
-    coreClient,
-    fallbackBody,
-    headers,
-    "CCR compatibility fallback failed",
-  );
-  const allExecutorUsage = [...executorUsage, copyUsage(result.usage)];
-  return {
-    ...result,
-    content: [{ type: "text", text: FALLBACK_WARNING }, ...structuredClone(result.content)],
-    usage: aggregateExecutorUsage(result.usage, allExecutorUsage, advisorUsage),
-  };
-}
-
-function stripCompatibilityHistory(source) {
-  return (Array.isArray(source) ? source : []).map((message) => {
-    if (!Array.isArray(message?.content)) return structuredClone(message);
-    const content = message.content
-      .filter(
-        (block) =>
-          !(
-            (block?.type === "server_tool_use" && isCompatibilityServerUse(block)) ||
-            block?.type === "advisor_tool_result" ||
-            block?.type === "tool_search_tool_result"
-          ),
-      )
-      .map((block) => structuredClone(block));
-    return {
-      ...structuredClone(message),
-      content:
-        content.length > 0 ? content : [{ type: "text", text: FALLBACK_HISTORY_NOTICE }],
-    };
-  });
-}
-
-function expandFallbackTools(tools = []) {
-  return (Array.isArray(tools) ? tools : [])
-    .filter((tool) => tool?.type !== ADVISOR_TOOL_TYPE && !TOOL_SEARCH_TYPES.has(tool?.type))
-    .map(expandDeferredTool);
-}
-
 function expandDeferredTool(tool) {
   const expanded = structuredClone(tool);
   delete expanded.defer_loading;
   return expanded;
 }
 
-function finalizeMessage(message, content, executorUsage, advisorUsage) {
+function finalizeMessage(message, content, executorUsage) {
   return {
     ...message,
     content,
-    usage: aggregateExecutorUsage(message.usage, executorUsage, advisorUsage),
+    usage: aggregateExecutorUsage(message.usage, executorUsage),
   };
 }
 
-function aggregateExecutorUsage(finalUsage, executorUsage, advisorUsage) {
+function aggregateExecutorUsage(finalUsage, executorUsage) {
   const usage = copyUsage(finalUsage);
   aggregateNumericUsageFields(usage, executorUsage);
   usage.iterations = {
-    advisor: advisorUsage.map(copyUsage),
     executor: executorUsage.map(copyUsage),
   };
   return usage;
@@ -605,14 +416,40 @@ function assertMessageResponse(message) {
   }
 }
 
-async function requestCoreMessage(coreClient, body, headers, publicMessage) {
+async function requestCoreMessage(coreClient, body, headers, publicMessage, signal) {
   try {
-    const message = await coreClient.requestMessage(body, headers);
+    const message = await coreClient.requestMessage(body, headers, signal);
     assertMessageResponse(message);
     return message;
   } catch {
     throw new Error(publicMessage);
   }
+}
+
+function requiresWholeRequestFallback({ body, config, serverHistory, serverTools }) {
+  if (serverTools.requiresFallback || serverHistory.continuation === "unsupported") return true;
+  if (serverHistory.containerId !== null || serverHistory.pendingServerCallIds.length > 0) return true;
+  if (Array.isArray(body?.mcp_servers) && body.mcp_servers.length > 0) return true;
+
+  const families = new Set([...serverTools.families, ...serverHistory.families]);
+  for (const family of families) {
+    if (family === "toolSearch" && config.toolSearch?.mode === "bridge") continue;
+    return true;
+  }
+  return false;
+}
+
+async function routeWholeRequestFallback({ body, headers, config, coreClient, response, signal }) {
+  const requestFallback = coreClient.requestFallback?.bind(coreClient) ??
+    coreClient.requestMessage.bind(coreClient);
+  const route = createFallbackRouter({
+    config,
+    coreClient: ({ body: fallbackBody, headers: fallbackHeaders, signal: fallbackSignal }) =>
+      requestFallback(fallbackBody, fallbackHeaders, fallbackSignal),
+  });
+  const result = await route({ body, headers, signal });
+  if (response === undefined) return result;
+  await pipeCoreResponse(result, response, signal);
 }
 
 function defaultCreateId(prefix) {
