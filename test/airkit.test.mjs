@@ -36,6 +36,29 @@ test("runtime requirements hard-cut to Node 22, Claude Code 2.1.208, and CCR 3.0
   });
 });
 
+test("catalog rejects invalid proactive compaction policy", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-invalid-context-policy-"));
+  const catalog = launchCatalog();
+  const cases = [
+    [{ autoCompactWindow: 99999 }, /autoCompactWindow must be an integer from 100000 to 1000000/],
+    [{ autoCompactWindow: 300000.5 }, /autoCompactWindow must be an integer from 100000 to 1000000/],
+    [{ autoCompactPercentage: 0 }, /autoCompactPercentage must be "default" or an integer from 1 to 100/],
+    [{ autoCompactPercentage: "40" }, /autoCompactPercentage must be "default" or an integer from 1 to 100/],
+    [{ extra: true }, /launch\.context contains unsupported field: extra/],
+  ];
+
+  try {
+    for (const [index, [context, expected]] of cases.entries()) {
+      catalog.profiles[0].launch.context = context;
+      const catalogPath = join(root, `${index}.json`);
+      await writeFile(catalogPath, `${JSON.stringify(catalog)}\n`);
+      await assert.rejects(loadCatalog(catalogPath), expected);
+    }
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
 test("isolated verifier restarts management-only before trusting persisted dangerous Codex state", async () => {
   assert.equal(ccrVerifier.isSupportedCcrVersion("3.0.4"), true);
   assert.equal(ccrVerifier.isSupportedCcrVersion("3.9.99"), true);
@@ -846,6 +869,39 @@ test("airclaude launch quiets the Powerlevel10k instant prompt in its command su
     // command shells, spamming "(eval): command not found: git/head/awk/...". Disabling instant
     // prompt for the launched process silences it without touching the user's P10k/.zshrc setup.
     assert.equal(plan.launch.env.POWERLEVEL9K_INSTANT_PROMPT, "off");
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("airclaude launch scopes proactive compaction policy to the managed child", async () => {
+  const catalog = launchCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-compaction-"));
+  catalog.profiles[0].launch.context = {
+    autoCompactWindow: 300000,
+    autoCompactPercentage: "default",
+  };
+  catalog.profiles[0].launch.env = {
+    CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "99",
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: "1",
+  };
+
+  try {
+    const env = {
+      CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "40",
+      HOME: configDir,
+    };
+    const plan = buildLaunchPlan(catalog, "launch-example", { configDir, env });
+    const managed = airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {}, { configDir, env });
+    const managedProfile = managed.config.profile.profiles.find(
+      (candidate) => candidate.id === "airkit-launch-example-auto",
+    );
+
+    assert.equal(plan.launch.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "300000");
+    assert.equal(plan.launch.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, "");
+    assert.equal(managedProfile.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "300000");
+    assert.equal(managedProfile.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, "");
+    assert.equal(env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, "40");
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }
