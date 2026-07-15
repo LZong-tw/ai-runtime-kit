@@ -41,6 +41,21 @@ Do not commit tenant-specific deployment names, regions, quotas, negotiated
 prices, or private gateway details. Task labels such as `think` and
 `longContext` describe model suitability only; they are not CCR 3 Router keys.
 
+`airkit doctor --profile <name>` labels the source of any reported context
+window. Catalog values and Claude Code `/model/info` values are model metadata;
+they are not the token state of a completion response. `/model/info` therefore
+cannot prove how much context the current turn consumed or whether the provider
+reported a cache hit.
+
+Completion usage is accounted independently. OpenAI-compatible
+`prompt_tokens` already includes cached prompt tokens, so nested
+`prompt_tokens_details.cached_tokens` is reported without being added a second
+time. Anthropic-style `input_tokens`, `cache_read_input_tokens`, and
+`cache_creation_input_tokens` are summed for total input accounting. If a
+provider returns only total prompt/completion usage, compaction accounting still
+uses the non-zero input total and reports cache details as `unavailable`; AirKit
+does not synthesize cache hits.
+
 ## Profile fields
 
 - `name`: required lookup key and generated-file identifier.

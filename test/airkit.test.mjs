@@ -727,6 +727,8 @@ test("doctorProfile reports rendered file drift and runtime availability", async
     assert.equal(result.files.ccrConfig.ok, false);
     assert.equal(result.files.shellSnippet.ok, true);
     assert.equal(result.runtime.ccr.ok, false);
+    assert.equal(result.runtime.context.contextWindow.source, "unavailable");
+    assert.equal(result.runtime.context.usage.cacheDetails, "unavailable");
     assert.match(result.failures.join("\n"), /stale CCR config/);
     assert.match(result.failures.join("\n"), /missing command: ccr/);
   } finally {
@@ -752,6 +754,12 @@ test("doctorProfile reports each configured compatibility capability without a l
       webSearch: "unverified",
     });
     assert.equal(result.runtime.compatibility.ok, true);
+    assert.deepEqual(result.runtime.context.contextWindow, {
+      tokens: 256_000,
+      source: "catalog:modelCatalog",
+      metadataOnly: true,
+    });
+    assert.equal(result.runtime.context.usage.cacheDetails, "unavailable");
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }
@@ -782,6 +790,8 @@ test("doctor command exits zero when rendered files match", async () => {
     assert.match(result.stdout, /ok shell snippet/);
     assert.match(result.stdout, /ok CCR availability/);
     assert.match(result.stdout, /ok shell source/);
+    assert.match(result.stdout, /info context window: unavailable/);
+    assert.match(result.stdout, /info completion usage: unavailable; cache details unavailable/);
     assert.equal(result.stderr, "");
   } finally {
     await rm(fakeBin, { force: true, recursive: true });
@@ -2193,7 +2203,7 @@ function launchCatalog() {
           id: "demo",
           models: [
             { id: "cheap-coder", pricingUsdPer1M: { input: 0.1 } },
-            { id: "steady-coder", pricingUsdPer1M: { input: 0.5 } },
+            { id: "steady-coder", contextWindow: 256_000, pricingUsdPer1M: { input: 0.5 } },
             { id: "strong-coder", pricingUsdPer1M: { input: 2 } },
           ],
         },
