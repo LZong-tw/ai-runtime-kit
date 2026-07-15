@@ -326,6 +326,47 @@ test("CCR 3 launch rejects args that clear the managed apiKeyHelper", () => {
   );
 });
 
+test("CCR 3 launch inherits only the user's statusLine into the isolated Claude profile", async () => {
+  const home = await mkdtemp(join(tmpdir(), "airkit-statusline-home-"));
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-statusline-config-"));
+  const calls = [];
+  await mkdir(join(home, ".claude"), { recursive: true });
+  await writeFile(join(home, ".claude", "settings.json"), JSON.stringify({
+    model: "must-not-leak",
+    permissions: { ask: ["Bash(glab api:*)"] },
+    statusLine: { type: "command", command: "/tmp/statusline.sh" },
+  }));
+
+  try {
+    await prepareLaunch(launchCatalog(), "launch-example", {
+      ccrClient: {
+        ensureGateway: async () => {},
+        getConfig: async () => ({ Providers: [], Router: {}, profile: { profiles: [] } }),
+        getVersion: async () => "3.0.4",
+        saveConfig: async () => {},
+      },
+      commandExists: async () => true,
+      configDir,
+      env: { DEMO_API_KEY: "runtime-secret", HOME: home },
+      inspectCodexTakeoverFiles: async () => ({ inspection: { hazards: [] } }),
+      runtimeVersions: passingRuntimeVersions(),
+      spawnCommand: (_command, args) => {
+        calls.push(args);
+        return { status: 0 };
+      },
+    });
+
+    const settingsIndex = calls[0].indexOf("--settings");
+    assert.notEqual(settingsIndex, -1);
+    assert.deepEqual(JSON.parse(calls[0][settingsIndex + 1]), {
+      statusLine: { type: "command", command: "/tmp/statusline.sh" },
+    });
+  } finally {
+    await rm(home, { force: true, recursive: true });
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
 test("legacy transformer rejection happens before launch writes or CCR RPC", async () => {
   const catalog = launchCatalog();
   const configDir = await mkdtemp(join(tmpdir(), "airkit-legacy-transformer-"));
