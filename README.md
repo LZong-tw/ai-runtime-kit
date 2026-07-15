@@ -1,33 +1,103 @@
 # ai-runtime-kit
 
-Public-safe runtime profile templates for Claude Code Router and other AI client wrappers.
+AirKit turns public runtime profiles into managed Claude Code Router configuration
+and an `airclaude` launcher. It previews every managed-file or runtime change,
+keeps machine state outside git, and verifies the installed launch path.
 
-This repository intentionally contains no private endpoints, no credential-manager item references, and no secret values. Use `profiles/catalog.json` as a starting point, then keep machine-specific runtime state outside git.
+## Quick start
 
-`profiles/catalog.json` also includes a public model catalog seed for provider
-and gateway mapping. It covers first-party providers, LiteLLM provider prefixes,
-and Azure OpenAI deployment-name routing. Prices and limits are copied only from
-public vendor documentation and include a `lastReviewed` date because model
-catalogs change frequently.
+Prerequisites are Node.js 22 or newer, Claude Code 2.1.208 or newer, Claude Code
+Router 3.0.4 through the latest 3.x release, and zsh. The supported public
+onboarding path is a source checkout:
+
+```bash
+git clone https://github.com/LZong-tw/ai-runtime-kit.git
+cd ai-runtime-kit
+node src/airkit.mjs --help
+npm install --global . --dry-run
+# After reviewing and approving the global install:
+npm install --global .
+airkit --help
+```
+
+Do not claim a registry installation path unless a release has been verified as
+published and visible. The commands below use the installed `airkit` binary. To
+inspect the checkout without installing it, run
+`node src/airkit.mjs <command>` from the repository root instead.
+
+Inspect the runtime first:
+
+```bash
+airkit runtime check
+```
+
+If the check reports a missing or unsupported Claude Code or CCR version,
+preview the pinned update, review the packages and backup paths it prints, and
+only then deliberately run the write form:
+
+```bash
+airkit runtime update
+# After reviewing the preview and approving the changes:
+airkit runtime update --write
+```
+
+The public example expects an OpenAI-compatible provider. Its endpoint, model
+IDs, and credential are placeholders, so it can validate rendering and
+preflight but cannot complete a real provider request unchanged. When using a
+locally customized public profile, expose the credential through an environment
+variable such as:
+
+```bash
+export ANTHROPIC_AUTH_TOKEN="<provider-api-token>"
+```
+
+Never commit the real value. Preview the generated files, review every target
+path, then approve the write explicitly:
+
+```bash
+airkit init --profile openai-compatible-example
+# After reviewing the preview and approving the target paths:
+airkit init --profile openai-compatible-example --write
+source ~/.config/ai-runtime-kit/shell/openai-compatible-example.zsh
+```
+
+Verify the managed files and the actual launcher path, not only the install
+command:
+
+```bash
+airkit doctor --profile openai-compatible-example
+command -v airclaude
+airclaude --doctor
+airclaude
+```
+
+The last command is an interactive smoke test. Confirm that Claude starts, then
+exit normally. If the public placeholders have not been replaced or credentials
+are unavailable, report the provider session as blocked with the exact error;
+do not claim onboarding is complete merely because `init --write` succeeded.
+See [`docs/install.md`](docs/install.md) for updates, takeover recovery,
+troubleshooting, and the complete fresh-machine workflow.
+
+## Daily use
 
 ```bash
 airclaude
 airclaude pro
 airclaude --dry-run
 airclaude --doctor
-airclaude --help
-airkit list
-airkit --help
-airkit runtime check
-airkit runtime update
-airkit runtime update --write
-airkit repair codex-takeover
-airkit repair codex-takeover --write
-airkit init --profile openai-compatible-example
-airkit init --profile openai-compatible-example --write
-airkit render ccr --profile openai-compatible-example
-airkit render shell --profile openai-compatible-example
+airclaude -- --resume
 ```
+
+This repository intentionally contains no private endpoints, no
+credential-manager item references, and no secret values. Use
+`profiles/catalog.json` as a starting point, then keep machine-specific runtime
+state outside git.
+
+`profiles/catalog.json` also includes a public model catalog seed for provider
+and gateway mapping. It covers first-party providers, LiteLLM provider prefixes,
+and Azure OpenAI deployment-name routing. Prices and limits are copied only from
+public vendor documentation and include a `lastReviewed` date because model
+catalogs change frequently.
 
 The supported runtime is Node.js 22 or newer, Claude Code 2.1.208 or newer,
 and Claude Code Router 3.0.4 through the latest 3.x release. `runtime update`
