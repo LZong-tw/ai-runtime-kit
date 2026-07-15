@@ -118,6 +118,7 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
       env: {
         ...airclaudeLaunchEnv(catalog, profile, mode, modeConfig, options.env),
         ...renderTemplateValue(launch.env ?? {}, launchVars),
+        ...contextLaunchEnv(profile),
         CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
       },
       id: `${managedPrefix}${slug(mode)}`,
@@ -394,6 +395,7 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
       env: {
         ...airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, options.env),
         ...renderTemplateValue(launch.env ?? {}, launchVars),
+        ...contextLaunchEnv(profile),
       },
       userArgs: options.userArgs ?? [],
     },
@@ -549,7 +551,34 @@ function validateCatalog(catalog) {
       throw new Error(`profile "${profile.name}" has invalid visibility`);
     }
     if (profile.ccr) validateCcr(profile.name, profile.ccr);
+    validateLaunch(profile);
     validateManagedFiles(profile);
+  }
+}
+
+function validateLaunch(profile) {
+  const context = profile.launch?.context;
+  if (context === undefined) return;
+  if (!isPlainObject(context)) {
+    throw new Error(`profile "${profile.name}" launch.context must be an object`);
+  }
+
+  const supportedFields = new Set(["autoCompactPercentage", "autoCompactWindow"]);
+  for (const field of Object.keys(context)) {
+    if (!supportedFields.has(field)) {
+      throw new Error(`profile "${profile.name}" launch.context contains unsupported field: ${field}`);
+    }
+  }
+
+  const window = context.autoCompactWindow;
+  if (window !== undefined && (!Number.isInteger(window) || window < 100000 || window > 1000000)) {
+    throw new Error(`profile "${profile.name}" launch.context.autoCompactWindow must be an integer from 100000 to 1000000`);
+  }
+
+  const percentage = context.autoCompactPercentage;
+  if (percentage !== undefined && percentage !== "default"
+    && (!Number.isInteger(percentage) || percentage < 1 || percentage > 100)) {
+    throw new Error(`profile "${profile.name}" launch.context.autoCompactPercentage must be "default" or an integer from 1 to 100`);
   }
 }
 
@@ -1303,6 +1332,22 @@ function airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, runtimeEnv = proc
     env[`${envKey}_MODEL`] = model;
   }
 
+  return env;
+}
+
+function contextLaunchEnv(profile) {
+  const context = profile.launch?.context;
+  if (!context) return {};
+
+  const env = {};
+  if (context.autoCompactWindow !== undefined) {
+    env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(context.autoCompactWindow);
+  }
+  if (context.autoCompactPercentage === "default") {
+    env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = "";
+  } else if (context.autoCompactPercentage !== undefined) {
+    env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = String(context.autoCompactPercentage);
+  }
   return env;
 }
 

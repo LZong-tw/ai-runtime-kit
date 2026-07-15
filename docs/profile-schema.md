@@ -161,6 +161,10 @@ probe.
       "CCR_PROFILE": "{{profileName}}"
     },
     "claudeModel": "claude-sonnet-4-6",
+    "context": {
+      "autoCompactWindow": 300000,
+      "autoCompactPercentage": "default"
+    },
     "defaultMode": "auto",
     "modes": {
       "auto": {},
@@ -183,6 +187,15 @@ probe.
   `{{statuslineLabel}}`, and default/background route variables.
 - `claudeModel`: Claude-recognized model passed only as the launched process's
   `--model` argument.
+- `context.autoCompactWindow`: optional integer from `100000` through `1000000`
+  passed as `CLAUDE_CODE_AUTO_COMPACT_WINDOW` to the managed AirClaude child.
+  It changes when Claude Code compacts, not the model's real context window or
+  the status line's full-window percentage.
+- `context.autoCompactPercentage`: optional integer from `1` through `100`, or
+  `"default"`. An integer sets the managed child's percentage override;
+  `"default"` clears an inherited override for that child. Omitting the field
+  preserves normal environment inheritance. When `context` owns either value,
+  it takes precedence over the matching generic `launch.env` key.
 - `defaultMode`: mode selected by plain `airclaude`.
 - `modes.<name>.ccr`: partial CCR overlay for that managed mode.
 
