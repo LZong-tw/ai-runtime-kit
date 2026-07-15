@@ -271,8 +271,17 @@ test("CCR compatibility opt-in resolves the installed plugin and preserves unrel
 
   assert.deepEqual(merged.config.plugins[0], unrelated);
   assert.equal(merged.config.plugins[1].id, "airkit-compatibility");
+  assert.equal(merged.config.plugins[1].enabled, true);
   assert.equal(merged.config.plugins[1].module, resolve(import.meta.dirname, "..", "src", "compat", "plugin.mjs"));
   assert.doesNotMatch(merged.config.plugins[1].module, /airkit-compatibility\/plugins/);
+
+  const repeated = airkitRuntime.buildCcr3ManagedConfig(
+    catalog,
+    "launch-example",
+    merged.config,
+    { configDir: "/tmp/airkit-compatibility" },
+  );
+  assert.deepEqual(repeated.config, merged.config);
 });
 
 test("CCR compatibility rejects invalid or missing Anthropic-family compatibility models", () => {

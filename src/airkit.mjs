@@ -160,6 +160,7 @@ function mergeManagedConfigArrays(currentConfig, baseConfig, managedPrefix) {
     if (!Array.isArray(baseConfig[key])) continue;
     const managed = baseConfig[key].map((entry, index) => ({
       ...entry,
+      ...(key === "plugins" && entry.enabled === undefined ? { enabled: true } : {}),
       id: entry.id ?? `${managedPrefix}${slug(key)}-${index + 1}`,
     }));
     const ownedIds = new Set(managed.map((entry) => entry.id));
