@@ -112,10 +112,7 @@ registered` failures.
 {
   "launch": {
     "binary": "claude",
-    "args": [
-      "--settings",
-      "{\"apiKeyHelper\":\"\"}"
-    ],
+    "args": [],
     "env": {
       "CCR_PROFILE": "{{profileName}}"
     },
@@ -145,11 +142,23 @@ registered` failures.
 - `defaultMode`: mode selected by plain `airclaude`.
 - `modes.<name>.ccr`: partial CCR overlay for that managed mode.
 
+For CCR-backed profiles, `args` must not contain a JSON `--settings` override
+that defines `apiKeyHelper`. CCR manages that helper for routed launches;
+clearing or replacing it breaks CCR authentication, so AirKit rejects the
+profile before writing files or calling CCR.
+
 `airclaude` resolves credentials, merges only AirKit-owned state through the CCR
 3 management API, and launches `ccr <managed-profile> cli -- ...`. Each mode is
 a separate `scope: "ccr"` profile whose model selectors reference the managed
 provider identity. It does not sync a live CCR JSON file or invoke CCR 2
 start/restart/activate commands.
+
+AirKit starts a missing management service only with `ccr start --no-gateway`,
+reads live configuration before later operations, and saves with
+`applyProfile: false`. Enabled global Codex profiles targeting Codex
+configuration are rejected at launch and can be converted to `scope: "ccr"`
+with `showAllSessions: true` through the preview-first
+`airkit repair codex-takeover` command.
 
 AirKit never writes `claudeModel` into Claude settings or transcripts. Claude
 Code owns `/model` and its normal model-choice persistence, so a routed launch
@@ -191,5 +200,6 @@ do not add a daemon-control wrapper layer.
 - Declare an explicit provider `type`.
 - Use only `default` and `background` in active CCR Router config.
 - Define an explicit Claude launch contract.
+- Do not override CCR's managed `apiKeyHelper` in launch arguments.
 - Keep provider API keys as environment placeholders.
 - Run `npm test`, `npm run check`, and an isolated CCR 3 smoke test.

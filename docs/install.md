@@ -105,6 +105,12 @@ management API, preserving unrelated providers, profiles, and routing rules.
 It then delegates to `ccr <managed-profile> cli -- ...`; there is no CCR 2
 `restart`, `activate`, or live `config.json` overwrite path.
 
+If the CCR management service is missing, AirKit starts it with
+`ccr start --no-gateway`. Its first RPC reads the live configuration; managed
+updates use `saveConfig(..., { applyProfile: false })`, so saving does not apply
+or reconcile a global profile. Gateway startup happens only after takeover and
+runtime checks pass.
+
 Each managed profile sets the mode's default model and small/background model.
 CCR 2's automatic `think`, `longContextThreshold`, and `webSearch` categories
 are outside this hard-cut contract; use an explicit AirClaude mode when a
@@ -120,6 +126,12 @@ spamming command-not-found in Claude Code's non-interactive shells), so a sessio
 started through the wrapper does not diverge from the node path and does not leave
 profile variables behind in the caller shell. Prefer starting and resuming through
 the wrapper (`<wrapper> --resume`, `<wrapper> --continue`).
+
+CCR owns the `apiKeyHelper` installed for its routed Claude launch. Do not add
+`--settings '{"apiKeyHelper":""}'` or any other JSON `--settings` value that
+defines `apiKeyHelper` to a CCR-backed profile; AirKit rejects that override.
+Other Claude arguments remain available through the normal passthrough after
+`--`.
 
 The 1M context window is **not** controlled by an env var (there is no such env
 var in Claude Code — `ANTHROPIC_1M_CONTEXT` is a no-op). Claude Code enables 1M
@@ -149,6 +161,30 @@ node src/airkit.mjs doctor --profile openai-compatible-example
 If `doctor` reports stale or missing rendered files, rerun the dry run, confirm
 the paths, and use the update flow below. If it reports missing tools or shell
 source failures, fix the local runtime environment and rerun `doctor --profile`.
+
+## Repair Codex Takeover State
+
+AirKit fails closed before launch when it finds an enabled global Codex profile
+targeting Codex configuration, a CCR takeover record, or exact CCR-managed
+blocks in a Codex config file. Preview the repair without starting CCR or
+writing files:
+
+```bash
+node src/airkit.mjs repair codex-takeover
+```
+
+Review every affected path and action. To apply the repair:
+
+```bash
+node src/airkit.mjs repair codex-takeover --write
+```
+
+Write mode inventories live and recorded targets, creates exclusive rollback
+snapshots before the first mutation-capable save, scopes hazardous Codex
+profiles to `scope: "ccr"` with `showAllSessions: true`, and removes only exact
+CCR-managed Codex blocks. It preserves unrelated profiles and the latest
+user-owned bytes. If a concurrent writer wins a repair race, AirKit does not
+overwrite it and reports the retained conflict snapshot.
 
 ## Update Managed Runtime Files
 
@@ -184,7 +220,9 @@ When guiding a user, keep the agent's write boundary clear:
    in the current shell when that is the requested scope.
 7. Have the user launch the generated wrapper; do not ask them to manually copy
    CCR config files.
-8. Run `node src/airkit.mjs doctor --profile <profile>` and use its output as
+8. If launch reports Codex takeover state, preview `repair codex-takeover` and
+   review its paths before considering `--write`.
+9. Run `node src/airkit.mjs doctor --profile <profile>` and use its output as
    the final health check.
 
 Do not write runtime files directly from the LLM agent as a shortcut around
@@ -215,6 +253,13 @@ repo, chat, or docs.
 : Run `command -v zsh`, inspect the generated snippet path reported by
   `doctor`, and source it in a clean shell. After fixing the local shell
   environment, rerun `doctor --profile`.
+
+`Codex takeover detected`
+
+: Run `node src/airkit.mjs repair codex-takeover` first. Review the affected
+  paths, then rerun with `--write` only when the repair is intended. Do not
+  manually delete the takeover record or replace Codex configuration with a
+  stale backup.
 
 Secrets or login failures after the files render cleanly
 
