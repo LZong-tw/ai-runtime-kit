@@ -7,7 +7,11 @@ import assert from "node:assert/strict";
 
 import * as airkitRuntime from "../src/airkit.mjs";
 import * as ccrVerifier from "../scripts/verify-ccr3-e2e.mjs";
-import { buildHeartbeatResponse } from "../src/context-heartbeat.mjs";
+import {
+  buildHeartbeatResponse,
+  parseTaskCapsule,
+  processContextHook,
+} from "../src/context-heartbeat.mjs";
 
 import {
   buildLaunchPlan,
@@ -845,6 +849,19 @@ test("buildLaunchPlan applies pro mode CCR routing overlay without mutating the 
     assert.match(plan.launch.args[4], /background: demo,cheap-coder \(model cheap-coder\)/);
     assert.doesNotMatch(plan.launch.args[4], /- think:|- longContext:|- webSearch:/);
     assert.match(plan.launch.args[4], /Do not infer the active provider route from Claude Code's displayed model name/);
+    assert.match(plan.launch.args[4], /\[AIRKIT_TASK_CAPSULE\]/);
+    for (const field of [
+      "objective",
+      "constraints",
+      "decisions",
+      "changed_files",
+      "verification",
+      "repository_state",
+      "next_action",
+    ]) {
+      assert.match(plan.launch.args[4], new RegExp(`${field}:`));
+    }
+    assert.match(plan.launch.args[4], /Never include credentials or provider-private payloads in the capsule/);
     assert.equal(plan.launch.env.AIRCLAUDE_PROFILE, "launch-example");
     assert.equal(plan.launch.env.AIRCLAUDE_MODE, "pro");
     assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_DEFAULT, "demo,strong-coder");
@@ -964,8 +981,12 @@ test("AirClaude renders an additive session plugin for the heartbeat", async () 
     assert.ok(manifest);
     assert.ok(hooks);
     assert.ok(script);
-
     await installProfile(catalog, "launch-example", { configDir, force: true, write: true });
+    assert.deepEqual(Object.keys(JSON.parse(await readFile(hooks.path, "utf8")).hooks).sort(), [
+      "PostCompact",
+      "SessionStart",
+      "UserPromptSubmit",
+    ]);
     const hookInput = JSON.stringify({
       hook_event_name: "UserPromptSubmit",
       prompt: "ordinary prompt",
@@ -994,10 +1015,168 @@ test("AirClaude renders an additive session plugin for the heartbeat", async () 
     assert.equal(inactive.status, 0);
     assert.equal(inactive.stdout, "");
     assert.equal(inactive.stderr, "");
+
+    const lifecycleEnv = {
+      ...process.env,
+      AIRCLAUDE_MODE: "auto",
+      AIRCLAUDE_PROFILE: "launch-example",
+      AIRCLAUDE_ROUTE_BACKGROUND_MODEL: "cheap-coder",
+      AIRCLAUDE_ROUTE_DEFAULT_MODEL: "balanced-coder",
+      CLAUDE_PLUGIN_DATA: join(configDir, "plugin-data"),
+    };
+    const compact = spawnSync(process.execPath, [script.path], {
+      encoding: "utf8",
+      env: lifecycleEnv,
+      input: JSON.stringify({
+        compact_summary: `[AIRKIT_TASK_CAPSULE]\nobjective: Resume the isolated task\nconstraints: Keep settings unchanged\ndecisions: Persist only bounded fields\nchanged_files: src/context-heartbeat.mjs\nverification: Manual compact simulated\nrepository_state: isolated fixture\nnext_action: Resume the session\n[/AIRKIT_TASK_CAPSULE]`,
+        cwd: "/workspace/isolated",
+        hook_event_name: "PostCompact",
+        trigger: "manual",
+      }),
+    });
+    assert.equal(compact.status, 0);
+    assert.equal(compact.stdout, "");
+
+    const resumed = spawnSync(process.execPath, [script.path], {
+      encoding: "utf8",
+      env: lifecycleEnv,
+      input: JSON.stringify({
+        cwd: "/workspace/isolated",
+        hook_event_name: "SessionStart",
+        source: "resume",
+      }),
+    });
+    assert.equal(resumed.status, 0);
+    assert.match(JSON.parse(resumed.stdout).hookSpecificOutput.additionalContext, /Objective: Resume the isolated task/);
+    assert.equal(resumed.stderr, "");
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }
 });
+
+test("task capsule requires every durable field, stays bounded, and redacts credential-shaped values", () => {
+  const capsule = parseTaskCapsule(`
+[AIRKIT_TASK_CAPSULE]
+objective: Finish context lifecycle restoration
+constraints: Do not change global settings; token=private-token-value; ANTHROPIC_AUTH_TOKEN=opaquecredentialvalue; AWS_SECRET_ACCESS_KEY=opaqueawssecret; endpoint=https://private.example/v1
+decisions: Store state in plugin data
+changed_files: src/context-heartbeat.mjs, test/airkit.test.mjs
+verification: Focused tests pass
+repository_state: branch codex/context-retention-phase3, clean before edits
+next_action: Run the complete suite
+[/AIRKIT_TASK_CAPSULE]
+`);
+
+  assert.deepEqual(Object.keys(capsule), [
+    "objective",
+    "constraints",
+    "decisions",
+    "changed_files",
+    "verification",
+    "repository_state",
+    "next_action",
+  ]);
+  assert.match(capsule.constraints, /token=\[redacted\]/);
+  assert.doesNotMatch(JSON.stringify(capsule), /private-token-value|opaquecredentialvalue|opaqueawssecret|private\.example/);
+  assert.ok(JSON.stringify(capsule).length <= 2048);
+  assert.equal(parseTaskCapsule("ordinary compact summary without a capsule"), null);
+  assert.equal(parseTaskCapsule(`
+[AIRKIT_TASK_CAPSULE]
+objective: incomplete
+[/AIRKIT_TASK_CAPSULE]
+`), null);
+  assert.equal(parseTaskCapsule(`${compactCapsuleFixture("old")}\nQuoted above.\n${compactCapsuleFixture("current")}`), null);
+  assert.equal(parseTaskCapsule(`${compactCapsuleFixture("current")}\ntrailing text`), null);
+  assert.equal(parseTaskCapsule(compactCapsuleFixture("current").replace(
+    "objective: current",
+    "objective: stale\nobjective: current",
+  )), null);
+  assert.equal(parseTaskCapsule(compactCapsuleFixture("current").replace(
+    "[/AIRKIT_TASK_CAPSULE]",
+    "unexpected_field: unexpected\n[/AIRKIT_TASK_CAPSULE]",
+  )), null);
+});
+
+test("PostCompact persists a workspace-scoped capsule for every SessionStart lifecycle source", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-context-data-"));
+  const env = {
+    AIRCLAUDE_MODE: "auto",
+    AIRCLAUDE_PROFILE: "example-profile",
+    AIRCLAUDE_ROUTE_BACKGROUND_MODEL: "fast-model",
+    AIRCLAUDE_ROUTE_DEFAULT_MODEL: "strong-model",
+    CLAUDE_PLUGIN_DATA: pluginData,
+  };
+  const cwd = "/workspace/example";
+  const compactSummary = `
+[AIRKIT_TASK_CAPSULE]
+objective: Restore task state after compaction
+constraints: Keep user settings untouched
+decisions: Use a bounded plugin-data capsule
+changed_files: src/context-heartbeat.mjs
+verification: Manual compact fixture captured
+repository_state: phase3 has local changes
+next_action: Verify resume and clear
+[/AIRKIT_TASK_CAPSULE]
+`;
+
+  try {
+    assert.equal(await processContextHook({
+      compact_summary: compactSummary,
+      cwd,
+      hook_event_name: "PostCompact",
+      trigger: "manual",
+    }, env), null);
+
+    for (const source of ["startup", "resume", "clear", "compact"]) {
+      const response = await processContextHook({
+        cwd,
+        hook_event_name: "SessionStart",
+        source,
+      }, env);
+      const context = response.hookSpecificOutput.additionalContext;
+      assert.equal(response.hookSpecificOutput.hookEventName, "SessionStart");
+      assert.match(context, new RegExp(`Session lifecycle source is ${source}`));
+      assert.match(context, /Objective: Restore task state after compaction/);
+      assert.match(context, /Next action: Verify resume and clear/);
+      assert.ok(context.length <= 3072);
+    }
+
+    const unrelated = await processContextHook({
+      cwd: "/workspace/unrelated",
+      hook_event_name: "SessionStart",
+      source: "resume",
+    }, env);
+    assert.match(unrelated.hookSpecificOutput.additionalContext, /AirClaude session context is active/);
+    assert.doesNotMatch(unrelated.hookSpecificOutput.additionalContext, /Objective:/);
+
+    assert.equal(await processContextHook({
+      compact_summary: "latest compact summary is missing its capsule",
+      cwd,
+      hook_event_name: "PostCompact",
+      trigger: "auto",
+    }, env), null);
+    const cleared = await processContextHook({
+      cwd,
+      hook_event_name: "SessionStart",
+      source: "compact",
+    }, env);
+    assert.doesNotMatch(cleared.hookSpecificOutput.additionalContext, /Objective:/);
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+function compactCapsuleFixture(objective) {
+  return `[AIRKIT_TASK_CAPSULE]
+objective: ${objective}
+constraints: fixture constraints
+decisions: fixture decisions
+changed_files: fixture.js
+verification: fixture verified
+repository_state: fixture state
+next_action: fixture action
+[/AIRKIT_TASK_CAPSULE]`;
+}
 
 test("airclaude launch does not set the dead ANTHROPIC_1M_CONTEXT env (1M comes from the [1m] model suffix)", async () => {
   const catalog = launchCatalog();

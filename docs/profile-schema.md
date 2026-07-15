@@ -218,6 +218,14 @@ does not echo the prompt, transcript path, session identifier, provider name,
 endpoint, credential, or token. Plugin hooks merge with existing user and
 project hooks; AirKit does not replace or rewrite Claude settings.
 
+The same plugin records only a complete, seven-field `[AIRKIT_TASK_CAPSULE]`
+from `PostCompact.compact_summary`. It bounds and redacts each field, keys the
+record by a hash of the workspace path under Claude's plugin-data directory,
+and re-injects it with current route metadata on `SessionStart` for `startup`,
+`resume`, `clear`, and `compact`. It does not read the transcript or create
+state files in the repository. Missing, partial, or malformed capsules are
+ignored; route context still loads normally.
+
 AirKit starts a missing management service only with `ccr start --no-gateway`,
 reads live configuration before later operations, and saves with
 `applyProfile: false`. Enabled global Codex profiles targeting Codex
