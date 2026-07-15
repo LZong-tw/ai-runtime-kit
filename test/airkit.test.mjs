@@ -36,17 +36,66 @@ test("runtime requirements hard-cut to Node 22, Claude Code 2.1.208, and CCR 3.0
   });
 });
 
-test("isolated verifier accepts the declared CCR 3 range and encodes the management-only sentinel gate", async () => {
+test("isolated verifier restarts management-only before trusting persisted dangerous Codex state", async () => {
   assert.equal(ccrVerifier.isSupportedCcrVersion("3.0.4"), true);
   assert.equal(ccrVerifier.isSupportedCcrVersion("3.9.99"), true);
   assert.equal(ccrVerifier.isSupportedCcrVersion("3.0.3"), false);
   assert.equal(ccrVerifier.isSupportedCcrVersion("4.0.0"), false);
+  const sentinel = Buffer.from("sentinel");
+  const dangerousProfile = { agent: "codex", enabled: true, id: "danger", scope: "global" };
+  const safeConfig = { profile: { profiles: [] } };
+  const events = [];
+  let persisted = { profile: { profiles: [] } };
+  const makeRpc = (generation) => async (method, args = []) => {
+    events.push(`${generation}:${method}`);
+    if (method === "saveConfig") persisted = structuredClone(args[0]);
+    return structuredClone(persisted);
+  };
+  const initialRpc = makeRpc("initial");
+  const restartedRpc = makeRpc("fresh");
+
+  const result = await ccrVerifier.verifyDangerousCodexPersistence({
+    ccr: "ccr",
+    dangerousProfile,
+    env: {},
+    initialConfig: persisted,
+    read: async () => Buffer.from(sentinel),
+    rpc: initialRpc,
+    rpcFactory: async () => {
+      events.push("fresh-client");
+      return restartedRpc;
+    },
+    runCommand: (_command, args) => {
+      events.push(`run:${args.join(" ")}`);
+      return { status: 0, stderr: "" };
+    },
+    safeConfig,
+    sentinelBytes: sentinel,
+    sentinelPath: "/isolated/.codex/config.toml",
+  });
+
+  assert.deepEqual(events, [
+    "initial:saveConfig",
+    "run:stop",
+    "run:start --no-gateway",
+    "fresh-client",
+    "fresh:getConfig",
+    "fresh:saveConfig",
+  ]);
+  assert.equal(result.rpc, restartedRpc);
+  assert.deepEqual(persisted, safeConfig);
+
   const source = await readFile(resolve(import.meta.dirname, "..", "scripts", "verify-ccr3-e2e.mjs"), "utf8");
-  assert.match(source, /CCR_CONTRACT_SENTINEL/);
-  assert.match(source, /start.+--no-gateway/s);
-  assert.match(source, /saveConfig.+applyProfile:\s*false/s);
-  assert.match(source, /agent:\s*"codex"/);
-  assert.match(source, /scope:\s*"global"/);
+  const lifecycle = [
+    "await rpc(\"saveConfig\"",
+    "runCommand(ccr, [\"stop\"]",
+    "runCommand(ccr, [\"start\", \"--no-gateway\"]",
+    "await rpcFactory(env)",
+    "await freshRpc(\"getConfig\")",
+    "await freshRpc(\"saveConfig\"",
+  ].map((step) => source.indexOf(step));
+  assert.equal(lifecycle.every((position) => position >= 0), true);
+  assert.deepEqual([...lifecycle].sort((left, right) => left - right), lifecycle);
 });
 
 test("OSS package allowlist excludes tests and migration artifacts", async () => {

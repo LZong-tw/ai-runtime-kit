@@ -220,6 +220,11 @@ function transactionFixture({ backupCollision = false, failAt } = {}) {
     readFile: async (path) => {
       events.push(`read:${path}`);
       if (!files.has(path)) throw Object.assign(new Error("missing"), { code: "ENOENT" });
+      if (failAt === "captureRead" && path.endsWith("/captured")) {
+        files.set(codexPath, Buffer.from("user_edit = \"wins\"\n"));
+        modes.set(codexPath, 0o600);
+        throw new Error("private captured read failure");
+      }
       if (failAt === "verification" && path === codexPath && events.some((event) => event.startsWith("rename:"))) {
         return Buffer.from("verification failed with private bytes");
       }
@@ -243,6 +248,9 @@ function transactionFixture({ backupCollision = false, failAt } = {}) {
     },
     stat: async (path) => {
       events.push(`stat:${path}`);
+      if (failAt === "captureStat" && path.endsWith("/captured")) {
+        throw new Error("private captured stat failure");
+      }
       return { mode: modes.get(path) };
     },
     unlink: async (path) => {
@@ -453,6 +461,40 @@ for (const failAt of ["targetWrite", "rename", "verification"]) {
     if (failAt !== "rename") {
       assert.ok([...fixture.files.keys()].some((path) => path.endsWith("/captured")));
     }
+  });
+}
+
+for (const failAt of ["captureStat", "captureRead"]) {
+  test(`restores active ownership and reports retained capture after ${failAt} failure`, async () => {
+    const fixture = transactionFixture({ failAt });
+
+    await assert.rejects(
+      repairCodexTakeover({
+        ccrClient: fixture.ccrClient,
+        env: fixture.env,
+        io: fixture.io,
+        nonce: fixture.nonce,
+        now: fixture.now,
+        write: true,
+      }),
+      (error) => {
+        assert.equal(error.code, "CODEX_TAKEOVER_RESTORE_FAILED");
+        assert.equal(error.failedPaths.includes(fixture.codexPath), true);
+        assert.equal(error.conflictPaths.length, 1);
+        assert.match(error.conflictPaths[0], /\/captured$/);
+        assert.doesNotMatch(`${error.message} ${JSON.stringify(error)}`, /private captured/);
+        return true;
+      },
+    );
+
+    const capturedPath = [...fixture.files.keys()].find((path) => path.endsWith("/captured"));
+    assert.ok(capturedPath);
+    assert.deepEqual(fixture.files.get(capturedPath), Buffer.from(`${managedCodexText}concurrent = "preserved"\n`));
+    assert.equal(fixture.files.has(fixture.codexPath), true);
+    assert.deepEqual(
+      fixture.files.get(fixture.codexPath),
+      Buffer.from(failAt === "captureRead" ? "user_edit = \"wins\"\n" : `${managedCodexText}concurrent = "preserved"\n`),
+    );
   });
 }
 

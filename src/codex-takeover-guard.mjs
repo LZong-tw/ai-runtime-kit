@@ -235,13 +235,23 @@ async function restoreCapturedPath(io, path, capturedPath, capturedBytes, mode) 
   return capturedPath;
 }
 
-async function captureIfUnchanged(io, path, expected, suffix, nonce) {
+async function captureIfUnchanged(io, path, expected, fallbackMode, suffix, nonce) {
   const swapDir = await io.mkdtemp(`${path}.airkit-swap-${suffix}-${repairNonce(nonce)}-`);
   await io.chmod(swapDir, 0o700);
   const capturedPath = join(swapDir, "captured");
   await io.rename(path, capturedPath);
-  const capturedMode = (await io.stat(capturedPath)).mode & 0o777;
-  const capturedBytes = Buffer.from(await io.readFile(capturedPath));
+  let capturedMode = fallbackMode;
+  let capturedBytes;
+  try {
+    capturedMode = (await io.stat(capturedPath)).mode & 0o777;
+    capturedBytes = Buffer.from(await io.readFile(capturedPath));
+  } catch {
+    await restoreCapturedPath(io, path, capturedPath, expected, capturedMode);
+    throw Object.assign(new Error("captured target inspection failed"), {
+      code: "AIRKIT_REPAIR_CAPTURE_FAILED",
+      conflictPath: capturedPath,
+    });
+  }
   if (!capturedBytes.equals(expected)) {
     await restoreCapturedPath(io, path, capturedPath, capturedBytes, capturedMode);
     throw Object.assign(new Error("concurrent target change"), {
@@ -262,6 +272,7 @@ async function replaceIfUnchanged(io, path, expected, bytes, mode, suffix, nonce
       io,
       path,
       expected,
+      mode,
       suffix,
       nonce,
     ));
@@ -285,8 +296,8 @@ async function replaceIfUnchanged(io, path, expected, bytes, mode, suffix, nonce
   return capturedPath;
 }
 
-async function quarantineIfUnchanged(io, path, expected, suffix, nonce) {
-  return (await captureIfUnchanged(io, path, expected, suffix, nonce)).capturedPath;
+async function quarantineIfUnchanged(io, path, expected, mode, suffix, nonce) {
+  return (await captureIfUnchanged(io, path, expected, mode, suffix, nonce)).capturedPath;
 }
 
 export async function repairCodexTakeover({
@@ -444,7 +455,14 @@ export async function repairCodexTakeover({
       } else if (latest) {
         const parsed = parsedTakeover(latest.toString("utf8"));
         if (!parsed) {
-          conflictPaths.push(await quarantineIfUnchanged(io, takeoverPath, latest, timestamp, nonce));
+          conflictPaths.push(await quarantineIfUnchanged(
+            io,
+            takeoverPath,
+            latest,
+            (await io.stat(takeoverPath)).mode & 0o777,
+            timestamp,
+            nonce,
+          ));
         } else {
           const pruned = Buffer.from(withoutCodexTakeoverEntries(latest.toString("utf8")));
           await replaceIfUnchanged(io, takeoverPath, latest, pruned, (await io.stat(takeoverPath)).mode & 0o777, timestamp, nonce);
@@ -463,7 +481,14 @@ export async function repairCodexTakeover({
             nonce,
           ));
         } else {
-          conflictPaths.push(await quarantineIfUnchanged(io, takeoverPath, latest, timestamp, nonce));
+          conflictPaths.push(await quarantineIfUnchanged(
+            io,
+            takeoverPath,
+            latest,
+            (await io.stat(takeoverPath)).mode & 0o777,
+            timestamp,
+            nonce,
+          ));
         }
         failedPaths.push(takeoverPath);
       } else {
