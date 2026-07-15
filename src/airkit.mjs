@@ -239,7 +239,16 @@ export async function exportOssRelease({ outDir }) {
   await copyFile(join(here, "codex-takeover-guard.mjs"), join(outDir, "src", "codex-takeover-guard.mjs"));
   await copyFile(join(here, "context-heartbeat.mjs"), join(outDir, "src", "context-heartbeat.mjs"));
   await copyFile(join(here, "context-observability.mjs"), join(outDir, "src", "context-observability.mjs"));
-  for (const module of ["gateway.mjs", "plugin.mjs", "protocol.mjs", "server-tools.mjs"]) {
+  for (const module of [
+    "config.mjs",
+    "fallback.mjs",
+    "gateway.mjs",
+    "plugin.mjs",
+    "protocol.mjs",
+    "server-history.mjs",
+    "server-tools.mjs",
+    "tool-search.mjs",
+  ]) {
     await copyFile(join(here, "compat", module), join(outDir, "src", "compat", module));
   }
   await writeFile(join(outDir, "profiles", "catalog.json"), `${JSON.stringify(publicCatalog, null, 2)}\n`);

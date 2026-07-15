@@ -190,7 +190,16 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
       await readFile(join(outDir, "src", "codex-takeover-guard.mjs"), "utf8"),
       await readFile(resolve(import.meta.dirname, "..", "src", "codex-takeover-guard.mjs"), "utf8"),
     );
-    for (const module of ["gateway.mjs", "plugin.mjs", "protocol.mjs", "server-tools.mjs"]) {
+    for (const module of [
+      "config.mjs",
+      "fallback.mjs",
+      "gateway.mjs",
+      "plugin.mjs",
+      "protocol.mjs",
+      "server-history.mjs",
+      "server-tools.mjs",
+      "tool-search.mjs",
+    ]) {
       assert.equal(
         await readFile(join(outDir, "src", "compat", module), "utf8"),
         await readFile(resolve(import.meta.dirname, "..", "src", "compat", module), "utf8"),
