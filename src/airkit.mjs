@@ -13,7 +13,10 @@ import {
   inspectCodexTakeover,
   repairCodexTakeover,
 } from "./codex-takeover-guard.mjs";
-import { assertAnthropicFamilyModel } from "./compat/protocol.mjs";
+import {
+  resolveCompatibilityPolicies,
+  validateCompatibilityConfig,
+} from "./compat/config.mjs";
 import { renderHeartbeatManagedFiles } from "./context-heartbeat.mjs";
 import { buildContextObservability } from "./context-observability.mjs";
 
@@ -22,6 +25,7 @@ const repoRoot = resolve(here, "..");
 const defaultCatalogPath = join(repoRoot, "profiles", "catalog.json");
 const compatibilityPluginId = "airkit-compatibility";
 const compatibilityPluginModule = join(here, "compat", "plugin.mjs");
+const verifiedNativeCompatibility = Object.freeze({ webFetch: true, webSearch: true });
 export const RUNTIME_REQUIREMENTS = Object.freeze({
   claudeCode: ">=2.1.208",
   claudeCodeRouter: ">=3.0.4 <4",
@@ -49,7 +53,7 @@ export function buildCcrConfig(catalog, profileName, options = {}) {
     throw new Error(`profile "${profileName}" does not define a CCR config`);
   }
   const config = renderTemplateValue(structuredClone(profile.ccr), profileTemplateVars(profile, options.configDir));
-  validateCompatibilityPlugin(config);
+  validateConfiguredCompatibility(config);
   if (!Array.isArray(config.plugins)) return config;
   config.plugins = config.plugins.map((plugin) => plugin?.id === compatibilityPluginId
     ? { ...plugin, module: compatibilityPluginModule }
@@ -372,6 +376,7 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
   const mode = resolveLaunchMode(profile, launch, options.mode);
   const ccrConfig = applyLaunchModeOverlay(buildCcrConfig(catalog, profileName, { configDir }), profile, mode, templateVars);
   assertCcr3Compatible(ccrConfig);
+  const compatibility = resolveConfiguredCompatibility(ccrConfig);
   const logOverride = resolveCcrLogOverride(options.env ?? process.env);
   if (logOverride !== undefined) ccrConfig.LOG = logOverride;
   const claudeModel = resolveClaudeLaunchModel(profile);
@@ -402,6 +407,7 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
     configDir,
     files: basePlan.files,
     ccrConfig,
+    ...(compatibility ? { compatibility } : {}),
     liveCcrConfig: { path: join(defaultCcrStateDir(options.env), "config.sqlite") },
     credential: {
       ccrTokenOpRef: profile.shell?.ccrTokenOpRef ?? null,
@@ -616,32 +622,26 @@ function validateCcr(profileName, ccr) {
       throw new Error(`profile "${profileName}" embeds a secret-looking API key`);
     }
   }
-  validateCompatibilityPlugin(ccr);
+  validateConfiguredCompatibility(ccr);
 }
 
-function validateCompatibilityPlugin(ccrConfig) {
-  const config = ccrConfig.plugins?.find((plugin) => plugin?.id === compatibilityPluginId)?.config;
-  if (!config) return;
-  for (const capability of ["advisor", "toolSearch", "webSearch"]) {
-    const settings = config[capability];
-    if (!settings || typeof settings !== "object" || Array.isArray(settings)) continue;
-    for (const field of ["model", "fallbackModel"]) {
-      if (settings[field] !== undefined) {
-        assertAnthropicFamilyModel(settings[field], `${capability}.${field}`);
-      }
-    }
-  }
-  if (config.advisor?.mode === "bridge") {
-    assertAnthropicFamilyModel(config.advisor.model, "advisor.model");
-    assertAnthropicFamilyModel(config.advisor.fallbackModel, "advisor.fallbackModel");
-  }
-  if (config.webSearch?.mode === "mcp") {
-    assertAnthropicFamilyModel(config.webSearch.model, "webSearch.model");
-  }
+function configuredCompatibility(ccrConfig) {
+  return ccrConfig?.plugins?.find((plugin) => plugin?.id === compatibilityPluginId)?.config ?? null;
+}
+
+function validateConfiguredCompatibility(ccrConfig) {
+  const config = configuredCompatibility(ccrConfig);
+  if (config) validateCompatibilityConfig(config);
+  return config;
+}
+
+function resolveConfiguredCompatibility(ccrConfig) {
+  const config = configuredCompatibility(ccrConfig);
+  return config ? resolveCompatibilityPolicies(config, verifiedNativeCompatibility) : null;
 }
 
 function buildCompatibilityLaunch(ccrConfig, env) {
-  const config = ccrConfig.plugins?.find((plugin) => plugin?.id === compatibilityPluginId)?.config;
+  const config = configuredCompatibility(ccrConfig);
   if (config?.webSearch?.mode !== "mcp") return { args: [], env: {} };
 
   const host = expandEnvironmentReference(ccrConfig.gateway?.host ?? ccrConfig.HOST, env, "CCR gateway host");
@@ -670,16 +670,24 @@ function buildCompatibilityLaunch(ccrConfig, env) {
 }
 
 function compatibilityCapabilityStatus(ccrConfig) {
-  const config = ccrConfig?.plugins?.find((plugin) => plugin?.id === compatibilityPluginId)?.config;
+  const config = configuredCompatibility(ccrConfig);
   if (!config) return { capabilities: {}, ok: true, skipped: true };
+  const { policies } = resolveCompatibilityPolicies(config, verifiedNativeCompatibility);
   return {
     capabilities: {
-      advisor: config.advisor?.mode === "bridge" ? "bridged" : "unavailable",
-      toolSearch: config.toolSearch?.mode === "bridge" ? "bridged" : "unavailable",
-      webSearch: config.webSearch?.mode === "mcp" ? "unverified" : "unavailable",
+      advisor: policyStatus(policies.advisor),
+      codeExecution: policyStatus(policies.codeExecution),
+      mcpConnector: policyStatus(policies.mcpConnector),
+      toolSearch: policyStatus(policies.toolSearch),
+      webFetch: policyStatus(policies.webFetch),
+      webSearch: config.webSearch.mode === "mcp" ? "unverified" : policyStatus(policies.webSearch),
     },
     ok: true,
   };
+}
+
+function policyStatus(policy) {
+  return policy === "bridge" ? "bridged" : policy;
 }
 
 function expandEnvironmentReference(value, env, fieldName) {

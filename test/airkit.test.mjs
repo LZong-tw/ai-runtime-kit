@@ -328,24 +328,33 @@ test("CCR compatibility opt-in resolves the installed plugin and preserves unrel
   assert.deepEqual(repeated.config, merged.config);
 });
 
-test("CCR compatibility rejects invalid or missing Anthropic-family compatibility models", () => {
-  for (const path of ["advisor.model", "advisor.fallbackModel", "toolSearch.fallbackModel", "webSearch.model"]) {
-    const catalog = compatibilityCatalog();
-    const [capability, field] = path.split(".");
-    catalog.profiles[0].ccr.plugins[0].config[capability][field] = "openai/gpt-5.4";
+test("CCR compatibility rejects removed Advisor bridge before CCR RPC or credentials", async () => {
+  const catalog = compatibilityCatalog();
+  catalog.profiles[0].ccr.plugins[0].config.advisor = {
+    fallbackModel: "anthropic/claude-opus",
+    mode: "bridge",
+    model: "anthropic/claude-opus",
+  };
+  catalog.profiles[0].shell = { ccrTokenOpRef: "op://Test/API/token" };
+  let ccrClientCreations = 0;
+  let credentialCalls = 0;
 
-    assert.throws(
-      () => buildLaunchPlan(catalog, "launch-example", { configDir: "/tmp/airkit-compatibility" }),
-      new RegExp(`${path.replace(".", "\\.")} must be an Anthropic-family model`),
-    );
-  }
-
-  const missingFallback = compatibilityCatalog();
-  delete missingFallback.profiles[0].ccr.plugins[0].config.advisor.fallbackModel;
-  assert.throws(
-    () => buildLaunchPlan(missingFallback, "launch-example", { configDir: "/tmp/airkit-compatibility" }),
-    /advisor\.fallbackModel must be an Anthropic-family model/,
+  await assert.rejects(
+    () => prepareLaunch(catalog, "launch-example", {
+      configDir: "/tmp/airkit-compatibility",
+      createCcrClient: () => {
+        ccrClientCreations += 1;
+        return {};
+      },
+      runCommand: async () => {
+        credentialCalls += 1;
+        return { ok: true, status: 0, stdout: "unused" };
+      },
+    }),
+    /advisor\.mode.*removed/i,
   );
+  assert.equal(ccrClientCreations, 0);
+  assert.equal(credentialCalls, 0);
 });
 
 test("CCR 3 merge rejects the removed CCR 2 transformer contract", () => {
@@ -745,11 +754,21 @@ test("doctorProfile reports rendered file drift and runtime availability", async
   }
 });
 
-test("doctorProfile reports each configured compatibility capability without a live-state claim", async () => {
+test("native-first compatibility renders no duplicate MCP and reports six policies", async () => {
   const catalog = compatibilityCatalog();
   const configDir = await mkdtemp(join(tmpdir(), "airkit-compatibility-doctor-"));
 
   try {
+    const plan = buildLaunchPlan(catalog, "launch-example", { configDir });
+    assert.equal(plan.compatibilityMcp, undefined);
+    assert.deepEqual(plan.compatibility.policies, {
+      webSearch: "native",
+      webFetch: "native",
+      codeExecution: "anthropic-fallback",
+      advisor: "anthropic-fallback",
+      toolSearch: "bridge",
+      mcpConnector: "anthropic-fallback",
+    });
     await installProfile(catalog, "launch-example", { configDir, write: true });
     const result = await doctorProfile(catalog, "launch-example", {
       commandExists: async () => true,
@@ -758,9 +777,12 @@ test("doctorProfile reports each configured compatibility capability without a l
     });
 
     assert.deepEqual(result.runtime.compatibility.capabilities, {
-      advisor: "bridged",
+      advisor: "anthropic-fallback",
+      codeExecution: "anthropic-fallback",
+      mcpConnector: "anthropic-fallback",
       toolSearch: "bridged",
-      webSearch: "unverified",
+      webFetch: "native",
+      webSearch: "native",
     });
     assert.equal(result.runtime.compatibility.ok, true);
     assert.deepEqual(result.runtime.context.contextWindow, {
@@ -1937,7 +1959,7 @@ test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves
 });
 
 test("prepareLaunch registers compatibility MCP additively with child-only expanded gateway credentials", async () => {
-  const catalog = compatibilityCatalog();
+  const catalog = legacyCompatibilityCatalog();
   const configDir = await mkdtemp(join(tmpdir(), "airkit-compatibility-launch-"));
   const saved = [];
   const spawned = [];
@@ -2279,20 +2301,25 @@ function compatibilityCatalog() {
     id: "airkit-compatibility",
     module: "@lzong/ai-runtime-kit/compatibility-plugin",
     config: {
-      advisor: {
-        fallbackModel: "anthropic/claude-opus",
-        mode: "bridge",
-        model: "anthropic/claude-opus",
+      fallback: {
         provider: "anthropic-messages",
-      },
-      toolSearch: { mode: "bridge" },
-      webSearch: {
-        mode: "mcp",
         model: "anthropic/claude-sonnet",
-        provider: "anthropic-messages",
+        maxContinuationTurns: 8,
       },
+      advisor: { mode: "anthropic-fallback" },
+      codeExecution: { mode: "anthropic-fallback" },
+      mcpConnector: { mode: "anthropic-fallback" },
+      toolSearch: { mode: "bridge" },
+      webFetch: { mode: "native-first" },
+      webSearch: { mode: "native-first" },
     },
   }];
+  return catalog;
+}
+
+function legacyCompatibilityCatalog() {
+  const catalog = compatibilityCatalog();
+  catalog.profiles[0].ccr.plugins[0].config.webSearch = { mode: "mcp" };
   return catalog;
 }
 
