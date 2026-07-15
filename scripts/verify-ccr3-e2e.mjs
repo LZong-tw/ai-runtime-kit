@@ -288,6 +288,8 @@ async function main() {
 
     const payload = JSON.parse(await readFile(env.FAKE_CLAUDE_RESULT_FILE, "utf8"));
     assert.equal(payload.content?.[0]?.text, "FAKE_PROVIDER_OK");
+    assert.equal(payload.compatibilityMcp?.serverInfo?.name, "airkit-compatibility");
+    assert.equal(payload.compatibilityMcp?.protocolVersion, "2025-03-26");
     assert.equal(payload.ambientSentinel, undefined, "ambient controller env leaked into the CCR/Claude child");
     assert.ok(resolve(payload.fixtureSettingsPath).startsWith(`${resolve(root)}/`));
     const providerRequest = JSON.parse(await readFile(fakeProvider.requestFile, "utf8"));
@@ -305,6 +307,7 @@ async function main() {
       fakeProviderResponse: payload.content[0].text,
       gateway: endpoint.origin,
       idempotentManagedSaves: managedSaves,
+      compatibilityMcp: payload.compatibilityMcp.serverInfo.name,
       namedProfile: managedProfileId,
       realHomeAccessDenied: true,
       realHomeReferenced: false,
@@ -404,6 +407,16 @@ function fakeCatalog(providerPort) {
       launch: { binary: "claude", args: [], defaultMode: "auto", modes: { auto: {} } },
       ccr: {
         LOG: false,
+        plugins: [{
+          id: "airkit-compatibility",
+          module: "@lzong/ai-runtime-kit/compatibility-plugin",
+          config: {
+            webSearch: {
+              mode: "mcp",
+              model: "anthropic/claude-sonnet",
+            },
+          },
+        }],
         Providers: [{
           name: "fake",
           type: "openai_chat_completions",
@@ -483,6 +496,17 @@ import { readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 const assertNoManagedApiKeyHelperOverride = (${assertNoManagedApiKeyHelperOverride.toString()});
 assertNoManagedApiKeyHelperOverride(process.argv.slice(2));
+const mcpConfigIndex = process.argv.indexOf("--mcp-config");
+if (mcpConfigIndex === -1) throw new Error("compatibility MCP config was not supplied");
+if (process.argv.includes("--strict-mcp-config")) throw new Error("compatibility MCP must remain additive");
+const mcpConfig = JSON.parse(process.argv[mcpConfigIndex + 1]);
+const compatibilityMcp = mcpConfig.mcpServers?.["airkit-compatibility"];
+if (compatibilityMcp?.url !== "\${AIRKIT_COMPATIBILITY_MCP_URL}") {
+  throw new Error("compatibility MCP URL must remain an environment placeholder");
+}
+if (compatibilityMcp?.headers?.Authorization !== "Bearer \${AIRKIT_COMPATIBILITY_MCP_TOKEN}") {
+  throw new Error("compatibility MCP token must remain an environment placeholder");
+}
 const baseUrl = process.env.ANTHROPIC_BASE_URL;
 const model = process.env.ANTHROPIC_MODEL;
 if (!baseUrl || !model) throw new Error("named CCR profile did not supply gateway URL and model");
@@ -511,9 +535,30 @@ const response = await fetch(new URL("/v1/messages", baseUrl), {
 });
 const payload = await response.json();
 if (!response.ok) throw new Error(JSON.stringify(payload));
+const mcpResponse = await fetch(process.env.AIRKIT_COMPATIBILITY_MCP_URL, {
+  method: "POST",
+  headers: {
+    authorization: "Bearer " + process.env.AIRKIT_COMPATIBILITY_MCP_TOKEN,
+    "content-type": "application/json",
+  },
+  body: JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: "2025-03-26",
+      capabilities: {},
+      clientInfo: { name: "airkit-e2e", version: "1" },
+    },
+  }),
+  signal: AbortSignal.timeout(10_000),
+});
+const mcpPayload = await mcpResponse.json();
+if (!mcpResponse.ok || mcpPayload.error) throw new Error(JSON.stringify(mcpPayload));
 await writeFile(process.env.FAKE_CLAUDE_RESULT_FILE, JSON.stringify({
   ...payload,
   ambientSentinel: process.env.AIRKIT_E2E_AMBIENT_SENTINEL,
+  compatibilityMcp: mcpPayload.result,
   fixtureSettingsPath: helperSettings.path,
 }));
 

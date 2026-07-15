@@ -19,6 +19,15 @@ test("repository includes the isolated CCR 3 end-to-end verifier", () => {
   assert.doesNotMatch(verifierSource, /AIRKIT_E2E_CONTROLLER_GUARD/);
 });
 
+test("isolated CCR verifier loads the compatibility plugin and probes its MCP route", () => {
+  assert.match(verifierSource, /id: "airkit-compatibility"/);
+  assert.match(verifierSource, /AIRKIT_COMPATIBILITY_MCP_URL/);
+  assert.match(verifierSource, /AIRKIT_COMPATIBILITY_MCP_TOKEN/);
+  assert.match(verifierSource, /method: "initialize"/);
+  assert.match(verifierSource, /payload\.compatibilityMcp\?\.serverInfo\?\.name/);
+  assert.match(verifierSource, /payload\.content\?\.\[0\]\?\.text, "FAKE_PROVIDER_OK"/);
+});
+
 test("runtime has no persisted Claude session model repair layer", () => {
   const runtime = readFileSync(resolve(import.meta.dirname, "..", "src", "airkit.mjs"), "utf8");
   assert.doesNotMatch(runtime, /repairClaudeRestoreSessions|claudeRestoreProjectsDir|listClaudeSessionFiles/);
