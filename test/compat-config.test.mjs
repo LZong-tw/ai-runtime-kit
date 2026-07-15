@@ -69,7 +69,7 @@ test("returns deeply frozen policy data without freezing the caller config", () 
 
 test("accepts exact supported modes", () => {
   const cases = {
-    webSearch: ["native-first", "anthropic-fallback"],
+    webSearch: ["native-first", "anthropic-fallback", "mcp"],
     webFetch: ["native-first", "anthropic-fallback"],
     codeExecution: ["anthropic-fallback"],
     advisor: ["anthropic-fallback"],
@@ -85,6 +85,22 @@ test("accepts exact supported modes", () => {
       });
     }
   }
+});
+
+test("legacy MCP requires an explicit webSearch mode and keeps typed requests on fallback", () => {
+  const legacy = {
+    ...VALID_CONFIG,
+    webSearch: { mode: "mcp" },
+  };
+
+  assert.equal(
+    resolveCompatibilityPolicies(legacy, { webSearch: true }).policies.webSearch,
+    "anthropic-fallback",
+  );
+  assert.throws(
+    () => validateCompatibilityConfig({ ...VALID_CONFIG, webFetch: { mode: "mcp" } }),
+    /webFetch\.mode/,
+  );
 });
 
 test("rejects non-Anthropic fallback and removed Advisor bridge configuration", () => {

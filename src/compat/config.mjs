@@ -1,7 +1,7 @@
 import { assertAnthropicFamilyModel } from "./protocol.mjs";
 
 const FAMILY_MODES = Object.freeze({
-  webSearch: Object.freeze(["native-first", "anthropic-fallback"]),
+  webSearch: Object.freeze(["native-first", "anthropic-fallback", "mcp"]),
   webFetch: Object.freeze(["native-first", "anthropic-fallback"]),
   codeExecution: Object.freeze(["anthropic-fallback"]),
   advisor: Object.freeze(["anthropic-fallback"]),
