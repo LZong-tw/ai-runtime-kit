@@ -3,7 +3,10 @@ import {
   handleCompatibilityMessage,
   writeAnthropicMessage,
 } from "./gateway.mjs";
-import { assertAnthropicFamilyModel, inspectCompatibilityRequest } from "./protocol.mjs";
+import { validateCompatibilityConfig } from "./config.mjs";
+import { inspectPendingServerHistory } from "./server-history.mjs";
+import { inspectServerToolRequest } from "./server-tools.mjs";
+import { assertAnthropicFamilyModel } from "./protocol.mjs";
 
 const MCP_PROTOCOL_VERSION = "2025-03-26";
 const MAX_QUERY_LENGTH = 1_000;
@@ -33,24 +36,24 @@ const WEB_SEARCH_TOOL = {
 export default {
   async setup(ctx) {
     const pluginConfig = isRecord(ctx.pluginConfig) ? ctx.pluginConfig : {};
-    validateConfiguredModels(pluginConfig);
-    const config = {
+    validateCompatibilityConfig(pluginConfig);
+    const runtimeConfig = {
       ...(isRecord(ctx.config) ? ctx.config : {}),
       ...pluginConfig,
       gateway: isRecord(ctx.config?.gateway) ? ctx.config.gateway : pluginConfig.gateway,
     };
-    const coreClient = ctx.coreClient ?? createCoreClient({ config });
+    const coreClient = ctx.coreClient ?? createCoreClient({ config: runtimeConfig });
 
     ctx.registerGatewayRoute({
       auth: "gateway",
-      handler: createMessagesHandler({ config, coreClient }),
+      handler: createMessagesHandler({ config: pluginConfig, coreClient }),
       id: "airkit-compatibility-messages",
       method: "POST",
       path: "/v1/messages",
     });
     ctx.registerGatewayRoute({
       auth: "gateway",
-      handler: createMcpHandler({ config, coreClient }),
+      handler: createMcpHandler({ config: pluginConfig, coreClient }),
       id: "airkit-compatibility-mcp",
       method: "POST",
       path: "/airkit/compatibility/mcp",
@@ -62,7 +65,7 @@ function createMessagesHandler({ config, coreClient }) {
   return async (request, response, helpers) => {
     const rawBody = await helpers.readBody(request);
     const body = parseJsonCopy(rawBody);
-    if (!isRecord(body) || !isConfiguredCompatibilityRequest(body, config)) {
+    if (!isRecord(body) || !isConfiguredCompatibilityRequest(body)) {
       await coreClient.forwardRaw({
         body: rawBody,
         headers: request.headers,
@@ -78,16 +81,21 @@ function createMessagesHandler({ config, coreClient }) {
       config,
       coreClient,
       headers: request.headers,
+      response,
+      signal: request.signal,
     });
-    writeAnthropicMessage(response, message, body.stream === true);
+    if (message !== undefined) writeAnthropicMessage(response, message, body.stream === true);
   };
 }
 
-function isConfiguredCompatibilityRequest(body, config) {
-  const inspection = inspectCompatibilityRequest(body);
+function isConfiguredCompatibilityRequest(body) {
+  const tools = inspectServerToolRequest(body);
+  const history = inspectPendingServerHistory(body);
   return (
-    (inspection.advisor !== null && config.advisor?.mode === "bridge") ||
-    (inspection.toolSearch !== null && config.toolSearch?.mode === "bridge")
+    tools.serverTools.length > 0 ||
+    history.requiresFallback ||
+    history.containerId !== null ||
+    (Array.isArray(body.mcp_servers) && body.mcp_servers.length > 0)
   );
 }
 
@@ -160,7 +168,7 @@ async function callWebSearch({ config, coreClient, headers, input }) {
 
   const message = await coreClient.requestMessage(
     {
-      model: assertAnthropicFamilyModel(config.webSearch?.model, "webSearch.model"),
+      model: assertAnthropicFamilyModel(config.fallback?.model, "fallback.model"),
       max_tokens: 1_024,
       messages: [{ role: "user", content: input.query }],
       stream: false,
@@ -264,25 +272,6 @@ function sanitizePublicUrl(value) {
     return url.href;
   } catch {
     return null;
-  }
-}
-
-function validateConfiguredModels(config) {
-  for (const capability of ["advisor", "toolSearch", "webSearch"]) {
-    const settings = config[capability];
-    if (!isRecord(settings)) continue;
-    for (const field of ["model", "fallbackModel"]) {
-      if (settings[field] !== undefined) {
-        assertAnthropicFamilyModel(settings[field], `${capability}.${field}`);
-      }
-    }
-  }
-  if (config.advisor?.mode === "bridge") {
-    assertAnthropicFamilyModel(config.advisor.model, "advisor.model");
-    assertAnthropicFamilyModel(config.advisor.fallbackModel, "advisor.fallbackModel");
-  }
-  if (config.webSearch?.mode === "mcp") {
-    assertAnthropicFamilyModel(config.webSearch.model, "webSearch.model");
   }
 }
 
