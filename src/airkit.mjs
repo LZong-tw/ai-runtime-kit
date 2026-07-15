@@ -243,8 +243,8 @@ export async function exportOssRelease({ outDir }) {
     await readFile(join(repoRoot, "scripts", "verify-ccr3-e2e.mjs"), "utf8"),
   );
   await writeFile(join(outDir, "package.json"), `${JSON.stringify(publicPackage(), null, 2)}\n`);
-  await writeFile(join(outDir, "CLAUDE.md"), claudeGuide());
-  await writeFile(join(outDir, "README.md"), publicReadme());
+  await copyFile(join(repoRoot, "CLAUDE.md"), join(outDir, "CLAUDE.md"));
+  await copyFile(join(repoRoot, "README.md"), join(outDir, "README.md"));
 }
 
 export function planInstall(catalog, profileName, options = {}) {
@@ -684,44 +684,6 @@ function publicPackage() {
     license: "MIT",
     author: "LZong, Lim, Un-tiong <lzong.tw@gmail.com>",
   };
-}
-
-function publicReadme() {
-  return `# ai-runtime-kit
-
-Public-safe runtime profile templates for Claude Code Router and other AI client wrappers.
-
-This repository intentionally contains no private endpoints, no credential-manager item references, and no secret values. Use \`profiles/catalog.json\` as a starting point, then keep machine-specific runtime state outside git.
-
-\`\`\`bash
-airclaude
-airclaude pro
-airclaude --dry-run
-airclaude --doctor
-airclaude --help
-airkit list
-airkit --help
-airkit runtime check
-airkit runtime update
-airkit runtime update --write
-airkit init --profile openai-compatible-example
-airkit init --profile openai-compatible-example --write
-airkit render ccr --profile openai-compatible-example
-airkit render shell --profile openai-compatible-example
-airkit update --profile openai-compatible-example
-airkit doctor --profile openai-compatible-example
-\`\`\`
-
-\`airclaude\` is the daily entrypoint. It merges AirKit-owned providers and
-profiles through the CCR 3 management API, then launches the managed CCR CLI
-profile. Supported versions are Node.js 22+, Claude Code 2.1.208+, and CCR
-3.0.4 through the latest 3.x release.
-\`airclaude pro\` applies the profile's stronger routing overlay before launch.
-
-For LLM-guided installation or debugging, start with \`CLAUDE.md\`. The
-management flow remains inspectable: dry run first, then \`--write\` after the
-user confirms the target paths.
-`;
 }
 
 export async function runCli(argv = process.argv.slice(2), options = {}) {
@@ -2069,56 +2031,6 @@ async function fileExists(path) {
     if (error?.code === "ENOENT") return false;
     throw error;
   }
-}
-
-function claudeGuide() {
-  const defaultProfile = "openai-compatible-example";
-
-  return `# CLAUDE.md - ai-runtime-kit
-
-## Agent Start Here
-
-This repo is the public OSS for AI runtime profiles. The goal is a guided,
-OpenCode-style install flow: inspect first, write only when the user passes
-\`--write\`.
-
-Run these from the repo root:
-
-\`\`\`bash
-node src/airkit.mjs --help
-node src/airkit.mjs airclaude --help
-node src/airkit.mjs airclaude --dry-run
-node src/airkit.mjs airclaude pro --dry-run
-node src/airkit.mjs list
-node src/airkit.mjs init --profile ${defaultProfile}
-node src/airkit.mjs init --profile ${defaultProfile} --write
-node src/airkit.mjs doctor
-\`\`\`
-
-\`airclaude\` is the daily launch path. The management dry run prints every file
-path it would create. Do not edit runtime files directly unless the user
-explicitly asks for a manual repair.
-
-## Product Boundary
-
-- Keep runtime state out of git: Claude sessions, CCR daemon state, caches,
-  login state, and secret values.
-- Profiles may contain placeholders such as \`$ANTHROPIC_AUTH_TOKEN\`.
-- Public output must not contain private endpoints, company names,
-  credential-manager item references, or personal/company tokens.
-
-## Release Rules
-
-For public changes:
-
-\`\`\`bash
-npm run verify
-git push
-\`\`\`
-
-Do not add private endpoints, company names, credential-manager item references, or
-personal/company tokens to this repository.
-`;
 }
 
 if (isDirectEntrypoint()) {

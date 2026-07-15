@@ -148,6 +148,12 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
 
     assert.deepEqual(packageJson.files, expectedFiles);
     assert.deepEqual(exportedPackage.files, expectedFiles);
+    for (const document of ["README.md", "CLAUDE.md"]) {
+      assert.equal(
+        await readFile(join(outDir, document), "utf8"),
+        await readFile(resolve(import.meta.dirname, "..", document), "utf8"),
+      );
+    }
     assert.equal(
       await readFile(join(outDir, "scripts", "verify-ccr3-e2e.mjs"), "utf8"),
       await readFile(resolve(import.meta.dirname, "..", "scripts", "verify-ccr3-e2e.mjs"), "utf8"),
