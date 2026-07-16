@@ -764,7 +764,7 @@ test("native-first compatibility renders no duplicate MCP and reports six polici
     assert.equal(plan.compatibilityMcp, undefined);
     assert.deepEqual(plan.compatibility.policies, {
       webSearch: "native",
-      webFetch: "native",
+      webFetch: "anthropic-fallback",
       codeExecution: "anthropic-fallback",
       advisor: "anthropic-fallback",
       toolSearch: "bridge",
@@ -782,7 +782,7 @@ test("native-first compatibility renders no duplicate MCP and reports six polici
       codeExecution: "anthropic-fallback",
       mcpConnector: "anthropic-fallback",
       toolSearch: "bridged",
-      webFetch: "native",
+      webFetch: "anthropic-fallback",
       webSearch: "native",
     });
     assert.equal(result.runtime.compatibility.ok, true);
