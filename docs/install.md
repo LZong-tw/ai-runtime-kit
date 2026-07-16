@@ -133,6 +133,74 @@ defines `apiKeyHelper` to a CCR-backed profile; AirKit rejects that override.
 Other Claude arguments remain available through the normal passthrough after
 `--`.
 
+## Configure Server-Tool Compatibility
+
+Compatibility is opt-in in the source profile's `ccr.plugins` array. Generated
+CCR state is an output, not an editable source. The current six-family contract
+is:
+
+| Family | Profile mode | Effective behavior |
+| --- | --- | --- |
+| WebSearch (`webSearch`) | `native-first` | Native. The complete call/result wire cycle was verified with real Claude Code 2.1.211. |
+| WebFetch (`webFetch`) | `native-first` | Anthropic fallback for now. Claude exposes the native client tool, but the zero-public-network loopback execution is blocked by Claude's domain-safety check, so AirKit does not claim the native cycle is verified. |
+| Code Execution (`codeExecution`) | `anthropic-fallback` | The complete request uses the configured Anthropic route so container and continuation state stay intact. |
+| Advisor (`advisor`) | `anthropic-fallback` | The complete request uses the configured Anthropic route; the removed approximation bridge is not used. |
+| ToolSearch (`toolSearch`) | `bridge` | Safe bounded regex/BM25 requests use the local bridge. Unsafe, oversized, unsupported, or unknown requests fall back as a complete request. |
+| MCP Connector (`mcpConnector`) | `anthropic-fallback` | Typed server-side connector requests use the configured Anthropic route; client-side MCP remains native. |
+
+The profile must declare a single fallback and all six modes, for example:
+
+```json
+{
+  "id": "airkit-compatibility",
+  "module": "@lzong/ai-runtime-kit/compatibility-plugin",
+  "config": {
+    "fallback": {
+      "provider": "anthropic-messages",
+      "model": "claude-sonnet",
+      "maxContinuationTurns": 8
+    },
+    "advisor": { "mode": "anthropic-fallback" },
+    "codeExecution": { "mode": "anthropic-fallback" },
+    "mcpConnector": { "mode": "anthropic-fallback" },
+    "toolSearch": { "mode": "bridge" },
+    "webFetch": { "mode": "native-first" },
+    "webSearch": { "mode": "native-first" }
+  }
+}
+```
+
+`fallback.model` is valid only when it is both Anthropic-family and routable by
+the selected CCR/provider configuration. A slash-bearing name such as
+`anthropic/claude-*` can be ambiguous in CCR; its prefix alone is not proof.
+Use an identifier already proven for the profile, such as `claude-sonnet`, and
+verify the route. Fallback applies to one complete request and incurs that
+Anthropic route's context, cache, and billing. Safe ToolSearch bridge requests
+stay local and make no model call.
+
+To migrate an older source profile, remove Advisor `model`, `fallbackModel`,
+and `mode: "bridge"`; put the model in the generic `fallback` block; add every
+missing family entry; and change `webSearch.mode: "mcp"` to `native-first`.
+Keep `mcp` only when the user explicitly needs the legacy `web_search` MCP
+migration tool. Native-first renders no duplicate MCP registration.
+
+Preview and verify the rendered migration with these commands:
+
+```bash
+PROFILE=your-profile
+node src/airkit.mjs update --profile "$PROFILE"
+# After reviewing and approving the paths:
+node src/airkit.mjs update --profile "$PROFILE" --write
+node src/airkit.mjs doctor --profile "$PROFILE"
+npm run verify:tool-contract
+npm run verify:ccr3:e2e
+```
+
+Doctor reports `native` and `bridged` for verified policies,
+`anthropic-fallback` for configured fallback that has not been live-probed, and
+`unverified` for the legacy MCP route. It does not claim provider success or
+fallback billing evidence without a real request.
+
 The 1M context window is **not** controlled by an env var (there is no such env
 var in Claude Code — `ANTHROPIC_1M_CONTEXT` is a no-op). Claude Code enables 1M
 only when the resolved model string ends in the literal `[1m]` suffix, so the

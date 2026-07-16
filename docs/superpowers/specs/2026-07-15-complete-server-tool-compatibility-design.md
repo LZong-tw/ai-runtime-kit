@@ -44,8 +44,8 @@ The supported server-tool inventory is:
 
 | Family | Current request types | Default compatibility policy |
 | --- | --- | --- |
-| Web Search | `web_search_20250305`, `web_search_20260209`, `web_search_20260318` | native client tool when Claude Code supplies one; otherwise Anthropic request fallback |
-| Web Fetch | `web_fetch_20250910`, `web_fetch_20260209`, `web_fetch_20260309`, `web_fetch_20260318` | native client tool when Claude Code supplies one; otherwise Anthropic request fallback |
+| Web Search | `web_search_20250305`, `web_search_20260209`, `web_search_20260318` | verified native client tool when Claude Code supplies one; otherwise Anthropic request fallback |
+| Web Fetch | `web_fetch_20250910`, `web_fetch_20260209`, `web_fetch_20260309`, `web_fetch_20260318` | Anthropic request fallback until the native client execution cycle is verified |
 | Code Execution | `code_execution_20250825`, `code_execution_20260120`, `code_execution_20260521` | Anthropic request fallback |
 | Advisor | `advisor_20260301` | Anthropic request fallback |
 | Tool Search | `tool_search_tool_regex_20251119`, `tool_search_tool_bm25_20251119`, `tool_search_tool_regex`, `tool_search_tool_bm25` | local bridge, then Anthropic request fallback when unsupported |
@@ -65,9 +65,10 @@ with a bounded compatibility error.
 
 AirKit classifies the request before transforming it:
 
-1. If Claude Code supplies a client tool such as `WebFetch` or `WebSearch`, the
-   tool remains native to Claude Code. AirKit does not register a duplicate MCP
-   tool by default.
+1. If Claude Code supplies a client tool such as `WebFetch` or `WebSearch`,
+   AirKit preserves the definition and does not register a duplicate MCP tool.
+   The effective policy is native only after the complete execution cycle is
+   verified; otherwise the complete affected request uses fallback.
 2. If the request contains no server-tool definitions or pending server-tool
    history, the request passes through unchanged.
 3. If every detected server tool has a proven local bridge, AirKit uses that
@@ -102,7 +103,7 @@ fallback under Advisor:
 {
   "fallback": {
     "provider": "anthropic-messages",
-    "model": "anthropic/claude-sonnet",
+    "model": "claude-sonnet",
     "maxContinuationTurns": 8
   },
   "toolSearch": {
@@ -126,9 +127,10 @@ fallback under Advisor:
 }
 ```
 
-The public identifiers above are placeholders. A private overlay owns its real
-provider and model selection. Removed legacy keys are rejected with a migration
-message instead of silently changing semantics.
+The public identifiers above are placeholders, not proven CCR routes. A private
+profile owns its real provider and provider-local model selection. Removed
+legacy keys are rejected with a migration message instead of silently changing
+semantics.
 
 ## Whole-request fallback lifecycle
 
@@ -161,9 +163,12 @@ programmatic-tool loops and produces a bounded visible error.
 
 ### Web Search and Web Fetch
 
-Claude Code client tools named `WebSearch` and `WebFetch` remain native when the
-isolated E2E proves their complete call/result cycle. They are not evidence that
-typed Messages API server tools will work through a non-Anthropic provider.
+WebSearch native execution is verified by an isolated complete call/result
+cycle. WebFetch resolves to Anthropic fallback because native execution is not
+verified: Claude exposes the client tool, but the zero-public-network loopback
+attempt is blocked by Claude's domain-safety check. Presence of either client
+tool is not evidence that typed Messages API server tools work through a
+non-Anthropic provider.
 
 When typed server-tool definitions appear, the complete request falls back so
 Anthropic retains domain filtering, localization, citations, URL provenance,
@@ -236,8 +241,8 @@ is introduced.
 profile. It distinguishes configuration from live verification:
 
 ```text
-native compatibility webSearch (verified with Claude Code 2.1.210)
-native compatibility webFetch (verified with Claude Code 2.1.210)
+native compatibility webSearch (verified with Claude Code 2.1.211)
+anthropic-fallback compatibility webFetch (native execution unverified)
 anthropic-fallback compatibility codeExecution (configured, unprobed)
 anthropic-fallback compatibility advisor (configured, unprobed)
 bridged compatibility toolSearch (verified)
@@ -273,7 +278,8 @@ The isolated fake-provider E2E covers:
 
 1. current Claude Code custom-gateway request capture;
 2. native `WebSearch` call/result continuation;
-3. native `WebFetch` call/result continuation without external network access;
+3. `WebFetch` client-tool exposure plus the blocked loopback execution evidence
+   that keeps its effective policy on Anthropic fallback;
 4. ToolSearch local bridge and fallback boundary;
 5. Advisor whole-request fallback;
 6. Web Search and Web Fetch typed server-tool fallback;

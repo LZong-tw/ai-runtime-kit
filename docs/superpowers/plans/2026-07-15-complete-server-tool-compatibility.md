@@ -64,12 +64,14 @@ test("classifies every current server-tool type and ToolSearch alias", () => {
   }
 });
 
-test("keeps Claude Code WebFetch and WebSearch client tools native", () => {
+test("identifies Claude Code web client families without treating them as server tools", () => {
   const inspection = inspectServerToolRequest({
     tools: [{ name: "WebFetch", input_schema: {} }, { name: "WebSearch", input_schema: {} }],
   });
   assert.deepEqual(inspection.clientTools.map((tool) => tool.name), ["WebFetch", "WebSearch"]);
+  assert.deepEqual([...inspection.clientFamilies], ["webFetch", "webSearch"]);
   assert.deepEqual(inspection.serverTools, []);
+  assert.deepEqual([...inspection.families], []);
   assert.equal(inspection.requiresFallback, false);
 });
 
@@ -151,7 +153,7 @@ Commit: `git commit -m "feat: classify complete server tool inventory"`
 const config = {
   fallback: {
     provider: "anthropic-messages",
-    model: "anthropic/claude-sonnet",
+    model: "claude-sonnet",
     maxContinuationTurns: 8,
   },
   toolSearch: { mode: "bridge" },
@@ -162,11 +164,11 @@ const config = {
   mcpConnector: { mode: "anthropic-fallback" },
 };
 
-test("resolves all six policies and native web capabilities", () => {
-  const resolved = resolveCompatibilityPolicies(config, { webSearch: true, webFetch: true });
+test("resolves verified WebSearch and unverified WebFetch capabilities", () => {
+  const resolved = resolveCompatibilityPolicies(config, { webSearch: true, webFetch: false });
   assert.deepEqual(resolved.policies, {
     webSearch: "native",
-    webFetch: "native",
+    webFetch: "anthropic-fallback",
     codeExecution: "anthropic-fallback",
     advisor: "anthropic-fallback",
     toolSearch: "bridge",
@@ -181,7 +183,7 @@ test("rejects non-Anthropic fallback and removed advisor bridge keys", () => {
   }), /fallback\.model must be an Anthropic-family model/);
   assert.throws(() => validateCompatibilityConfig({
     ...config,
-    advisor: { mode: "bridge", model: "anthropic/claude-opus" },
+    advisor: { mode: "bridge", model: "claude-opus" },
   }), /advisor\.mode.*removed/);
 });
 ```
@@ -237,12 +239,12 @@ test("routes typed Advisor and Code Execution requests to the configured model",
     },
   });
   const body = {
-    model: "oneportal,GLM-5.2",
+    model: "non-anthropic,main-model",
     tools: [{ type: "code_execution_20260120", name: "code_execution" }],
     messages: [{ role: "user", content: "run" }],
   };
   await route({ body, headers: { "anthropic-beta": "code-execution-2025-08-25" } });
-  assert.equal(calls[0].body.model, "anthropic/claude-sonnet");
+  assert.equal(calls[0].body.model, "claude-sonnet");
   assert.deepEqual(calls[0].body.tools, body.tools);
   assert.equal(calls[0].headers["anthropic-beta"], "code-execution-2025-08-25");
 });
@@ -362,7 +364,7 @@ test("native-first compatibility renders no duplicate MCP and reports six polici
   assert.equal(plan.compatibilityMcp, undefined);
   assert.deepEqual(plan.compatibility.policies, {
     webSearch: "native",
-    webFetch: "native",
+    webFetch: "anthropic-fallback",
     codeExecution: "anthropic-fallback",
     advisor: "anthropic-fallback",
     toolSearch: "bridge",
@@ -384,7 +386,11 @@ Expected: FAIL because rendering and doctor only know three capabilities.
 
 - [ ] **Step 3: Replace scattered validation with the config module**
 
-Delete the duplicated three-capability loops from `airkit.mjs`; render the resolved policy object into the managed plugin configuration. Keep all unrelated providers, profiles, plugins, MCP servers, and user statusline handling unchanged. Document the generic public schema and the legacy MCP migration behavior.
+Delete the duplicated three-capability loops from `airkit.mjs`; define verified
+native capabilities once in the config module and make both Doctor and the
+runtime plugin resolve policy from that source. Keep all unrelated providers,
+profiles, plugins, MCP servers, and user statusline handling unchanged. Document
+the generic public schema and the legacy MCP migration behavior.
 
 - [ ] **Step 4: Run AirKit/config tests**
 
@@ -417,7 +423,7 @@ Commit: `git commit -m "feat: render complete server tool policy"`
 - [ ] **Step 1: Write failing contract and repository tests**
 
 ```js
-test("wire capture proves native web tools through a fake provider", async () => {
+test("wire capture proves native WebSearch through a fake provider", async () => {
   const result = await runCapture({ claudePath: process.env.CLAUDE_PATH, tool: "WebSearch" });
   assert.equal(result.realHomeReferenced, false);
   assert.equal(result.initialTools.includes("WebSearch"), true);
@@ -440,7 +446,12 @@ Expected: FAIL because the capture script and fallback scenarios do not exist.
 
 - [ ] **Step 3: Implement isolated captures and fake fallback scenarios**
 
-Use OS-assigned loopback ports, temporary homes, bounded child-process timeouts, and retained artifacts only on failure. WebFetch targets a loopback fixture, not the public internet. Never inherit real Claude/CCR config paths or credential variables. Add `verify:tool-contract` to `package.json` without changing lockfiles.
+Use OS-assigned loopback ports, temporary homes, bounded child-process timeouts,
+and retained artifacts only on failure. Attempt WebFetch against a loopback
+fixture, not the public internet, and record Claude's domain-safety rejection
+without claiming native execution. Never inherit real Claude/CCR config paths
+or credential variables. Add `verify:tool-contract` to `package.json` without
+changing lockfiles.
 
 - [ ] **Step 4: Run isolated verification**
 
@@ -509,13 +520,27 @@ Run: `npm_config_cache=/tmp/airkit-npm-cache npm run pack:check`
 
 Run: `node scripts/verify-ccr3-e2e.mjs`
 
-Run public scan:
+Run the real known-company identifier scan from private release automation. The
+pattern is supplied out of band so OSS documentation does not reproduce those
+identifiers:
 
 ```bash
-rg -n -i 'company-internal|oneportal|op://|employee/|private-token' README.md CLAUDE.md docs src test scripts profiles
+test -n "$AIRKIT_PRIVATE_IDENTIFIER_PATTERN"
+rg -n -i "$AIRKIT_PRIVATE_IDENTIFIER_PATTERN" README.md CLAUDE.md docs src test scripts profiles
 ```
 
-Expected: all suites and E2E pass; scan has no private identifiers; `git diff --check` is clean.
+Review generic credential-scheme and redaction-fixture matches separately:
+
+```bash
+rg -n -i 'op://|private-token' README.md CLAUDE.md docs src test scripts profiles
+```
+
+`op://` is a generic credential-manager scheme. Synthetic `private-token`
+values are expected in redaction fixtures and source validation tests. Keep
+those security cases; inspect their surrounding lines to prove they contain no
+real account, tenant, endpoint, or secret value. Expected: all suites and E2E
+pass; the company-identifier scan has no matches; generic matches have only the
+documented synthetic disposition; `git diff --check` is clean.
 
 - [ ] **Step 5: Independent review and commit Task 7**
 
@@ -525,52 +550,59 @@ Commit: `git commit -m "docs: hard cut complete server tool compatibility"`
 
 ---
 
-### Task 8: Internal overlay opt-in and user-facing verification
+### Task 8: Private overlay opt-in and user-facing verification
 
 **Files:**
-- Modify: `../ai-runtime-kit/profiles/catalog.json`
-- Modify: `../ai-runtime-kit/docs/examples/oneportal-lowcost.profile.json`
-- Modify: `../ai-runtime-kit/docs/profile-schema.md`
-- Modify: `../ai-runtime-kit/test/airkit.test.mjs`
-- Modify: `../ai-runtime-kit/README.md`
+- Modify: `../private-runtime-overlay/profiles/catalog.json`
+- Modify: `../private-runtime-overlay/docs/examples/private-profile.profile.json`
+- Modify: `../private-runtime-overlay/docs/profile-schema.md`
+- Modify: `../private-runtime-overlay/test/airkit.test.mjs`
+- Modify: `../private-runtime-overlay/README.md`
 
 **Interfaces:**
-- Internal profile consumes the OSS schema without duplicating runtime logic.
+- Private profile consumes the OSS schema without duplicating runtime logic.
 - All fallback models use the approved Anthropic-family LiteLLM identifiers in the private catalog.
 - Existing `airclaude`, `hr-airclaude`, modes, aliases, statusline, and passthrough arguments remain unchanged.
 
-- [ ] **Step 1: Write failing internal profile tests**
+- [ ] **Step 1: Write failing private-profile tests**
 
 ```js
-test("internal profile configures all six server-tool policies", () => {
-  const profile = catalog.profiles.find(({ name }) => name === "oneportal-lowcost");
-  assert.deepEqual(profile.compatibility.toolSearch, { mode: "bridge" });
-  assert.equal(profile.compatibility.webSearch.mode, "native-first");
-  assert.equal(profile.compatibility.webFetch.mode, "native-first");
+test("private profile configures all six server-tool policies", () => {
+  const profile = catalog.profiles.find(({ name }) => name === "private-profile");
+  const compatibility = profile.ccr.plugins.find(
+    ({ id }) => id === "airkit-compatibility",
+  )?.config;
+  assert.ok(compatibility);
+  assert.deepEqual(compatibility.toolSearch, { mode: "bridge" });
+  assert.equal(compatibility.webSearch.mode, "native-first");
+  assert.equal(compatibility.webFetch.mode, "native-first");
   for (const key of ["advisor", "codeExecution", "mcpConnector"]) {
-    assert.equal(profile.compatibility[key].mode, "anthropic-fallback");
+    assert.equal(compatibility[key].mode, "anthropic-fallback");
   }
-  assert.match(profile.compatibility.fallback.model, /^anthropic\//);
+  assert.equal(compatibility.fallback.model, "claude-sonnet");
 });
 ```
 
 Add assertions that source/example remain equal and wrapper output still delegates once with `"$@"`.
 
-- [ ] **Step 2: Run internal tests and confirm red**
+- [ ] **Step 2: Run private-overlay tests and confirm red**
 
-Run from internal root: `npm test`
+Run from the private-overlay root: `npm test`
 
 Expected: FAIL because the profile currently has no compatibility section.
 
-- [ ] **Step 3: Add private policy and update internal docs**
+- [ ] **Step 3: Add private policy and update overlay docs**
 
-Add the approved private Anthropic-family fallback ID once to the profile source, mirror it in the documented example, describe the six states, and preserve every existing provider route and wrapper command. Do not add secret values.
+Add the approved provider-local Anthropic-family fallback ID once to the profile
+source, mirror it in the documented example, describe the six states, and
+preserve every existing provider route and wrapper command. Do not copy the
+actual identifier into this OSS plan and do not add secret values.
 
-- [ ] **Step 4: Verify internal rendering and real dry-run**
+- [ ] **Step 4: Verify private-overlay rendering and real dry-run**
 
 Run: `npm test && npm run check`
 
-Run: `node src/airkit.mjs doctor --profile oneportal-lowcost`
+Run: `node src/airkit.mjs doctor --profile private-profile`
 
 Run: `node src/airkit.mjs airclaude glm --dry-run -r`
 
@@ -590,18 +622,18 @@ Report previewed paths and request explicit approval before `update --write` or 
 - No source edits unless verification exposes a reproducible defect; any defect starts a new red-green task with at most five files.
 
 **Interfaces:**
-- Consumes committed OSS and internal changes plus explicit user approval.
+- Consumes committed OSS and private-overlay changes plus explicit user approval.
 - Produces verified live managed state without modifying global model, permission, Codex, or session history.
 
 - [ ] **Step 1: Preview the live update**
 
-Run from internal root: `node src/airkit.mjs update --profile oneportal-lowcost`
+Run from the private-overlay root: `node src/airkit.mjs update --profile private-profile`
 
 Expected: preview lists only AirKit-managed CCR/plugin/shell paths and no global Claude/Codex settings.
 
 - [ ] **Step 2: Obtain explicit approval and apply once**
 
-Run only after approval: `node src/airkit.mjs update --profile oneportal-lowcost --write`
+Run only after approval: `node src/airkit.mjs update --profile private-profile --write`
 
 Expected: backup paths are printed and managed save count remains idempotent on a second preview.
 
@@ -617,7 +649,7 @@ Expected: no takeover/login error; mode remains `glm`; final Claude arguments in
 
 OSS: `npm test && npm run check && npm_config_cache=/tmp/airkit-npm-cache npm run pack:check && node scripts/verify-ccr3-e2e.mjs`
 
-Internal: `npm test && npm run check`
+Private overlay: `npm test && npm run check`
 
 Both: `git status --short --branch && git diff --check`
 
@@ -625,6 +657,6 @@ Expected: all gates pass, both worktrees are clean, and no uncommitted changes r
 
 - [ ] **Step 5: Push both main branches and report exact state**
 
-Run: `git push origin main` in OSS, then internal.
+Run: `git push origin main` in OSS, then the private overlay.
 
 Report commit IDs, test counts, E2E summary, backup paths, and any capability still marked unverified. Do not say a capability is native or working unless its exact E2E ran.

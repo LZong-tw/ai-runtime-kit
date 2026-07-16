@@ -3,7 +3,11 @@ import {
   handleCompatibilityMessage,
   writeAnthropicMessage,
 } from "./gateway.mjs";
-import { validateCompatibilityConfig } from "./config.mjs";
+import {
+  VERIFIED_NATIVE_COMPATIBILITY,
+  resolveCompatibilityPolicies,
+  validateCompatibilityConfig,
+} from "./config.mjs";
 import { inspectPendingServerHistory } from "./server-history.mjs";
 import { inspectServerToolRequest } from "./server-tools.mjs";
 import { assertAnthropicFamilyModel } from "./protocol.mjs";
@@ -37,6 +41,10 @@ export default {
   async setup(ctx) {
     const pluginConfig = isRecord(ctx.pluginConfig) ? ctx.pluginConfig : {};
     validateCompatibilityConfig(pluginConfig);
+    const { policies } = resolveCompatibilityPolicies(
+      pluginConfig,
+      VERIFIED_NATIVE_COMPATIBILITY,
+    );
     const runtimeConfig = {
       ...(isRecord(ctx.config) ? ctx.config : {}),
       ...pluginConfig,
@@ -46,7 +54,7 @@ export default {
 
     ctx.registerGatewayRoute({
       auth: "gateway",
-      handler: createMessagesHandler({ config: pluginConfig, coreClient }),
+      handler: createMessagesHandler({ config: pluginConfig, coreClient, policies }),
       id: "airkit-compatibility-messages",
       method: "POST",
       path: "/v1/messages",
@@ -61,11 +69,11 @@ export default {
   },
 };
 
-function createMessagesHandler({ config, coreClient }) {
+function createMessagesHandler({ config, coreClient, policies }) {
   return async (request, response, helpers) => {
     const rawBody = await helpers.readBody(request);
     const body = parseJsonCopy(rawBody);
-    if (!isRecord(body) || !isConfiguredCompatibilityRequest(body)) {
+    if (!isRecord(body) || !isConfiguredCompatibilityRequest(body, policies)) {
       await coreClient.forwardRaw({
         body: rawBody,
         headers: request.headers,
@@ -88,11 +96,12 @@ function createMessagesHandler({ config, coreClient }) {
   };
 }
 
-function isConfiguredCompatibilityRequest(body) {
+function isConfiguredCompatibilityRequest(body, policies) {
   const tools = inspectServerToolRequest(body);
   const history = inspectPendingServerHistory(body);
   return (
     tools.serverTools.length > 0 ||
+    [...tools.clientFamilies].some((family) => policies[family] !== "native") ||
     history.requiresFallback ||
     history.containerId !== null ||
     (Array.isArray(body.mcp_servers) && body.mcp_servers.length > 0)

@@ -14,6 +14,7 @@ import {
   repairCodexTakeover,
 } from "./codex-takeover-guard.mjs";
 import {
+  VERIFIED_NATIVE_COMPATIBILITY,
   resolveCompatibilityPolicies,
   validateCompatibilityConfig,
 } from "./compat/config.mjs";
@@ -25,7 +26,6 @@ const repoRoot = resolve(here, "..");
 const defaultCatalogPath = join(repoRoot, "profiles", "catalog.json");
 const compatibilityPluginId = "airkit-compatibility";
 const compatibilityPluginModule = join(here, "compat", "plugin.mjs");
-const verifiedNativeCompatibility = Object.freeze({ webFetch: false, webSearch: true });
 export const RUNTIME_REQUIREMENTS = Object.freeze({
   claudeCode: ">=2.1.208",
   claudeCodeRouter: ">=3.0.4 <4",
@@ -641,7 +641,7 @@ function validateConfiguredCompatibility(ccrConfig) {
 
 function resolveConfiguredCompatibility(ccrConfig) {
   const config = configuredCompatibility(ccrConfig);
-  return config ? resolveCompatibilityPolicies(config, verifiedNativeCompatibility) : null;
+  return config ? resolveCompatibilityPolicies(config, VERIFIED_NATIVE_COMPATIBILITY) : null;
 }
 
 function buildCompatibilityLaunch(ccrConfig, env) {
@@ -676,7 +676,7 @@ function buildCompatibilityLaunch(ccrConfig, env) {
 function compatibilityCapabilityStatus(ccrConfig) {
   const config = configuredCompatibility(ccrConfig);
   if (!config) return { capabilities: {}, ok: true, skipped: true };
-  const { policies } = resolveCompatibilityPolicies(config, verifiedNativeCompatibility);
+  const { policies } = resolveCompatibilityPolicies(config, VERIFIED_NATIVE_COMPATIBILITY);
   return {
     capabilities: {
       advisor: policyStatus(policies.advisor),

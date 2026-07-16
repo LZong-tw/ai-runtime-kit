@@ -183,6 +183,86 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
         await readFile(resolve(import.meta.dirname, "..", document), "utf8"),
       );
     }
+    const compatibilityDocuments = [
+      "README.md",
+      "CLAUDE.md",
+      "docs/install.md",
+      "docs/superpowers/specs/2026-07-14-claude-gateway-compatibility.md",
+    ];
+    const compatibilityTable = [
+      "| Family | Profile mode | Effective behavior |",
+      "| --- | --- | --- |",
+      "| WebSearch (`webSearch`) | `native-first` | Native. The complete call/result wire cycle was verified with real Claude Code 2.1.211. |",
+      "| WebFetch (`webFetch`) | `native-first` | Anthropic fallback for now. Claude exposes the native client tool, but the zero-public-network loopback execution is blocked by Claude's domain-safety check, so AirKit does not claim the native cycle is verified. |",
+      "| Code Execution (`codeExecution`) | `anthropic-fallback` | The complete request uses the configured Anthropic route so container and continuation state stay intact. |",
+      "| Advisor (`advisor`) | `anthropic-fallback` | The complete request uses the configured Anthropic route; the removed approximation bridge is not used. |",
+      "| ToolSearch (`toolSearch`) | `bridge` | Safe bounded regex/BM25 requests use the local bridge. Unsafe, oversized, unsupported, or unknown requests fall back as a complete request. |",
+      "| MCP Connector (`mcpConnector`) | `anthropic-fallback` | Typed server-side connector requests use the configured Anthropic route; client-side MCP remains native. |",
+    ].join("\n");
+    for (const document of compatibilityDocuments) {
+      const text = await readFile(resolve(import.meta.dirname, "..", document), "utf8");
+      assert.equal(
+        text.includes(compatibilityTable),
+        true,
+        `${document} must contain the shared six-family compatibility table`,
+      );
+      for (const shellBlock of text.matchAll(/```bash\n([\s\S]*?)```/g)) {
+        assert.doesNotMatch(
+          shellBlock[1],
+          /--profile <profile>/,
+          `${document} shell commands must use the copyable PROFILE variable`,
+        );
+      }
+      assert.match(text, /PROFILE=your-profile/);
+      assert.match(text, /--profile "\$PROFILE"/);
+      assert.doesNotMatch(text, /"advisor"\s*:\s*\{[^}]*"mode"\s*:\s*"bridge"/s);
+      assert.doesNotMatch(text, /"advisor"\s*:\s*\{[^}]*"(?:model|fallbackModel)"\s*:/s);
+      assert.doesNotMatch(text, /"webSearch"\s*:\s*\{[^}]*"mode"\s*:\s*"mcp"/s);
+      assert.doesNotMatch(
+        text,
+        /Advisor, ToolSearch, and WebSearch are all compatibility capabilities/,
+      );
+    }
+    const authorityDocuments = [
+      "docs/profile-schema.md",
+      "docs/superpowers/specs/2026-07-15-complete-server-tool-compatibility-design.md",
+    ];
+    for (const document of authorityDocuments) {
+      const text = await readFile(resolve(import.meta.dirname, "..", document), "utf8");
+      assert.match(
+        text,
+        /WebSearch[\s\S]{0,120}native[\s\S]{0,120}verified/i,
+        `${document} must identify WebSearch native execution as verified`,
+      );
+      assert.match(
+        text,
+        /WebFetch[\s\S]{0,180}Anthropic fallback[\s\S]{0,180}native execution[\s\S]{0,80}not\s+verified/i,
+        `${document} must resolve WebFetch to Anthropic fallback without claiming native execution`,
+      );
+    }
+    const authoritativeExamples = [
+      ...authorityDocuments,
+      "docs/superpowers/plans/2026-07-15-complete-server-tool-compatibility.md",
+    ];
+    for (const document of authoritativeExamples) {
+      const text = await readFile(resolve(import.meta.dirname, "..", document), "utf8");
+      assert.doesNotMatch(
+        text,
+        /\bmodel["']?\s*:\s*["']anthropic\/claude-[^"']+["']/i,
+        `${document} must not present a slash-bearing model as a proven CCR route`,
+      );
+    }
+    const implementationPlan = await readFile(
+      resolve(
+        import.meta.dirname,
+        "..",
+        "docs/superpowers/plans/2026-07-15-complete-server-tool-compatibility.md",
+      ),
+      "utf8",
+    );
+    assert.match(implementationPlan, /private-runtime-overlay/);
+    assert.match(implementationPlan, /--profile private-profile/);
+    assert.doesNotMatch(implementationPlan, /"visibility"\s*:\s*"internal"/i);
     assert.equal(
       await readFile(join(outDir, "scripts", "verify-ccr3-e2e.mjs"), "utf8"),
       await readFile(resolve(import.meta.dirname, "..", "scripts", "verify-ccr3-e2e.mjs"), "utf8"),

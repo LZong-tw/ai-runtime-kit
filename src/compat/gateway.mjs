@@ -4,6 +4,10 @@ import {
   inspectCompatibilityRequest,
 } from "./protocol.mjs";
 import { createFallbackRouter } from "./fallback.mjs";
+import {
+  VERIFIED_NATIVE_COMPATIBILITY,
+  resolveCompatibilityPolicies,
+} from "./config.mjs";
 import { inspectPendingServerHistory } from "./server-history.mjs";
 import { inspectServerToolRequest } from "./server-tools.mjs";
 import { bridgeToolSearch } from "./tool-search.mjs";
@@ -426,6 +430,11 @@ function requiresWholeRequestFallback({ body, config, serverHistory, serverTools
   if (serverTools.requiresFallback || serverHistory.continuation === "unsupported") return true;
   if (serverHistory.containerId !== null || serverHistory.pendingServerCallIds.length > 0) return true;
   if (Array.isArray(body?.mcp_servers) && body.mcp_servers.length > 0) return true;
+
+  const { policies } = resolveCompatibilityPolicies(config, VERIFIED_NATIVE_COMPATIBILITY);
+  for (const family of serverTools.clientFamilies) {
+    if (policies[family] !== "native") return true;
+  }
 
   const families = new Set([...serverTools.families, ...serverHistory.families]);
   for (const family of families) {

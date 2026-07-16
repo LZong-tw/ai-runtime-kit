@@ -46,13 +46,14 @@ test("exports an immutable server-tool inventory", () => {
   assert.throws(() => SERVER_TOOL_TYPES.webSearch.push("web_search_20990101"), TypeError);
 });
 
-test("keeps Claude Code WebFetch and WebSearch client tools native", () => {
+test("identifies Claude Code web client families without treating them as server tools", () => {
   const inspection = inspectServerToolRequest({
     tools: [{ name: "WebFetch", input_schema: {} }, { name: "WebSearch", input_schema: {} }],
   });
 
   assert.deepEqual(inspection.clientTools.map((tool) => tool.name), ["WebFetch", "WebSearch"]);
   assert.deepEqual(inspection.serverTools, []);
+  assert.deepEqual([...inspection.clientFamilies], ["webFetch", "webSearch"]);
   assert.deepEqual([...inspection.families], []);
   assert.deepEqual(inspection.futureTypes, []);
   assert.equal(inspection.requiresFallback, false);
@@ -85,6 +86,7 @@ test("returns fresh collections for every inspection", () => {
   const second = inspectServerToolRequest(body);
 
   assert.notEqual(first.clientTools, second.clientTools);
+  assert.notEqual(first.clientFamilies, second.clientFamilies);
   assert.notEqual(first.serverTools, second.serverTools);
   assert.notEqual(first.families, second.families);
   assert.notEqual(first.futureTypes, second.futureTypes);
