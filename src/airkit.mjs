@@ -17,6 +17,7 @@ import {
   VERIFIED_NATIVE_COMPATIBILITY,
   resolveCompatibilityPolicies,
   validateCompatibilityConfig,
+  validateCompatibilityProviderBinding,
 } from "./compat/config.mjs";
 import { renderHeartbeatManagedFiles } from "./context-heartbeat.mjs";
 import { buildContextObservability } from "./context-observability.mjs";
@@ -161,17 +162,7 @@ function bindManagedCompatibilityProvider(ccrConfig, managedProviderIds) {
   if (!compatibility) return;
 
   const sourceName = compatibility.fallback.provider;
-  const provider = ccrConfig.Providers.find((candidate) => candidate.name === sourceName);
-  if (!provider) throw new Error(`compatibility fallback references unmanaged provider: ${sourceName}`);
-  if (provider.type !== "anthropic_messages") {
-    throw new Error(`compatibility fallback provider must use anthropic_messages: ${sourceName}`);
-  }
-  const model = compatibility.fallback.model.slice(
-    compatibility.fallback.model.lastIndexOf("/") + 1,
-  );
-  if (!provider.models?.includes(model)) {
-    throw new Error(`compatibility fallback model is missing from provider ${sourceName}: ${model}`);
-  }
+  validateCompatibilityProviderBinding(compatibility, ccrConfig.Providers);
   compatibility.fallback.provider = managedProviderIds.get(sourceName);
 }
 
@@ -657,7 +648,10 @@ function configuredCompatibility(ccrConfig) {
 
 function validateConfiguredCompatibility(ccrConfig) {
   const config = configuredCompatibility(ccrConfig);
-  if (config) validateCompatibilityConfig(config);
+  if (config) {
+    validateCompatibilityConfig(config);
+    validateCompatibilityProviderBinding(config, ccrConfig.Providers);
+  }
   return config;
 }
 

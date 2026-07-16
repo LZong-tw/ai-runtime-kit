@@ -393,7 +393,7 @@ test("CCR compatibility requires a managed Anthropic Messages provider and local
   const cases = [
     ["missing provider", (catalog) => {
       catalog.profiles[0].ccr.plugins[0].config.fallback.provider = "missing";
-    }, /references unmanaged provider: missing/],
+    }, /fallback provider must resolve exactly once: missing/],
     ["wrong provider type", (catalog) => {
       catalog.profiles[0].ccr.Providers[1].type = "openai_chat_completions";
     }, /must use anthropic_messages/],
@@ -469,6 +469,31 @@ test("CCR compatibility rejects removed Advisor bridge before CCR RPC or credent
       },
     }),
     /advisor\.mode.*removed/i,
+  );
+  assert.equal(ccrClientCreations, 0);
+  assert.equal(credentialCalls, 0);
+});
+
+test("CCR compatibility rejects provider linkage before CCR RPC or credentials", async () => {
+  const catalog = compatibilityCatalog();
+  catalog.profiles[0].ccr.Providers[1].type = "openai_chat_completions";
+  catalog.profiles[0].shell = { ccrTokenOpRef: "op://Test/API/token" };
+  let ccrClientCreations = 0;
+  let credentialCalls = 0;
+
+  await assert.rejects(
+    () => prepareLaunch(catalog, "launch-example", {
+      configDir: "/tmp/airkit-compatibility-linkage",
+      createCcrClient: () => {
+        ccrClientCreations += 1;
+        return {};
+      },
+      runCommand: async () => {
+        credentialCalls += 1;
+        return { ok: true, status: 0, stdout: "unused" };
+      },
+    }),
+    /fallback provider must use anthropic_messages/,
   );
   assert.equal(ccrClientCreations, 0);
   assert.equal(credentialCalls, 0);

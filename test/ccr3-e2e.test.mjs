@@ -45,7 +45,16 @@ test("isolated CCR verifier executes and validates every fallback family", async
         headers: Object.fromEntries(new Headers(init.headers)),
         url: String(input),
       });
-      return Response.json({ type: "message", content: [], stop_reason: "end_turn" });
+      const family = gatewayRequests.at(-1).body.metadata.user_id.slice("airkit-e2e-".length);
+      const content = family === "advisor"
+        ? [{ type: "server_tool_use" }, {
+            type: "advisor_tool_result",
+            content: { type: "advisor_redacted_result", encrypted_content: "fixture" },
+          }]
+        : family === "codeExecution"
+          ? [{ type: "server_tool_use" }, { type: "code_execution_tool_result" }]
+          : [];
+      return Response.json({ type: "message", content, stop_reason: "end_turn" });
     },
   });
 
@@ -74,6 +83,14 @@ test("isolated CCR verifier executes and validates every fallback family", async
     "x-request-id": "[present]",
   });
   assert.doesNotMatch(JSON.stringify(evidence), /provider-fixture-secret|outer-fixture/);
+  const providerBodies = gatewayRequests.map((request, index) => ({
+    ...request,
+    body: { ...request.body, model: "claude-sonnet" },
+    headers: { ...request.headers, "x-request-id": `fixture-${families[index]}` },
+    url: "/v1/messages",
+  }));
+  assert.doesNotThrow(() =>
+    verifier.assertFallbackProviderRequests(providerBodies, "http://127.0.0.1:43124"));
 });
 
 test("runtime has no persisted Claude session model repair layer", () => {

@@ -8,6 +8,7 @@ import {
   compatibilityFallbackSelector,
   resolveCompatibilityPolicies,
   validateCompatibilityConfig,
+  validateCompatibilityProviderBinding,
 } from "./config.mjs";
 import { inspectPendingServerHistory } from "./server-history.mjs";
 import { inspectServerToolRequest } from "./server-tools.mjs";
@@ -41,6 +42,7 @@ export default {
   async setup(ctx) {
     const pluginConfig = isRecord(ctx.pluginConfig) ? ctx.pluginConfig : {};
     validateCompatibilityConfig(pluginConfig);
+    validateCompatibilityProviderBinding(pluginConfig, ctx.config?.Providers);
     const { policies } = resolveCompatibilityPolicies(
       pluginConfig,
       VERIFIED_NATIVE_COMPATIBILITY,
