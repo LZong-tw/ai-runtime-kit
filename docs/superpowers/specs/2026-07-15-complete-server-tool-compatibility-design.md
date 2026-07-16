@@ -309,7 +309,7 @@ test without changing the normal command names or passthrough arguments.
 - ToolSearch remains local for its proven subset.
 - Advisor no longer claims parity through transcript approximation.
 - Doctor reports all six families without claiming unrun live verification.
-- Existing AirClaude and `hr-*` commands keep their names and arguments.
+- Existing AirClaude commands (and any overlay-specific launcher variants) keep their names and arguments.
 - No global Claude, CCR-unrelated, Codex, credential, or session state is
   overwritten.
 - OSS contains no private identifiers.
