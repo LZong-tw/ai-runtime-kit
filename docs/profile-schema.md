@@ -115,6 +115,18 @@ Router values use `provider,model`. CCR 2 `think`, `longContext`,
 `longContextThreshold`, `webSearch`, and transformer fields are unsupported.
 AirKit rejects legacy transformers before writing files or calling CCR.
 
+CCR 3 itself strips `default`/`background` from its gateway Router on load, so
+during the managed merge AirKit translates them twice: into each named
+profile's pinned `model`/`smallFastModel`, and into two managed gateway
+condition rules (`<prefix>route-background`: `request.body.model starts-with
+claude-haiku` → background route; `<prefix>route-default`: `starts-with
+claude-` → default route). The rules let bare Claude model names — plain
+`claude` launched outside a named profile, including its background haiku
+requests — resolve at the gateway. Provider-prefixed selectors bypass the
+rules, so named profiles and plugin fallback routes are unaffected. Foreign
+rules in the live config are preserved ahead of the managed rules; stale
+managed rules are replaced on every merge.
+
 During merge, AirKit creates a stable managed provider identity and intentionally
 sets its CCR `id` and `name` to the same value. CCR 3 resolves profile selectors
 through its management layer, while the generated gateway performs adapter
