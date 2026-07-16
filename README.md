@@ -104,11 +104,12 @@ current contract:
 
 Fallback is per request, not a global model switch. A fallback request consumes
 context, cache, and billing on the configured Anthropic route; the local
-ToolSearch bridge does not make a model call. `fallback.model` must both match
-the Anthropic-family schema and resolve through the profile's CCR/provider
-routes. A slash-bearing name such as `anthropic/claude-*` can be ambiguous to
-CCR, so a prefix alone does not prove routability. Use a route already proven
-by that profile, such as `claude-sonnet`, and verify it end to end.
+ToolSearch bridge does not make a model call. `fallback.provider` names a
+profile provider whose type must be `anthropic_messages`; `fallback.model` is
+the provider-local Claude model it exposes. AirKit validates that binding and
+renders CCR's canonical `<managed-provider>/<model>` selector. Keep the model
+bare (for example, `claude-sonnet`), use a dedicated `/v1/messages` provider,
+and verify it end to end.
 
 Legacy `webSearch.mode: "mcp"` is migration-only. It adds the older
 `web_search` MCP tool explicitly and additively; a native-first profile does not

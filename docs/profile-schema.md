@@ -132,7 +132,7 @@ entry in `ccr.plugins`:
   "module": "@lzong/ai-runtime-kit/compatibility-plugin",
   "config": {
     "fallback": {
-      "provider": "anthropic-messages",
+      "provider": "your-anthropic-provider",
       "model": "claude-sonnet",
       "maxContinuationTurns": 8
     },
@@ -146,11 +146,12 @@ entry in `ccr.plugins`:
 }
 ```
 
-The provider and model strings above are schema examples, not proven CCR route
-names or defaults. Each opted-in profile must select a provider-local
-Anthropic-family LiteLLM model identifier that its configured fallback provider
-actually exposes. AirKit requires all six family entries and validates the
-complete configuration before CCR RPC, managed saves, or credential resolution.
+The provider and model strings above are schema examples, not defaults.
+`fallback.provider` must be the source name of a provider in `ccr.Providers`
+whose type is exactly `anthropic_messages`; `fallback.model` must be a bare
+Anthropic-family model in that provider's `models`. AirKit binds the source
+name to its managed CCR ID and validates the complete configuration before CCR
+RPC, managed saves, or credential resolution.
 Removed Advisor bridge fields such as `advisor.model` and
 `advisor.fallbackModel` are rejected with a migration error; their replacement
 is the single generic `fallback` section.
