@@ -30,6 +30,10 @@ test("isolated CCR verifier loads the compatibility plugin and probes its MCP ro
 });
 
 test("isolated CCR verifier executes and validates every fallback family", async () => {
+  assert.match(verifierSource, /name: "fake-openai"[\s\S]*type: "openai_chat_completions"/);
+  assert.match(verifierSource, /name: "fake-anthropic"[\s\S]*type: "anthropic_messages"/);
+  assert.match(verifierSource, /provider: "fake-anthropic"/);
+  assert.match(verifierSource, /fallback requests must use Anthropic Messages/);
   const gatewayRequests = [];
   const families = await verifier.runFallbackGatewayScenarios({
     apiKey: "outer-fixture",

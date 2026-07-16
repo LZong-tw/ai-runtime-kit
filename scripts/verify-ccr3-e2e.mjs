@@ -321,9 +321,12 @@ async function main() {
     assert.equal(payload.compatibilityMcp?.protocolVersion, "2025-03-26");
     assert.equal(payload.ambientSentinel, undefined, "ambient controller env leaked into the CCR/Claude child");
     const providerRequest = providerRequests.find(({ body }) => body.model === "fake-model");
-    assert.ok(providerRequest, "fake provider did not receive the ordinary launch request");
-    assert.equal(providerRequest.url, "/v1/messages");
+    assert.ok(providerRequest, "fake OpenAI provider did not receive the ordinary launch request");
+    assert.equal(providerRequest.url, "/v1/chat/completions");
     assert.equal(providerRequest.body.model, "fake-model");
+    assert.ok(providerRequests
+      .filter(({ body }) => body.metadata?.user_id?.startsWith("airkit-e2e-"))
+      .every(({ url }) => url === "/v1/messages"), "fallback requests must use Anthropic Messages");
 
     assert.ok(resolve(managedProfile.settingsFile).startsWith(`${resolve(root)}/`));
     assert.ok(resolve(managedProfile.env.CLAUDE_STATUSLINE_CACHE_DIR).startsWith(`${resolve(root)}/`));
@@ -443,13 +446,19 @@ function fakeCatalog(providerPort) {
           config: fakeCompatibilityConfig("mcp"),
         }],
         Providers: [{
-          name: "fake",
+          name: "fake-openai",
+          type: "openai_chat_completions",
+          api_base_url: `http://127.0.0.1:${providerPort}/v1/chat/completions`,
+          api_key: "$FAKE_PROVIDER_API_KEY",
+          models: ["fake-model"],
+        }, {
+          name: "fake-anthropic",
           type: "anthropic_messages",
           api_base_url: `http://127.0.0.1:${providerPort}/v1/messages`,
           api_key: "$FAKE_PROVIDER_API_KEY",
-          models: ["fake-model", "claude-sonnet"],
+          models: ["claude-sonnet"],
         }],
-        Router: { default: "fake,fake-model", background: "fake,fake-model" },
+        Router: { default: "fake-openai,fake-model", background: "fake-openai,fake-model" },
       },
     }],
   };
@@ -458,7 +467,7 @@ function fakeCatalog(providerPort) {
 function fakeCompatibilityConfig(webSearchMode = "native-first") {
   return {
     fallback: {
-      provider: "anthropic-messages",
+      provider: "fake-anthropic",
       model: "claude-sonnet",
       maxContinuationTurns: 8,
     },
@@ -596,8 +605,15 @@ const server = createServer((request, response) => {
       return;
     }
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({
-      id: "fixture-response",
+    response.end(JSON.stringify(request.url === "/v1/chat/completions" ? {
+      id: "fixture-openai-response",
+      object: "chat.completion",
+      created: 1,
+      model: body.model,
+      choices: [{ index: 0, message: { role: "assistant", content: "FAKE_PROVIDER_OK" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    } : {
+      id: "fixture-anthropic-response",
       type: "message",
       role: "assistant",
       model: body.model,
