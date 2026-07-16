@@ -441,26 +441,29 @@ test("real core fallback preserves stream true, SSE bytes, and backpressure", as
     downstream.firstWrite.then(() => "write"),
     new Promise((resolve) => setTimeout(() => resolve("timed-out"), 200)),
   ]);
-  if (firstEvent !== "write") {
+  try {
+    assert.equal(firstEvent, "write");
+    assert.equal(seenBody.stream, true);
+    assert.equal(seenBody.model, "anthropic-messages/claude-sonnet");
+    assert.equal(downstream.statusCode, 200);
+    assert.equal(downstream.headers["content-type"], "text/event-stream");
+    assert.equal(downstream.headers["x-request-id"], "fallback-stream");
+    assert.deepEqual(downstream.body, firstChunk);
+    assert.equal(settled, false);
+
+    releaseSecondChunk();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(settled, false);
+    downstream.releaseDrain();
+    await pending;
+    assert.deepEqual(downstream.body, Buffer.concat([firstChunk, secondChunk]));
+  } finally {
+    // Always unblock the fixture's provider handler and the drain gate so a
+    // failed assertion tears down fast instead of hanging until suite timeout.
     releaseSecondChunk();
     downstream.releaseDrain();
     await pending.catch(() => {});
   }
-  assert.equal(firstEvent, "write");
-  assert.equal(seenBody.stream, true);
-  assert.equal(seenBody.model, "anthropic/claude-sonnet");
-  assert.equal(downstream.statusCode, 200);
-  assert.equal(downstream.headers["content-type"], "text/event-stream");
-  assert.equal(downstream.headers["x-request-id"], "fallback-stream");
-  assert.deepEqual(downstream.body, firstChunk);
-  assert.equal(settled, false);
-
-  releaseSecondChunk();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(settled, false);
-  downstream.releaseDrain();
-  await pending;
-  assert.deepEqual(downstream.body, Buffer.concat([firstChunk, secondChunk]));
 });
 
 test("real core fallback preserves non-2xx status, headers, and body", async (t) => {
