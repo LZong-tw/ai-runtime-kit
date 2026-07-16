@@ -102,7 +102,7 @@ fallback under Advisor:
 ```json
 {
   "fallback": {
-    "provider": "anthropic-messages",
+    "provider": "your-anthropic-provider",
     "model": "claude-sonnet",
     "maxContinuationTurns": 8
   },
@@ -126,6 +126,11 @@ fallback under Advisor:
   }
 }
 ```
+
+The provider value is a source `ccr.Providers[].name`, not a protocol label.
+That provider must use `anthropic_messages` at `/v1/messages` and expose the
+bare provider-local Claude model. Managed rendering rewrites the source name to
+the AirKit-owned CCR provider ID before any compatibility request is routed.
 
 The public identifiers above are placeholders, not proven CCR routes. A private
 profile owns its real provider and provider-local model selection. Removed

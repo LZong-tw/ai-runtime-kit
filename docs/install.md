@@ -148,35 +148,45 @@ is:
 | ToolSearch (`toolSearch`) | `bridge` | Safe bounded regex/BM25 requests use the local bridge. Unsafe, oversized, unsupported, or unknown requests fall back as a complete request. |
 | MCP Connector (`mcpConnector`) | `anthropic-fallback` | Typed server-side connector requests use the configured Anthropic route; client-side MCP remains native. |
 
-The profile must declare a single fallback and all six modes, for example:
+The profile must declare a dedicated Anthropic Messages provider, a single
+fallback bound to its source name, and all six modes, for example:
 
 ```json
 {
-  "id": "airkit-compatibility",
-  "module": "@lzong/ai-runtime-kit/compatibility-plugin",
-  "config": {
-    "fallback": {
-      "provider": "anthropic-messages",
-      "model": "claude-sonnet",
-      "maxContinuationTurns": 8
-    },
-    "advisor": { "mode": "anthropic-fallback" },
-    "codeExecution": { "mode": "anthropic-fallback" },
-    "mcpConnector": { "mode": "anthropic-fallback" },
-    "toolSearch": { "mode": "bridge" },
-    "webFetch": { "mode": "native-first" },
-    "webSearch": { "mode": "native-first" }
+  "ccr": {
+    "Providers": [{
+      "name": "your-anthropic-provider",
+      "type": "anthropic_messages",
+      "api_base_url": "https://gateway.example/v1/messages",
+      "api_key": "$ANTHROPIC_AUTH_TOKEN",
+      "models": ["claude-sonnet"]
+    }],
+    "plugins": [{
+      "id": "airkit-compatibility",
+      "module": "@lzong/ai-runtime-kit/compatibility-plugin",
+      "config": {
+        "fallback": {
+          "provider": "your-anthropic-provider",
+          "model": "claude-sonnet",
+          "maxContinuationTurns": 8
+        },
+        "advisor": { "mode": "anthropic-fallback" },
+        "codeExecution": { "mode": "anthropic-fallback" },
+        "mcpConnector": { "mode": "anthropic-fallback" },
+        "toolSearch": { "mode": "bridge" },
+        "webFetch": { "mode": "native-first" },
+        "webSearch": { "mode": "native-first" }
+      }
+    }]
   }
 }
 ```
 
-`fallback.model` is valid only when it is both Anthropic-family and routable by
-the selected CCR/provider configuration. A slash-bearing name such as
-`anthropic/claude-*` can be ambiguous in CCR; its prefix alone is not proof.
-Use an identifier already proven for the profile, such as `claude-sonnet`, and
-verify the route. Fallback applies to one complete request and incurs that
-Anthropic route's context, cache, and billing. Safe ToolSearch bridge requests
-stay local and make no model call.
+`fallback.provider` is the source provider name, not a protocol label or a
+managed CCR ID. AirKit requires that provider to use `anthropic_messages` and
+to expose the bare Claude identifier in `fallback.model`. Fallback applies to
+one complete request and incurs that Anthropic route's context, cache, and
+billing. Safe ToolSearch bridge requests stay local and make no model call.
 
 To migrate an older source profile, remove Advisor `model`, `fallbackModel`,
 and `mode: "bridge"`; put the model in the generic `fallback` block; add every

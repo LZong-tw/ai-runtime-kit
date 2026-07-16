@@ -100,10 +100,11 @@ the operating contract; do not infer capability from a tool name alone:
 Fallback is one-request routing, never a persisted model change. It incurs the
 configured Anthropic route's context, cache, and billing; the safe local
 ToolSearch bridge makes no model call. Validate both halves of
-`fallback.model`: it must be Anthropic-family and actually CCR/provider-routable
-for the selected profile. A slash-bearing `anthropic/claude-*` name may be
-ambiguous in CCR; do not treat its prefix as routing proof. Prefer a proven
-route such as `claude-sonnet`, then exercise it through the isolated E2E.
+`fallback.provider` must name a profile provider with type
+`anthropic_messages`, and `fallback.model` must be a bare provider-local Claude
+model exposed by it. AirKit binds the source name to the managed provider ID;
+do not put a slash-bearing route in `fallback.model`. Exercise the dedicated
+`/v1/messages` route through the isolated E2E.
 
 For migration, edit the source profile instead of generated CCR files. Replace
 Advisor `model` or `fallbackModel` fields with the single generic `fallback`
