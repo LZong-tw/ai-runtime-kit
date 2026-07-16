@@ -133,7 +133,7 @@ entry in `ccr.plugins`:
   "config": {
     "fallback": {
       "provider": "anthropic-messages",
-      "model": "anthropic/claude-sonnet",
+      "model": "claude-sonnet",
       "maxContinuationTurns": 8
     },
     "advisor": { "mode": "anthropic-fallback" },
@@ -146,12 +146,14 @@ entry in `ccr.plugins`:
 }
 ```
 
-The model string above is a schema example, not a default. Each opted-in
-profile must select a real Anthropic-family LiteLLM model identifier. AirKit
-requires all six family entries and validates the complete configuration before
-CCR RPC, managed saves, or credential resolution. Removed Advisor bridge fields
-such as `advisor.model` and `advisor.fallbackModel` are rejected with a migration
-error; their replacement is the single generic `fallback` section.
+The provider and model strings above are schema examples, not proven CCR route
+names or defaults. Each opted-in profile must select a provider-local
+Anthropic-family LiteLLM model identifier that its configured fallback provider
+actually exposes. AirKit requires all six family entries and validates the
+complete configuration before CCR RPC, managed saves, or credential resolution.
+Removed Advisor bridge fields such as `advisor.model` and
+`advisor.fallbackModel` are rejected with a migration error; their replacement
+is the single generic `fallback` section.
 
 The supported source modes are:
 
@@ -161,16 +163,20 @@ The supported source modes are:
 - `toolSearch`: `bridge` or `anthropic-fallback`.
 
 AirKit resolves these declarations into six effective policies. Doctor reports
-native WebSearch and WebFetch plus bridged ToolSearch as verified capabilities;
-Anthropic fallback families remain configured and unprobed. It does not claim
-that an unrun fallback request succeeded.
+WebSearch as native verified. WebFetch resolves to Anthropic fallback because
+native execution is not verified. ToolSearch remains a verified local bridge;
+other Anthropic fallback families remain configured and unprobed. Doctor does
+not claim that an unrun fallback request succeeded.
 
 At render time AirKit replaces the catalog's compatibility `module` marker
 with `src/compat/plugin.mjs` from the installed AirKit package. It replaces only
 the managed plugin ID and preserves unrelated CCR plugins.
 
-`native-first` uses Claude Code's existing client-side WebSearch and WebFetch
-tools. AirKit does not register duplicate MCP tools for those profiles.
+`native-first` preserves Claude Code's existing client-side WebSearch and
+WebFetch definitions and does not register duplicate MCP tools. Effective
+routing still follows verified capability evidence: WebSearch remains native,
+while WebFetch falls back as a complete request until its native execution cycle
+is verified.
 
 `webSearch.mode: "mcp"` is retained only as an explicit migration mode for
 profiles that still require the older compatibility `web_search` tool. In that

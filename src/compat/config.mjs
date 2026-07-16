@@ -1,5 +1,10 @@
 import { assertAnthropicFamilyModel } from "./protocol.mjs";
 
+export const VERIFIED_NATIVE_COMPATIBILITY = Object.freeze({
+  webFetch: false,
+  webSearch: true,
+});
+
 const FAMILY_MODES = Object.freeze({
   webSearch: Object.freeze(["native-first", "anthropic-fallback", "mcp"]),
   webFetch: Object.freeze(["native-first", "anthropic-fallback"]),

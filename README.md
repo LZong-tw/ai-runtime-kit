@@ -88,6 +88,50 @@ airclaude --doctor
 airclaude -- --resume
 ```
 
+## Server-tool compatibility
+
+Compatibility is profile-scoped and native-first. These six families are the
+current contract:
+
+| Family | Profile mode | Effective behavior |
+| --- | --- | --- |
+| WebSearch (`webSearch`) | `native-first` | Native. The complete call/result wire cycle was verified with real Claude Code 2.1.211. |
+| WebFetch (`webFetch`) | `native-first` | Anthropic fallback for now. Claude exposes the native client tool, but the zero-public-network loopback execution is blocked by Claude's domain-safety check, so AirKit does not claim the native cycle is verified. |
+| Code Execution (`codeExecution`) | `anthropic-fallback` | The complete request uses the configured Anthropic route so container and continuation state stay intact. |
+| Advisor (`advisor`) | `anthropic-fallback` | The complete request uses the configured Anthropic route; the removed approximation bridge is not used. |
+| ToolSearch (`toolSearch`) | `bridge` | Safe bounded regex/BM25 requests use the local bridge. Unsafe, oversized, unsupported, or unknown requests fall back as a complete request. |
+| MCP Connector (`mcpConnector`) | `anthropic-fallback` | Typed server-side connector requests use the configured Anthropic route; client-side MCP remains native. |
+
+Fallback is per request, not a global model switch. A fallback request consumes
+context, cache, and billing on the configured Anthropic route; the local
+ToolSearch bridge does not make a model call. `fallback.model` must both match
+the Anthropic-family schema and resolve through the profile's CCR/provider
+routes. A slash-bearing name such as `anthropic/claude-*` can be ambiguous to
+CCR, so a prefix alone does not prove routability. Use a route already proven
+by that profile, such as `claude-sonnet`, and verify it end to end.
+
+Legacy `webSearch.mode: "mcp"` is migration-only. It adds the older
+`web_search` MCP tool explicitly and additively; a native-first profile does not
+register a duplicate MCP tool. Migrate the source profile—not generated CCR
+state—by moving Advisor `model`/`fallbackModel` fields into the single
+`fallback` block, declaring all six family modes, and changing legacy
+`webSearch.mode` from `mcp` to `native-first`. Then preview, write only after
+review, and check the effective doctor states:
+
+```bash
+PROFILE=your-profile
+airkit update --profile "$PROFILE"
+airkit update --profile "$PROFILE" --write
+airkit doctor --profile "$PROFILE"
+npm run verify:tool-contract
+npm run verify:ccr3:e2e
+```
+
+Doctor's `native` and `bridged` states describe verified routing policy;
+`anthropic-fallback` means configured but not live-probed, and `unverified` is
+reserved for the legacy MCP mode. A clean doctor result is not proof that a
+billable fallback request succeeded.
+
 This repository intentionally contains no private endpoints, no
 credential-manager item references, and no secret values. Use
 `profiles/catalog.json` as a starting point, then keep machine-specific runtime

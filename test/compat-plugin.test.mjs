@@ -891,6 +891,100 @@ test("ordinary Messages requests preserve raw bytes and abort propagation", asyn
   assert.deepEqual(response.body, Buffer.from("raw-response"));
 });
 
+test("Claude Code WebFetch client requests fail closed to the Anthropic route", async () => {
+  const calls = [];
+  const fixture = await createPluginFixture({
+    coreClient: createPluginCoreClient({
+      async requestFallback(body) {
+        calls.push(structuredClone(body));
+        return new Response(JSON.stringify({ type: "message", content: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    }),
+  });
+  const response = createRecordingResponse();
+  const body = {
+    model: "executor-model",
+    max_tokens: 512,
+    messages: [{ role: "user", content: "Fetch the page." }],
+    tools: [{ name: "WebFetch", input_schema: { type: "object" } }],
+  };
+
+  await fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify(body))),
+    response,
+    fixture.helpers,
+  );
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].model, "anthropic/claude-sonnet");
+  assert.deepEqual(calls[0].tools, body.tools);
+  assert.equal(response.statusCode, 200);
+});
+
+test("Claude Code WebSearch stays native when native-first is verified", async () => {
+  const calls = [];
+  const fixture = await createPluginFixture({
+    coreClient: createPluginCoreClient({
+      async forwardRaw(input) {
+        calls.push(input);
+        input.response.writeHead(202, { "content-type": "application/json" });
+        input.response.end(Buffer.from("{}"));
+      },
+    }),
+  });
+  const response = createRecordingResponse();
+  const body = {
+    model: "executor-model",
+    messages: [{ role: "user", content: "Search." }],
+    tools: [{ name: "WebSearch", input_schema: { type: "object" } }],
+  };
+
+  await fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify(body))),
+    response,
+    fixture.helpers,
+  );
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(JSON.parse(calls[0].body), body);
+  assert.equal(response.statusCode, 202);
+});
+
+test("explicit WebSearch fallback overrides the verified native route", async () => {
+  const calls = [];
+  const fixture = await createPluginFixture({
+    pluginConfig: { webSearch: { mode: "anthropic-fallback" } },
+    coreClient: createPluginCoreClient({
+      async requestFallback(body) {
+        calls.push(structuredClone(body));
+        return new Response(JSON.stringify({ type: "message", content: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    }),
+  });
+  const response = createRecordingResponse();
+  const body = {
+    model: "executor-model",
+    messages: [{ role: "user", content: "Search." }],
+    tools: [{ name: "WebSearch", input_schema: { type: "object" } }],
+  };
+
+  await fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify(body))),
+    response,
+    fixture.helpers,
+  );
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].model, "anthropic/claude-sonnet");
+  assert.deepEqual(calls[0].tools, body.tools);
+});
+
 test("compatibility Messages requests bridge JSON and preserve the stream flag", async () => {
   const calls = [];
   const fixture = await createPluginFixture({

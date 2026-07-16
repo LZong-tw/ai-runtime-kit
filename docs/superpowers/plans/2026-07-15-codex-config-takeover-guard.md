@@ -146,10 +146,16 @@ npm test
 npm run check
 npm_config_cache=/tmp/airkit-npm-cache npm run pack:check
 git diff --check
-rg -n -i "oneportal|kkcompany|op://|anthropic_auth_token" src/codex-takeover-guard.mjs test/codex-takeover-guard.test.mjs src/airkit.mjs test/airkit.test.mjs
+test -n "$AIRKIT_PRIVATE_IDENTIFIER_PATTERN"
+rg -n -i "$AIRKIT_PRIVATE_IDENTIFIER_PATTERN" src/codex-takeover-guard.mjs test/codex-takeover-guard.test.mjs src/airkit.mjs test/airkit.test.mjs
+rg -n -i "op://|anthropic_auth_token" src/codex-takeover-guard.mjs test/codex-takeover-guard.test.mjs src/airkit.mjs test/airkit.test.mjs
 ```
 
-Expected: all tests/checks pass; private scan has no matches.
+Expected: all tests/checks pass and the private-identifier scan has no matches.
+The second scan is reviewed, not required to be empty: `op://` is a generic
+credential-manager scheme, and synthetic credential variables belong in
+redaction fixtures and source validation. Keep that security coverage while
+confirming each match contains no real account, endpoint, or secret value.
 
 - [ ] **Step 6: Commit Task 2**
 

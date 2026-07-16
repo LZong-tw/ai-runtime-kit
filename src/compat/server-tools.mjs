@@ -27,6 +27,10 @@ export const SERVER_TOOL_TYPES = Object.freeze({
 
 const FUTURE_SERVER_TOOL =
   /^(?:web_search|web_fetch|code_execution|advisor|tool_search_tool_(?:regex|bm25))_[0-9]{8}$/;
+const CLIENT_TOOL_FAMILIES = Object.freeze({
+  WebFetch: "webFetch",
+  WebSearch: "webSearch",
+});
 
 export function isFutureServerToolType(type) {
   return (
@@ -49,6 +53,7 @@ export function classifyToolDefinition(tool = {}) {
 
 export function inspectServerToolRequest(body = {}) {
   const tools = Array.isArray(body?.tools) ? body.tools : [];
+  const clientFamilies = new Set();
   const clientTools = [];
   const serverTools = [];
   const families = new Set();
@@ -58,6 +63,8 @@ export function inspectServerToolRequest(body = {}) {
     const classification = classifyToolDefinition(tool);
     if (classification.kind === "client") {
       clientTools.push(tool);
+      const clientFamily = CLIENT_TOOL_FAMILIES[tool?.name];
+      if (clientFamily !== undefined) clientFamilies.add(clientFamily);
       continue;
     }
 
@@ -67,6 +74,7 @@ export function inspectServerToolRequest(body = {}) {
   }
 
   return {
+    clientFamilies,
     clientTools,
     serverTools,
     families,
