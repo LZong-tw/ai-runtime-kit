@@ -202,6 +202,24 @@ export function buildShellSnippet(catalog, profileName, options = {}) {
     `# ${profile.summary}`,
   ];
 
+  if ((shell.exports ?? []).length > 0) {
+    lines.push("# Global routing exports (replaces CCR global agent profile)");
+    for (const entry of shell.exports) {
+      if (entry.value !== undefined) {
+        lines.push(`export ${entry.name}=${quoteShell(renderTemplateValue(entry.value, templateVars))}`);
+        continue;
+      }
+      const command = renderTemplateValue(entry.command, templateVars);
+      lines.push(
+        `if [[ -x ${quoteShell(command)} ]]; then`,
+        `  export ${entry.name}="$(${quoteShell(command)})"`,
+        "else",
+        `  print -u2 ${quoteShell(`airkit: credential helper for ${entry.name} missing (${command}); export skipped`)}`,
+        "fi",
+      );
+    }
+  }
+
   for (const wrapper of shell.wrappers ?? []) {
     lines.push(`${wrapper.name}() {`);
     const isAirclaudeLauncher = shouldAppendReusableRuntimeLessons(wrapper.command);
@@ -603,6 +621,7 @@ function validateCatalog(catalog) {
     }
     if (profile.ccr) validateCcr(profile.name, profile.ccr);
     validateLaunch(profile);
+    validateShell(profile);
     validateManagedFiles(profile);
   }
 }
@@ -630,6 +649,32 @@ function validateLaunch(profile) {
   if (percentage !== undefined && percentage !== "default"
     && (!Number.isInteger(percentage) || percentage < 1 || percentage > 100)) {
     throw new Error(`profile "${profile.name}" launch.context.autoCompactPercentage must be "default" or an integer from 1 to 100`);
+  }
+}
+
+function validateShell(profile) {
+  const exports = profile.shell?.exports;
+  if (exports === undefined) return;
+  if (!Array.isArray(exports)) {
+    throw new Error(`profile "${profile.name}" shell.exports must be an array`);
+  }
+
+  for (const entry of exports) {
+    if (!isPlainObject(entry)) {
+      throw new Error(`profile "${profile.name}" shell export must be an object`);
+    }
+    if (typeof entry.name !== "string" || !/^[A-Z][A-Z0-9_]*$/.test(entry.name)) {
+      throw new Error(`profile "${profile.name}" shell export has an invalid name: ${JSON.stringify(entry.name)}`);
+    }
+    if ((entry.value === undefined) === (entry.command === undefined)) {
+      throw new Error(`profile "${profile.name}" shell export "${entry.name}" must set exactly one of value or command`);
+    }
+    if (entry.value !== undefined && typeof entry.value !== "string") {
+      throw new Error(`profile "${profile.name}" shell export "${entry.name}" value must be a string`);
+    }
+    if (entry.command !== undefined && typeof entry.command !== "string") {
+      throw new Error(`profile "${profile.name}" shell export "${entry.name}" command must be a string`);
+    }
   }
 }
 
@@ -2144,6 +2189,7 @@ function statusOf(check) {
 function profileTemplateVars(profile, configDir = defaultConfigDir()) {
   return {
     configDir: resolve(configDir),
+    home: homedir(),
     profileName: profile.name,
     claudeModel: profile.launch?.claudeModel ?? "",
   };

@@ -227,7 +227,7 @@ rendered.
 - `binary`: Claude-compatible command, normally `claude`.
 - `args`: base arguments before user passthrough arguments.
 - `env`: non-secret launch environment. Values may use `{{profileName}}`,
-  `{{configDir}}`, `{{launchMode}}`, `{{claudeModel}}`,
+  `{{configDir}}`, `{{home}}`, `{{launchMode}}`, `{{claudeModel}}`,
   `{{statuslineLabel}}`, and default/background route variables.
 - `claudeModel`: Claude-recognized model passed only as the launched process's
   `--model` argument.
@@ -288,6 +288,10 @@ output.
 ```json
 {
   "shell": {
+    "exports": [
+      { "name": "ANTHROPIC_BASE_URL", "value": "http://127.0.0.1:3456" },
+      { "name": "ANTHROPIC_API_KEY", "command": "{{home}}/bin/api-key-helper" }
+    ],
     "wrappers": [
       {
         "name": "airclaude-example",
@@ -303,9 +307,19 @@ output.
 
 - `ccrTokenOpRef`: optional credential-manager reference; omit private
   references from public profiles.
+- `exports`: optional global exports rendered before the wrapper functions.
+- `exports[].name`: environment variable name matching `^[A-Z][A-Z0-9_]*$`.
+- `exports[].value` or `exports[].command`: exactly one of the two, as a
+  string. A `value` renders `export NAME='value'`. A `command` renders an
+  executable guard that captures the command's output, so credential values
+  never appear in the rendered snippet; when the helper is missing, the export
+  is skipped with a warning on stderr.
 - `wrappers`: generated shell functions.
 - `wrappers[].name`: shell function name.
 - `wrappers[].command`, `args`, and `env`: launch inputs.
+
+Export values and commands accept `{{profileName}}`, `{{configDir}}`,
+`{{claudeModel}}`, and `{{home}}` (the current user's home directory).
 
 For CCR-backed profiles, generated wrappers delegate once to `airclaude`; they
 do not add a daemon-control wrapper layer.
