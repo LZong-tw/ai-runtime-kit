@@ -306,6 +306,7 @@ async function main() {
       import(pathToFileURL(join(installedCompatRoot, "config.mjs"))),
     ]);
     const fallbackEvidence = summarizeFallbackEvidence(providerRequests, { inspectPendingServerHistory });
+    assertFallbackProviderRequests(providerRequests, `http://127.0.0.1:${providerPort}`);
     assert.deepEqual(fallbackEvidence.map(({ family }) => family), fallbackFamilies);
     assert.equal(
       JSON.stringify(providerRequests).includes(gatewayApiKey),
@@ -488,7 +489,14 @@ export async function runFallbackGatewayScenarios({
 }) {
   const fallbackFamilies = ["advisor", "webSearch", "webFetch", "codeExecution", "mcpConnector"];
   const scenarios = {
-    advisor: { tools: [{ type: "advisor_20260301" }] },
+    advisor: {
+      tools: [{
+        type: "advisor_20260301",
+        name: "advisor",
+        model: "claude-sonnet",
+        max_uses: 3,
+      }],
+    },
     webSearch: { tools: [{ type: "web_search_20260318" }] },
     webFetch: {
       messages: [{ role: "user", content: `Fetch ${loopbackOrigin}/webFetch-fixture only.` }],
@@ -517,7 +525,7 @@ export async function runFallbackGatewayScenarios({
   };
   for (const family of fallbackFamilies) {
     const body = {
-      metadata: { user_id: `airkit-e2e-${family}` },
+      metadata: { user_id: `airkit-e2e-${family}`, contract_marker: "preserve-me" },
       model: "fake-model",
       max_tokens: 32,
       messages: [{ role: "user", content: "fixture" }],
@@ -542,8 +550,51 @@ export async function runFallbackGatewayScenarios({
       `${family} gateway fallback failed: HTTP ${response.status}${errorMessage ? ` (${errorMessage})` : ""}`,
     );
     assert.equal(payload.type, "message", `${family} gateway fallback returned a non-message`);
+    if (family === "advisor") {
+      assert.deepEqual(payload.content.map(({ type }) => type), ["server_tool_use", "advisor_tool_result"]);
+      assert.deepEqual(payload.content[1].content, {
+        type: "advisor_redacted_result",
+        encrypted_content: "fixture",
+      });
+    }
+    if (family === "codeExecution") {
+      assert.deepEqual(payload.content.map(({ type }) => type), ["server_tool_use", "code_execution_tool_result"]);
+    }
   }
   return fallbackFamilies;
+}
+
+export function assertFallbackProviderRequests(records, loopbackOrigin) {
+  const byFamily = new Map(records.flatMap((record) => {
+    const userId = record.body?.metadata?.user_id;
+    return typeof userId === "string" && userId.startsWith("airkit-e2e-")
+      ? [[userId.slice("airkit-e2e-".length), record]]
+      : [];
+  }));
+  assert.equal(byFamily.size, 5);
+  for (const [family, record] of byFamily) {
+    assert.equal(record.url, "/v1/messages", `${family} used the wrong provider protocol`);
+    assert.equal(record.body.metadata.contract_marker, "preserve-me");
+    assert.equal(record.headers["anthropic-version"], "2023-06-01");
+  }
+  assert.deepEqual(byFamily.get("advisor").body.tools, [{
+    type: "advisor_20260301",
+    name: "advisor",
+    model: "claude-sonnet",
+    max_uses: 3,
+  }]);
+  assert.deepEqual(byFamily.get("webSearch").body.tools, [{ type: "web_search_20260318" }]);
+  assert.deepEqual(byFamily.get("webFetch").body.tools, [{ type: "web_fetch_20260209" }]);
+  assert.match(byFamily.get("webFetch").body.messages[0].content, new RegExp(`${loopbackOrigin}/webFetch-fixture`));
+  assert.deepEqual(byFamily.get("codeExecution").body.container, { id: "container_fixture" });
+  assert.deepEqual(byFamily.get("codeExecution").body.tools, [{ type: "code_execution_20260120" }]);
+  assert.equal(byFamily.get("codeExecution").body.messages[0].content[0].type, "server_tool_use");
+  assert.equal(byFamily.get("codeExecution").body.messages[0].content[1].type, "code_execution_tool_result");
+  assert.deepEqual(byFamily.get("mcpConnector").body.mcp_servers, [{
+    type: "url",
+    url: `${loopbackOrigin}/mcp-fixture`,
+  }]);
+  assert.deepEqual(byFamily.get("mcpConnector").body.tools, [{ type: "mcp_toolset" }]);
 }
 
 export function summarizeFallbackEvidence(records, { inspectPendingServerHistory }) {
@@ -599,12 +650,28 @@ const server = createServer((request, response) => {
       body,
     });
     await writeFile(process.env.FAKE_PROVIDER_REQUEST_FILE, JSON.stringify(records));
+    const credentialValid = request.url === "/v1/chat/completions"
+      ? request.headers.authorization === "Bearer fixture-key"
+      : request.headers["x-api-key"] === "fixture-key";
+    if (!credentialValid) {
+      response.writeHead(401, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "invalid fixture credential" } }));
+      return;
+    }
     if (!["fake-model", "claude-sonnet"].includes(body.model)) {
       response.writeHead(422, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: { message: "unexpected fixture model" } }));
       return;
     }
     response.writeHead(200, { "content-type": "application/json" });
+    const family = body.metadata?.user_id?.slice("airkit-e2e-".length);
+    const serverContent = family === "advisor" ? [
+      { type: "server_tool_use", id: "srvtoolu_advisor_response", name: "advisor", input: {} },
+      { type: "advisor_tool_result", tool_use_id: "srvtoolu_advisor_response", content: { type: "advisor_redacted_result", encrypted_content: "fixture" } },
+    ] : family === "codeExecution" ? [
+      { type: "server_tool_use", id: "srvtoolu_code_response", name: "code_execution", input: {} },
+      { type: "code_execution_tool_result", tool_use_id: "srvtoolu_code_response", content: { type: "code_execution_result", stdout: "fixture-response" } },
+    ] : [{ type: "text", text: "FAKE_PROVIDER_OK" }];
     response.end(JSON.stringify(request.url === "/v1/chat/completions" ? {
       id: "fixture-openai-response",
       object: "chat.completion",
@@ -617,7 +684,7 @@ const server = createServer((request, response) => {
       type: "message",
       role: "assistant",
       model: body.model,
-      content: [{ type: "text", text: "FAKE_PROVIDER_OK" }],
+      content: serverContent,
       stop_reason: "end_turn",
       stop_sequence: null,
       usage: { input_tokens: 1, output_tokens: 1 },

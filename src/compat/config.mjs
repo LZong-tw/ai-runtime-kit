@@ -78,6 +78,21 @@ export function compatibilityFallbackSelector(fallback) {
   return `${fallback.provider}/${fallback.model}`;
 }
 
+export function validateCompatibilityProviderBinding(config, providers) {
+  const matches = (providers ?? []).filter(({ name }) => name === config.fallback.provider);
+  if (matches.length !== 1) {
+    throw new Error(`fallback provider must resolve exactly once: ${config.fallback.provider}`);
+  }
+  const [provider] = matches;
+  if (provider.type !== "anthropic_messages") {
+    throw new Error(`fallback provider must use anthropic_messages: ${provider.name}`);
+  }
+  if (!provider.models?.includes(config.fallback.model)) {
+    throw new Error(`fallback model is missing from provider ${provider.name}: ${config.fallback.model}`);
+  }
+  return provider;
+}
+
 function resolveNativeFirst(mode, nativeCapability) {
   return mode === "native-first" && nativeCapability === true ? "native" : "anthropic-fallback";
 }

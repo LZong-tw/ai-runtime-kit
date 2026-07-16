@@ -182,7 +182,8 @@ is verified.
 `webSearch.mode: "mcp"` is retained only as an explicit migration mode for
 profiles that still require the older compatibility `web_search` tool. In that
 mode AirKit adds one non-strict `--mcp-config` JSON argument for the launched
-Claude process and uses `fallback.model` for its Anthropic request. The entry uses
+Claude process and uses the configured managed-provider/model fallback route
+for its Anthropic request. The entry uses
 `${AIRKIT_COMPATIBILITY_MCP_URL}` and
 `Bearer ${AIRKIT_COMPATIBILITY_MCP_TOKEN}` placeholders; their values are
 child-only environment variables derived from the active CCR gateway endpoint

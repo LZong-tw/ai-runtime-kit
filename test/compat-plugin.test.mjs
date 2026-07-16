@@ -24,6 +24,13 @@ const COMPLETE_PLUGIN_CONFIG = {
   advisor: { mode: "anthropic-fallback" },
   mcpConnector: { mode: "anthropic-fallback" },
 };
+const PLUGIN_RUNTIME_CONFIG = {
+  Providers: [{
+    name: "anthropic-messages",
+    type: "anthropic_messages",
+    models: ["claude-sonnet"],
+  }],
+};
 
 test("core client uses generated x-ccr-core-auth without forwarding client secrets", async (t) => {
   const fixture = await createCoreFixture(t, { tokenEntry: { key: CORE_TOKEN } });
@@ -816,7 +823,7 @@ test("compatibility plugin registers stable authenticated POST routes", async ()
   const routes = [];
 
   await plugin.setup({
-    config: {},
+    config: structuredClone(PLUGIN_RUNTIME_CONFIG),
     coreClient: {},
     pluginConfig: structuredClone(COMPLETE_PLUGIN_CONFIG),
     registerGatewayRoute(route) {
@@ -841,6 +848,28 @@ test("compatibility plugin registers stable authenticated POST routes", async ()
       },
     ],
   );
+});
+
+test("compatibility plugin fails closed on an invalid fallback provider binding", async () => {
+  for (const Providers of [
+    [],
+    [{ name: "anthropic-messages", type: "openai_chat_completions", models: ["claude-sonnet"] }],
+    [{ name: "anthropic-messages", type: "anthropic_messages", models: ["claude-opus"] }],
+  ]) {
+    const routes = [];
+    await assert.rejects(
+      plugin.setup({
+        config: { Providers },
+        coreClient: createPluginCoreClient(),
+        pluginConfig: structuredClone(COMPLETE_PLUGIN_CONFIG),
+        registerGatewayRoute(route) {
+          routes.push(route);
+        },
+      }),
+      /fallback provider|fallback model/,
+    );
+    assert.deepEqual(routes, []);
+  }
 });
 
 test("compatibility plugin rejects removed Advisor bridge configuration before registering routes", async () => {
@@ -1345,7 +1374,7 @@ async function createPluginFixture(options = {}) {
     },
   };
   await plugin.setup({
-    config: {},
+    config: structuredClone(PLUGIN_RUNTIME_CONFIG),
     coreClient: options.coreClient ?? createPluginCoreClient({
       async requestMessage(body, headers) {
         coreCalls.push({ body: structuredClone(body), headers: structuredClone(headers ?? {}) });
