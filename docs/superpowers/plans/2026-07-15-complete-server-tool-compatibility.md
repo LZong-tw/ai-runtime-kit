@@ -562,7 +562,7 @@ Commit: `git commit -m "docs: hard cut complete server tool compatibility"`
 **Interfaces:**
 - Private profile consumes the OSS schema without duplicating runtime logic.
 - All fallback models use the approved Anthropic-family LiteLLM identifiers in the private catalog.
-- Existing `airclaude`, `hr-airclaude`, modes, aliases, statusline, and passthrough arguments remain unchanged.
+- Existing `airclaude` (and any overlay-specific launcher variants), modes, aliases, statusline, and passthrough arguments remain unchanged.
 
 - [ ] **Step 1: Write failing private-profile tests**
 
@@ -639,7 +639,7 @@ Expected: backup paths are printed and managed save count remains idempotent on 
 
 - [ ] **Step 3: Verify normal entrypoints**
 
-Run: `hr-airclaude glm -r --help`
+Run: `airclaude glm -r --help`
 
 Run: `airclaude --doctor`
 

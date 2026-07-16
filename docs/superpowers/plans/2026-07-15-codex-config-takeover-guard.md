@@ -14,7 +14,7 @@
 - OSS contains no company names, private endpoints, credential references, or secret values.
 - Never run the CCR CLI during tests or live diagnosis.
 - Never persist a default Codex model or replace the user's latest config with a stale CCR backup.
-- Ordinary `airclaude`, `hr-*`, and `claude-sub` usage remains unchanged after the one-time repair.
+- Ordinary `airclaude` (and any overlay-specific launcher variants) and `claude-sub` usage remains unchanged after the one-time repair.
 - Preview mode performs no filesystem writes and must not auto-start CCR.
 - Write mode creates a byte-exact backup before any CCR RPC that can reconcile global profiles.
 - The repaired Codex text preserves every non-CCR byte and removes only exact comment-delimited CCR managed profile/provider blocks.
