@@ -5,12 +5,12 @@ import {
 } from "./gateway.mjs";
 import {
   VERIFIED_NATIVE_COMPATIBILITY,
+  compatibilityFallbackSelector,
   resolveCompatibilityPolicies,
   validateCompatibilityConfig,
 } from "./config.mjs";
 import { inspectPendingServerHistory } from "./server-history.mjs";
 import { inspectServerToolRequest } from "./server-tools.mjs";
-import { assertAnthropicFamilyModel } from "./protocol.mjs";
 
 const MCP_PROTOCOL_VERSION = "2025-03-26";
 const MAX_QUERY_LENGTH = 1_000;
@@ -177,7 +177,7 @@ async function callWebSearch({ config, coreClient, headers, input }) {
 
   const message = await coreClient.requestMessage(
     {
-      model: assertAnthropicFamilyModel(config.fallback?.model, "fallback.model"),
+      model: compatibilityFallbackSelector(config.fallback),
       max_tokens: 1_024,
       messages: [{ role: "user", content: input.query }],
       stream: false,

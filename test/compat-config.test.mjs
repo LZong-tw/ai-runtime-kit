@@ -9,7 +9,7 @@ import {
 const VALID_CONFIG = {
   fallback: {
     provider: "anthropic-messages",
-    model: "anthropic/claude-sonnet",
+    model: "claude-sonnet",
     maxContinuationTurns: 8,
   },
   toolSearch: { mode: "bridge" },
@@ -142,13 +142,26 @@ test("rejects missing fallback, unknown keys, and invalid provider or family mod
     () => validateCompatibilityConfig({ ...VALID_CONFIG, extra: {} }),
     /unknown compatibility key.*extra/i,
   );
-  assert.throws(
-    () =>
-      validateCompatibilityConfig({
+  assert.doesNotThrow(() =>
+    validateCompatibilityConfig({
+      ...VALID_CONFIG,
+      fallback: { ...VALID_CONFIG.fallback, provider: "custom-anthropic" },
+    }));
+  for (const provider of ["", "provider/model", "../provider", "provider name"]) {
+    assert.throws(
+      () => validateCompatibilityConfig({
         ...VALID_CONFIG,
-        fallback: { ...VALID_CONFIG.fallback, provider: "custom" },
+        fallback: { ...VALID_CONFIG.fallback, provider },
       }),
-    /fallback\.provider.*anthropic-messages/,
+      /fallback\.provider.*identifier/,
+    );
+  }
+  assert.throws(
+    () => validateCompatibilityConfig({
+      ...VALID_CONFIG,
+      fallback: { ...VALID_CONFIG.fallback, model: "anthropic/claude-sonnet" },
+    }),
+    /provider-local Claude model identifier/,
   );
 
   for (const family of [

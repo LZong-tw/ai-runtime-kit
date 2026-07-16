@@ -370,7 +370,7 @@ test("CCR 3 merge creates CCR-only mode profiles and preserves unrelated configu
 
 test("CCR 3 managed providers can route upstream through a per-launch proxy", () => {
   const merged = airkitRuntime.buildCcr3ManagedConfig(
-    launchCatalog(),
+    compatibilityCatalog(),
     "launch-example",
     {},
     {
@@ -383,6 +383,34 @@ test("CCR 3 managed providers can route upstream through a per-launch proxy", ()
     merged.config.Providers[0].api_base_url,
     "http://127.0.0.1:8804/v1/chat/completions",
   );
+  assert.equal(
+    merged.config.Providers[1].api_base_url,
+    "https://example.invalid/v1/messages",
+  );
+});
+
+test("CCR compatibility requires a managed Anthropic Messages provider and local model", () => {
+  const cases = [
+    ["missing provider", (catalog) => {
+      catalog.profiles[0].ccr.plugins[0].config.fallback.provider = "missing";
+    }, /references unmanaged provider: missing/],
+    ["wrong provider type", (catalog) => {
+      catalog.profiles[0].ccr.Providers[1].type = "openai_chat_completions";
+    }, /must use anthropic_messages/],
+    ["missing provider model", (catalog) => {
+      catalog.profiles[0].ccr.Providers[1].models = ["claude-opus"];
+    }, /model is missing from provider anthropic-messages: claude-sonnet/],
+  ];
+
+  for (const [name, mutate, expected] of cases) {
+    const catalog = compatibilityCatalog();
+    mutate(catalog);
+    assert.throws(
+      () => airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example"),
+      expected,
+      name,
+    );
+  }
 });
 
 test("CCR compatibility opt-in resolves the installed plugin and preserves unrelated plugins", () => {
@@ -398,6 +426,14 @@ test("CCR compatibility opt-in resolves the installed plugin and preserves unrel
   assert.equal(merged.config.plugins[1].id, "airkit-compatibility");
   assert.equal(merged.config.plugins[1].enabled, true);
   assert.equal(merged.config.plugins[1].module, resolve(import.meta.dirname, "..", "src", "compat", "plugin.mjs"));
+  assert.equal(
+    merged.config.plugins[1].config.fallback.provider,
+    "airkit-provider-launch-example-anthropic-messages",
+  );
+  assert.ok(merged.config.Providers.some((provider) =>
+    provider.id === "airkit-provider-launch-example-anthropic-messages" &&
+    provider.type === "anthropic_messages" &&
+    provider.models.includes("claude-sonnet")));
   assert.doesNotMatch(merged.config.plugins[1].module, /airkit-compatibility\/plugins/);
 
   const repeated = airkitRuntime.buildCcr3ManagedConfig(
@@ -2105,7 +2141,10 @@ test("prepareLaunch registers compatibility MCP additively with child-only expan
 });
 
 test("prepareLaunch resolves ccrTokenOpRef once for the CCR 3 config merge", async () => {
-  const catalog = launchCatalog();
+  const catalog = compatibilityCatalog();
+  for (const provider of catalog.profiles[0].ccr.Providers) {
+    provider.api_key = "$ANTHROPIC_AUTH_TOKEN";
+  }
   catalog.profiles[0].shell = { ccrTokenOpRef: "op://Test/API/token" };
   const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-op-"));
   const calls = [];
@@ -2133,6 +2172,37 @@ test("prepareLaunch resolves ccrTokenOpRef once for the CCR 3 config merge", asy
     assert.equal(
       saved[0].Providers.find((provider) => provider.id === "airkit-provider-launch-example-demo").api_key,
       "resolved-token",
+    );
+    assert.equal(
+      saved[0].Providers.find((provider) =>
+        provider.id === "airkit-provider-launch-example-anthropic-messages").api_key,
+      "resolved-token",
+    );
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("prepareLaunch never assigns the Anthropic token to a different unresolved placeholder", async () => {
+  const catalog = compatibilityCatalog();
+  catalog.profiles[0].ccr.Providers[1].api_key = "$OTHER_PROVIDER_TOKEN";
+  catalog.profiles[0].shell = { ccrTokenOpRef: "op://Test/API/token" };
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-other-token-"));
+
+  try {
+    await assert.rejects(
+      () => prepareLaunch(catalog, "launch-example", {
+        configDir,
+        ccrClient: ccrTestClient([]),
+        commandExists: async (command) => ["ccr", "claude", "op"].includes(command),
+        env: { DEMO_API_KEY: "demo-token", HOME: configDir },
+        launch: false,
+        runtimeVersions: passingRuntimeVersions(),
+        runCommand: async (command) => command === "op"
+          ? { ok: true, status: 0, stdout: "resolved-token" }
+          : { ok: true, status: 0, stdout: "" },
+      }),
+      /unresolved provider credentials: anthropic-messages \(OTHER_PROVIDER_TOKEN\)/,
     );
   } finally {
     await rm(configDir, { force: true, recursive: true });
@@ -2378,13 +2448,20 @@ function launchCatalog() {
 
 function compatibilityCatalog() {
   const catalog = launchCatalog();
+  catalog.profiles[0].ccr.Providers.push({
+    name: "anthropic-messages",
+    type: "anthropic_messages",
+    api_base_url: "https://example.invalid/v1/messages",
+    api_key: "$DEMO_API_KEY",
+    models: ["claude-sonnet"],
+  });
   catalog.profiles[0].ccr.plugins = [{
     id: "airkit-compatibility",
     module: "@lzong/ai-runtime-kit/compatibility-plugin",
     config: {
       fallback: {
         provider: "anthropic-messages",
-        model: "anthropic/claude-sonnet",
+        model: "claude-sonnet",
         maxContinuationTurns: 8,
       },
       advisor: { mode: "anthropic-fallback" },

@@ -10,7 +10,7 @@ import { inspectPendingServerHistory } from "../src/compat/server-history.mjs";
 const VALID_CONFIG = {
   fallback: {
     provider: "anthropic-messages",
-    model: "anthropic/claude-sonnet",
+    model: "claude-sonnet",
     maxContinuationTurns: 8,
   },
   toolSearch: { mode: "bridge" },
@@ -50,7 +50,7 @@ test("routes typed Advisor and Code Execution requests by changing only the mode
     assert.deepEqual(body, before);
     assert.deepEqual(calls[0].body, {
       ...before,
-      model: "anthropic/claude-sonnet",
+      model: "anthropic-messages/claude-sonnet",
     });
     assert.equal(calls[0].body.tools, body.tools);
     assert.equal(calls[0].body.messages, body.messages);
@@ -402,7 +402,7 @@ test("gateway sends typed server tools through whole-request fallback unchanged"
 
   assert.equal(result, response);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].body.model, "anthropic/claude-sonnet");
+  assert.equal(calls[0].body.model, "anthropic-messages/claude-sonnet");
   assert.equal(calls[0].body.messages, body.messages);
   assert.equal(calls[0].body.tools, body.tools);
 });
