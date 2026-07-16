@@ -162,6 +162,7 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
     "docs/profile-schema.md",
     "docs/runtime-lessons.md",
     "profiles",
+    "scripts/capture-claude-tool-contract.mjs",
     "scripts/verify-ccr3-e2e.mjs",
     "src",
   ];

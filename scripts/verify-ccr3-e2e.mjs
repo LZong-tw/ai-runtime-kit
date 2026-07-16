@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -285,28 +285,57 @@ async function main() {
     assert.equal(Number(endpoint.port), gatewayPort);
     const health = await fetch(new URL("/health", endpoint), { signal: AbortSignal.timeout(5_000) });
     assert.equal(health.ok, true, `configured gateway health failed: HTTP ${health.status}`);
-
+    const managedProfile = liveConfig.profile.profiles.find((profile) => profile.id === managedProfileId);
+    assert.ok(managedProfile);
     const payload = JSON.parse(await readFile(env.FAKE_CLAUDE_RESULT_FILE, "utf8"));
+    assert.ok(resolve(payload.fixtureSettingsPath).startsWith(`${resolve(root)}/`));
+    const managedSettings = JSON.parse(await readFile(payload.fixtureSettingsPath, "utf8"));
+    const gatewayKeyResult = run(managedSettings.apiKeyHelper, [], env);
+    assert.equal(gatewayKeyResult.status, 0, "isolated CCR apiKeyHelper failed");
+    const gatewayApiKey = gatewayKeyResult.stdout.trim();
+    assert.ok(gatewayApiKey.length > 0, "isolated CCR apiKeyHelper returned an empty key");
+    const fallbackFamilies = await runFallbackGatewayScenarios({
+      apiKey: gatewayApiKey,
+      gatewayOrigin: endpoint.origin,
+      loopbackOrigin: `http://127.0.0.1:${providerPort}`,
+    });
+    const providerRequests = JSON.parse(await readFile(fakeProvider.requestFile, "utf8"));
+    const installedCompatRoot = join(runtimeRoot, "node_modules", "@lzong", "ai-runtime-kit", "src", "compat");
+    const [{ inspectPendingServerHistory }, { resolveCompatibilityPolicies }] = await Promise.all([
+      import(pathToFileURL(join(installedCompatRoot, "server-history.mjs"))),
+      import(pathToFileURL(join(installedCompatRoot, "config.mjs"))),
+    ]);
+    const fallbackEvidence = summarizeFallbackEvidence(providerRequests, { inspectPendingServerHistory });
+    assert.deepEqual(fallbackEvidence.map(({ family }) => family), fallbackFamilies);
+    assert.equal(
+      JSON.stringify(providerRequests).includes(gatewayApiKey),
+      false,
+      "generated outer gateway key reached provider",
+    );
+    assert.equal(JSON.stringify(providerRequests).includes("ccr-local"), false, "outer gateway key reached provider");
+    const compatibilityPolicies = resolveCompatibilityPolicies(fakeCompatibilityConfig("mcp"), {}).policies;
+    assert.equal(Object.keys(compatibilityPolicies).length, 6);
+
     assert.equal(payload.content?.[0]?.text, "FAKE_PROVIDER_OK");
     assert.equal(payload.compatibilityMcp?.serverInfo?.name, "airkit-compatibility");
     assert.equal(payload.compatibilityMcp?.protocolVersion, "2025-03-26");
     assert.equal(payload.ambientSentinel, undefined, "ambient controller env leaked into the CCR/Claude child");
-    assert.ok(resolve(payload.fixtureSettingsPath).startsWith(`${resolve(root)}/`));
-    const providerRequest = JSON.parse(await readFile(fakeProvider.requestFile, "utf8"));
-    assert.equal(providerRequest.url, "/v1/chat/completions");
+    const providerRequest = providerRequests.find(({ body }) => body.model === "fake-model");
+    assert.ok(providerRequest, "fake provider did not receive the ordinary launch request");
+    assert.equal(providerRequest.url, "/v1/messages");
     assert.equal(providerRequest.body.model, "fake-model");
 
-    const managedProfile = liveConfig.profile.profiles.find((profile) => profile.id === managedProfileId);
-    assert.ok(managedProfile);
     assert.ok(resolve(managedProfile.settingsFile).startsWith(`${resolve(root)}/`));
     assert.ok(resolve(managedProfile.env.CLAUDE_STATUSLINE_CACHE_DIR).startsWith(`${resolve(root)}/`));
     assert.equal(JSON.stringify(managedProfile).includes(homedir()), false);
 
     process.stdout.write(`${JSON.stringify({
       ccrVersion: ccrPackage.version,
+      compatibilityPolicies,
       fakeProviderResponse: payload.content[0].text,
       gateway: endpoint.origin,
       idempotentManagedSaves: managedSaves,
+      fallbackEvidence,
       compatibilityMcp: payload.compatibilityMcp.serverInfo.name,
       namedProfile: managedProfileId,
       realHomeAccessDenied: true,
@@ -406,28 +435,135 @@ function fakeCatalog(providerPort) {
       summary: "Isolated CCR 3 verification fixture.",
       launch: { binary: "claude", args: [], defaultMode: "auto", modes: { auto: {} } },
       ccr: {
+        APIKEY: "ccr-local",
         LOG: false,
         plugins: [{
           id: "airkit-compatibility",
           module: "@lzong/ai-runtime-kit/compatibility-plugin",
-          config: {
-            webSearch: {
-              mode: "mcp",
-              model: "anthropic/claude-sonnet",
-            },
-          },
+          config: fakeCompatibilityConfig("mcp"),
         }],
         Providers: [{
           name: "fake",
-          type: "openai_chat_completions",
-          api_base_url: `http://127.0.0.1:${providerPort}/v1/chat/completions`,
+          type: "anthropic_messages",
+          api_base_url: `http://127.0.0.1:${providerPort}/v1/messages`,
           api_key: "$FAKE_PROVIDER_API_KEY",
-          models: ["fake-model"],
+          models: ["fake-model", "claude-sonnet"],
         }],
         Router: { default: "fake,fake-model", background: "fake,fake-model" },
       },
     }],
   };
+}
+
+function fakeCompatibilityConfig(webSearchMode = "native-first") {
+  return {
+    fallback: {
+      provider: "anthropic-messages",
+      model: "claude-sonnet",
+      maxContinuationTurns: 8,
+    },
+    advisor: { mode: "anthropic-fallback" },
+    codeExecution: { mode: "anthropic-fallback" },
+    mcpConnector: { mode: "anthropic-fallback" },
+    toolSearch: { mode: "bridge" },
+    webFetch: { mode: "native-first" },
+    webSearch: { mode: webSearchMode },
+  };
+}
+
+export async function runFallbackGatewayScenarios({
+  apiKey,
+  fetchImpl = fetch,
+  gatewayOrigin,
+  loopbackOrigin,
+}) {
+  const fallbackFamilies = ["advisor", "webSearch", "webFetch", "codeExecution", "mcpConnector"];
+  const scenarios = {
+    advisor: { tools: [{ type: "advisor_20260301" }] },
+    webSearch: { tools: [{ type: "web_search_20260318" }] },
+    webFetch: {
+      messages: [{ role: "user", content: `Fetch ${loopbackOrigin}/webFetch-fixture only.` }],
+      tools: [{ type: "web_fetch_20260209" }],
+    },
+    codeExecution: {
+      container: { id: "container_fixture" },
+      messages: [{
+        role: "assistant",
+        content: [
+          { type: "server_tool_use", id: "srvtoolu_code", name: "code_execution", input: {} },
+          {
+            type: "code_execution_tool_result",
+            tool_use_id: "srvtoolu_code",
+            content: { type: "code_execution_result", stdout: "fixture" },
+          },
+        ],
+      }],
+      tools: [{ type: "code_execution_20260120" }],
+    },
+    mcpConnector: {
+      container: { id: "container_mcp_fixture" },
+      mcp_servers: [{ type: "url", url: `${loopbackOrigin}/mcp-fixture` }],
+      tools: [{ type: "mcp_toolset" }],
+    },
+  };
+  for (const family of fallbackFamilies) {
+    const body = {
+      metadata: { user_id: `airkit-e2e-${family}` },
+      model: "fake-model",
+      max_tokens: 32,
+      messages: [{ role: "user", content: "fixture" }],
+      ...scenarios[family],
+    };
+    const response = await fetchImpl(new URL("/v1/messages", gatewayOrigin), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "x-request-id": `fixture-${family}`,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const payload = await response.json();
+    const errorMessage = String(payload?.error?.message ?? "").slice(0, 200);
+    assert.equal(
+      response.ok,
+      true,
+      `${family} gateway fallback failed: HTTP ${response.status}${errorMessage ? ` (${errorMessage})` : ""}`,
+    );
+    assert.equal(payload.type, "message", `${family} gateway fallback returned a non-message`);
+  }
+  return fallbackFamilies;
+}
+
+export function summarizeFallbackEvidence(records, { inspectPendingServerHistory }) {
+  const evidence = records.flatMap(({ body, headers }) => {
+    const userId = body?.metadata?.user_id;
+    if (typeof userId !== "string" || !userId.startsWith("airkit-e2e-")) return [];
+    const history = inspectPendingServerHistory(body);
+    return [{
+      bodyHash: createHash("sha256").update(JSON.stringify(body)).digest("hex"),
+      container: history.containerId,
+      continuationCount: history.continuationTurns,
+      fallbackModel: body.model,
+      redactedHeaders: redactProviderHeaders(headers),
+      family: userId.slice("airkit-e2e-".length),
+    }];
+  });
+  assert.ok(evidence.every(({ bodyHash }) => /^[a-f0-9]{64}$/.test(bodyHash)));
+  assert.ok(evidence.every(({ fallbackModel }) => fallbackModel === "claude-sonnet"));
+  assert.equal(evidence.find(({ family }) => family === "codeExecution").continuationCount, 1);
+  assert.equal(evidence.find(({ family }) => family === "codeExecution").container, "container_fixture");
+  return evidence;
+}
+
+function redactProviderHeaders(headers = {}) {
+  const selected = ["anthropic-version", "x-api-key", "x-request-id"];
+  return Object.fromEntries(selected.flatMap((name) => {
+    if (!Object.hasOwn(headers, name)) return [];
+    return [[name, name === "x-api-key" ? "[redacted]" : "[present]"]];
+  }));
 }
 
 async function startFakeProvider(binDir, port, requestFile, env) {
@@ -447,12 +583,14 @@ const server = createServer((request, response) => {
   request.on("data", (chunk) => chunks.push(chunk));
   request.on("end", async () => {
     const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-    await writeFile(process.env.FAKE_PROVIDER_REQUEST_FILE, JSON.stringify({
+    records.push({
       method: request.method,
       url: request.url,
+      headers: request.headers,
       body,
-    }));
-    if (body.model !== "fake-model") {
+    });
+    await writeFile(process.env.FAKE_PROVIDER_REQUEST_FILE, JSON.stringify(records));
+    if (!["fake-model", "claude-sonnet"].includes(body.model)) {
       response.writeHead(422, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: { message: "unexpected fixture model" } }));
       return;
@@ -460,14 +598,18 @@ const server = createServer((request, response) => {
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({
       id: "fixture-response",
-      object: "chat.completion",
-      created: 0,
-      model: "fake-model",
-      choices: [{ index: 0, message: { role: "assistant", content: "FAKE_PROVIDER_OK" }, finish_reason: "stop" }],
-      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      type: "message",
+      role: "assistant",
+      model: body.model,
+      content: [{ type: "text", text: "FAKE_PROVIDER_OK" }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
     }));
   });
 });
+const records = [];
+await writeFile(process.env.FAKE_PROVIDER_REQUEST_FILE, "[]");
 server.listen(Number(process.env.FAKE_PROVIDER_PORT), "127.0.0.1");
 process.on("SIGTERM", () => server.close(() => process.exit(0)));
 `);

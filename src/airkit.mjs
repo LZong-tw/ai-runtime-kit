@@ -260,6 +260,10 @@ export async function exportOssRelease({ outDir }) {
     join(outDir, "scripts", "verify-ccr3-e2e.mjs"),
     await readFile(join(repoRoot, "scripts", "verify-ccr3-e2e.mjs"), "utf8"),
   );
+  await writeFile(
+    join(outDir, "scripts", "capture-claude-tool-contract.mjs"),
+    await readFile(join(repoRoot, "scripts", "capture-claude-tool-contract.mjs"), "utf8"),
+  );
   await writeFile(join(outDir, "package.json"), `${JSON.stringify(publicPackage(), null, 2)}\n`);
   await copyFile(join(repoRoot, "CLAUDE.md"), join(outDir, "CLAUDE.md"));
   await copyFile(join(repoRoot, "README.md"), join(outDir, "README.md"));
@@ -735,6 +739,7 @@ function publicPackage() {
       "docs/profile-schema.md",
       "docs/runtime-lessons.md",
       "profiles",
+      "scripts/capture-claude-tool-contract.mjs",
       "scripts/verify-ccr3-e2e.mjs",
       "src",
     ],
@@ -743,6 +748,7 @@ function publicPackage() {
       "pack:check": "npm pack --dry-run",
       test: "node --test",
       "verify:ccr3:e2e": "node scripts/verify-ccr3-e2e.mjs",
+      "verify:tool-contract": "node scripts/capture-claude-tool-contract.mjs",
       verify: "npm test && npm run check && npm run pack:check",
     },
     engines: { node: RUNTIME_REQUIREMENTS.node },

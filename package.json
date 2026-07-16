@@ -15,6 +15,7 @@
     "docs/profile-schema.md",
     "docs/runtime-lessons.md",
     "profiles",
+    "scripts/capture-claude-tool-contract.mjs",
     "scripts/verify-ccr3-e2e.mjs",
     "src"
   ],
@@ -23,6 +24,7 @@
     "pack:check": "npm pack --dry-run",
     "test": "node --test",
     "verify:ccr3:e2e": "node scripts/verify-ccr3-e2e.mjs",
+    "verify:tool-contract": "node scripts/capture-claude-tool-contract.mjs",
     "verify": "npm test && npm run check && npm run pack:check"
   },
   "engines": {
