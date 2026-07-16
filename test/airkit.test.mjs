@@ -368,6 +368,59 @@ test("CCR 3 merge creates CCR-only mode profiles and preserves unrelated configu
   assert.ok(merged.config.Router.rules.some((rule) => rule.id === "unrelated-rule"));
 });
 
+test("CCR 3 merge translates base routes into gateway rules for bare Claude models", () => {
+  const current = {
+    Router: {
+      builtInRules: { "claude-code": { enabled: true } },
+      fallback: { mode: "off", models: [], retryCount: 1 },
+      rules: [
+        { id: "unrelated-rule", name: "Keep me", enabled: true, target: "unrelated/keep-me" },
+        { id: "airkit-launch-example-route-default", name: "Stale managed", enabled: true },
+      ],
+    },
+  };
+
+  const merged = airkitRuntime.buildCcr3ManagedConfig(launchCatalog(), "launch-example", current, {
+    configDir: "/tmp/airkit-config",
+  });
+
+  assert.deepEqual(
+    merged.config.Router.rules.map(({ id }) => id),
+    ["unrelated-rule", "airkit-launch-example-route-background", "airkit-launch-example-route-default"],
+    "foreign rules stay first; stale managed rules are replaced",
+  );
+  const [, background, fallthrough] = merged.config.Router.rules;
+  assert.deepEqual(background.condition, {
+    left: "request.body.model",
+    operator: "starts-with",
+    right: "claude-haiku",
+  });
+  assert.deepEqual(background.rewrites, [{
+    key: "request.body.model",
+    operation: "set",
+    value: "airkit-provider-launch-example-demo/cheap-coder",
+  }]);
+  assert.deepEqual(fallthrough.condition, {
+    left: "request.body.model",
+    operator: "starts-with",
+    right: "claude-",
+  });
+  assert.deepEqual(fallthrough.rewrites, [{
+    key: "request.body.model",
+    operation: "set",
+    value: "airkit-provider-launch-example-demo/steady-coder",
+  }]);
+  assert.equal(background.type, "condition");
+  assert.equal(background.enabled, true);
+  assert.deepEqual(merged.config.Router.builtInRules, { "claude-code": { enabled: true } });
+  assert.deepEqual(merged.config.Router.fallback, { mode: "off", models: [], retryCount: 1 });
+
+  const repeated = airkitRuntime.buildCcr3ManagedConfig(launchCatalog(), "launch-example", merged.config, {
+    configDir: "/tmp/airkit-config",
+  });
+  assert.deepEqual(repeated.config.Router, merged.config.Router, "router merge is idempotent");
+});
+
 test("CCR 3 managed providers can route upstream through a per-launch proxy", () => {
   const merged = airkitRuntime.buildCcr3ManagedConfig(
     compatibilityCatalog(),

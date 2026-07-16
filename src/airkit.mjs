@@ -146,6 +146,11 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
     config: {
       ...structuredClone(currentConfig),
       Providers: [...preservedProviders, ...managedProviders],
+      Router: mergeManagedRouter(
+        currentConfig.Router,
+        buildManagedRouterRules(baseConfig, managedRouteSelector, managedPrefix),
+        managedPrefix,
+      ),
       ...mergeManagedConfigArrays(currentConfig, baseConfig, managedPrefix),
       profile: {
         ...(currentConfig.profile ?? {}),
@@ -155,6 +160,37 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
     },
     profileIds: Object.fromEntries(modes.map((mode) => [mode, `${managedPrefix}${slug(mode)}`])),
   };
+}
+
+// CCR 3 strips CCR 2 Router.default/background keys on load, so bare Claude
+// model names (plain `claude` outside a named profile, including its constant
+// claude-haiku background requests) would fail gateway model resolution.
+// Translate the profile's base routes into managed condition rules instead.
+function buildManagedRouterRules(baseConfig, managedRouteSelector, managedPrefix) {
+  const router = baseConfig.Router ?? {};
+  if (!router.default) return [];
+  const rule = (kind, name, prefix, route) => ({
+    id: `${managedPrefix}route-${kind}`,
+    name,
+    type: "condition",
+    enabled: true,
+    condition: { left: "request.body.model", operator: "starts-with", right: prefix },
+    rewrites: [
+      { key: "request.body.model", operation: "set", value: managedRouteSelector(route) },
+    ],
+  });
+  return [
+    rule("background", "AirKit background route", "claude-haiku", router.background ?? router.default),
+    rule("default", "AirKit default route", "claude-", router.default),
+  ];
+}
+
+function mergeManagedRouter(currentRouter, managedRules, managedPrefix) {
+  const router = structuredClone(currentRouter ?? {});
+  const preserved = (router.rules ?? []).filter(
+    (candidate) => !String(candidate?.id ?? "").startsWith(managedPrefix),
+  );
+  return { ...router, rules: [...preserved, ...managedRules] };
 }
 
 function bindManagedCompatibilityProvider(ccrConfig, managedProviderIds) {
