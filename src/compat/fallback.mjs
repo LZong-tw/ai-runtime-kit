@@ -1,4 +1,4 @@
-import { resolveCompatibilityPolicies } from "./config.mjs";
+import { compatibilityFallbackSelector, resolveCompatibilityPolicies } from "./config.mjs";
 import { inspectPendingServerHistory } from "./server-history.mjs";
 
 const SAFE_HEADER_NAMES = new Set([
@@ -44,7 +44,7 @@ export function createFallbackRouter({ coreClient, config }) {
     }
 
     return coreClient({
-      body: { ...body, model: fallback.model },
+      body: { ...body, model: compatibilityFallbackSelector(fallback) },
       headers: copyAllowedHeaders(headers),
       signal,
     });

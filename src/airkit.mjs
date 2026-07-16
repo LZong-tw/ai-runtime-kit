@@ -79,7 +79,9 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
       sourceName: provider.name,
       config: {
         ...provider,
-        api_base_url: providerBaseUrl || provider.api_base_url,
+        api_base_url: providerBaseUrl && provider.type === "openai_chat_completions"
+          ? providerBaseUrl
+          : provider.api_base_url,
         id,
         name: id,
         api_key: options.apiKeys?.[provider.name] ?? provider.api_key,
@@ -88,6 +90,7 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
   });
   const managedProviders = managedProviderEntries.map((entry) => entry.config);
   const managedProviderIds = new Map(managedProviderEntries.map((entry) => [entry.sourceName, entry.config.id]));
+  bindManagedCompatibilityProvider(baseConfig, managedProviderIds);
   const managedRouteSelector = (route) => {
     const selector = routeSelector(route);
     const separator = selector.indexOf("/");
@@ -151,6 +154,25 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
     },
     profileIds: Object.fromEntries(modes.map((mode) => [mode, `${managedPrefix}${slug(mode)}`])),
   };
+}
+
+function bindManagedCompatibilityProvider(ccrConfig, managedProviderIds) {
+  const compatibility = configuredCompatibility(ccrConfig);
+  if (!compatibility) return;
+
+  const sourceName = compatibility.fallback.provider;
+  const provider = ccrConfig.Providers.find((candidate) => candidate.name === sourceName);
+  if (!provider) throw new Error(`compatibility fallback references unmanaged provider: ${sourceName}`);
+  if (provider.type !== "anthropic_messages") {
+    throw new Error(`compatibility fallback provider must use anthropic_messages: ${sourceName}`);
+  }
+  const model = compatibility.fallback.model.slice(
+    compatibility.fallback.model.lastIndexOf("/") + 1,
+  );
+  if (!provider.models?.includes(model)) {
+    throw new Error(`compatibility fallback model is missing from provider ${sourceName}: ${model}`);
+  }
+  compatibility.fallback.provider = managedProviderIds.get(sourceName);
 }
 
 function assertCcr3Compatible(ccrConfig) {
@@ -1786,7 +1808,7 @@ async function resolveProviderApiKeys(catalog, profileName, plan, options) {
     const match = String(provider.api_key ?? "").match(/^\$([A-Za-z_][A-Za-z0-9_]*)$/);
     if (!match) continue;
     if (env[match[1]]) apiKeys[provider.name] = env[match[1]];
-    else unresolved.push(provider.name);
+    else unresolved.push({ providerName: provider.name, envName: match[1] });
   }
   if (unresolved.length > 0 && plan.credential.ccrTokenOpRef) {
     const auth = await resolveCcrAuthEnv(plan, {
@@ -1797,12 +1819,18 @@ async function resolveProviderApiKeys(catalog, profileName, plan, options) {
     });
     if (!auth.ok) throw new Error(auth.reason);
     if (auth.env.ANTHROPIC_AUTH_TOKEN) {
-      for (const providerName of unresolved) apiKeys[providerName] = auth.env.ANTHROPIC_AUTH_TOKEN;
+      for (const credential of unresolved) {
+        if (credential.envName === "ANTHROPIC_AUTH_TOKEN") {
+          apiKeys[credential.providerName] = auth.env.ANTHROPIC_AUTH_TOKEN;
+        }
+      }
     }
   }
-  const stillUnresolved = unresolved.filter((providerName) => !apiKeys[providerName]);
+  const stillUnresolved = unresolved.filter(({ providerName }) => !apiKeys[providerName]);
   if (stillUnresolved.length > 0) {
-    throw new Error(`unresolved provider credentials: ${stillUnresolved.join(", ")}`);
+    throw new Error(`unresolved provider credentials: ${stillUnresolved
+      .map(({ providerName, envName }) => `${providerName} (${envName})`)
+      .join(", ")}`);
   }
   return apiKeys;
 }

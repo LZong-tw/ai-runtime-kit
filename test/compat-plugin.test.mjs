@@ -14,7 +14,7 @@ const RAW_RESPONSE_BODY = Buffer.from([0, 1, 2, 255, 10]);
 const COMPLETE_PLUGIN_CONFIG = {
   fallback: {
     provider: "anthropic-messages",
-    model: "anthropic/claude-sonnet",
+    model: "claude-sonnet",
     maxContinuationTurns: 8,
   },
   toolSearch: { mode: "bridge" },
@@ -538,7 +538,7 @@ test("unsupported native history falls back without rewriting request or respons
   const result = await handleCompatibilityMessage(fixture.input);
 
   assert.equal(fixture.calls.length, 1);
-  assert.equal(fixture.calls[0].body.model, "anthropic/claude-sonnet");
+  assert.equal(fixture.calls[0].body.model, "anthropic-messages/claude-sonnet");
   assert.deepEqual(fixture.calls[0].body.tools, fixture.input.body.tools);
   assert.deepEqual(fixture.calls[0].body.messages, fixture.input.body.messages);
   assert.match(JSON.stringify(fixture.calls[0].body.messages), /srvtoolu_web_search/);
@@ -595,7 +595,7 @@ test("cross-kind native result IDs fall back without rewriting mismatched histor
     await handleCompatibilityMessage(fixture.input);
 
     assert.equal(fixture.calls.length, 1);
-    assert.equal(fixture.calls[0].body.model, "anthropic/claude-sonnet");
+    assert.equal(fixture.calls[0].body.model, "anthropic-messages/claude-sonnet");
     assert.deepEqual(fixture.calls[0].body.messages, fixture.input.body.messages);
     assert.match(JSON.stringify(fixture.calls[0].body.messages), /get_weather|wrong kind/);
   }
@@ -653,7 +653,7 @@ test("executor loop cap falls back after eight iterations", async () => {
   const result = await handleCompatibilityMessage(fixture.input);
 
   assert.equal(fixture.calls.filter((call) => call.body.model === "executor-model").length, 8);
-  assert.equal(fixture.calls.at(-1).body.model, "anthropic/claude-sonnet");
+  assert.equal(fixture.calls.at(-1).body.model, "anthropic-messages/claude-sonnet");
   assert.deepEqual(result.content, [{ type: "text", text: "Loop fallback response." }]);
   assert.equal(result.usage.iterations, undefined);
 });
@@ -919,7 +919,7 @@ test("Claude Code WebFetch client requests fail closed to the Anthropic route", 
   );
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].model, "anthropic/claude-sonnet");
+  assert.equal(calls[0].model, "anthropic-messages/claude-sonnet");
   assert.deepEqual(calls[0].tools, body.tools);
   assert.equal(response.statusCode, 200);
 });
@@ -981,7 +981,7 @@ test("explicit WebSearch fallback overrides the verified native route", async ()
   );
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].model, "anthropic/claude-sonnet");
+  assert.equal(calls[0].model, "anthropic-messages/claude-sonnet");
   assert.deepEqual(calls[0].tools, body.tools);
 });
 
@@ -1062,7 +1062,7 @@ test("compatibility plugin streams typed server-tool fallback through the real r
   );
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].body.model, "anthropic/claude-sonnet");
+  assert.equal(calls[0].body.model, "anthropic-messages/claude-sonnet");
   assert.equal(calls[0].body.stream, true);
   assert.deepEqual(calls[0].body.tools, body.tools);
   assert.equal(calls[0].signal, signal);
@@ -1103,7 +1103,7 @@ test("compatibility plugin routes pending server history without a repeated tool
   );
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].model, "anthropic/claude-sonnet");
+  assert.equal(calls[0].model, "anthropic-messages/claude-sonnet");
   assert.deepEqual(calls[0].messages, body.messages);
   assert.equal(response.statusCode, 529);
   assert.equal(response.headers["retry-after"], "2");
@@ -1169,7 +1169,7 @@ test("MCP web_search forces the configured model, server tool, and domain filter
   });
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].model, "anthropic/claude-sonnet");
+  assert.equal(calls[0].model, "anthropic-messages/claude-sonnet");
   assert.equal(calls[0].stream, false);
   assert.deepEqual(calls[0].messages, [
     { role: "user", content: "current protocol release" },
@@ -1505,7 +1505,7 @@ function createBridgeFixture(script, options = {}) {
       config: {
         fallback: {
           provider: "anthropic-messages",
-          model: options.fallbackModel ?? "anthropic/claude-sonnet",
+          model: options.fallbackModel ?? "claude-sonnet",
           maxContinuationTurns: 8,
         },
         toolSearch: { mode: "bridge" },

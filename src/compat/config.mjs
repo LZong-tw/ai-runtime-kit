@@ -24,10 +24,16 @@ export function validateCompatibilityConfig(config) {
 
   assertRecord(config.fallback, "fallback", true);
   rejectUnknownKeys(config.fallback, FALLBACK_KEYS, "fallback");
-  if (config.fallback.provider !== "anthropic-messages") {
-    throw new Error('fallback.provider must be "anthropic-messages"');
+  if (
+    typeof config.fallback.provider !== "string" ||
+    !/^[a-z0-9][a-z0-9._-]*$/i.test(config.fallback.provider)
+  ) {
+    throw new Error("fallback.provider must be a provider identifier");
   }
   assertAnthropicFamilyModel(config.fallback.model, "fallback.model");
+  if (config.fallback.model.includes("/")) {
+    throw new Error("fallback.model must be a provider-local Claude model identifier");
+  }
   if (
     !Number.isInteger(config.fallback.maxContinuationTurns) ||
     config.fallback.maxContinuationTurns < 1 ||
@@ -66,6 +72,10 @@ export function resolveCompatibilityPolicies(config, nativeCapabilities = {}) {
   });
 
   return Object.freeze({ fallback, policies });
+}
+
+export function compatibilityFallbackSelector(fallback) {
+  return `${fallback.provider}/${fallback.model}`;
 }
 
 function resolveNativeFirst(mode, nativeCapability) {
