@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import test from "node:test";
 import * as airkitRuntime from "../src/airkit.mjs";
+import { inspectPendingServerHistory } from "../src/compat/server-history.mjs";
 
 const verifierPath = resolve(import.meta.dirname, "..", "scripts", "verify-ccr3-e2e.mjs");
 const verifierSource = readFileSync(verifierPath, "utf8");
@@ -26,6 +27,49 @@ test("isolated CCR verifier loads the compatibility plugin and probes its MCP ro
   assert.match(verifierSource, /method: "initialize"/);
   assert.match(verifierSource, /payload\.compatibilityMcp\?\.serverInfo\?\.name/);
   assert.match(verifierSource, /payload\.content\?\.\[0\]\?\.text, "FAKE_PROVIDER_OK"/);
+});
+
+test("isolated CCR verifier executes and validates every fallback family", async () => {
+  const gatewayRequests = [];
+  const families = await verifier.runFallbackGatewayScenarios({
+    apiKey: "outer-fixture",
+    gatewayOrigin: "http://127.0.0.1:43123",
+    loopbackOrigin: "http://127.0.0.1:43124",
+    async fetchImpl(input, init) {
+      gatewayRequests.push({
+        body: JSON.parse(init.body),
+        headers: Object.fromEntries(new Headers(init.headers)),
+        url: String(input),
+      });
+      return Response.json({ type: "message", content: [], stop_reason: "end_turn" });
+    },
+  });
+
+  assert.deepEqual(families, ["advisor", "webSearch", "webFetch", "codeExecution", "mcpConnector"]);
+  assert.equal(gatewayRequests.length, 5);
+  assert.ok(gatewayRequests.every(({ url }) => url === "http://127.0.0.1:43123/v1/messages"));
+  assert.match(JSON.stringify(gatewayRequests[2].body), /http:\/\/127\.0\.0\.1:43124\/webFetch-fixture/);
+
+  const providerRecords = gatewayRequests.map((request, index) => ({
+    body: { ...request.body, model: "claude-sonnet" },
+    headers: {
+      "anthropic-version": "2023-06-01",
+      "x-api-key": "provider-fixture-secret",
+      "x-request-id": `provider-${families[index]}`,
+    },
+  }));
+  const evidence = verifier.summarizeFallbackEvidence(providerRecords, { inspectPendingServerHistory });
+  assert.deepEqual(evidence.map(({ family }) => family), families);
+  assert.ok(evidence.every(({ fallbackModel }) => fallbackModel === "claude-sonnet"));
+  assert.ok(evidence.every(({ bodyHash }) => /^[a-f0-9]{64}$/.test(bodyHash)));
+  assert.equal(evidence.find(({ family }) => family === "codeExecution").continuationCount, 1);
+  assert.equal(evidence.find(({ family }) => family === "codeExecution").container, "container_fixture");
+  assert.deepEqual(evidence[0].redactedHeaders, {
+    "anthropic-version": "[present]",
+    "x-api-key": "[redacted]",
+    "x-request-id": "[present]",
+  });
+  assert.doesNotMatch(JSON.stringify(evidence), /provider-fixture-secret|outer-fixture/);
 });
 
 test("runtime has no persisted Claude session model repair layer", () => {
