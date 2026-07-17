@@ -904,8 +904,8 @@ test("ordinary Messages requests preserve raw bytes and abort propagation", asyn
     }),
   });
   const body = Buffer.from([0, 255, 123, 125, 10]);
-  const signal = new AbortController().signal;
-  const request = createPluginRequest(body, { signal });
+  const upstream = new AbortController();
+  const request = createPluginRequest(body, { signal: upstream.signal });
   const response = createRecordingResponse();
 
   await fixture.messages.handler(request, response, fixture.helpers);
@@ -916,7 +916,11 @@ test("ordinary Messages requests preserve raw bytes and abort propagation", asyn
   assert.equal(calls[0].headers, request.headers);
   assert.equal(calls[0].method, "POST");
   assert.equal(calls[0].response, response);
-  assert.equal(calls[0].signal, signal);
+  // The handler derives a lifecycle signal (CCR passes no request.signal on
+  // real requests); an upstream abort must still propagate through it.
+  assert.equal(calls[0].signal.aborted, false);
+  upstream.abort();
+  assert.equal(calls[0].signal.aborted, true);
   assert.deepEqual(response.body, Buffer.from("raw-response"));
 });
 
@@ -1060,7 +1064,8 @@ test("compatibility Messages requests bridge JSON and preserve the stream flag",
 
 test("compatibility plugin streams typed server-tool fallback through the real response path", async () => {
   const calls = [];
-  const signal = new AbortController().signal;
+  const upstreamAbort = new AbortController();
+  const signal = upstreamAbort.signal;
   const fixture = await createPluginFixture({
     coreClient: createPluginCoreClient({
       async requestFallback(body, headers, receivedSignal) {
@@ -1094,7 +1099,9 @@ test("compatibility plugin streams typed server-tool fallback through the real r
   assert.equal(calls[0].body.model, "anthropic-messages/claude-sonnet");
   assert.equal(calls[0].body.stream, true);
   assert.deepEqual(calls[0].body.tools, body.tools);
-  assert.equal(calls[0].signal, signal);
+  assert.equal(calls[0].signal.aborted, false);
+  upstreamAbort.abort();
+  assert.equal(calls[0].signal.aborted, true, "upstream abort propagates via lifecycle signal");
   assert.equal(response.statusCode, 200);
   assert.equal(response.headers["content-type"], "text/event-stream");
   assert.equal(response.headers["x-request-id"], "typed-fallback");
@@ -1805,4 +1812,78 @@ test("bare Claude routing without routes config forwards byte-identical bytes", 
   );
   await handler({ headers: {}, method: "POST", signal: undefined }, {}, { readBody: async () => raw });
   assert.deepEqual(forwarded.at(-1), raw);
+});
+
+test("handler contains forwarding failures instead of rejecting into the daemon", async () => {
+  const fixture = await createPluginFixture({
+    coreClient: createPluginCoreClient({
+      async forwardRaw() {
+        throw new Error("core connection lost");
+      },
+    }),
+  });
+  const response = createRecordingResponse();
+
+  await fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify({ model: "x", messages: [] }))),
+    response,
+    fixture.helpers,
+  );
+
+  assert.equal(response.statusCode, 502);
+  assert.match(response.body.toString(), /compatibility forwarding failed/);
+});
+
+test("handler destroys the response when failure happens after headers were sent", async () => {
+  let destroyedWith;
+  const fixture = await createPluginFixture({
+    coreClient: createPluginCoreClient({
+      async forwardRaw({ response }) {
+        response.headersSent = true;
+        throw new Error("downstream vanished mid-stream");
+      },
+    }),
+  });
+  const response = Object.assign(createRecordingResponse(), {
+    destroy(error) {
+      destroyedWith = error;
+    },
+  });
+
+  await fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify({ model: "x", messages: [] }))),
+    response,
+    fixture.helpers,
+  );
+
+  assert.match(destroyedWith.message, /downstream vanished/);
+});
+
+test("client disconnect aborts the lifecycle signal handed to the core", async () => {
+  let receivedSignal;
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const fixture = await createPluginFixture({
+    coreClient: createPluginCoreClient({
+      async forwardRaw({ signal }) {
+        receivedSignal = signal;
+        await gate;
+      },
+    }),
+  });
+  const response = createRecordingResponse();
+
+  const pending = fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify({ model: "x", messages: [] }))),
+    response,
+    fixture.helpers,
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(receivedSignal.aborted, false);
+  response.emit("close");
+  assert.equal(receivedSignal.aborted, true, "response close aborts the core request");
+  release();
+  await pending;
 });

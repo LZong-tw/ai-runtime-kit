@@ -72,39 +72,81 @@ export default {
   },
 };
 
+// CCR awaits gateway route handlers without catching rejections, and hands
+// them plain Node requests that carry no AbortSignal. A handler that rejects
+// (for example when the client disconnects mid-forward) therefore kills the
+// whole CCR daemon with an unhandled rejection, and without a signal the
+// upstream core fetch is never cancelled after the client goes away. Derive
+// the signal from the response lifecycle and never let the handler reject.
+function requestLifecycleSignal(request, response) {
+  const controller = new AbortController();
+  const abort = () => {
+    if (!controller.signal.aborted) controller.abort(new Error("client disconnected"));
+  };
+  if (typeof response?.once === "function") {
+    response.once("close", () => {
+      if (response.writableEnded !== true) abort();
+    });
+  }
+  if (typeof request?.once === "function") request.once("error", abort);
+  const upstreamSignal = request?.signal;
+  if (typeof upstreamSignal?.addEventListener === "function") {
+    if (upstreamSignal.aborted) abort();
+    else upstreamSignal.addEventListener("abort", abort, { once: true });
+  }
+  return controller.signal;
+}
+
+function containHandlerFailure(response, error) {
+  if (response?.headersSent !== true && typeof response?.writeHead === "function") {
+    response.writeHead(502, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      error: { message: "compatibility forwarding failed", type: "api_error" },
+    }));
+    return;
+  }
+  response?.destroy?.(error instanceof Error ? error : new Error(String(error)));
+}
+
 function createMessagesHandler({ config, coreClient, policies }) {
   return async (request, response, helpers) => {
-    const rawBody = await helpers.readBody(request);
-    const body = parseJsonCopy(rawBody);
-    // Route bare Claude model ids before any forwarding decision: this plugin
-    // owns POST /v1/messages, so CCR Router rules never see these requests
-    // and the core rejects unlisted model names. A single rewrite here covers
-    // the raw passthrough and the executor path; the whole-request fallback
-    // sets its own provider-qualified selector and is unaffected.
-    const routed = routeBareClaudeModel(body, config.routes);
-    const outboundBody = routed ?? body;
-    const outboundRaw = routed ? Buffer.from(JSON.stringify(routed), "utf8") : rawBody;
-    if (!isRecord(outboundBody) || !isConfiguredCompatibilityRequest(outboundBody, policies)) {
-      await coreClient.forwardRaw({
-        body: outboundRaw,
-        headers: request.headers,
-        method: request.method,
-        response,
-        signal: request.signal,
-      });
-      return;
-    }
+    const signal = requestLifecycleSignal(request, response);
+    try {
+      const rawBody = await helpers.readBody(request);
+      const body = parseJsonCopy(rawBody);
+      // Route bare Claude model ids before any forwarding decision: this
+      // plugin owns POST /v1/messages, so CCR Router rules never see these
+      // requests and the core rejects unlisted model names. A single rewrite
+      // here covers the raw passthrough and the executor path; the
+      // whole-request fallback sets its own provider-qualified selector and
+      // is unaffected.
+      const routed = routeBareClaudeModel(body, config.routes);
+      const outboundBody = routed ?? body;
+      const outboundRaw = routed ? Buffer.from(JSON.stringify(routed), "utf8") : rawBody;
+      if (!isRecord(outboundBody) || !isConfiguredCompatibilityRequest(outboundBody, policies)) {
+        await coreClient.forwardRaw({
+          body: outboundRaw,
+          headers: request.headers,
+          method: request.method,
+          response,
+          signal,
+        });
+        return;
+      }
 
-    const message = await handleCompatibilityMessage({
-      body: outboundBody,
-      config,
-      coreClient,
-      headers: request.headers,
-      response,
-      signal: request.signal,
-    });
-    if (message !== undefined) {
-      writeAnthropicMessage(response, message, outboundBody.stream === true);
+      const message = await handleCompatibilityMessage({
+        body: outboundBody,
+        config,
+        coreClient,
+        headers: request.headers,
+        response,
+        signal,
+      });
+      if (message !== undefined) {
+        writeAnthropicMessage(response, message, outboundBody.stream === true);
+      }
+    } catch (error) {
+      containHandlerFailure(response, error);
     }
   };
 }
@@ -123,6 +165,15 @@ function isConfiguredCompatibilityRequest(body, policies) {
 
 function createMcpHandler({ config, coreClient }) {
   return async (request, response, helpers) => {
+    try {
+      await handleMcpRequest({ config, coreClient, helpers, request, response });
+    } catch (error) {
+      containHandlerFailure(response, error);
+    }
+  };
+}
+
+async function handleMcpRequest({ config, coreClient, helpers, request, response }) {
     const rawBody = await helpers.readBody(request);
     let requestBody;
     try {
@@ -176,7 +227,6 @@ function createMcpHandler({ config, coreClient }) {
     } catch {
       sendJsonRpcResult(response, requestBody.id, toolError("Web search is unavailable."));
     }
-  };
 }
 
 async function callWebSearch({ config, coreClient, headers, input }) {
