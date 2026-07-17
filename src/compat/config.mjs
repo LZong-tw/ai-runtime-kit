@@ -14,9 +14,11 @@ const FAMILY_MODES = Object.freeze({
   mcpConnector: Object.freeze(["anthropic-fallback"]),
 });
 
-const CONFIG_KEYS = new Set(["fallback", ...Object.keys(FAMILY_MODES)]);
+const CONFIG_KEYS = new Set(["fallback", "routes", ...Object.keys(FAMILY_MODES)]);
 const FALLBACK_KEYS = new Set(["provider", "model", "maxContinuationTurns"]);
 const FAMILY_KEYS = new Set(["mode"]);
+const ROUTE_KEYS = new Set(["default", "background"]);
+const ROUTE_SELECTOR_PATTERN = /^[a-z0-9][a-z0-9._-]*\/\S+$/i;
 
 export function validateCompatibilityConfig(config) {
   assertRecord(config, "compatibility config");
@@ -52,7 +54,38 @@ export function validateCompatibilityConfig(config) {
     }
   }
 
+  if (config.routes !== undefined) {
+    assertRecord(config.routes, "routes");
+    rejectUnknownKeys(config.routes, ROUTE_KEYS, "routes");
+    if (config.routes.default === undefined) {
+      throw new Error("routes.default is required when routes is configured");
+    }
+    for (const key of ROUTE_KEYS) {
+      const selector = config.routes[key];
+      if (selector === undefined) continue;
+      if (typeof selector !== "string" || !ROUTE_SELECTOR_PATTERN.test(selector)) {
+        throw new Error(`routes.${key} must be a provider-qualified model selector`);
+      }
+    }
+  }
+
   return config;
+}
+
+// Bare Claude model ids (plain `claude` outside a named CCR profile, including
+// its constant claude-haiku background requests) have no gateway-side mapping:
+// this plugin owns POST /v1/messages, so CCR Router rules never see them and
+// the core rejects unlisted models. Route them here; provider-qualified
+// selectors (named profiles, the whole-request fallback) pass through as-is.
+export function routeBareClaudeModel(body, routes) {
+  if (!isRecord(body) || typeof body.model !== "string") return null;
+  if (!isRecord(routes)) return null;
+  if (body.model.includes("/") || !body.model.startsWith("claude-")) return null;
+  const target = body.model.startsWith("claude-haiku")
+    ? routes.background ?? routes.default
+    : routes.default;
+  if (typeof target !== "string" || target === "" || target === body.model) return null;
+  return { ...body, model: target };
 }
 
 export function resolveCompatibilityPolicies(config, nativeCapabilities = {}) {
@@ -95,6 +128,10 @@ export function validateCompatibilityProviderBinding(config, providers) {
 
 function resolveNativeFirst(mode, nativeCapability) {
   return mode === "native-first" && nativeCapability === true ? "native" : "anthropic-fallback";
+}
+
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function assertRecord(value, field, required = false) {

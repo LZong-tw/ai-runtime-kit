@@ -116,16 +116,29 @@ Router values use `provider,model`. CCR 2 `think`, `longContext`,
 AirKit rejects legacy transformers before writing files or calling CCR.
 
 CCR 3 itself strips `default`/`background` from its gateway Router on load, so
-during the managed merge AirKit translates them twice: into each named
-profile's pinned `model`/`smallFastModel`, and into two managed gateway
-condition rules (`<prefix>route-background`: `request.body.model starts-with
-claude-haiku` → background route; `<prefix>route-default`: `starts-with
-claude-` → default route). The rules let bare Claude model names — plain
-`claude` launched outside a named profile, including its background haiku
-requests — resolve at the gateway. Provider-prefixed selectors bypass the
-rules, so named profiles and plugin fallback routes are unaffected. Foreign
-rules in the live config are preserved ahead of the managed rules; stale
-managed rules are replaced on every merge.
+during the managed merge AirKit translates them three ways:
+
+1. Into each named profile's pinned `model`/`smallFastModel`.
+2. Into two managed gateway condition rules (`<prefix>route-background`:
+   `request.body.model starts-with claude-haiku` → background route;
+   `<prefix>route-default`: `starts-with claude-` → default route). CCR
+   evaluates Router rules only on protocol paths not owned by a plugin
+   gateway route — with the compatibility plugin enabled, that means the
+   rules never see `POST /v1/messages`; they still cover other protocol
+   paths.
+3. Into the compatibility plugin's `routes` config. The plugin owns
+   `POST /v1/messages`, so it performs the bare-Claude-model rewrite itself
+   before forwarding to the core: `claude-haiku*` → background route, other
+   bare `claude-*` → default route. Provider-qualified selectors (named
+   profiles, the whole-request Anthropic fallback) pass through untouched,
+   and without `routes` the plugin forwards byte-identical bytes as before.
+
+This is what lets bare Claude model names — plain `claude` launched outside a
+named profile, including its constant claude-haiku background requests —
+resolve at the gateway instead of failing model resolution with
+`400 All target providers failed`. Foreign Router rules in the live config are
+preserved ahead of the managed rules; stale managed rules are replaced on
+every merge.
 
 During merge, AirKit creates a stable managed provider identity and intentionally
 sets its CCR `id` and `name` to the same value. CCR 3 resolves profile selectors
