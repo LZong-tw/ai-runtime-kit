@@ -478,6 +478,14 @@ test("CCR compatibility opt-in resolves the installed plugin and preserves unrel
   assert.deepEqual(merged.config.plugins[0], unrelated);
   assert.equal(merged.config.plugins[1].id, "airkit-compatibility");
   assert.equal(merged.config.plugins[1].enabled, true);
+  assert.deepEqual(
+    merged.config.plugins[1].config.routes,
+    {
+      default: "airkit-provider-launch-example-demo/steady-coder",
+      background: "airkit-provider-launch-example-demo/cheap-coder",
+    },
+    "plugin receives managed base routes for bare Claude model rewriting",
+  );
   assert.equal(merged.config.plugins[1].module, resolve(import.meta.dirname, "..", "src", "compat", "plugin.mjs"));
   assert.equal(
     merged.config.plugins[1].config.fallback.provider,

@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   resolveCompatibilityPolicies,
+  routeBareClaudeModel,
   validateCompatibilityConfig,
 } from "../src/compat/config.mjs";
 
@@ -229,4 +230,54 @@ test("enforces integer continuation bounds from one through thirty-two", () => {
       /fallback\.maxContinuationTurns.*integer.*1.*32/i,
     );
   }
+});
+
+test("routes accepts provider-qualified selectors and rejects malformed shapes", () => {
+  validateCompatibilityConfig({
+    ...VALID_CONFIG,
+    routes: { default: "demo/steady-coder", background: "demo/cheap-coder" },
+  });
+  validateCompatibilityConfig({ ...VALID_CONFIG, routes: { default: "demo/steady-coder" } });
+
+  assert.throws(
+    () => validateCompatibilityConfig({ ...VALID_CONFIG, routes: {} }),
+    /routes\.default is required/,
+  );
+  assert.throws(
+    () => validateCompatibilityConfig({ ...VALID_CONFIG, routes: { default: "bare-model" } }),
+    /routes\.default must be a provider-qualified model selector/,
+  );
+  assert.throws(
+    () =>
+      validateCompatibilityConfig({
+        ...VALID_CONFIG,
+        routes: { default: "demo/steady-coder", small: "demo/cheap-coder" },
+      }),
+    /routes/,
+  );
+});
+
+test("bare Claude models route to background or default; qualified and foreign models do not", () => {
+  const routes = { default: "demo/steady-coder", background: "demo/cheap-coder" };
+  const body = (model) => ({ model, max_tokens: 8, messages: [] });
+
+  assert.equal(
+    routeBareClaudeModel(body("claude-haiku-4-5-20251001"), routes).model,
+    "demo/cheap-coder",
+  );
+  assert.equal(routeBareClaudeModel(body("claude-fable-5"), routes).model, "demo/steady-coder");
+  assert.equal(routeBareClaudeModel(body("claude-sonnet-4-6"), routes).model, "demo/steady-coder");
+  assert.equal(
+    routeBareClaudeModel(body("claude-haiku-4-5"), { default: "demo/steady-coder" }).model,
+    "demo/steady-coder",
+    "background falls back to default",
+  );
+  assert.equal(routeBareClaudeModel(body("provider/claude-sonnet"), routes), null);
+  assert.equal(routeBareClaudeModel(body("deepseek-v4-flash"), routes), null);
+  assert.equal(routeBareClaudeModel(body("claude-fable-5"), undefined), null);
+  assert.equal(routeBareClaudeModel({ max_tokens: 8 }, routes), null);
+  const original = body("claude-fable-5");
+  const rewritten = routeBareClaudeModel(original, routes);
+  assert.equal(original.model, "claude-fable-5", "input body is not mutated");
+  assert.notEqual(rewritten, original);
 });

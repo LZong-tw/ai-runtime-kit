@@ -1721,3 +1721,88 @@ async function observePromptSettlement(pending, response) {
   }
   return outcome;
 }
+
+test("bare Claude models are routed before raw passthrough; qualified models pass byte-identical", async () => {
+  const forwarded = [];
+  const routes = [];
+  await plugin.setup({
+    config: structuredClone(PLUGIN_RUNTIME_CONFIG),
+    coreClient: {
+      async forwardRaw({ body }) {
+        forwarded.push(Buffer.from(body));
+      },
+    },
+    pluginConfig: {
+      ...structuredClone(COMPLETE_PLUGIN_CONFIG),
+      routes: {
+        default: "demo-provider/steady-coder",
+        background: "demo-provider/cheap-coder",
+      },
+    },
+    registerGatewayRoute(route) {
+      routes.push(route);
+    },
+  });
+  const handler = routes.find(({ id }) => id === "airkit-compatibility-messages").handler;
+  const invoke = async (body) => {
+    const raw = Buffer.from(JSON.stringify(body), "utf8");
+    await handler(
+      { headers: {}, method: "POST", signal: undefined },
+      {},
+      { readBody: async () => raw },
+    );
+    return { raw, sent: forwarded.at(-1) };
+  };
+
+  const background = await invoke({
+    model: "claude-haiku-4-5-20251001",
+    max_tokens: 8,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  assert.equal(JSON.parse(background.sent.toString()).model, "demo-provider/cheap-coder");
+
+  const fallthrough = await invoke({
+    model: "claude-fable-5",
+    max_tokens: 8,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  assert.equal(JSON.parse(fallthrough.sent.toString()).model, "demo-provider/steady-coder");
+
+  const qualified = await invoke({
+    model: "other-provider/claude-sonnet",
+    max_tokens: 8,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  assert.deepEqual(qualified.sent, qualified.raw, "qualified selector stays byte-identical");
+
+  const unrelated = await invoke({
+    model: "deepseek-v4-flash",
+    max_tokens: 8,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  assert.deepEqual(unrelated.sent, unrelated.raw, "non-Claude model stays byte-identical");
+});
+
+test("bare Claude routing without routes config forwards byte-identical bytes", async () => {
+  const forwarded = [];
+  const routes = [];
+  await plugin.setup({
+    config: structuredClone(PLUGIN_RUNTIME_CONFIG),
+    coreClient: {
+      async forwardRaw({ body }) {
+        forwarded.push(Buffer.from(body));
+      },
+    },
+    pluginConfig: structuredClone(COMPLETE_PLUGIN_CONFIG),
+    registerGatewayRoute(route) {
+      routes.push(route);
+    },
+  });
+  const handler = routes.find(({ id }) => id === "airkit-compatibility-messages").handler;
+  const raw = Buffer.from(
+    JSON.stringify({ model: "claude-haiku-4-5-20251001", max_tokens: 8, messages: [] }),
+    "utf8",
+  );
+  await handler({ headers: {}, method: "POST", signal: undefined }, {}, { readBody: async () => raw });
+  assert.deepEqual(forwarded.at(-1), raw);
+});

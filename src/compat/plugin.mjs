@@ -7,6 +7,7 @@ import {
   VERIFIED_NATIVE_COMPATIBILITY,
   compatibilityFallbackSelector,
   resolveCompatibilityPolicies,
+  routeBareClaudeModel,
   validateCompatibilityConfig,
   validateCompatibilityProviderBinding,
 } from "./config.mjs";
@@ -75,9 +76,17 @@ function createMessagesHandler({ config, coreClient, policies }) {
   return async (request, response, helpers) => {
     const rawBody = await helpers.readBody(request);
     const body = parseJsonCopy(rawBody);
-    if (!isRecord(body) || !isConfiguredCompatibilityRequest(body, policies)) {
+    // Route bare Claude model ids before any forwarding decision: this plugin
+    // owns POST /v1/messages, so CCR Router rules never see these requests
+    // and the core rejects unlisted model names. A single rewrite here covers
+    // the raw passthrough and the executor path; the whole-request fallback
+    // sets its own provider-qualified selector and is unaffected.
+    const routed = routeBareClaudeModel(body, config.routes);
+    const outboundBody = routed ?? body;
+    const outboundRaw = routed ? Buffer.from(JSON.stringify(routed), "utf8") : rawBody;
+    if (!isRecord(outboundBody) || !isConfiguredCompatibilityRequest(outboundBody, policies)) {
       await coreClient.forwardRaw({
-        body: rawBody,
+        body: outboundRaw,
         headers: request.headers,
         method: request.method,
         response,
@@ -87,14 +96,16 @@ function createMessagesHandler({ config, coreClient, policies }) {
     }
 
     const message = await handleCompatibilityMessage({
-      body,
+      body: outboundBody,
       config,
       coreClient,
       headers: request.headers,
       response,
       signal: request.signal,
     });
-    if (message !== undefined) writeAnthropicMessage(response, message, body.stream === true);
+    if (message !== undefined) {
+      writeAnthropicMessage(response, message, outboundBody.stream === true);
+    }
   };
 }
 

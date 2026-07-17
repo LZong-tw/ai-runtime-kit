@@ -100,6 +100,7 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
     if (!providerId) throw new Error(`CCR route references unmanaged provider: ${providerName}`);
     return `${providerId}/${selector.slice(separator + 1)}`;
   };
+  bindManagedCompatibilityRoutes(baseConfig, managedRouteSelector);
   const managedProviderNames = new Set(managedProviderEntries.map((entry) => entry.sourceName));
   const managedProviderIdSet = new Set(managedProviders.map((provider) => provider.id));
   for (const provider of currentConfig.Providers ?? []) {
@@ -200,6 +201,20 @@ function bindManagedCompatibilityProvider(ccrConfig, managedProviderIds) {
   const sourceName = compatibility.fallback.provider;
   validateCompatibilityProviderBinding(compatibility, ccrConfig.Providers);
   compatibility.fallback.provider = managedProviderIds.get(sourceName);
+}
+
+// The compatibility plugin owns POST /v1/messages, so bare Claude model names
+// never reach the CCR Router. Hand the plugin the same base routes as managed
+// selectors so it can rewrite them before forwarding to the core.
+function bindManagedCompatibilityRoutes(ccrConfig, managedRouteSelector) {
+  const compatibility = configuredCompatibility(ccrConfig);
+  if (!compatibility) return;
+  const router = ccrConfig.Router ?? {};
+  if (!router.default) return;
+  compatibility.routes = {
+    default: managedRouteSelector(router.default),
+    background: managedRouteSelector(router.background ?? router.default),
+  };
 }
 
 function assertCcr3Compatible(ccrConfig) {
