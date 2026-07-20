@@ -118,12 +118,20 @@ export function resolveModeRoutes(config, mode) {
   return isRecord(perMode) ? perMode : (isRecord(config.routes) ? config.routes : null);
 }
 
+// One normalization shared by both ends of the header contract: the launcher
+// stamps exactly this label, requestedMode reduces what arrives to the same
+// form, and the rendered route tables are keyed by it. Normalizing in one
+// place keeps a catalog with an uppercase mode name from missing its table.
+export function airkitModeLabel(mode) {
+  return String(mode).trim().toLowerCase();
+}
+
 export function requestedMode(headers) {
   if (!isRecord(headers)) return null;
   const raw = headers[AIRKIT_MODE_HEADER];
   const value = (Array.isArray(raw) ? raw[0] : raw);
   if (typeof value !== "string") return null;
-  const mode = value.trim().toLowerCase();
+  const mode = airkitModeLabel(value);
   return mode !== "" && MODE_PATTERN.test(mode) ? mode : null;
 }
 

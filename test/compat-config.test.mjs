@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   AIRKIT_MODE_HEADER,
+  airkitModeLabel,
   requestedMode,
   resolveCompatibilityPolicies,
   resolveModeRoutes,
@@ -324,6 +325,7 @@ test("mode label selects its route table and falls back to the flat table", () =
 
 test("mode header is normalized and malformed labels are ignored", () => {
   assert.equal(AIRKIT_MODE_HEADER, "x-airkit-mode");
+  assert.equal(airkitModeLabel(" GLM "), "glm", "sender and receiver share one normalization");
   assert.equal(requestedMode({ [AIRKIT_MODE_HEADER]: "glm" }), "glm");
   assert.equal(requestedMode({ [AIRKIT_MODE_HEADER]: "  GLM  " }), "glm");
   assert.equal(requestedMode({ [AIRKIT_MODE_HEADER]: ["kimi", "pro"] }), "kimi");
