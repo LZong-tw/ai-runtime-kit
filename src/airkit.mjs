@@ -494,6 +494,19 @@ const LAUNCH_CLEARED_ENV = Object.freeze([
   "CODEXL_CLAUDE_CODE_MODEL",
 ]);
 
+// Upstream provider credentials arrive as $NAME environment placeholders. CCR
+// receives their resolved values through the managed save, so the launched
+// Claude has no use for them — and everything left in its environment is
+// inherited by every Bash tool it runs. Clear each placeholder by name.
+function providerCredentialEnvNames(profile) {
+  const names = new Set();
+  for (const provider of profile.ccr?.Providers ?? []) {
+    const match = String(provider.api_key ?? "").match(/^\$([A-Za-z_][A-Za-z0-9_]*)$/);
+    if (match) names.add(match[1]);
+  }
+  return [...names].sort();
+}
+
 // A live CCR config may hold its address as an environment reference, so
 // resolve it the same way the compatibility MCP endpoint does.
 function resolveLaunchGatewayEndpoint(ccrConfig, env) {
@@ -584,10 +597,16 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
         ...(gatewayEndpoint ? gatewayBaseUrlEnv(gatewayEndpoint) : {}),
         ANTHROPIC_CUSTOM_HEADERS: `${AIRKIT_MODE_HEADER}: ${airkitModeLabel(mode)}`,
       },
-      clearEnv: [...LAUNCH_CLEARED_ENV],
+      // Provider credential placeholders join the cleared list: the child gets
+      // the gateway key instead, and its Bash tools must not inherit upstream
+      // secrets. ANTHROPIC_AUTH_TOKEN may appear here AND be set at spawn —
+      // the inherited value is dropped, the gateway key replaces it.
+      clearEnv: [...new Set([...LAUNCH_CLEARED_ENV, ...providerCredentialEnvNames(profile)])],
       // CCR mints one gateway key per managed profile and writes this helper
-      // when the profile is saved. Run it at spawn so the token reaches only
-      // the child's environment, never argv, a plan, or a dry run.
+      // when the profile is saved. Run it at spawn so the token enters the
+      // child's environment — never argv, a plan, or a dry run. Environment
+      // means inheritance: the session's own Bash tools see it too, which is
+      // the accepted tradeoff for a key that only opens the local gateway.
       gatewayTokenCommand: join(ccrRuntimePaths(options.env).configDir, "bin", `ccr-claude-code-api-key-${managedProfileId}`),
       managedProfileId,
       userArgs: options.userArgs ?? [],
@@ -1976,18 +1995,21 @@ async function readCcrVersionSafely(ccrClient) {
 
 async function resolveCcrAuthEnv(plan, { commandExists, env, runCommand, timeoutMs }) {
   const existingToken = env.ANTHROPIC_AUTH_TOKEN;
-  // Same reason as resolveProviderApiKeys: inside a launched session this
-  // variable holds the local gateway key, not the upstream credential.
+  // Same reason as resolveProviderApiKeys: inside a launched session the
+  // environment is not a credential source — ANTHROPIC_AUTH_TOKEN holds the
+  // local gateway key, and any inherited op-ref override may be stale or
+  // belong to a different launcher. Nested runs trust only the profile.
   const nested = Boolean(env.AIRCLAUDE_PROFILE || env.AIRCLAUDE_MODE);
   if (existingToken && !nested && !existingToken.startsWith("op://")) {
     return { ok: true, env: { ANTHROPIC_AUTH_TOKEN: existingToken } };
   }
 
-  const ref =
-    env.CCR_ANTHROPIC_AUTH_TOKEN_OP_REF ??
-    env.ANTHROPIC_AUTH_TOKEN_OP_REF_DEFAULT ??
-    env.ANTHROPIC_AUTH_TOKEN_OP_REF ??
-    plan.credential.ccrTokenOpRef;
+  const ref = nested
+    ? plan.credential.ccrTokenOpRef
+    : env.CCR_ANTHROPIC_AUTH_TOKEN_OP_REF ??
+      env.ANTHROPIC_AUTH_TOKEN_OP_REF_DEFAULT ??
+      env.ANTHROPIC_AUTH_TOKEN_OP_REF ??
+      plan.credential.ccrTokenOpRef;
   if (!ref) return { ok: true, env: {} };
   if (!(await commandExists("op"))) {
     return { ok: false, reason: `op not found; cannot resolve ${ref}` };

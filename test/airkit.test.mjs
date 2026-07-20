@@ -684,6 +684,11 @@ test("launch spawns Claude against the shared home, not an isolated CCR profile"
       assert.equal(Object.hasOwn(spawned.env, key), false, `${key} must not reach the child`);
     }
     assert.equal(
+      Object.hasOwn(spawned.env, "DEMO_API_KEY"),
+      false,
+      "upstream provider credential placeholders are cleared from the child, so Bash tools cannot inherit them",
+    );
+    assert.equal(
       [...spawned.args, JSON.stringify(calls.map(({ command, args }) => ({ command, args })))]
         .join(" ")
         .includes("gateway-key-from-helper"),
@@ -2290,7 +2295,6 @@ test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves
     assert.equal(spawned[0].args[3], "claude-sonnet-4-6");
     assert.equal(spawned[0].args.at(-1), "--dangerously-skip-permissions");
     assert.deepEqual(spawned[0].env, {
-      DEMO_API_KEY: "runtime-secret",
       HOME: "/tmp/airkit-isolated-home",
       AIRCLAUDE_MODE: "pro",
       AIRCLAUDE_PROFILE: "launch-example",
@@ -2441,7 +2445,9 @@ test("a launch from inside a launched session never adopts the gateway key as th
 
   try {
     // Reproduces running airkit inside an airclaude session: the environment
-    // carries the local gateway key, which the upstream provider would reject.
+    // carries the local gateway key — and possibly a stale op-ref override —
+    // neither of which is a credential source for the upstream provider.
+    const opReads = [];
     await prepareLaunch(catalog, "launch-example", {
       configDir,
       ccrClient: ccrTestClient(saved),
@@ -2450,16 +2456,25 @@ test("a launch from inside a launched session never adopts the gateway key as th
         AIRCLAUDE_MODE: "pro",
         AIRCLAUDE_PROFILE: "launch-example",
         ANTHROPIC_AUTH_TOKEN: "local-gateway-key",
+        CCR_ANTHROPIC_AUTH_TOKEN_OP_REF: "op://Stale/Inherited/ref",
         HOME: configDir,
       },
       launch: false,
-      runCommand: async (command) =>
-        (command === "op"
-          ? { ok: true, status: 0, stdout: "upstream-token" }
-          : { ok: true, status: 0, stdout: "" }),
+      runCommand: async (command, args) => {
+        if (command === "op") {
+          opReads.push(args[1]);
+          return { ok: true, status: 0, stdout: "upstream-token" };
+        }
+        return { ok: true, status: 0, stdout: "" };
+      },
       runtimeVersions: passingRuntimeVersions(),
     });
 
+    assert.deepEqual(
+      opReads,
+      ["op://Test/API/token"],
+      "a nested run resolves the profile's own op ref, never an inherited override",
+    );
     for (const provider of saved[0].Providers) {
       assert.equal(provider.api_key, "upstream-token", `${provider.id} keeps the upstream credential`);
       assert.notEqual(provider.api_key, "local-gateway-key");

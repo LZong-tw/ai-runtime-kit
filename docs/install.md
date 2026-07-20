@@ -131,7 +131,11 @@ profile variables behind in the caller shell. Prefer starting and resuming throu
 the wrapper (`<wrapper> --resume`, `<wrapper> --continue`).
 
 The launch authenticates with the profile's CCR gateway key, exported into the
-child's environment at spawn time. An `apiKeyHelper` outranks it, so do not add
+child's environment at spawn time. Environment variables are inherited, so the
+session's own Bash tools can read that key too — an accepted tradeoff for a key
+that only opens the local gateway; upstream provider credentials, by contrast,
+are cleared from the child by placeholder name. An `apiKeyHelper` outranks the
+gateway key, so do not add
 `--settings '{"apiKeyHelper":""}'` or any other JSON `--settings` value that
 defines `apiKeyHelper`; AirKit rejects that override. Other Claude arguments
 remain available through the normal passthrough after `--`.
