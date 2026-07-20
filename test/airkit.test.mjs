@@ -539,6 +539,45 @@ test("CCR compatibility opt-in resolves the installed plugin and preserves unrel
   assert.deepEqual(repeated.config, merged.config);
 });
 
+test("a non-lowercase catalog mode renders one canonical label everywhere", () => {
+  const catalog = compatibilityCatalog();
+  const modes = catalog.profiles[0].launch.modes;
+  modes.GLM = { ccr: { Router: { default: "demo,strong-coder" } } };
+  delete modes.pro;
+
+  const merged = airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {}, {
+    configDir: "/tmp/airkit-canonical-mode",
+  });
+
+  const plugin = merged.config.plugins.find((candidate) => candidate.id === "airkit-compatibility");
+  assert.equal(Object.hasOwn(plugin.config.modeRoutes, "glm"), true, "table key is normalized");
+  assert.equal(Object.hasOwn(plugin.config.modeRoutes, "GLM"), false);
+  const profile = merged.config.profile.profiles.find((candidate) => candidate.id.endsWith("-glm"));
+  assert.equal(
+    profile.env.ANTHROPIC_CUSTOM_HEADERS,
+    "x-airkit-mode: glm",
+    "the stamped header uses the same normalized label as the table key",
+  );
+});
+
+test("a catalog mode that cannot round-trip through the header is rejected", () => {
+  const catalog = compatibilityCatalog();
+  // A literal assignment would hit the prototype setter and silently create
+  // nothing — exactly the hazard under test — so define the own key the way
+  // JSON.parse would.
+  Object.defineProperty(catalog.profiles[0].launch.modes, "__proto__", {
+    configurable: true,
+    enumerable: true,
+    value: { ccr: { Router: { default: "demo,strong-coder" } } },
+    writable: true,
+  });
+
+  assert.throws(
+    () => airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {}),
+    /launch mode cannot be labeled through x-airkit-mode: __proto__/,
+  );
+});
+
 test("CCR compatibility rejects removed Advisor bridge before CCR RPC or credentials", async () => {
   const catalog = compatibilityCatalog();
   catalog.profiles[0].ccr.plugins[0].config.advisor = {
@@ -624,6 +663,41 @@ test("CCR 3 launch rejects args that clear the managed apiKeyHelper", () => {
   );
 });
 
+test("CCR 3 launch rejects passthrough args that set an apiKeyHelper", () => {
+  assert.throws(
+    () => buildLaunchPlan(launchCatalog(), "launch-example", {
+      mode: "auto",
+      userArgs: ["--settings", "{\"apiKeyHelper\":\"/tmp/foreign-helper.sh\"}"],
+    }),
+    /must not set apiKeyHelper; it overrides the AirKit gateway token/,
+  );
+});
+
+test("CCR 3 launch rejects a profile env that redirects the Claude home", () => {
+  for (const key of ["CLAUDE_CONFIG_DIR", "HOME"]) {
+    const catalog = launchCatalog();
+    catalog.profiles[0].launch.env[key] = "/tmp/airkit-split-home";
+    assert.throws(
+      () => buildLaunchPlan(catalog, "launch-example", { mode: "auto" }),
+      new RegExp(`launch\\.env must not set ${key}`),
+      key,
+    );
+  }
+});
+
+test("the mode header joins inherited custom headers and replaces a stale mode label", () => {
+  const plan = buildLaunchPlan(launchCatalog(), "launch-example", {
+    mode: "pro",
+    env: { ANTHROPIC_CUSTOM_HEADERS: "x-tenant: tenant-a\nX-AirKit-Mode: glm" },
+  });
+
+  assert.equal(
+    plan.launch.env.ANTHROPIC_CUSTOM_HEADERS,
+    "x-tenant: tenant-a\nx-airkit-mode: pro",
+    "inherited headers survive; only a stale outer mode label is replaced",
+  );
+});
+
 test("launch spawns Claude against the shared home, not an isolated CCR profile", async () => {
   const home = await mkdtemp(join(tmpdir(), "airkit-shared-home-"));
   const configDir = await mkdtemp(join(tmpdir(), "airkit-shared-config-"));
@@ -655,6 +729,7 @@ test("launch spawns Claude against the shared home, not an isolated CCR profile"
         ANTHROPIC_API_KEY: "stale-key",
         ANTHROPIC_MODEL: "stale-model",
         CCR_CLAUDE_CODE_MODEL: "stale-ccr-model",
+        CLAUDE_CODE_USE_BEDROCK: "1",
         DEMO_API_KEY: "runtime-secret",
         HOME: home,
       },
@@ -680,7 +755,12 @@ test("launch spawns Claude against the shared home, not an isolated CCR profile"
     assert.equal(spawned.env.CLAUDE_AGENT_API_BASE_URL, "http://127.0.0.1:3456");
     assert.equal(spawned.env.ANTHROPIC_AUTH_TOKEN, "gateway-key-from-helper");
     assert.equal(spawned.env.ANTHROPIC_CUSTOM_HEADERS, "x-airkit-mode: auto");
-    for (const key of ["ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "CCR_CLAUDE_CODE_MODEL"]) {
+    assert.equal(
+      spawned.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY,
+      "1",
+      "direct launch must carry the discovery opt-in the CCR profile env used to inject",
+    );
+    for (const key of ["ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "CCR_CLAUDE_CODE_MODEL", "CLAUDE_CODE_USE_BEDROCK"]) {
       assert.equal(Object.hasOwn(spawned.env, key), false, `${key} must not reach the child`);
     }
     assert.equal(
@@ -695,6 +775,185 @@ test("launch spawns Claude against the shared home, not an isolated CCR profile"
       false,
       "the gateway key never appears in argv",
     );
+  } finally {
+    await rm(home, { force: true, recursive: true });
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("a profile-pinned gateway address survives to the spawned child", async () => {
+  const home = await mkdtemp(join(tmpdir(), "airkit-pinned-home-"));
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-pinned-config-"));
+  const catalog = launchCatalog();
+  catalog.profiles[0].ccr.HOST = "127.0.0.1";
+  catalog.profiles[0].ccr.PORT = 9314;
+  const calls = [];
+
+  try {
+    const result = await prepareLaunch(catalog, "launch-example", {
+      ccrClient: {
+        ensureGateway: async () => {},
+        getConfig: async () => ({
+          HOST: "127.0.0.1",
+          PORT: 3456,
+          Providers: [],
+          Router: {},
+          profile: { profiles: [] },
+        }),
+        getVersion: async () => "3.0.4",
+        saveConfig: async () => {},
+      },
+      commandExists: async () => true,
+      configDir,
+      env: { DEMO_API_KEY: "runtime-secret", HOME: home },
+      runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
+      runtimeVersions: passingRuntimeVersions(),
+      spawnCommand: (command, args, options) => {
+        calls.push({ command, args, env: options.env });
+        return { status: 0 };
+      },
+    });
+
+    assert.equal(result.launch.gatewayPinned, true);
+    // The live CCR config says 3456, but the profile pinned 9314: the child
+    // must receive what the plan (and any dry run) reported.
+    assert.equal(calls[0].env.ANTHROPIC_BASE_URL, "http://127.0.0.1:9314");
+    assert.equal(calls[0].env.ANTHROPIC_API_BASE_URL, "http://127.0.0.1:9314");
+    assert.equal(calls[0].env.CLAUDE_AGENT_API_BASE_URL, "http://127.0.0.1:9314");
+  } finally {
+    await rm(home, { force: true, recursive: true });
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("launch refuses when the inherited Claude home sets an apiKeyHelper", async () => {
+  const home = await mkdtemp(join(tmpdir(), "airkit-helper-home-"));
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-helper-config-"));
+  const spawned = [];
+  await mkdir(join(home, ".claude"), { recursive: true });
+  await writeFile(
+    join(home, ".claude", "settings.json"),
+    JSON.stringify({ apiKeyHelper: "/tmp/foreign-helper.sh" }),
+  );
+
+  try {
+    await assert.rejects(
+      () => prepareLaunch(launchCatalog(), "launch-example", {
+        ccrClient: {
+          ensureGateway: async () => {},
+          getConfig: async () => ({
+            HOST: "127.0.0.1",
+            PORT: 3456,
+            Providers: [],
+            Router: {},
+            profile: { profiles: [] },
+          }),
+          getVersion: async () => "3.0.4",
+          saveConfig: async () => {},
+        },
+        commandExists: async () => true,
+        configDir,
+        env: { DEMO_API_KEY: "runtime-secret", HOME: home },
+        runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
+        runtimeVersions: passingRuntimeVersions(),
+        spawnCommand: (command, args, options) => {
+          spawned.push({ command, args, env: options.env });
+          return { status: 0 };
+        },
+      }),
+      /settings\.json sets apiKeyHelper, which overrides the AirKit gateway token/,
+    );
+    assert.deepEqual(spawned, [], "the child is never spawned under a foreign apiKeyHelper");
+  } finally {
+    await rm(home, { force: true, recursive: true });
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("a missing gateway key helper triggers one profile apply and a retry", async () => {
+  const home = await mkdtemp(join(tmpdir(), "airkit-mint-home-"));
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-mint-config-"));
+  const events = [];
+  const tokens = [];
+  let helperReady = false;
+
+  try {
+    await prepareLaunch(launchCatalog(), "launch-example", {
+      ccrClient: {
+        // A save with applyProfile:false never mints the per-profile key
+        // helper, so the first launch in a fresh CCR home finds none.
+        applyProfile: async () => {
+          events.push("applyProfile");
+          helperReady = true;
+        },
+        ensureGateway: async () => {},
+        getConfig: async () => ({
+          HOST: "127.0.0.1",
+          PORT: 3456,
+          Providers: [],
+          Router: {},
+          profile: { profiles: [] },
+        }),
+        getVersion: async () => "3.0.4",
+        saveConfig: async () => {},
+      },
+      commandExists: async () => true,
+      configDir,
+      env: { DEMO_API_KEY: "runtime-secret", HOME: home },
+      runCommand: async () => (helperReady
+        ? { ok: true, status: 0, stdout: "minted-gateway-key" }
+        : { ok: false, status: 127, stdout: "" }),
+      runtimeVersions: passingRuntimeVersions(),
+      spawnCommand: (command, args, options) => {
+        tokens.push(options.env.ANTHROPIC_AUTH_TOKEN);
+        return { status: 0 };
+      },
+    });
+
+    assert.deepEqual(events, ["applyProfile"], "exactly one apply pass mints the helper");
+    assert.deepEqual(tokens, ["minted-gateway-key"]);
+  } finally {
+    await rm(home, { force: true, recursive: true });
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("a gateway key helper that still fails after the apply pass blocks the launch", async () => {
+  const home = await mkdtemp(join(tmpdir(), "airkit-mint-fail-home-"));
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-mint-fail-config-"));
+  const events = [];
+  const spawned = [];
+
+  try {
+    await assert.rejects(
+      () => prepareLaunch(launchCatalog(), "launch-example", {
+        ccrClient: {
+          applyProfile: async () => events.push("applyProfile"),
+          ensureGateway: async () => {},
+          getConfig: async () => ({
+            HOST: "127.0.0.1",
+            PORT: 3456,
+            Providers: [],
+            Router: {},
+            profile: { profiles: [] },
+          }),
+          getVersion: async () => "3.0.4",
+          saveConfig: async () => {},
+        },
+        commandExists: async () => true,
+        configDir,
+        env: { DEMO_API_KEY: "runtime-secret", HOME: home },
+        runCommand: async () => ({ ok: false, status: 127, stdout: "" }),
+        runtimeVersions: passingRuntimeVersions(),
+        spawnCommand: (command, args, options) => {
+          spawned.push({ command, args });
+          return { status: 0 };
+        },
+      }),
+      /restart the CCR gateway daemon so it re-applies its managed profiles/,
+    );
+    assert.deepEqual(events, ["applyProfile"], "the apply pass runs once, not in a loop");
+    assert.deepEqual(spawned, [], "no child is spawned without a gateway key");
   } finally {
     await rm(home, { force: true, recursive: true });
     await rm(configDir, { force: true, recursive: true });
@@ -2310,6 +2569,7 @@ test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves
       POWERLEVEL9K_INSTANT_PROMPT: "off",
       CCR_PROFILE: "launch-example",
       ANTHROPIC_CUSTOM_HEADERS: "x-airkit-mode: pro",
+      CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
       ANTHROPIC_API_BASE_URL: "http://127.0.0.1:3456",
       ANTHROPIC_BASE_URL: "http://127.0.0.1:3456",
       CLAUDE_AGENT_API_BASE_URL: "http://127.0.0.1:3456",

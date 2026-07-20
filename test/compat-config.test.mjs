@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   AIRKIT_MODE_HEADER,
   airkitModeLabel,
+  isAirkitModeLabel,
   requestedMode,
   resolveCompatibilityPolicies,
   resolveModeRoutes,
@@ -299,9 +300,23 @@ test("modeRoutes validates per mode and rejects malformed tables", () => {
   );
   assert.throws(
     () => validateCompatibilityConfig(withModes({ "../evil": { default: "demo/glm" } })),
-    /modeRoutes key must be a launch mode identifier/,
+    /modeRoutes key must be a canonical launch mode label/,
+  );
+  assert.throws(
+    () => validateCompatibilityConfig(withModes({ GLM: { default: "demo/glm" } })),
+    /modeRoutes key must be a canonical launch mode label/,
+    "requestedMode lowercases every label, so an uppercase key could never match",
   );
   assert.throws(() => validateCompatibilityConfig(withModes("glm")), /modeRoutes/);
+});
+
+test("isAirkitModeLabel accepts only labels that round-trip through the header", () => {
+  for (const label of ["glm", "auto", "pro-2", "a.b"]) {
+    assert.equal(isAirkitModeLabel(label), true, label);
+  }
+  for (const label of ["GLM", " glm", "", "__proto__", "../evil", null, 7]) {
+    assert.equal(isAirkitModeLabel(label), false, String(label));
+  }
 });
 
 test("mode label selects its route table and falls back to the flat table", () => {

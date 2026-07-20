@@ -173,7 +173,8 @@ plugin.
 Do not pass a JSON `--settings` override containing `apiKeyHelper`. An
 `apiKeyHelper` outranks the gateway key the launch puts in the environment, so
 it would silently authenticate the session as somebody else; AirKit rejects
-launch arguments that define one.
+launch arguments that define one — profile args and passthrough args alike —
+and refuses to launch while the inherited home's `settings.json` defines one.
 Because the launched session reads the user's real settings, it also picks up
 their statusline, hooks, and permission rules natively — AirKit forwards no
 settings overlay of its own.
