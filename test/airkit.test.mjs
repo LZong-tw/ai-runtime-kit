@@ -493,6 +493,32 @@ test("CCR compatibility opt-in resolves the installed plugin and preserves unrel
     },
     "plugin receives managed base routes for bare Claude model rewriting",
   );
+  assert.deepEqual(
+    merged.config.plugins[1].config.modeRoutes,
+    {
+      auto: {
+        default: "airkit-provider-launch-example-demo/steady-coder",
+        background: "airkit-provider-launch-example-demo/cheap-coder",
+      },
+      fast: {
+        default: "airkit-provider-launch-example-demo/cheap-coder",
+        background: "airkit-provider-launch-example-demo/cheap-coder",
+      },
+      pro: {
+        default: "airkit-provider-launch-example-demo/strong-coder",
+        background: "airkit-provider-launch-example-demo/cheap-coder",
+      },
+    },
+    "one plugin instance serves every mode, so each mode ships its own route table",
+  );
+  for (const profile of merged.config.profile.profiles) {
+    const mode = profile.id.replace("airkit-launch-example-", "");
+    assert.equal(
+      profile.env.ANTHROPIC_CUSTOM_HEADERS,
+      `x-airkit-mode: ${mode}`,
+      "each launch mode labels its own requests so the plugin can route them",
+    );
+  }
   assert.equal(merged.config.plugins[1].module, resolve(import.meta.dirname, "..", "src", "compat", "plugin.mjs"));
   assert.equal(
     merged.config.plugins[1].config.fallback.provider,

@@ -1852,6 +1852,70 @@ test("routeLog emits one redacted decision line per request and stays silent whe
   assert.equal(silent.length, 0, "no decision lines when routeLog is absent");
 });
 
+test("the caller's mode label selects its route table for main and background traffic", async () => {
+  const forwarded = [];
+  const routes = [];
+  await plugin.setup({
+    config: structuredClone(PLUGIN_RUNTIME_CONFIG),
+    coreClient: {
+      async forwardRaw({ body }) {
+        forwarded.push(Buffer.from(body));
+      },
+    },
+    pluginConfig: {
+      ...structuredClone(COMPLETE_PLUGIN_CONFIG),
+      routeLog: true,
+      routes: { default: "demo-provider/steady-coder", background: "demo-provider/cheap-coder" },
+      modeRoutes: {
+        glm: { default: "demo-provider/glm-coder", background: "demo-provider/glm-mini" },
+      },
+    },
+    registerGatewayRoute(route) {
+      routes.push(route);
+    },
+  });
+  const handler = routes.find(({ id }) => id === "airkit-compatibility-messages").handler;
+  const lines = [];
+  const invoke = async (model, headers) => {
+    const raw = Buffer.from(JSON.stringify({ model, max_tokens: 8, messages: [] }), "utf8");
+    const original = process.stderr.write;
+    process.stderr.write = (chunk) => {
+      lines.push(String(chunk));
+      return true;
+    };
+    try {
+      await handler({ headers, method: "POST", signal: undefined }, {}, { readBody: async () => raw });
+    } finally {
+      process.stderr.write = original;
+    }
+    return JSON.parse(forwarded.at(-1).toString()).model;
+  };
+
+  const labelled = { "x-airkit-mode": "glm" };
+  assert.equal(await invoke("claude-sonnet-4-6", labelled), "demo-provider/glm-coder");
+  assert.equal(await invoke("claude-haiku-4-5-20251001", labelled), "demo-provider/glm-mini");
+  assert.equal(
+    await invoke("claude-sonnet-4-6", { "x-airkit-mode": "unconfigured" }),
+    "demo-provider/steady-coder",
+    "an unknown mode still routes through the flat table",
+  );
+  assert.equal(await invoke("claude-sonnet-4-6", {}), "demo-provider/steady-coder");
+
+  const decisions = lines
+    .filter((line) => line.startsWith("[airkit-route] "))
+    .map((line) => JSON.parse(line.slice("[airkit-route] ".length)));
+  assert.deepEqual(decisions.map((entry) => entry.mode), ["glm", "glm", "unconfigured", null]);
+  assert.deepEqual(
+    decisions.map((entry) => entry.outModel),
+    [
+      "demo-provider/glm-coder",
+      "demo-provider/glm-mini",
+      "demo-provider/steady-coder",
+      "demo-provider/steady-coder",
+    ],
+  );
+});
+
 test("bare Claude routing without routes config forwards byte-identical bytes", async () => {
   const forwarded = [];
   const routes = [];

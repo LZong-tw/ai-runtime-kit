@@ -15,6 +15,7 @@ import {
 } from "./codex-takeover-guard.mjs";
 import {
   VERIFIED_NATIVE_COMPATIBILITY,
+  AIRKIT_MODE_HEADER,
   resolveCompatibilityPolicies,
   validateCompatibilityConfig,
   validateCompatibilityProviderBinding,
@@ -100,7 +101,10 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
     if (!providerId) throw new Error(`CCR route references unmanaged provider: ${providerName}`);
     return `${providerId}/${selector.slice(separator + 1)}`;
   };
-  bindManagedCompatibilityRoutes(baseConfig, managedRouteSelector);
+  const modeConfigs = new Map(
+    modes.map((mode) => [mode, applyLaunchModeOverlay(structuredClone(baseConfig), profile, mode, templateVars)]),
+  );
+  bindManagedCompatibilityRoutes(baseConfig, managedRouteSelector, modeConfigs);
   const managedProviderNames = new Set(managedProviderEntries.map((entry) => entry.sourceName));
   const managedProviderIdSet = new Set(managedProviders.map((provider) => provider.id));
   for (const provider of currentConfig.Providers ?? []) {
@@ -120,7 +124,7 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
     (provider) => !managedProviderNames.has(provider.name) && !managedProviderIdSet.has(provider.id),
   );
   const managedProfiles = modes.map((mode) => {
-    const modeConfig = applyLaunchModeOverlay(structuredClone(baseConfig), profile, mode, templateVars);
+    const modeConfig = modeConfigs.get(mode);
     const claudeModel = resolveClaudeLaunchModel(profile);
     const launchVars = launchTemplateVars(profile, configDir, mode, modeConfig, claudeModel);
     return {
@@ -130,6 +134,7 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
         ...airclaudeLaunchEnv(catalog, profile, mode, modeConfig, options.env),
         ...renderTemplateValue(launch.env ?? {}, launchVars),
         ...contextLaunchEnv(profile),
+        ANTHROPIC_CUSTOM_HEADERS: `${AIRKIT_MODE_HEADER}: ${mode}`,
         CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
       },
       id: `${managedPrefix}${slug(mode)}`,
@@ -211,16 +216,28 @@ function bindManagedCompatibilityProvider(ccrConfig, managedProviderIds) {
 
 // The compatibility plugin owns POST /v1/messages, so bare Claude model names
 // never reach the CCR Router. Hand the plugin the same base routes as managed
-// selectors so it can rewrite them before forwarding to the core.
-function bindManagedCompatibilityRoutes(ccrConfig, managedRouteSelector) {
+// selectors so it can rewrite them before forwarding to the core. A single
+// plugin instance serves every mode, so each mode's overlaid routes ship too,
+// keyed by the mode label the launcher stamps on its requests; the flat table
+// stays as the fallback for unlabelled callers.
+function bindManagedCompatibilityRoutes(ccrConfig, managedRouteSelector, modeConfigs = new Map()) {
   const compatibility = configuredCompatibility(ccrConfig);
   if (!compatibility) return;
-  const router = ccrConfig.Router ?? {};
-  if (!router.default) return;
-  compatibility.routes = {
-    default: managedRouteSelector(router.default),
-    background: managedRouteSelector(router.background ?? router.default),
-  };
+  const routeTable = (router) => (router?.default
+    ? {
+      default: managedRouteSelector(router.default),
+      background: managedRouteSelector(router.background ?? router.default),
+    }
+    : null);
+  const routes = routeTable(ccrConfig.Router);
+  if (!routes) return;
+  compatibility.routes = routes;
+  const modeRoutes = {};
+  for (const [mode, modeConfig] of modeConfigs) {
+    const table = routeTable(modeConfig?.Router);
+    if (table) modeRoutes[mode] = table;
+  }
+  if (Object.keys(modeRoutes).length > 0) compatibility.modeRoutes = modeRoutes;
 }
 
 function assertCcr3Compatible(ccrConfig) {
