@@ -8,7 +8,9 @@ import {
 import {
   VERIFIED_NATIVE_COMPATIBILITY,
   compatibilityFallbackSelector,
+  requestedMode,
   resolveCompatibilityPolicies,
+  resolveModeRoutes,
   routeBareClaudeModel,
   validateCompatibilityConfig,
   validateCompatibilityProviderBinding,
@@ -121,14 +123,17 @@ function createMessagesHandler({ config, coreClient, policies }) {
       // requests and the core rejects unlisted model names. A single rewrite
       // here covers the raw passthrough and the executor path; the
       // whole-request fallback sets its own provider-qualified selector and
-      // is unaffected.
-      const routed = routeBareClaudeModel(body, config.routes);
+      // is unaffected. Each launch mode wants a different target model, so the
+      // caller's own mode label picks the table.
+      const mode = requestedMode(request?.headers);
+      const routed = routeBareClaudeModel(body, resolveModeRoutes(config, mode));
       const outboundBody = routed ?? body;
       const outboundRaw = routed ? Buffer.from(JSON.stringify(routed), "utf8") : rawBody;
       const compat = isRecord(outboundBody) && isConfiguredCompatibilityRequest(outboundBody, policies);
       logRouteDecision({
         enabled: config.routeLog,
         body,
+        mode,
         outboundBody,
         path: compat ? "compat" : "passthrough",
         request,
@@ -166,7 +171,7 @@ function createMessagesHandler({ config, coreClient, policies }) {
 // invisible. One stderr line per request (daemon.err.log under supervision)
 // records the model rewrite and the caller's credential as a hash prefix.
 // Observability must never break request handling, so failures are swallowed.
-function logRouteDecision({ enabled, body, outboundBody, path, request }) {
+function logRouteDecision({ enabled, body, mode, outboundBody, path, request }) {
   if (enabled !== true) return;
   try {
     const inModel = isRecord(body) && typeof body.model === "string" ? body.model : null;
@@ -177,6 +182,7 @@ function logRouteDecision({ enabled, body, outboundBody, path, request }) {
       at: new Date().toISOString(),
       authId: presentedCredentialId(request?.headers),
       inModel,
+      mode: mode ?? null,
       outModel,
       path,
       rewritten: inModel !== outModel,
