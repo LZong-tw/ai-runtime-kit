@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import {
   createCoreClient,
   handleCompatibilityMessage,
@@ -123,7 +125,15 @@ function createMessagesHandler({ config, coreClient, policies }) {
       const routed = routeBareClaudeModel(body, config.routes);
       const outboundBody = routed ?? body;
       const outboundRaw = routed ? Buffer.from(JSON.stringify(routed), "utf8") : rawBody;
-      if (!isRecord(outboundBody) || !isConfiguredCompatibilityRequest(outboundBody, policies)) {
+      const compat = isRecord(outboundBody) && isConfiguredCompatibilityRequest(outboundBody, policies);
+      logRouteDecision({
+        enabled: config.routeLog,
+        body,
+        outboundBody,
+        path: compat ? "compat" : "passthrough",
+        request,
+      });
+      if (!compat) {
         await coreClient.forwardRaw({
           body: outboundRaw,
           headers: request.headers,
@@ -149,6 +159,44 @@ function createMessagesHandler({ config, coreClient, policies }) {
       containHandlerFailure(response, error);
     }
   };
+}
+
+// This plugin owns POST /v1/messages, which bypasses CCR's request logger —
+// without its own trace, routing regressions on the main Claude path are
+// invisible. One stderr line per request (daemon.err.log under supervision)
+// records the model rewrite and the caller's credential as a hash prefix.
+// Observability must never break request handling, so failures are swallowed.
+function logRouteDecision({ enabled, body, outboundBody, path, request }) {
+  if (enabled !== true) return;
+  try {
+    const inModel = isRecord(body) && typeof body.model === "string" ? body.model : null;
+    const outModel = isRecord(outboundBody) && typeof outboundBody.model === "string"
+      ? outboundBody.model
+      : null;
+    process.stderr.write(`[airkit-route] ${JSON.stringify({
+      at: new Date().toISOString(),
+      authId: presentedCredentialId(request?.headers),
+      inModel,
+      outModel,
+      path,
+      rewritten: inModel !== outModel,
+      stream: isRecord(body) && body.stream === true,
+    })}\n`);
+  } catch {
+    // never let logging interfere with the request
+  }
+}
+
+function presentedCredentialId(headers) {
+  if (!isRecord(headers)) return null;
+  const bearer = typeof headers.authorization === "string"
+    ? headers.authorization.replace(/^Bearer\s+/i, "").trim()
+    : "";
+  const credential = bearer !== ""
+    ? bearer
+    : typeof headers["x-api-key"] === "string" ? headers["x-api-key"].trim() : "";
+  if (credential === "") return null;
+  return createHash("sha256").update(credential).digest("hex").slice(0, 8);
 }
 
 function isConfiguredCompatibilityRequest(body, policies) {

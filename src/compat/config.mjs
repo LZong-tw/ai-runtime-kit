@@ -14,7 +14,7 @@ const FAMILY_MODES = Object.freeze({
   mcpConnector: Object.freeze(["anthropic-fallback"]),
 });
 
-const CONFIG_KEYS = new Set(["fallback", "routes", ...Object.keys(FAMILY_MODES)]);
+const CONFIG_KEYS = new Set(["fallback", "routeLog", "routes", ...Object.keys(FAMILY_MODES)]);
 const FALLBACK_KEYS = new Set(["provider", "model", "maxContinuationTurns"]);
 const FAMILY_KEYS = new Set(["mode"]);
 const ROUTE_KEYS = new Set(["default", "background"]);
@@ -52,6 +52,10 @@ export function validateCompatibilityConfig(config) {
     if (!modes.includes(definition.mode)) {
       throw new Error(`${family}.mode must be one of: ${modes.join(", ")}`);
     }
+  }
+
+  if (config.routeLog !== undefined && typeof config.routeLog !== "boolean") {
+    throw new Error("routeLog must be a boolean");
   }
 
   if (config.routes !== undefined) {
