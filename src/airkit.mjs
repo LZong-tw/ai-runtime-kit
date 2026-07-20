@@ -16,6 +16,7 @@ import {
 import {
   VERIFIED_NATIVE_COMPATIBILITY,
   AIRKIT_MODE_HEADER,
+  airkitModeLabel,
   resolveCompatibilityPolicies,
   validateCompatibilityConfig,
   validateCompatibilityProviderBinding,
@@ -134,7 +135,7 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
         ...airclaudeLaunchEnv(catalog, profile, mode, modeConfig, options.env),
         ...renderTemplateValue(launch.env ?? {}, launchVars),
         ...contextLaunchEnv(profile),
-        ANTHROPIC_CUSTOM_HEADERS: `${AIRKIT_MODE_HEADER}: ${mode}`,
+        ANTHROPIC_CUSTOM_HEADERS: `${AIRKIT_MODE_HEADER}: ${airkitModeLabel(mode)}`,
         CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
       },
       id: `${managedPrefix}${slug(mode)}`,
@@ -235,7 +236,7 @@ function bindManagedCompatibilityRoutes(ccrConfig, managedRouteSelector, modeCon
   const modeRoutes = {};
   for (const [mode, modeConfig] of modeConfigs) {
     const table = routeTable(modeConfig?.Router);
-    if (table) modeRoutes[mode] = table;
+    if (table) modeRoutes[airkitModeLabel(mode)] = table;
   }
   if (Object.keys(modeRoutes).length > 0) compatibility.modeRoutes = modeRoutes;
 }
@@ -581,7 +582,7 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
         ...renderTemplateValue(launch.env ?? {}, launchVars),
         ...contextLaunchEnv(profile),
         ...(gatewayEndpoint ? gatewayBaseUrlEnv(gatewayEndpoint) : {}),
-        ANTHROPIC_CUSTOM_HEADERS: `${AIRKIT_MODE_HEADER}: ${mode}`,
+        ANTHROPIC_CUSTOM_HEADERS: `${AIRKIT_MODE_HEADER}: ${airkitModeLabel(mode)}`,
       },
       clearEnv: [...LAUNCH_CLEARED_ENV],
       // CCR mints one gateway key per managed profile and writes this helper
