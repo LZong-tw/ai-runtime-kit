@@ -620,13 +620,13 @@ test("CCR 3 launch rejects args that clear the managed apiKeyHelper", () => {
 
   assert.throws(
     () => buildLaunchPlan(catalog, "launch-example", { mode: "auto" }),
-    /must not override CCR managed apiKeyHelper/,
+    /must not set apiKeyHelper; it overrides the AirKit gateway token/,
   );
 });
 
-test("CCR 3 launch inherits only the user's statusLine into the isolated Claude profile", async () => {
-  const home = await mkdtemp(join(tmpdir(), "airkit-statusline-home-"));
-  const configDir = await mkdtemp(join(tmpdir(), "airkit-statusline-config-"));
+test("launch spawns Claude against the shared home, not an isolated CCR profile", async () => {
+  const home = await mkdtemp(join(tmpdir(), "airkit-shared-home-"));
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-shared-config-"));
   const calls = [];
   await mkdir(join(home, ".claude"), { recursive: true });
   await writeFile(join(home, ".claude", "settings.json"), JSON.stringify({
@@ -639,26 +639,57 @@ test("CCR 3 launch inherits only the user's statusLine into the isolated Claude 
     await prepareLaunch(launchCatalog(), "launch-example", {
       ccrClient: {
         ensureGateway: async () => {},
-        getConfig: async () => ({ Providers: [], Router: {}, profile: { profiles: [] } }),
+        getConfig: async () => ({
+          HOST: "127.0.0.1",
+          PORT: 3456,
+          Providers: [],
+          Router: {},
+          profile: { profiles: [] },
+        }),
         getVersion: async () => "3.0.4",
         saveConfig: async () => {},
       },
       commandExists: async () => true,
       configDir,
-      env: { DEMO_API_KEY: "runtime-secret", HOME: home },
+      env: {
+        ANTHROPIC_API_KEY: "stale-key",
+        ANTHROPIC_MODEL: "stale-model",
+        CCR_CLAUDE_CODE_MODEL: "stale-ccr-model",
+        DEMO_API_KEY: "runtime-secret",
+        HOME: home,
+      },
       inspectCodexTakeoverFiles: async () => ({ inspection: { hazards: [] } }),
+      runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
       runtimeVersions: passingRuntimeVersions(),
-      spawnCommand: (_command, args) => {
-        calls.push(args);
+      spawnCommand: (command, args, options) => {
+        calls.push({ command, args, env: options.env });
         return { status: 0 };
       },
     });
 
-    const settingsIndex = calls[0].indexOf("--settings");
-    assert.notEqual(settingsIndex, -1);
-    assert.deepEqual(JSON.parse(calls[0][settingsIndex + 1]), {
-      statusLine: { type: "command", command: "/tmp/statusline.sh" },
-    });
+    const [spawned] = calls;
+    assert.equal(spawned.command, "claude");
+    assert.equal(spawned.args.includes("--settings"), false, "statusline is inherited natively now");
+    assert.equal(
+      Object.hasOwn(spawned.env, "CLAUDE_CONFIG_DIR"),
+      false,
+      "the shared ~/.claude must be inherited, never redirected",
+    );
+    assert.equal(spawned.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:3456");
+    assert.equal(spawned.env.ANTHROPIC_API_BASE_URL, "http://127.0.0.1:3456");
+    assert.equal(spawned.env.CLAUDE_AGENT_API_BASE_URL, "http://127.0.0.1:3456");
+    assert.equal(spawned.env.ANTHROPIC_AUTH_TOKEN, "gateway-key-from-helper");
+    assert.equal(spawned.env.ANTHROPIC_CUSTOM_HEADERS, "x-airkit-mode: auto");
+    for (const key of ["ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "CCR_CLAUDE_CODE_MODEL"]) {
+      assert.equal(Object.hasOwn(spawned.env, key), false, `${key} must not reach the child`);
+    }
+    assert.equal(
+      [...spawned.args, JSON.stringify(calls.map(({ command, args }) => ({ command, args })))]
+        .join(" ")
+        .includes("gateway-key-from-helper"),
+      false,
+      "the gateway key never appears in argv",
+    );
   } finally {
     await rm(home, { force: true, recursive: true });
     await rm(configDir, { force: true, recursive: true });
@@ -788,8 +819,13 @@ test("CCR 3 launch path uses the managed profile and never invokes CCR 2 command
       runtimeVersions: { claudeCode: "2.1.208", claudeCodeRouter: "3.0.4", node: "24.11.1" },
     });
 
-    assert.equal(result.launch.command, "ccr");
-    assert.deepEqual(result.launch.args.slice(0, 3), ["airkit-launch-example-pro", "cli", "--"]);
+    assert.equal(result.launch.command, "claude");
+    assert.equal(result.launch.managedProfileId, "airkit-launch-example-pro");
+    assert.equal(result.launch.args.includes("cli"), false, "CCR no longer wraps the launch");
+    assert.match(
+      result.launch.gatewayTokenCommand,
+      /bin\/ccr-claude-code-api-key-airkit-launch-example-pro$/,
+    );
     assert.ok(calls.some((call) => call.command === "saveConfig"));
     assert.ok(!calls.some((call) => ["restart", "activate"].includes(call.args?.[0])));
   } finally {
@@ -1203,25 +1239,20 @@ test("buildLaunchPlan applies pro mode CCR routing overlay without mutating the 
     assert.equal(plan.ccrConfig.Router.think, undefined);
     assert.equal(plan.ccrConfig.Router.background, "demo,cheap-coder");
     assert.equal(catalog.profiles[0].ccr.Router.default, "demo,steady-coder");
-    assert.equal(plan.launch.command, "ccr");
-    assert.deepEqual(plan.launch.args.slice(0, 4), [
-      "airkit-launch-example-pro",
-      "cli",
-      "--",
-      "--append-system-prompt",
-    ]);
+    assert.equal(plan.launch.command, "claude");
+    assert.equal(plan.launch.args[0], "--append-system-prompt");
     assert.match(
-      plan.launch.args[4],
+      plan.launch.args[1],
       /AirClaude mode pro routes default to strong-coder while Claude launch uses claude-sonnet-4-6\./,
     );
-    assert.match(plan.launch.args[4], /AirKit reusable runtime lessons/);
-    assert.match(plan.launch.args[4], /AirClaude active routing/);
-    assert.match(plan.launch.args[4], /mode: pro/);
-    assert.match(plan.launch.args[4], /default: demo,strong-coder \(model strong-coder\)/);
-    assert.match(plan.launch.args[4], /background: demo,cheap-coder \(model cheap-coder\)/);
-    assert.doesNotMatch(plan.launch.args[4], /- think:|- longContext:|- webSearch:/);
-    assert.match(plan.launch.args[4], /Do not infer the active provider route from Claude Code's displayed model name/);
-    assert.match(plan.launch.args[4], /\[AIRKIT_TASK_CAPSULE\]/);
+    assert.match(plan.launch.args[1], /AirKit reusable runtime lessons/);
+    assert.match(plan.launch.args[1], /AirClaude active routing/);
+    assert.match(plan.launch.args[1], /mode: pro/);
+    assert.match(plan.launch.args[1], /default: demo,strong-coder \(model strong-coder\)/);
+    assert.match(plan.launch.args[1], /background: demo,cheap-coder \(model cheap-coder\)/);
+    assert.doesNotMatch(plan.launch.args[1], /- think:|- longContext:|- webSearch:/);
+    assert.match(plan.launch.args[1], /Do not infer the active provider route from Claude Code's displayed model name/);
+    assert.match(plan.launch.args[1], /\[AIRKIT_TASK_CAPSULE\]/);
     for (const field of [
       "objective",
       "constraints",
@@ -1231,9 +1262,9 @@ test("buildLaunchPlan applies pro mode CCR routing overlay without mutating the 
       "repository_state",
       "next_action",
     ]) {
-      assert.match(plan.launch.args[4], new RegExp(`${field}:`));
+      assert.match(plan.launch.args[1], new RegExp(`${field}:`));
     }
-    assert.match(plan.launch.args[4], /Never include credentials or provider-private payloads in the capsule/);
+    assert.match(plan.launch.args[1], /Never include credentials or provider-private payloads in the capsule/);
     assert.equal(plan.launch.env.AIRCLAUDE_PROFILE, "launch-example");
     assert.equal(plan.launch.env.AIRCLAUDE_MODE, "pro");
     assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_DEFAULT, "demo,strong-coder");
@@ -2227,11 +2258,7 @@ test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves
       runtimeVersions: passingRuntimeVersions(),
       userArgs: ["--dangerously-skip-permissions"],
       commandExists: async (command) => ["ccr", "claude"].includes(command),
-      runCommand: async (command, args) => ({
-        ok: true,
-        status: 0,
-        stdout: command === "ccr" && args[0] === "activate" ? 'export ANTHROPIC_BASE_URL="http://127.0.0.1:3456"\n' : "",
-      }),
+      runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
       spawnCommand: (command, args, options) => {
         launchEvents.push("profile-launch");
         spawned.push({ command, args, env: options.env });
@@ -2247,26 +2274,21 @@ test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves
     );
     assert.equal(spawned.length, 1);
     assert.deepEqual(launchEvents, ["gateway-ready", "profile-launch"]);
-    assert.equal(spawned[0].command, "ccr");
-    assert.deepEqual(spawned[0].args.slice(0, 4), [
-      "airkit-launch-example-pro",
-      "cli",
-      "--",
-      "--append-system-prompt",
-    ]);
+    assert.equal(spawned[0].command, "claude");
+    assert.equal(spawned[0].args[0], "--append-system-prompt");
     assert.match(
-      spawned[0].args[4],
+      spawned[0].args[1],
       /AirClaude mode pro routes default to strong-coder while Claude launch uses claude-sonnet-4-6\./,
     );
-    assert.match(spawned[0].args[4], /AirKit reusable runtime lessons/);
-    assert.match(spawned[0].args[4], /AirClaude active routing/);
-    assert.match(spawned[0].args[4], /mode: pro/);
-    assert.match(spawned[0].args[4], /background: demo,cheap-coder \(model cheap-coder\)/);
+    assert.match(spawned[0].args[1], /AirKit reusable runtime lessons/);
+    assert.match(spawned[0].args[1], /AirClaude active routing/);
+    assert.match(spawned[0].args[1], /mode: pro/);
+    assert.match(spawned[0].args[1], /background: demo,cheap-coder \(model cheap-coder\)/);
     // AirClaude selects its display model for this launch only; passthrough args
     // still follow and can override it for the same process.
-  assert.equal(spawned[0].args[5], "--model");
-  assert.equal(spawned[0].args[6], "claude-sonnet-4-6");
-  assert.equal(spawned[0].args.at(-1), "--dangerously-skip-permissions");
+    assert.equal(spawned[0].args[2], "--model");
+    assert.equal(spawned[0].args[3], "claude-sonnet-4-6");
+    assert.equal(spawned[0].args.at(-1), "--dangerously-skip-permissions");
     assert.deepEqual(spawned[0].env, {
       DEMO_API_KEY: "runtime-secret",
       HOME: "/tmp/airkit-isolated-home",
@@ -2283,6 +2305,11 @@ test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves
       CLAUDE_STATUSLINE_CACHE_DIR: "/tmp/airkit-isolated-home/.claude/cache/airclaude/launch-example/pro",
       POWERLEVEL9K_INSTANT_PROMPT: "off",
       CCR_PROFILE: "launch-example",
+      ANTHROPIC_CUSTOM_HEADERS: "x-airkit-mode: pro",
+      ANTHROPIC_API_BASE_URL: "http://127.0.0.1:3456",
+      ANTHROPIC_BASE_URL: "http://127.0.0.1:3456",
+      CLAUDE_AGENT_API_BASE_URL: "http://127.0.0.1:3456",
+      ANTHROPIC_AUTH_TOKEN: "gateway-key-from-helper",
     });
   } finally {
     await rm(configDir, { force: true, recursive: true });
@@ -2322,6 +2349,7 @@ test("prepareLaunch registers compatibility MCP additively with child-only expan
         DEMO_API_KEY: "runtime-secret",
         HOME: configDir,
       },
+      runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
       runtimeVersions: passingRuntimeVersions(),
       spawnCommand: (command, args, options) => {
         spawned.push({ args, command, env: options.env });
@@ -2349,6 +2377,11 @@ test("prepareLaunch registers compatibility MCP additively with child-only expan
     assert.equal(spawned[0].env.AIRKIT_COMPATIBILITY_MCP_URL,
       "http://127.0.0.1:4567/airkit/compatibility/mcp");
     assert.equal(spawned[0].env.AIRKIT_COMPATIBILITY_MCP_TOKEN, "fixture-gateway-token");
+    assert.equal(
+      spawned[0].env.ANTHROPIC_BASE_URL,
+      "http://127.0.0.1:4567",
+      "an environment-referenced gateway address is expanded for the child too",
+    );
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }
@@ -2392,6 +2425,98 @@ test("prepareLaunch resolves ccrTokenOpRef once for the CCR 3 config merge", asy
         provider.id === "airkit-provider-launch-example-anthropic-messages").api_key,
       "resolved-token",
     );
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("a launch from inside a launched session never adopts the gateway key as the provider credential", async () => {
+  const catalog = compatibilityCatalog();
+  for (const provider of catalog.profiles[0].ccr.Providers) {
+    provider.api_key = "$ANTHROPIC_AUTH_TOKEN";
+  }
+  catalog.profiles[0].shell = { ccrTokenOpRef: "op://Test/API/token" };
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-nested-"));
+  const saved = [];
+
+  try {
+    // Reproduces running airkit inside an airclaude session: the environment
+    // carries the local gateway key, which the upstream provider would reject.
+    await prepareLaunch(catalog, "launch-example", {
+      configDir,
+      ccrClient: ccrTestClient(saved),
+      commandExists: async (command) => ["ccr", "claude", "op"].includes(command),
+      env: {
+        AIRCLAUDE_MODE: "pro",
+        AIRCLAUDE_PROFILE: "launch-example",
+        ANTHROPIC_AUTH_TOKEN: "local-gateway-key",
+        HOME: configDir,
+      },
+      launch: false,
+      runCommand: async (command) =>
+        (command === "op"
+          ? { ok: true, status: 0, stdout: "upstream-token" }
+          : { ok: true, status: 0, stdout: "" }),
+      runtimeVersions: passingRuntimeVersions(),
+    });
+
+    for (const provider of saved[0].Providers) {
+      assert.equal(provider.api_key, "upstream-token", `${provider.id} keeps the upstream credential`);
+      assert.notEqual(provider.api_key, "local-gateway-key");
+    }
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("launch fails closed when Claude Code is missing from PATH", async () => {
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-no-claude-"));
+
+  try {
+    await assert.rejects(
+      () => prepareLaunch(launchCatalog(), "launch-example", {
+        configDir,
+        ccrClient: ccrTestClient([]),
+        commandExists: async (command) => command === "ccr",
+        env: { DEMO_API_KEY: "runtime-secret", HOME: configDir },
+        runtimeVersions: passingRuntimeVersions(),
+      }),
+      /missing command: claude/,
+    );
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("a dry run proves the launch contract without resolving the gateway key", async () => {
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-dry-"));
+  const calls = [];
+
+  try {
+    const result = await prepareLaunch(launchCatalog(), "launch-example", {
+      configDir,
+      commandExists: async () => true,
+      dryRun: true,
+      env: { DEMO_API_KEY: "runtime-secret", HOME: configDir },
+      mode: "pro",
+      runCommand: async (command, args) => {
+        calls.push({ command, args });
+        return { ok: true, status: 0, stdout: "" };
+      },
+      runtimeVersions: passingRuntimeVersions(),
+      userArgs: ["--resume"],
+    });
+
+    assert.equal(result.write, false);
+    assert.equal(result.launch.command, "claude");
+    assert.deepEqual(result.launch.userArgs, ["--resume"]);
+    assert.equal(Object.hasOwn(result.launch.env, "ANTHROPIC_AUTH_TOKEN"), false);
+    assert.equal(
+      calls.some(({ command }) => command.includes("ccr-claude-code-api-key")),
+      false,
+      "a dry run must not run the gateway key helper",
+    );
+    assert.equal(result.launch.env.ANTHROPIC_CUSTOM_HEADERS, "x-airkit-mode: pro");
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }
@@ -2702,6 +2827,8 @@ function passingRuntimeVersions() {
 function ccrTestClient(saved) {
   return {
     getConfig: async () => ({
+      HOST: "127.0.0.1",
+      PORT: 3456,
       Providers: [],
       Router: { builtInRules: {}, fallback: { mode: "off", models: [], retryCount: 1 }, rules: [] },
       profile: { enabled: true, profiles: [] },
