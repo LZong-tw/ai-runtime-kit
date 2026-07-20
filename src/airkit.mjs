@@ -170,16 +170,22 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
 function buildManagedRouterRules(baseConfig, managedRouteSelector, managedPrefix) {
   const router = baseConfig.Router ?? {};
   if (!router.default) return [];
-  const rule = (kind, name, prefix, route) => ({
-    id: `${managedPrefix}route-${kind}`,
-    name,
-    type: "condition",
-    enabled: true,
-    condition: { left: "request.body.model", operator: "starts-with", right: prefix },
-    rewrites: [
-      { key: "request.body.model", operation: "set", value: managedRouteSelector(route) },
-    ],
-  });
+  // CCR 3 canonicalizes a single-rewrite condition rule to carry BOTH the
+  // singular `rewrite` and the `rewrites` array (same as the omitted-`enabled`
+  // case). Emit the canonical pair, or every prepare sees getConfig drift,
+  // re-saves, and restarts the gateway on each launch.
+  const rule = (kind, name, prefix, route) => {
+    const rewrite = { key: "request.body.model", operation: "set", value: managedRouteSelector(route) };
+    return {
+      id: `${managedPrefix}route-${kind}`,
+      name,
+      type: "condition",
+      enabled: true,
+      condition: { left: "request.body.model", operator: "starts-with", right: prefix },
+      rewrite,
+      rewrites: [{ ...rewrite }],
+    };
+  };
   return [
     rule("background", "AirKit background route", "claude-haiku", router.background ?? router.default),
     rule("default", "AirKit default route", "claude-", router.default),
