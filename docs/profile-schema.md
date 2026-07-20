@@ -269,15 +269,22 @@ rendered.
 - `modes.<name>.ccr`: partial CCR overlay for that managed mode.
 
 For CCR-backed profiles, `args` must not contain a JSON `--settings` override
-that defines `apiKeyHelper`. CCR manages that helper for routed launches;
-clearing or replacing it breaks CCR authentication, so AirKit rejects the
-profile before writing files or calling CCR.
+that defines `apiKeyHelper`. An `apiKeyHelper` outranks the gateway key the
+launch exports, so it would authenticate the session as somebody else; AirKit
+rejects the profile before writing files or calling CCR.
 
 `airclaude` resolves credentials, merges only AirKit-owned state through the CCR
-3 management API, and launches `ccr <managed-profile> cli -- ...`. Each mode is
-a separate `scope: "ccr"` profile whose model selectors reference the managed
-provider identity. It does not sync a live CCR JSON file or invoke CCR 2
-start/restart/activate commands.
+3 management API, and then spawns `launch.binary` directly against the CCR
+gateway. Each mode is still a separate `scope: "ccr"` profile whose model
+selectors reference the managed provider identity, and whose generated gateway
+key authenticates that mode's launch — but the profile is no longer used as a
+launcher, so it never redirects the child's `CLAUDE_CONFIG_DIR`. AirKit does not
+sync a live CCR JSON file or invoke CCR 2 start/restart/activate commands.
+
+Because one gateway plugin instance serves every mode, the launch labels its
+requests with an `x-airkit-mode` header (through `ANTHROPIC_CUSTOM_HEADERS`) and
+the compatibility plugin routes on that label. A profile must not set that
+variable itself.
 
 For Claude-backed AirClaude launches, AirKit also renders a session-scoped
 plugin under `{{configDir}}/plugins/airkit-context` and passes it with

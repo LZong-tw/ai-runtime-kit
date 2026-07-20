@@ -7,8 +7,9 @@ prices, and company identifiers belong in a private overlay.
 ## One launch path
 
 - Use `airclaude` as the daily entrypoint. It resolves credentials, merges
-  AirKit-owned state through the CCR 3 management API, and launches
-  `ccr <managed-profile> cli -- ...`.
+  AirKit-owned state through the CCR 3 management API, and spawns Claude Code
+  directly against the CCR gateway, leaving `CLAUDE_CONFIG_DIR` untouched so
+  every launcher shares one Claude home.
 - Generated CCR-backed shell functions delegate once to `airclaude`. Do not
   add start/restart/activate wrappers or live JSON synchronization.
 - A missing CCR service is started only as a management service with
@@ -103,9 +104,17 @@ Claude Code owns `/model` and its normal model-choice persistence; a routed
 launch must not replace the user's global choice. Do not infer the active
 provider from Claude Code's displayed launch model.
 
-CCR owns its routed `apiKeyHelper`. A wrapper or profile must not pass a JSON
-`--settings` override that defines `apiKeyHelper`; AirKit rejects the override
-instead of clearing or replacing CCR authentication state.
+A launched session authenticates with the profile's CCR gateway key, exported
+into the child's environment at spawn. An `apiKeyHelper` outranks that key by
+Claude Code's own auth precedence, so a wrapper or profile must not pass a JSON
+`--settings` override defining one; AirKit rejects the override rather than let
+the session authenticate as something else.
+
+A launcher that redirects `CLAUDE_CONFIG_DIR` buys isolation at the cost of a
+split brain: sessions, statusline, hooks, and `.claude.json` all fork per mode,
+and a session started under one launcher becomes invisible to the others. Route
+requests instead of relocating homes — carry the mode in the request, not in the
+filesystem.
 
 The `[1m]` suffix is Claude Code-local launch/display metadata. It is not an
 upstream provider model ID and is not enabled by `ANTHROPIC_1M_CONTEXT`.

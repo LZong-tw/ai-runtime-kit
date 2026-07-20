@@ -102,8 +102,11 @@ secret values.
 After it is sourced, profile wrappers are one-command entry points. The launch
 path merges only the AirKit-owned providers and mode profiles through CCR 3's
 management API, preserving unrelated providers, profiles, and routing rules.
-It then delegates to `ccr <managed-profile> cli -- ...`; there is no CCR 2
-`restart`, `activate`, or live `config.json` overwrite path.
+It then spawns Claude Code directly, pointed at the CCR gateway; there is no CCR
+2 `restart`, `activate`, or live `config.json` overwrite path, and no CCR
+launcher wrapper in between. The child keeps the `CLAUDE_CONFIG_DIR` it
+inherited, so its sessions live in the user's own Claude home alongside every
+other launcher's.
 
 If the CCR management service is missing, AirKit starts it with
 `ccr start --no-gateway`. Its first RPC reads the live configuration; managed
@@ -127,11 +130,16 @@ started through the wrapper does not diverge from the node path and does not lea
 profile variables behind in the caller shell. Prefer starting and resuming through
 the wrapper (`<wrapper> --resume`, `<wrapper> --continue`).
 
-CCR owns the `apiKeyHelper` installed for its routed Claude launch. Do not add
+The launch authenticates with the profile's CCR gateway key, exported into the
+child's environment at spawn time. An `apiKeyHelper` outranks it, so do not add
 `--settings '{"apiKeyHelper":""}'` or any other JSON `--settings` value that
-defines `apiKeyHelper` to a CCR-backed profile; AirKit rejects that override.
-Other Claude arguments remain available through the normal passthrough after
-`--`.
+defines `apiKeyHelper`; AirKit rejects that override. Other Claude arguments
+remain available through the normal passthrough after `--`.
+
+Because every launcher now shares one Claude home, `claude --resume` can pick up
+a session that started under `airclaude` and vice versa. The backend follows the
+launcher, not the transcript: resuming an `airclaude` session with plain `claude`
+continues it on plain Claude's own credentials and routing.
 
 ## Configure Server-Tool Compatibility
 

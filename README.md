@@ -151,7 +151,13 @@ versions, and validate them.
 
 `airclaude` is the daily entrypoint. It merges only AirKit-owned providers and
 profiles into CCR 3 through its management API, preserves unrelated CCR state,
-and launches `ccr <managed-profile> cli -- ...`.
+and then launches Claude Code directly. CCR is the gateway, not the launcher:
+the child inherits the user's own `CLAUDE_CONFIG_DIR`, so sessions, statusline,
+hooks, and `.claude.json` are shared with every other Claude launcher. What the
+launch supplies is the gateway base URL, the profile's gateway key (resolved at
+spawn, never through argv), and a `x-airkit-mode` header naming the routing
+mode. Model variables inherited from the shell are cleared, because a stale one
+would silently outrank the launch model.
 AirKit starts a missing CCR service only with `ccr start --no-gateway`, reads
 configuration before any mutation-capable operation, and saves managed state
 with profile application disabled. If it detects an enabled global Codex
@@ -164,13 +170,13 @@ categories are not presented as active CCR 3 routes.
 Legacy CCR 2 `transformers` are rejected instead of being silently discarded by
 CCR 3 persistence; remove them or migrate the behavior to a native CCR 3 gateway
 plugin.
-Do not pass a JSON `--settings` override containing `apiKeyHelper` through a
-CCR-backed profile. CCR owns that helper for routed launches, and AirKit rejects
-launch arguments that would clear or replace it.
-CCR named profiles isolate Claude's user settings. At launch, AirKit therefore
-reads the active user's `statusLine` entry and forwards only that entry as a
-process-local settings overlay. It does not copy the user's model, permissions,
-hooks, credentials, or complete settings file into the managed profile.
+Do not pass a JSON `--settings` override containing `apiKeyHelper`. An
+`apiKeyHelper` outranks the gateway key the launch puts in the environment, so
+it would silently authenticate the session as somebody else; AirKit rejects
+launch arguments that define one.
+Because the launched session reads the user's real settings, it also picks up
+their statusline, hooks, and permission rules natively — AirKit forwards no
+settings overlay of its own.
 Claude Code permission rules still retain their native precedence: an explicit
 `permissions.ask` rule overrides `--permission-mode auto`. Remove an obsolete
 Ask rule with Claude Code's `/permissions` UI when auto mode should classify
