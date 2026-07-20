@@ -127,7 +127,7 @@ test("isolated CCR environment keeps every writable state path below one root", 
 test("fake Claude enforces launch-time apiKeyHelper precedence", () => {
   assert.throws(
     () => verifier.assertNoApiKeyHelperOverride(["--settings", "{\"apiKeyHelper\":\"\"}"]),
-    /must not override CCR managed apiKeyHelper/,
+    /must not set apiKeyHelper; it overrides the AirKit gateway token/,
   );
   assert.doesNotThrow(() => verifier.assertNoApiKeyHelperOverride(["--permission-mode", "auto"]));
 });

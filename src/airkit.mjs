@@ -477,6 +477,53 @@ function resolveCcrLogOverride(env = process.env) {
   return undefined;
 }
 
+// Claude Code resolves a model from several channels, and a stale value in any
+// of them silently outranks the launch model. Launching Claude directly means
+// the user's own shell environment reaches it, so the inherited copies are
+// dropped rather than trusted. ANTHROPIC_AUTH_TOKEN is absent on purpose: it is
+// set from the gateway key at spawn, and clearing it here would defeat that.
+const LAUNCH_CLEARED_ENV = Object.freeze([
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_MODEL",
+  "ANTHROPIC_SMALL_FAST_MODEL",
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+  "ANTHROPIC_DEFAULT_SONNET_MODEL",
+  "ANTHROPIC_DEFAULT_OPUS_MODEL",
+  "CCR_CLAUDE_CODE_MODEL",
+  "CODEXL_CLAUDE_CODE_MODEL",
+]);
+
+// A live CCR config may hold its address as an environment reference, so
+// resolve it the same way the compatibility MCP endpoint does.
+function resolveLaunchGatewayEndpoint(ccrConfig, env) {
+  return resolveCcrGatewayEndpoint({
+    gateway: {
+      host: expandEnvironmentReference(ccrConfig.gateway?.host ?? ccrConfig.HOST, env, "CCR gateway host"),
+      port: expandEnvironmentReference(ccrConfig.gateway?.port ?? ccrConfig.PORT, env, "CCR gateway port"),
+    },
+  });
+}
+
+function gatewayBaseUrlEnv(endpoint) {
+  const url = endpoint.toString().replace(/\/+$/, "");
+  return {
+    ANTHROPIC_API_BASE_URL: url,
+    ANTHROPIC_BASE_URL: url,
+    CLAUDE_AGENT_API_BASE_URL: url,
+  };
+}
+
+// CCR owns the gateway address, and a profile normally leaves it unset. Resolve
+// it statically when the profile does pin one, otherwise the live config
+// supplies it at spawn.
+function profileGatewayEndpoint(ccrConfig) {
+  try {
+    return resolveCcrGatewayEndpoint(ccrConfig);
+  } catch {
+    return null;
+  }
+}
+
 export function buildLaunchPlan(catalog, profileName, options = {}) {
   const profile = findProfile(catalog, profileName);
   const configDir = resolve(options.configDir ?? defaultConfigDir());
@@ -492,6 +539,7 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
   const launchVars = launchTemplateVars(profile, configDir, mode, ccrConfig, claudeModel);
   const basePlan = planInstall(catalog, profileName, { configDir, write: true, force: true });
   const managedProfileId = `airkit-${slug(profile.name)}-${slug(mode)}`;
+  const gatewayEndpoint = profileGatewayEndpoint(ccrConfig);
   const renderedLaunchArgs = (launch.args ?? []).map((arg) => renderTemplateValue(arg, launchVars));
   assertNoManagedApiKeyHelperOverride(renderedLaunchArgs);
   const claudeArgs = withHeartbeatPluginArg(
@@ -522,13 +570,25 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
       ccrTokenOpRef: profile.shell?.ccrTokenOpRef ?? null,
     },
     launch: {
-      command: "ccr",
-      args: [managedProfileId, "cli", "--", ...claudeArgs],
+      // Spawn Claude Code directly. Routing it through `ccr <profile> cli`
+      // handed the child a per-mode CLAUDE_CONFIG_DIR, which split sessions,
+      // statusline, and hooks across four homes; CCR stays the gateway daemon
+      // and the shared ~/.claude is inherited untouched.
+      command: launch.binary,
+      args: claudeArgs,
       env: {
         ...airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, options.env),
         ...renderTemplateValue(launch.env ?? {}, launchVars),
         ...contextLaunchEnv(profile),
+        ...(gatewayEndpoint ? gatewayBaseUrlEnv(gatewayEndpoint) : {}),
+        ANTHROPIC_CUSTOM_HEADERS: `${AIRKIT_MODE_HEADER}: ${mode}`,
       },
+      clearEnv: [...LAUNCH_CLEARED_ENV],
+      // CCR mints one gateway key per managed profile and writes this helper
+      // when the profile is saved. Run it at spawn so the token reaches only
+      // the child's environment, never argv, a plan, or a dry run.
+      gatewayTokenCommand: join(ccrRuntimePaths(options.env).configDir, "bin", `ccr-claude-code-api-key-${managedProfileId}`),
+      managedProfileId,
       userArgs: options.userArgs ?? [],
     },
   };
@@ -551,23 +611,31 @@ export function assertNoManagedApiKeyHelperOverride(args) {
     }
     if (settings && typeof settings === "object" && !Array.isArray(settings)
       && Object.hasOwn(settings, "apiKeyHelper")) {
-      throw new Error("CCR-backed Claude launch args must not override CCR managed apiKeyHelper");
+      // An apiKeyHelper outranks the gateway token this launch puts in the
+      // environment, so a profile that ships one would silently authenticate
+      // the session as somebody else.
+      throw new Error("Claude launch args must not set apiKeyHelper; it overrides the AirKit gateway token");
     }
   }
 }
 
-async function inheritedStatusLineArgs(env = process.env) {
-  const home = env.HOME?.trim() || homedir();
-  const claudeConfigDir = env.CLAUDE_CONFIG_DIR?.trim() || join(home, ".claude");
-  try {
-    const settings = JSON.parse(await readFile(join(claudeConfigDir, "settings.json"), "utf8"));
-    if (!settings?.statusLine || typeof settings.statusLine !== "object" || Array.isArray(settings.statusLine)) {
-      return [];
-    }
-    return ["--settings", JSON.stringify({ statusLine: settings.statusLine })];
-  } catch {
-    return [];
+async function resolveGatewayToken(plan, options = {}) {
+  const runCommand = options.runCommand ?? runCommandSync;
+  const command = plan.launch.gatewayTokenCommand;
+  const result = await runCommand(command, [], {
+    env: options.env,
+    timeoutMs: options.commandTimeoutMs ?? 30000,
+  });
+  const token = String(result?.stdout ?? "").trim();
+  // The failure text must stay free of the command's output: on a partial
+  // write or a truncated helper the stdout that failed the check is itself
+  // credential material.
+  if (!result?.ok || token === "") {
+    throw new Error(
+      `unable to resolve the CCR gateway key for profile ${plan.launch.managedProfileId} from ${command}; run airkit update --write and retry`,
+    );
   }
+  return token;
 }
 
 export async function prepareLaunch(catalog, profileName, options = {}) {
@@ -616,14 +684,20 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
   if (options.launch !== false) {
     await ccrClient.ensureGateway();
     const spawnCommand = options.spawnCommand ?? spawnCommandSync;
-    const statusLineArgs = await inheritedStatusLineArgs(options.env ?? process.env);
+    const inherited = { ...(options.env ?? process.env) };
+    for (const key of plan.launch.clearEnv ?? []) delete inherited[key];
     child = spawnCommand(plan.launch.command, [
       ...plan.launch.args,
       ...compatibilityLaunch.args,
-      ...statusLineArgs,
       ...plan.launch.userArgs,
     ], {
-      env: { ...(options.env ?? process.env), ...plan.launch.env, ...compatibilityLaunch.env },
+      env: {
+        ...inherited,
+        ...plan.launch.env,
+        ...compatibilityLaunch.env,
+        ...gatewayBaseUrlEnv(resolveLaunchGatewayEndpoint(managed.config, launchEnv)),
+        ANTHROPIC_AUTH_TOKEN: await resolveGatewayToken(plan, options),
+      },
       stdio: "inherit",
     });
   }
@@ -1367,6 +1441,13 @@ Runtime:
 ${runtimeLines.join("\n") || "- skipped"}
 Launch:
 - ${result.launch.command} ${[...result.launch.args, ...result.launch.userArgs].map(quoteShell).join(" ")}
+
+Environment:
+- gateway: ${result.launch.env.ANTHROPIC_BASE_URL ?? "resolved from live CCR config at launch"}
+- mode header: ${result.launch.env.ANTHROPIC_CUSTOM_HEADERS ?? "unset"}
+- gateway key: resolved at launch from ${result.launch.gatewayTokenCommand}
+- inherited Claude home: CLAUDE_CONFIG_DIR is left untouched
+- cleared: ${(result.launch.clearEnv ?? []).join(", ") || "none"}
 `;
 }
 
@@ -1860,6 +1941,9 @@ function compareVersions(left, right) {
 async function checkLaunchRuntime(plan, options = {}) {
   const commandExists = options.commandExists ?? commandExistsOnPath;
   const ccrExists = await commandExists("ccr");
+  // CCR still has to be present as the gateway daemon, but the launch command
+  // is now Claude Code itself, so it needs its own check.
+  const launchExists = await commandExists(plan.launch.command);
   const versions = { ...(options.runtimeVersions ?? await inspectRuntimeVersions(options)) };
   if (options.ccrClient && !options.dryRun && !options.doctor) {
     versions.claudeCodeRouter = await readCcrVersionSafely(options.ccrClient);
@@ -1867,9 +1951,9 @@ async function checkLaunchRuntime(plan, options = {}) {
   const report = runtimeReport(versions);
   const runtime = {
     ccr: ccrExists ? { ok: true, command: "ccr" } : { ok: false, command: "ccr", reason: "missing command: ccr" },
-    launch: ccrExists
+    launch: launchExists
       ? { ok: true, command: plan.launch.command }
-      : { ok: false, command: plan.launch.command, reason: "missing command: ccr" },
+      : { ok: false, command: plan.launch.command, reason: `missing command: ${plan.launch.command}` },
     versions: report,
   };
   const failedVersion = report.find((entry) => !entry.ok);
@@ -1891,7 +1975,10 @@ async function readCcrVersionSafely(ccrClient) {
 
 async function resolveCcrAuthEnv(plan, { commandExists, env, runCommand, timeoutMs }) {
   const existingToken = env.ANTHROPIC_AUTH_TOKEN;
-  if (existingToken && !existingToken.startsWith("op://")) {
+  // Same reason as resolveProviderApiKeys: inside a launched session this
+  // variable holds the local gateway key, not the upstream credential.
+  const nested = Boolean(env.AIRCLAUDE_PROFILE || env.AIRCLAUDE_MODE);
+  if (existingToken && !nested && !existingToken.startsWith("op://")) {
     return { ok: true, env: { ANTHROPIC_AUTH_TOKEN: existingToken } };
   }
 
@@ -1915,12 +2002,18 @@ async function resolveCcrAuthEnv(plan, { commandExists, env, runCommand, timeout
 async function resolveProviderApiKeys(catalog, profileName, plan, options) {
   const profile = findProfile(catalog, profileName);
   const env = options.env ?? process.env;
+  // A launched session exports the CCR gateway key as ANTHROPIC_AUTH_TOKEN, and
+  // running airkit from inside one would otherwise adopt that key as the
+  // upstream provider credential and save it — repointing every mode at a key
+  // the upstream rejects. Inside our own session the environment is not a
+  // credential source; fall through to the profile's op reference.
+  const nested = Boolean(env.AIRCLAUDE_PROFILE || env.AIRCLAUDE_MODE);
   const apiKeys = {};
   const unresolved = [];
   for (const provider of profile.ccr?.Providers ?? []) {
     const match = String(provider.api_key ?? "").match(/^\$([A-Za-z_][A-Za-z0-9_]*)$/);
     if (!match) continue;
-    if (env[match[1]]) apiKeys[provider.name] = env[match[1]];
+    if (env[match[1]] && !nested) apiKeys[provider.name] = env[match[1]];
     else unresolved.push({ providerName: provider.name, envName: match[1] });
   }
   if (unresolved.length > 0 && plan.credential.ccrTokenOpRef) {
