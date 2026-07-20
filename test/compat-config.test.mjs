@@ -257,6 +257,21 @@ test("routes accepts provider-qualified selectors and rejects malformed shapes",
   );
 });
 
+test("routeLog accepts booleans and rejects everything else", () => {
+  validateCompatibilityConfig({ ...VALID_CONFIG, routeLog: true });
+  validateCompatibilityConfig({ ...VALID_CONFIG, routeLog: false });
+  validateCompatibilityConfig({ ...VALID_CONFIG });
+
+  assert.throws(
+    () => validateCompatibilityConfig({ ...VALID_CONFIG, routeLog: "yes" }),
+    /routeLog must be a boolean/,
+  );
+  assert.throws(
+    () => validateCompatibilityConfig({ ...VALID_CONFIG, routeLog: 1 }),
+    /routeLog must be a boolean/,
+  );
+});
+
 test("bare Claude models route to background or default; qualified and foreign models do not", () => {
   const routes = { default: "demo/steady-coder", background: "demo/cheap-coder" };
   const body = (model) => ({ model, max_tokens: 8, messages: [] });

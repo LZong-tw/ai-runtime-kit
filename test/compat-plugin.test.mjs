@@ -1790,6 +1790,68 @@ test("bare Claude models are routed before raw passthrough; qualified models pas
   assert.deepEqual(unrelated.sent, unrelated.raw, "non-Claude model stays byte-identical");
 });
 
+test("routeLog emits one redacted decision line per request and stays silent when off", async () => {
+  const setupHandler = async (pluginConfig) => {
+    const routes = [];
+    await plugin.setup({
+      config: structuredClone(PLUGIN_RUNTIME_CONFIG),
+      coreClient: { async forwardRaw() {} },
+      pluginConfig,
+      registerGatewayRoute(route) {
+        routes.push(route);
+      },
+    });
+    return routes.find(({ id }) => id === "airkit-compatibility-messages").handler;
+  };
+  const captureStderr = async (run) => {
+    const lines = [];
+    const original = process.stderr.write;
+    process.stderr.write = (chunk) => {
+      lines.push(String(chunk));
+      return true;
+    };
+    try {
+      await run();
+    } finally {
+      process.stderr.write = original;
+    }
+    return lines.filter((line) => line.startsWith("[airkit-route] "));
+  };
+  const request = {
+    headers: { authorization: "Bearer gateway-secret-token" },
+    method: "POST",
+    signal: undefined,
+  };
+  const raw = Buffer.from(
+    JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 8, messages: [] }),
+    "utf8",
+  );
+
+  const onHandler = await setupHandler({
+    ...structuredClone(COMPLETE_PLUGIN_CONFIG),
+    routeLog: true,
+    routes: { default: "demo-provider/steady-coder" },
+  });
+  const logged = await captureStderr(() =>
+    onHandler(request, {}, { readBody: async () => raw }));
+  assert.equal(logged.length, 1);
+  const entry = JSON.parse(logged[0].slice("[airkit-route] ".length));
+  assert.equal(entry.inModel, "claude-sonnet-4-6");
+  assert.equal(entry.outModel, "demo-provider/steady-coder");
+  assert.equal(entry.rewritten, true);
+  assert.equal(entry.path, "passthrough");
+  assert.match(entry.authId, /^[0-9a-f]{8}$/);
+  assert.ok(!logged[0].includes("gateway-secret-token"), "raw credential never appears");
+
+  const offHandler = await setupHandler({
+    ...structuredClone(COMPLETE_PLUGIN_CONFIG),
+    routes: { default: "demo-provider/steady-coder" },
+  });
+  const silent = await captureStderr(() =>
+    offHandler(request, {}, { readBody: async () => raw }));
+  assert.equal(silent.length, 0, "no decision lines when routeLog is absent");
+});
+
 test("bare Claude routing without routes config forwards byte-identical bytes", async () => {
   const forwarded = [];
   const routes = [];
