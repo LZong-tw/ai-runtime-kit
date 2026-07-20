@@ -400,6 +400,13 @@ test("CCR 3 merge translates base routes into gateway rules for bare Claude mode
     operation: "set",
     value: "airkit-provider-launch-example-demo/cheap-coder",
   }]);
+  for (const rule of [background, fallthrough]) {
+    assert.deepEqual(
+      rule.rewrite,
+      rule.rewrites[0],
+      "single-rewrite rules carry CCR's canonical rewrite/rewrites pair, or every prepare re-saves and restarts the gateway",
+    );
+  }
   assert.deepEqual(fallthrough.condition, {
     left: "request.body.model",
     operator: "starts-with",
