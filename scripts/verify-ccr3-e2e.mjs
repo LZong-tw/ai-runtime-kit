@@ -444,7 +444,10 @@ function fakeCatalog(providerPort) {
       name: "ccr3-e2e",
       visibility: "public",
       summary: "Isolated CCR 3 verification fixture.",
-      launch: { binary: "claude", args: [], defaultMode: "auto", modes: { auto: {} } },
+      // claudeModel is a bare Claude id on purpose: the fake claude sends it as
+      // body.model, so the run proves the compat plugin's bare-model rewrite
+      // end to end (provider must receive the routed provider-local model).
+      launch: { binary: "claude", args: [], claudeModel: "claude-sonnet-4-6", defaultMode: "auto", modes: { auto: {} } },
       ccr: {
         APIKEY: "ccr-local",
         LOG: false,
