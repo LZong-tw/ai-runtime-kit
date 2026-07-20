@@ -137,13 +137,21 @@ that only opens the local gateway; upstream provider credentials, by contrast,
 are cleared from the child by placeholder name. An `apiKeyHelper` outranks the
 gateway key, so do not add
 `--settings '{"apiKeyHelper":""}'` or any other JSON `--settings` value that
-defines `apiKeyHelper`; AirKit rejects that override. Other Claude arguments
-remain available through the normal passthrough after `--`.
+defines `apiKeyHelper`; AirKit rejects that override in profile args and in
+passthrough args alike, and it also refuses to launch while the inherited
+Claude home's `settings.json` defines an `apiKeyHelper` (remove it yourself;
+AirKit never edits that file). Other Claude arguments remain available through
+the normal passthrough after `--`.
 
 Because every launcher now shares one Claude home, `claude --resume` can pick up
 a session that started under `airclaude` and vice versa. The backend follows the
 launcher, not the transcript: resuming an `airclaude` session with plain `claude`
-continues it on plain Claude's own credentials and routing.
+continues it on plain Claude's own credentials and routing. The shared home is
+whatever the caller's environment resolves — a shell that exports its own
+`CLAUDE_CONFIG_DIR` keeps that home for `airclaude` exactly as it would for
+plain `claude`; a profile, however, may not set `CLAUDE_CONFIG_DIR` or `HOME`
+in `launch.env` (AirKit rejects it), because a per-profile home would split
+sessions by mode again.
 
 ## Configure Server-Tool Compatibility
 

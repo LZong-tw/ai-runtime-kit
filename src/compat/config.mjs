@@ -76,8 +76,11 @@ export function validateCompatibilityConfig(config) {
   if (config.modeRoutes !== undefined) {
     assertRecord(config.modeRoutes, "modeRoutes");
     for (const [mode, table] of Object.entries(config.modeRoutes)) {
-      if (!MODE_PATTERN.test(mode)) {
-        throw new Error(`modeRoutes key must be a launch mode identifier: ${mode}`);
+      // requestedMode lowercases every arriving label before the lookup, so a
+      // key that is not already canonical (e.g. "GLM") would validate here yet
+      // never match a request. Reject it instead of letting it rot unreachable.
+      if (!isAirkitModeLabel(mode)) {
+        throw new Error(`modeRoutes key must be a canonical launch mode label: ${mode}`);
       }
       validateRouteTable(table, `modeRoutes.${mode}`);
     }
@@ -126,13 +129,22 @@ export function airkitModeLabel(mode) {
   return String(mode).trim().toLowerCase();
 }
 
+// The single definition of a label that can round-trip through the header
+// contract: already canonical and inside the mode pattern. The launcher
+// checks catalog modes against this before rendering a table key, and
+// requestedMode reduces arriving headers to the same predicate.
+export function isAirkitModeLabel(label) {
+  return typeof label === "string" && label !== ""
+    && label === airkitModeLabel(label) && MODE_PATTERN.test(label);
+}
+
 export function requestedMode(headers) {
   if (!isRecord(headers)) return null;
   const raw = headers[AIRKIT_MODE_HEADER];
   const value = (Array.isArray(raw) ? raw[0] : raw);
   if (typeof value !== "string") return null;
   const mode = airkitModeLabel(value);
-  return mode !== "" && MODE_PATTERN.test(mode) ? mode : null;
+  return isAirkitModeLabel(mode) ? mode : null;
 }
 
 export function routeBareClaudeModel(body, routes) {
