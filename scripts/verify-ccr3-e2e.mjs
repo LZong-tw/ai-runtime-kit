@@ -182,6 +182,7 @@ async function main() {
     const fakeBin = join(root, "fake-bin");
     await installFakeClaude(fakeBin);
     env.FAKE_CLAUDE_RESULT_FILE = join(root, "fake-claude-result.json");
+    env.AIRKIT_E2E_EXPECTED_CLAUDE_HOME = env.CLAUDE_CONFIG_DIR;
     env.PATH = `${fakeBin}:${dirname(ccr)}:${env.PATH ?? ""}`;
     const ccrPackage = JSON.parse(await readFile(
       join(runtimeRoot, "node_modules", "@musistudio", "claude-code-router", "package.json"),
@@ -288,12 +289,18 @@ async function main() {
     const managedProfile = liveConfig.profile.profiles.find((profile) => profile.id === managedProfileId);
     assert.ok(managedProfile);
     const payload = JSON.parse(await readFile(env.FAKE_CLAUDE_RESULT_FILE, "utf8"));
-    assert.ok(resolve(payload.fixtureSettingsPath).startsWith(`${resolve(root)}/`));
-    const managedSettings = JSON.parse(await readFile(payload.fixtureSettingsPath, "utf8"));
-    const gatewayKeyResult = run(managedSettings.apiKeyHelper, [], env);
-    assert.equal(gatewayKeyResult.status, 0, "isolated CCR apiKeyHelper failed");
+    assert.equal(
+      payload.claudeConfigDir,
+      env.CLAUDE_CONFIG_DIR,
+      "the launched child must keep the Claude home it inherited",
+    );
+    // Resolve the key the way the launcher does, through the profile's
+    // generated helper, rather than through a settings file the child no
+    // longer reads.
+    const gatewayKeyResult = run(launched.launch.gatewayTokenCommand, [], env);
+    assert.equal(gatewayKeyResult.status, 0, "isolated CCR gateway key helper failed");
     const gatewayApiKey = gatewayKeyResult.stdout.trim();
-    assert.ok(gatewayApiKey.length > 0, "isolated CCR apiKeyHelper returned an empty key");
+    assert.ok(gatewayApiKey.length > 0, "isolated CCR gateway key helper returned an empty key");
     const fallbackFamilies = await runFallbackGatewayScenarios({
       apiKey: gatewayApiKey,
       gatewayOrigin: endpoint.origin,
@@ -716,7 +723,6 @@ async function installFakeClaude(binDir) {
   await mkdir(binDir, { recursive: true });
   const path = join(binDir, "claude");
   await writeFile(path, `#!/usr/bin/env node
-import { execFileSync } from "node:child_process";
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 const assertNoManagedApiKeyHelperOverride = (${assertNoManagedApiKeyHelperOverride.toString()});
@@ -733,27 +739,35 @@ if (compatibilityMcp?.headers?.Authorization !== "Bearer \${AIRKIT_COMPATIBILITY
   throw new Error("compatibility MCP token must remain an environment placeholder");
 }
 const baseUrl = process.env.ANTHROPIC_BASE_URL;
-const model = process.env.ANTHROPIC_MODEL;
-if (!baseUrl || !model) throw new Error("named CCR profile did not supply gateway URL and model");
+const gatewayToken = process.env.ANTHROPIC_AUTH_TOKEN;
+if (!baseUrl || !gatewayToken) throw new Error("direct launch did not supply the gateway URL and key");
+// The launch model arrives as an argument, not an environment default: a
+// stale ANTHROPIC_MODEL would outrank it silently.
+const modelIndex = process.argv.indexOf("--model");
+const model = modelIndex === -1 ? null : process.argv[modelIndex + 1];
+if (!model) throw new Error("direct launch did not supply --model");
+for (const name of ["ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_API_KEY"]) {
+  if (process.env[name]) throw new Error(\`direct launch must clear \${name}\`);
+}
+if (process.env.ANTHROPIC_CUSTOM_HEADERS !== "x-airkit-mode: auto") {
+  throw new Error("direct launch must label its routing mode");
+}
+// The whole point of the direct launch: Claude keeps the home it inherited.
+if (process.env.CLAUDE_CONFIG_DIR !== process.env.AIRKIT_E2E_EXPECTED_CLAUDE_HOME) {
+  throw new Error(\`direct launch redirected CLAUDE_CONFIG_DIR to \${process.env.CLAUDE_CONFIG_DIR}\`);
+}
 if (!(await fetch(process.env.FAKE_PROVIDER_PROBE_URL, { signal: AbortSignal.timeout(5_000) })).ok) {
   throw new Error("fake provider is not reachable from fake Claude");
 }
-const settingsFiles = await findSettingsFiles(dirname(process.env.HOME));
-let helperSettings;
-for (const path of settingsFiles) {
+for (const path of await findSettingsFiles(dirname(process.env.HOME))) {
   const settings = JSON.parse(await readFile(path, "utf8"));
   if (Object.hasOwn(settings, "model")) throw new Error(\`managed settings must not persist a Claude model default: \${path}\`);
-  if (settings.apiKeyHelper) helperSettings = { path, settings };
 }
-if (!helperSettings) throw new Error("CCR did not create an isolated apiKeyHelper setting");
-const helperKey = helperSettings.settings.apiKeyHelper
-  ? execFileSync("/bin/sh", ["-c", helperSettings.settings.apiKeyHelper], { encoding: "utf8", env: process.env }).trim()
-  : "";
 const response = await fetch(new URL("/v1/messages", baseUrl), {
   method: "POST",
   headers: {
     "content-type": "application/json",
-    "x-api-key": process.env.ANTHROPIC_API_KEY ?? process.env.ANTHROPIC_AUTH_TOKEN ?? helperKey,
+    "x-api-key": gatewayToken,
   },
   body: JSON.stringify({ max_tokens: 16, messages: [{ role: "user", content: "fixture" }], model }),
   signal: AbortSignal.timeout(10_000),
@@ -783,8 +797,9 @@ if (!mcpResponse.ok || mcpPayload.error) throw new Error(JSON.stringify(mcpPaylo
 await writeFile(process.env.FAKE_CLAUDE_RESULT_FILE, JSON.stringify({
   ...payload,
   ambientSentinel: process.env.AIRKIT_E2E_AMBIENT_SENTINEL,
+  claudeConfigDir: process.env.CLAUDE_CONFIG_DIR,
   compatibilityMcp: mcpPayload.result,
-  fixtureSettingsPath: helperSettings.path,
+  launchModel: model,
 }));
 
 async function findSettingsFiles(root) {
