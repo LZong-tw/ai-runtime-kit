@@ -14,11 +14,24 @@ const FAMILY_MODES = Object.freeze({
   mcpConnector: Object.freeze(["anthropic-fallback"]),
 });
 
-const CONFIG_KEYS = new Set(["fallback", "routeLog", "routes", ...Object.keys(FAMILY_MODES)]);
+const CONFIG_KEYS = new Set([
+  "fallback",
+  "modeRoutes",
+  "routeLog",
+  "routes",
+  ...Object.keys(FAMILY_MODES),
+]);
 const FALLBACK_KEYS = new Set(["provider", "model", "maxContinuationTurns"]);
 const FAMILY_KEYS = new Set(["mode"]);
 const ROUTE_KEYS = new Set(["default", "background"]);
 const ROUTE_SELECTOR_PATTERN = /^[a-z0-9][a-z0-9._-]*\/\S+$/i;
+const MODE_PATTERN = /^[a-z0-9][a-z0-9._-]*$/i;
+
+// One plugin instance serves every launch mode, and CCR discards the caller's
+// API-key identity before the plugin sees the request. The launcher therefore
+// labels its own mode through ANTHROPIC_CUSTOM_HEADERS, which Claude Code
+// forwards verbatim on /v1/messages.
+export const AIRKIT_MODE_HEADER = "x-airkit-mode";
 
 export function validateCompatibilityConfig(config) {
   assertRecord(config, "compatibility config");
@@ -58,22 +71,34 @@ export function validateCompatibilityConfig(config) {
     throw new Error("routeLog must be a boolean");
   }
 
-  if (config.routes !== undefined) {
-    assertRecord(config.routes, "routes");
-    rejectUnknownKeys(config.routes, ROUTE_KEYS, "routes");
-    if (config.routes.default === undefined) {
-      throw new Error("routes.default is required when routes is configured");
-    }
-    for (const key of ROUTE_KEYS) {
-      const selector = config.routes[key];
-      if (selector === undefined) continue;
-      if (typeof selector !== "string" || !ROUTE_SELECTOR_PATTERN.test(selector)) {
-        throw new Error(`routes.${key} must be a provider-qualified model selector`);
+  if (config.routes !== undefined) validateRouteTable(config.routes, "routes");
+
+  if (config.modeRoutes !== undefined) {
+    assertRecord(config.modeRoutes, "modeRoutes");
+    for (const [mode, table] of Object.entries(config.modeRoutes)) {
+      if (!MODE_PATTERN.test(mode)) {
+        throw new Error(`modeRoutes key must be a launch mode identifier: ${mode}`);
       }
+      validateRouteTable(table, `modeRoutes.${mode}`);
     }
   }
 
   return config;
+}
+
+function validateRouteTable(routes, label) {
+  assertRecord(routes, label);
+  rejectUnknownKeys(routes, ROUTE_KEYS, label);
+  if (routes.default === undefined) {
+    throw new Error(`${label}.default is required when ${label} is configured`);
+  }
+  for (const key of ROUTE_KEYS) {
+    const selector = routes[key];
+    if (selector === undefined) continue;
+    if (typeof selector !== "string" || !ROUTE_SELECTOR_PATTERN.test(selector)) {
+      throw new Error(`${label}.${key} must be a provider-qualified model selector`);
+    }
+  }
 }
 
 // Bare Claude model ids (plain `claude` outside a named CCR profile, including
@@ -81,6 +106,27 @@ export function validateCompatibilityConfig(config) {
 // this plugin owns POST /v1/messages, so CCR Router rules never see them and
 // the core rejects unlisted models. Route them here; provider-qualified
 // selectors (named profiles, the whole-request fallback) pass through as-is.
+// The mode label is a routing hint from a caller that already holds a gateway
+// credential, not a privilege boundary: that caller can name any configured
+// model outright. Unknown or malformed labels quietly fall back to the flat
+// table so an unlabelled client still routes.
+export function resolveModeRoutes(config, mode) {
+  if (!isRecord(config)) return null;
+  const perMode = isRecord(config.modeRoutes) && typeof mode === "string"
+    ? config.modeRoutes[mode]
+    : null;
+  return isRecord(perMode) ? perMode : (isRecord(config.routes) ? config.routes : null);
+}
+
+export function requestedMode(headers) {
+  if (!isRecord(headers)) return null;
+  const raw = headers[AIRKIT_MODE_HEADER];
+  const value = (Array.isArray(raw) ? raw[0] : raw);
+  if (typeof value !== "string") return null;
+  const mode = value.trim().toLowerCase();
+  return mode !== "" && MODE_PATTERN.test(mode) ? mode : null;
+}
+
 export function routeBareClaudeModel(body, routes) {
   if (!isRecord(body) || typeof body.model !== "string") return null;
   if (!isRecord(routes)) return null;

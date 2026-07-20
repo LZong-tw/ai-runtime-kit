@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  AIRKIT_MODE_HEADER,
+  requestedMode,
   resolveCompatibilityPolicies,
+  resolveModeRoutes,
   routeBareClaudeModel,
   validateCompatibilityConfig,
 } from "../src/compat/config.mjs";
@@ -270,6 +273,66 @@ test("routeLog accepts booleans and rejects everything else", () => {
     () => validateCompatibilityConfig({ ...VALID_CONFIG, routeLog: 1 }),
     /routeLog must be a boolean/,
   );
+});
+
+test("modeRoutes validates per mode and rejects malformed tables", () => {
+  const withModes = (modeRoutes) => ({ ...VALID_CONFIG, modeRoutes });
+
+  validateCompatibilityConfig(withModes({
+    glm: { default: "demo/glm", background: "demo/glm" },
+    auto: { default: "demo/flash" },
+  }));
+  validateCompatibilityConfig({ ...VALID_CONFIG });
+
+  assert.throws(
+    () => validateCompatibilityConfig(withModes({ glm: { background: "demo/glm" } })),
+    /modeRoutes\.glm\.default is required/,
+  );
+  assert.throws(
+    () => validateCompatibilityConfig(withModes({ glm: { default: "bare-model" } })),
+    /modeRoutes\.glm\.default must be a provider-qualified model selector/,
+  );
+  assert.throws(
+    () => validateCompatibilityConfig(withModes({ glm: { default: "demo/glm", small: "demo/x" } })),
+    /unknown modeRoutes\.glm key.*small/i,
+  );
+  assert.throws(
+    () => validateCompatibilityConfig(withModes({ "../evil": { default: "demo/glm" } })),
+    /modeRoutes key must be a launch mode identifier/,
+  );
+  assert.throws(() => validateCompatibilityConfig(withModes("glm")), /modeRoutes/);
+});
+
+test("mode label selects its route table and falls back to the flat table", () => {
+  const config = {
+    routes: { default: "demo/flash", background: "demo/flash" },
+    modeRoutes: { glm: { default: "demo/glm", background: "demo/glm-mini" } },
+  };
+
+  assert.deepEqual(resolveModeRoutes(config, "glm"), config.modeRoutes.glm);
+  assert.deepEqual(resolveModeRoutes(config, "kimi"), config.routes, "unknown mode uses flat routes");
+  assert.deepEqual(resolveModeRoutes(config, null), config.routes, "unlabelled caller uses flat routes");
+  assert.deepEqual(resolveModeRoutes({ routes: config.routes }, "glm"), config.routes);
+  assert.equal(resolveModeRoutes({}, "glm"), null);
+  assert.equal(resolveModeRoutes(null, "glm"), null);
+  assert.deepEqual(
+    resolveModeRoutes({ ...config, modeRoutes: { constructor: { default: "demo/x" } } }, "toString"),
+    config.routes,
+    "inherited object properties are never treated as modes",
+  );
+});
+
+test("mode header is normalized and malformed labels are ignored", () => {
+  assert.equal(AIRKIT_MODE_HEADER, "x-airkit-mode");
+  assert.equal(requestedMode({ [AIRKIT_MODE_HEADER]: "glm" }), "glm");
+  assert.equal(requestedMode({ [AIRKIT_MODE_HEADER]: "  GLM  " }), "glm");
+  assert.equal(requestedMode({ [AIRKIT_MODE_HEADER]: ["kimi", "pro"] }), "kimi");
+  assert.equal(requestedMode({ [AIRKIT_MODE_HEADER]: "glm\n" }), "glm", "surrounding whitespace is trimmed");
+  assert.equal(requestedMode({}), null);
+  assert.equal(requestedMode(null), null);
+  for (const value of ["", "  ", "../evil", "a b", "glm\nx", 7, {}]) {
+    assert.equal(requestedMode({ [AIRKIT_MODE_HEADER]: value }), null, `rejects ${JSON.stringify(value)}`);
+  }
 });
 
 test("bare Claude models route to background or default; qualified and foreign models do not", () => {
