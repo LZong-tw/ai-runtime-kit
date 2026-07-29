@@ -13,6 +13,7 @@ import {
   processContextHook,
 } from "../src/context-heartbeat.mjs";
 import { validateCompatibilityProviderBinding } from "../src/compat/config.mjs";
+import compatibilityPlugin from "../src/compat/plugin.mjs";
 
 import {
   buildLaunchPlan,
@@ -387,33 +388,48 @@ test("CCR 3 merge translates base routes into gateway rules for bare Claude mode
 
   assert.deepEqual(
     merged.config.Router.rules.map(({ id }) => id),
-    ["unrelated-rule", "airkit-launch-example-route-background", "airkit-launch-example-route-default"],
+    [
+      "unrelated-rule",
+      "airkit-launch-example-route-background",
+      "airkit-launch-example-route-opus",
+      "airkit-launch-example-route-default",
+    ],
     "foreign rules stay first; stale managed rules are replaced",
   );
-  const [, background, fallthrough] = merged.config.Router.rules;
+  const [, background, opus, sonnet] = merged.config.Router.rules;
   assert.deepEqual(background.condition, {
     left: "request.body.model",
     operator: "starts-with",
-    right: "claude-haiku",
+    right: "claude-haiku-",
   });
   assert.deepEqual(background.rewrites, [{
     key: "request.body.model",
     operation: "set",
     value: "airkit-provider-launch-example-demo/cheap-coder",
   }]);
-  for (const rule of [background, fallthrough]) {
+  for (const rule of [background, opus, sonnet]) {
     assert.deepEqual(
       rule.rewrite,
       rule.rewrites[0],
       "single-rewrite rules carry CCR's canonical rewrite/rewrites pair, or every prepare re-saves and restarts the gateway",
     );
   }
-  assert.deepEqual(fallthrough.condition, {
+  assert.deepEqual(opus.condition, {
     left: "request.body.model",
     operator: "starts-with",
-    right: "claude-",
+    right: "claude-opus-",
   });
-  assert.deepEqual(fallthrough.rewrites, [{
+  assert.deepEqual(opus.rewrites, [{
+    key: "request.body.model",
+    operation: "set",
+    value: "airkit-provider-launch-example-demo/steady-coder",
+  }]);
+  assert.deepEqual(sonnet.condition, {
+    left: "request.body.model",
+    operator: "starts-with",
+    right: "claude-sonnet-",
+  });
+  assert.deepEqual(sonnet.rewrites, [{
     key: "request.body.model",
     operation: "set",
     value: "airkit-provider-launch-example-demo/steady-coder",
@@ -427,6 +443,59 @@ test("CCR 3 merge translates base routes into gateway rules for bare Claude mode
     configDir: "/tmp/airkit-config",
   });
   assert.deepEqual(repeated.config.Router, merged.config.Router, "router merge is idempotent");
+});
+
+test("outer compatibility routing and managed core rules preserve unknown Claude models", async () => {
+  const merged = airkitRuntime.buildCcr3ManagedConfig(
+    compatibilityCatalog(),
+    "launch-example",
+    {},
+    { configDir: "/tmp/airkit-outer-core-routing" },
+  );
+  const pluginConfig = merged.config.plugins.find(({ id }) => id === "airkit-compatibility").config;
+  const registeredRoutes = [];
+  const coreModels = [];
+
+  await compatibilityPlugin.setup({
+    config: merged.config,
+    coreClient: {
+      async forwardRaw({ body }) {
+        const request = JSON.parse(body.toString());
+        const matchingRule = merged.config.Router.rules.find((rule) =>
+          request.model.startsWith(rule.condition.right));
+        coreModels.push(matchingRule ? matchingRule.rewrites[0].value : request.model);
+      },
+    },
+    pluginConfig,
+    registerGatewayRoute(route) {
+      registeredRoutes.push(route);
+    },
+  });
+  const handler = registeredRoutes.find(({ id }) => id === "airkit-compatibility-messages").handler;
+  const invoke = async (model) => {
+    const raw = Buffer.from(JSON.stringify({ model, max_tokens: 8, messages: [] }));
+    await handler(
+      { headers: {}, method: "POST", signal: undefined },
+      {},
+      { readBody: async () => raw },
+    );
+    return coreModels.at(-1);
+  };
+
+  assert.equal(await invoke("claude-fable-5"), "claude-fable-5");
+  assert.equal(await invoke("provider/claude-sonnet-5"), "provider/claude-sonnet-5");
+  assert.equal(
+    await invoke("claude-sonnet-5"),
+    "airkit-provider-launch-example-demo/steady-coder",
+  );
+  assert.equal(
+    await invoke("claude-haiku-4-5-20251001"),
+    "airkit-provider-launch-example-demo/cheap-coder",
+  );
+  assert.equal(
+    await invoke("claude-opus-5"),
+    "airkit-provider-launch-example-demo/steady-coder",
+  );
 });
 
 test("CCR 3 managed providers can route upstream through a per-launch proxy", () => {
