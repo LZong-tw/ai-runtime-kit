@@ -148,7 +148,9 @@ export function routeBareClaudeModel(body, routes) {
     ? routes.opus ?? routes.default
     : body.model.startsWith("claude-haiku-")
       ? routes.background ?? routes.default
-      : routes.default;
+      : body.model.startsWith("claude-sonnet-")
+        ? routes.default
+        : null;
   if (typeof target !== "string" || target === "" || target === body.model) return null;
   return { ...body, model: target };
 }

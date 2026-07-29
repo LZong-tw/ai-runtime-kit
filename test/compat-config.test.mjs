@@ -409,7 +409,8 @@ test("bare Claude models route to background or default; qualified and foreign m
     routeBareClaudeModel(body("claude-haiku-4-5-20251001"), routes).model,
     "demo/cheap-coder",
   );
-  assert.equal(routeBareClaudeModel(body("claude-fable-5"), routes).model, "demo/steady-coder");
+  assert.equal(routeBareClaudeModel(body("claude-fable-5"), routes), null);
+  assert.equal(routeBareClaudeModel(body("claude-sonet-5"), routes), null);
   assert.equal(routeBareClaudeModel(body("claude-sonnet-4-6"), routes).model, "demo/steady-coder");
   assert.equal(
     routeBareClaudeModel(body("claude-haiku-4-5"), { default: "demo/steady-coder" }).model,
@@ -420,8 +421,8 @@ test("bare Claude models route to background or default; qualified and foreign m
   assert.equal(routeBareClaudeModel(body("deepseek-v4-flash"), routes), null);
   assert.equal(routeBareClaudeModel(body("claude-fable-5"), undefined), null);
   assert.equal(routeBareClaudeModel({ max_tokens: 8 }, routes), null);
-  const original = body("claude-fable-5");
+  const original = body("claude-sonnet-4-6");
   const rewritten = routeBareClaudeModel(original, routes);
-  assert.equal(original.model, "claude-fable-5", "input body is not mutated");
+  assert.equal(original.model, "claude-sonnet-4-6", "input body is not mutated");
   assert.notEqual(rewritten, original);
 });
