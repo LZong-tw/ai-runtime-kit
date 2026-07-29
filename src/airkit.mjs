@@ -797,7 +797,9 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     configDir: plan.configDir,
     env: options.env,
   });
-  const compatibilityLaunch = buildCompatibilityLaunch(managed.config, options.env ?? process.env);
+  const compatibilityLaunch = options.plainClaude === true
+    ? { args: [], env: {} }
+    : buildCompatibilityLaunch(managed.config, options.env ?? process.env);
   if (!isDeepStrictEqual(managed.config, currentConfig)) {
     await ccrClient.saveConfig(managed.config, { applyProfile: false });
   }
@@ -1298,6 +1300,7 @@ async function emitText(value, outPath, stdout = process.stdout) {
 
 function parseAirclaudeArgs(argv, validModes = new Set(["auto", "pro"])) {
   const parsed = { userArgs: [] };
+  let positionalMode;
   const passthroughIndex = argv.indexOf("--");
   const ownArgs = passthroughIndex === -1 ? argv : argv.slice(0, passthroughIndex);
   parsed.userArgs.push(...(passthroughIndex === -1 ? [] : argv.slice(passthroughIndex + 1)));
@@ -1319,13 +1322,15 @@ function parseAirclaudeArgs(argv, validModes = new Set(["auto", "pro"])) {
     } else if (["--repair-restore", "--restore-projects-dir", "--restore-backups-dir"].includes(arg)) {
       throw new Error(`${arg} was removed; AirKit no longer reads or rewrites Claude Code session model state`);
     } else if (validModes.has(arg) && !parsed.mode) {
-      if (parsed.plainClaude && arg !== "plain") {
-        throw new Error(`--plain cannot be combined with positional mode "${arg}"`);
-      }
+      positionalMode = arg;
       parsed.mode = arg;
     } else {
       parsed.userArgs.push(arg);
     }
+  }
+
+  if (parsed.plainClaude && positionalMode && positionalMode !== "plain") {
+    throw new Error(`--plain cannot be combined with positional mode "${positionalMode}"`);
   }
 
   return parsed;

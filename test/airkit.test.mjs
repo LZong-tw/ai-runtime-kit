@@ -3127,14 +3127,75 @@ test("plain Claude CLI rejects a different positional mode", async () => {
   const configDir = await mkdtemp(join(tmpdir(), "airkit-plain-mode-"));
 
   try {
-    await assert.rejects(
-      () => runAirclaudeCli(["--plain", "pro", "--dry-run", "--profile", "launch-example", "--config-dir", configDir], {
-        catalogPath,
-        commandExists: async () => true,
-        stdout: { write: () => {} },
-      }),
-      /--plain cannot be combined with positional mode "pro"/,
-    );
+    for (const args of [
+      ["--plain", "pro"],
+      ["pro", "--plain"],
+    ]) {
+      await assert.rejects(
+        () => runAirclaudeCli([...args, "--dry-run", "--profile", "launch-example", "--config-dir", configDir], {
+          catalogPath,
+          commandExists: async () => true,
+          stdout: { write: () => {} },
+        }),
+        /--plain cannot be combined with positional mode "pro"/,
+      );
+    }
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+    await rm(resolve(catalogPath, ".."), { force: true, recursive: true });
+  }
+});
+
+test("plain Claude CLI excludes compatibility MCP launch overlays", async () => {
+  const catalog = legacyCompatibilityCatalog();
+  catalog.profiles[0].launch.modes.plain = {};
+  const catalogPath = await writeLaunchCatalog(catalog);
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-plain-compatibility-"));
+  const spawnCalls = [];
+  const ccrClient = {
+    ensureGateway: async () => {},
+    getConfig: async () => ({
+      APIKEY: "$CCR_GATEWAY_TOKEN",
+      HOST: "$CCR_GATEWAY_HOST",
+      PORT: "$CCR_GATEWAY_PORT",
+      Providers: [],
+      Router: { builtInRules: {}, fallback: { mode: "off", models: [], retryCount: 1 }, rules: [] },
+      profile: { enabled: true, profiles: [] },
+    }),
+    getVersion: async () => "3.0.4",
+    saveConfig: async () => {},
+  };
+
+  try {
+    const exitCode = await runAirclaudeCli(["--plain", "--profile", "launch-example", "-p", "hi"], {
+      catalogPath,
+      ccrClient,
+      commandExists: async (command) => ["ccr", "claude"].includes(command),
+      configDir,
+      env: {
+        CCR_GATEWAY_HOST: "127.0.0.1",
+        CCR_GATEWAY_PORT: "4567",
+        CCR_GATEWAY_TOKEN: "fixture-gateway-token",
+        DEMO_API_KEY: "runtime-secret",
+        HOME: "/tmp/airkit-plain-home",
+      },
+      runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
+      runtimeVersions: passingRuntimeVersions(),
+      spawnCommand: (command, args, options) => {
+        spawnCalls.push({ args, command, env: options.env });
+        return { status: 0 };
+      },
+      stdout: { write: () => {} },
+    });
+
+    assert.equal(exitCode, 0);
+    assert.equal(spawnCalls.length, 1);
+    assert.deepEqual(spawnCalls[0].args, ["-p", "hi"]);
+    assert.equal(spawnCalls[0].env.AIRKIT_COMPATIBILITY_MCP_TOKEN, undefined);
+    assert.equal(spawnCalls[0].env.AIRKIT_COMPATIBILITY_MCP_URL, undefined);
+    assert.equal(spawnCalls[0].env.ANTHROPIC_CUSTOM_HEADERS, "x-airkit-mode: plain");
+    assert.equal(spawnCalls[0].env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY, "1");
+    assert.equal(spawnCalls[0].env.ANTHROPIC_BASE_URL, "http://127.0.0.1:4567");
   } finally {
     await rm(configDir, { force: true, recursive: true });
     await rm(resolve(catalogPath, ".."), { force: true, recursive: true });
