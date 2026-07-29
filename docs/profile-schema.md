@@ -362,7 +362,11 @@ output.
   never appear in the rendered snippet; when the helper is missing, the export
   is skipped with a warning on stderr.
 - `plainClaude`: optional boolean, valid only for a CCR-backed profile with a
-  launch contract. When `true`, it routes only the normal `claude` command to
+  usable launch contract: a non-empty `launch.binary`, a non-empty
+  `ccr.Providers` list, and a `ccr.Router.default` provider/model route that
+  resolves to one of those providers. It cannot be combined with a
+  `wrappers` entry named `claude`, which would shadow the generated delegate.
+  When `true`, it routes only the normal `claude` command to
   `airclaude --plain --profile <name>`; it does not affect `claude-sub`, adds
   no AirClaude prompt, permission, model, or plugin arguments, and fails
   closed when the supervised CCR gateway cannot recover.

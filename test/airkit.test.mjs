@@ -1348,6 +1348,43 @@ test("plainClaude requires a CCR-backed launch and a boolean value", async () =>
   }
 });
 
+test("plainClaude rejects a wrapper that would shadow its Claude delegate", () => {
+  const catalog = launchCatalog();
+  catalog.profiles[0].shell = {
+    plainClaude: true,
+    wrappers: [{ command: "airclaude", name: "claude" }],
+  };
+
+  assert.throws(
+    () => buildShellSnippet(catalog, "launch-example"),
+    /shell\.plainClaude cannot be combined with shell\.wrappers named "claude"/,
+  );
+});
+
+test("plainClaude requires a usable CCR launch contract", () => {
+  const catalog = launchCatalog();
+  const validProfile = catalog.profiles[0];
+  const invalidContracts = [
+    { ccr: {}, launch: {} },
+    { ccr: validProfile.ccr, launch: { ...validProfile.launch, binary: "" } },
+    { ccr: { Providers: [], Router: {} }, launch: validProfile.launch },
+  ];
+
+  for (const [index, contract] of invalidContracts.entries()) {
+    const profile = {
+      ...validProfile,
+      ...contract,
+      name: `invalid-plain-contract-${index}`,
+      shell: { plainClaude: true },
+    };
+
+    assert.throws(
+      () => buildShellSnippet({ profiles: [profile] }, profile.name),
+      /shell\.plainClaude requires a usable CCR launch contract/,
+    );
+  }
+});
+
 test("shell wrapper args can use config dir templates", async () => {
   const configDir = await mkdtemp(join(tmpdir(), "airkit-oss-wrapper-args-"));
   const catalog = {
