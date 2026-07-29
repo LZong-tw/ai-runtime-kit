@@ -307,6 +307,7 @@ function mergeManagedConfigArrays(currentConfig, baseConfig, managedPrefix) {
 
 export function buildShellSnippet(catalog, profileName, options = {}) {
   const profile = findProfile(catalog, profileName);
+  validateShell(profile);
   const shell = profile.shell ?? {};
   const templateVars = profileTemplateVars(profile, options.configDir);
   const lines = [
@@ -330,6 +331,14 @@ export function buildShellSnippet(catalog, profileName, options = {}) {
         "fi",
       );
     }
+  }
+
+  if (shell.plainClaude === true) {
+    lines.push(
+      "claude() {",
+      `  command airclaude --plain --profile ${quoteShell(profile.name)} -- "$@"`,
+      "}",
+    );
   }
 
   for (const wrapper of shell.wrappers ?? []) {
@@ -939,6 +948,14 @@ function validateLaunch(profile) {
 }
 
 function validateShell(profile) {
+  const plainClaude = profile.shell?.plainClaude;
+  if (plainClaude !== undefined && typeof plainClaude !== "boolean") {
+    throw new Error(`profile "${profile.name}" shell.plainClaude must be a boolean`);
+  }
+  if (plainClaude === true && (!profile.ccr || !profile.launch)) {
+    throw new Error(`profile "${profile.name}" shell.plainClaude requires CCR and launch`);
+  }
+
   const providerTokenOpRefs = profile.shell?.providerTokenOpRefs;
   if (providerTokenOpRefs !== undefined) {
     if (!isPlainObject(providerTokenOpRefs)) {
