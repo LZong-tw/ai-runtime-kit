@@ -258,7 +258,11 @@ test("enforces integer continuation bounds from one through thirty-two", () => {
 test("routes accepts provider-qualified selectors and rejects malformed shapes", () => {
   validateCompatibilityConfig({
     ...VALID_CONFIG,
-    routes: { default: "demo/steady-coder", background: "demo/cheap-coder" },
+    routes: {
+      default: "demo/steady-coder",
+      background: "demo/cheap-coder",
+      opus: "demo/opus-coder",
+    },
   });
   validateCompatibilityConfig({ ...VALID_CONFIG, routes: { default: "demo/steady-coder" } });
 
@@ -269,6 +273,10 @@ test("routes accepts provider-qualified selectors and rejects malformed shapes",
   assert.throws(
     () => validateCompatibilityConfig({ ...VALID_CONFIG, routes: { default: "bare-model" } }),
     /routes\.default must be a provider-qualified model selector/,
+  );
+  assert.throws(
+    () => validateCompatibilityConfig({ ...VALID_CONFIG, routes: { default: "demo/steady-coder", opus: "bare-model" } }),
+    /routes\.opus must be a provider-qualified model selector/,
   );
   assert.throws(
     () =>
@@ -370,6 +378,29 @@ test("mode header is normalized and malformed labels are ignored", () => {
   }
 });
 
+test("bare Claude models route by family without rewriting qualified selectors", () => {
+  const routes = {
+    default: "oneportal-anthropic/claude-sonnet-5",
+    background: "oneportal-anthropic/claude-sonnet-5",
+    opus: "web-litellm/claude-opus-5",
+  };
+  const body = (model) => ({ model, max_tokens: 8, messages: [] });
+
+  assert.equal(
+    routeBareClaudeModel(body("claude-opus-5"), routes).model,
+    "web-litellm/claude-opus-5",
+  );
+  assert.equal(
+    routeBareClaudeModel(body("claude-haiku-4-5-20251001"), routes).model,
+    "oneportal-anthropic/claude-sonnet-5",
+  );
+  assert.equal(
+    routeBareClaudeModel(body("claude-sonnet-5"), routes).model,
+    "oneportal-anthropic/claude-sonnet-5",
+  );
+  assert.equal(routeBareClaudeModel(body("provider/claude-opus-5"), routes), null);
+});
+
 test("bare Claude models route to background or default; qualified and foreign models do not", () => {
   const routes = { default: "demo/steady-coder", background: "demo/cheap-coder" };
   const body = (model) => ({ model, max_tokens: 8, messages: [] });
@@ -378,7 +409,8 @@ test("bare Claude models route to background or default; qualified and foreign m
     routeBareClaudeModel(body("claude-haiku-4-5-20251001"), routes).model,
     "demo/cheap-coder",
   );
-  assert.equal(routeBareClaudeModel(body("claude-fable-5"), routes).model, "demo/steady-coder");
+  assert.equal(routeBareClaudeModel(body("claude-fable-5"), routes), null);
+  assert.equal(routeBareClaudeModel(body("claude-sonet-5"), routes), null);
   assert.equal(routeBareClaudeModel(body("claude-sonnet-4-6"), routes).model, "demo/steady-coder");
   assert.equal(
     routeBareClaudeModel(body("claude-haiku-4-5"), { default: "demo/steady-coder" }).model,
@@ -389,8 +421,8 @@ test("bare Claude models route to background or default; qualified and foreign m
   assert.equal(routeBareClaudeModel(body("deepseek-v4-flash"), routes), null);
   assert.equal(routeBareClaudeModel(body("claude-fable-5"), undefined), null);
   assert.equal(routeBareClaudeModel({ max_tokens: 8 }, routes), null);
-  const original = body("claude-fable-5");
+  const original = body("claude-sonnet-4-6");
   const rewritten = routeBareClaudeModel(original, routes);
-  assert.equal(original.model, "claude-fable-5", "input body is not mutated");
+  assert.equal(original.model, "claude-sonnet-4-6", "input body is not mutated");
   assert.notEqual(rewritten, original);
 });
