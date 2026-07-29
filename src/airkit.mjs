@@ -224,8 +224,9 @@ function buildManagedRouterRules(baseConfig, managedRouteSelector, managedPrefix
     };
   };
   return [
-    rule("background", "AirKit background route", "claude-haiku", router.background ?? router.default),
-    rule("default", "AirKit default route", "claude-", router.default),
+    rule("background", "AirKit background route", "claude-haiku-", router.background ?? router.default),
+    rule("opus", "AirKit Opus route", "claude-opus-", router.opus ?? router.default),
+    rule("default", "AirKit default route", "claude-sonnet-", router.default),
   ];
 }
 
@@ -262,6 +263,7 @@ function bindManagedCompatibilityRoutes(ccrConfig, managedRouteSelector, modeCon
     ? {
       default: managedRouteSelector(router.default),
       background: managedRouteSelector(router.background ?? router.default),
+      ...(router.opus ? { opus: managedRouteSelector(router.opus) } : {}),
     }
     : null);
   const routes = routeTable(ccrConfig.Router);
@@ -306,6 +308,7 @@ function mergeManagedConfigArrays(currentConfig, baseConfig, managedPrefix) {
 
 export function buildShellSnippet(catalog, profileName, options = {}) {
   const profile = findProfile(catalog, profileName);
+  validateShell(profile);
   const shell = profile.shell ?? {};
   const templateVars = profileTemplateVars(profile, options.configDir);
   const lines = [
@@ -329,6 +332,14 @@ export function buildShellSnippet(catalog, profileName, options = {}) {
         "fi",
       );
     }
+  }
+
+  if (shell.plainClaude === true) {
+    lines.push(
+      "claude() {",
+      `  command airclaude --plain --profile ${quoteShell(profile.name)} -- "$@"`,
+      "}",
+    );
   }
 
   for (const wrapper of shell.wrappers ?? []) {
@@ -608,6 +619,7 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
   const managedProfileId = `airkit-${slug(profile.name)}-${slug(mode)}`;
   const gatewayEndpoint = profileGatewayEndpoint(ccrConfig);
   const renderedLaunchArgs = (launch.args ?? []).map((arg) => renderTemplateValue(arg, launchVars));
+  const plainClaude = options.plainClaude === true;
   // Passthrough arguments reach the same Claude argv as profile args, so both
   // go through the apiKeyHelper rejection.
   assertNoManagedApiKeyHelperOverride([...renderedLaunchArgs, ...(options.userArgs ?? [])]);
@@ -619,21 +631,23 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
       throw new Error(`launch.env must not set ${key}; the launched Claude inherits the caller's home`);
     }
   }
-  const claudeArgs = withHeartbeatPluginArg(
-    appendLaunchRuntimePrompts(
-      withAirclaudeModelArg(
-        renderedLaunchArgs,
+  const claudeArgs = plainClaude
+    ? []
+    : withHeartbeatPluginArg(
+      appendLaunchRuntimePrompts(
+        withAirclaudeModelArg(
+          renderedLaunchArgs,
+          launch.binary,
+          claudeModel,
+        ),
         launch.binary,
+        mode,
+        ccrConfig,
         claudeModel,
       ),
       launch.binary,
-      mode,
-      ccrConfig,
-      claudeModel,
-    ),
-    launch.binary,
-    configDir,
-  );
+      configDir,
+    );
 
   return {
     profile: basePlan.profile,
@@ -656,7 +670,7 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
       env: {
         ...airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, options.env),
         ...renderedLaunchEnv,
-        ...contextLaunchEnv(profile),
+        ...(plainClaude ? {} : contextLaunchEnv(profile)),
         ...(gatewayEndpoint ? gatewayBaseUrlEnv(gatewayEndpoint) : {}),
         ANTHROPIC_CUSTOM_HEADERS: mergedCustomHeaders((options.env ?? process.env).ANTHROPIC_CUSTOM_HEADERS, mode),
         // The old `ccr <profile> cli` path injected this from the managed
@@ -793,7 +807,9 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     configDir: plan.configDir,
     env: options.env,
   });
-  const compatibilityLaunch = buildCompatibilityLaunch(managed.config, options.env ?? process.env);
+  const compatibilityLaunch = options.plainClaude === true
+    ? { args: [], env: {} }
+    : buildCompatibilityLaunch(managed.config, options.env ?? process.env);
   if (!isDeepStrictEqual(managed.config, currentConfig)) {
     await ccrClient.saveConfig(managed.config, { applyProfile: false });
   }
@@ -933,6 +949,20 @@ function validateLaunch(profile) {
 }
 
 function validateShell(profile) {
+  const plainClaude = profile.shell?.plainClaude;
+  if (plainClaude !== undefined && typeof plainClaude !== "boolean") {
+    throw new Error(`profile "${profile.name}" shell.plainClaude must be a boolean`);
+  }
+  if (plainClaude === true && (!profile.ccr || !profile.launch)) {
+    throw new Error(`profile "${profile.name}" shell.plainClaude requires CCR and launch`);
+  }
+  if (plainClaude === true && !hasUsableCcrLaunchContract(profile)) {
+    throw new Error(`profile "${profile.name}" shell.plainClaude requires a usable CCR launch contract`);
+  }
+  if (plainClaude === true && (profile.shell?.wrappers ?? []).some((wrapper) => wrapper?.name === "claude")) {
+    throw new Error(`profile "${profile.name}" shell.plainClaude cannot be combined with shell.wrappers named "claude"`);
+  }
+
   const providerTokenOpRefs = profile.shell?.providerTokenOpRefs;
   if (providerTokenOpRefs !== undefined) {
     if (!isPlainObject(providerTokenOpRefs)) {
@@ -976,6 +1006,24 @@ function validateShell(profile) {
       throw new Error(`profile "${profile.name}" shell export "${entry.name}" command must be a string`);
     }
   }
+}
+
+function hasUsableCcrLaunchContract(profile) {
+  const { ccr, launch } = profile;
+  if (!isPlainObject(launch) || typeof launch.binary !== "string" || launch.binary.trim() === "") return false;
+  if (!isPlainObject(ccr) || !Array.isArray(ccr.Providers) || ccr.Providers.length === 0 || !isPlainObject(ccr.Router)) {
+    return false;
+  }
+
+  const defaultRoute = ccr.Router.default;
+  if (typeof defaultRoute !== "string") return false;
+  const { model, provider } = splitRoute(defaultRoute);
+  if (!provider || !model) return false;
+
+  return ccr.Providers.some((candidate) => isPlainObject(candidate)
+    && candidate.name === provider
+    && Array.isArray(candidate.models)
+    && candidate.models.includes(model));
 }
 
 function validateCcr(profileName, ccr) {
@@ -1266,7 +1314,8 @@ export async function runAirclaudeCli(argv = process.argv.slice(2), options = {}
     doctor: parsed.doctor,
     dryRun: parsed.dryRun || parsed.doctor,
     launch: !parsed.dryRun && !parsed.doctor,
-    mode: parsed.mode,
+    mode: parsed.plainClaude ? "plain" : parsed.mode,
+    plainClaude: parsed.plainClaude,
     userArgs: parsed.userArgs,
   });
   stdout.write(renderLaunchResult(result, { doctor: parsed.doctor, dryRun: parsed.dryRun }));
@@ -1293,6 +1342,7 @@ async function emitText(value, outPath, stdout = process.stdout) {
 
 function parseAirclaudeArgs(argv, validModes = new Set(["auto", "pro"])) {
   const parsed = { userArgs: [] };
+  let positionalMode;
   const passthroughIndex = argv.indexOf("--");
   const ownArgs = passthroughIndex === -1 ? argv : argv.slice(0, passthroughIndex);
   parsed.userArgs.push(...(passthroughIndex === -1 ? [] : argv.slice(passthroughIndex + 1)));
@@ -1305,6 +1355,8 @@ function parseAirclaudeArgs(argv, validModes = new Set(["auto", "pro"])) {
       parsed.configDir = ownArgs[++index];
     } else if (arg === "--mode") {
       parsed.mode = ownArgs[++index];
+    } else if (arg === "--plain") {
+      parsed.plainClaude = true;
     } else if (arg === "--dry-run") {
       parsed.dryRun = true;
     } else if (arg === "--doctor") {
@@ -1312,10 +1364,15 @@ function parseAirclaudeArgs(argv, validModes = new Set(["auto", "pro"])) {
     } else if (["--repair-restore", "--restore-projects-dir", "--restore-backups-dir"].includes(arg)) {
       throw new Error(`${arg} was removed; AirKit no longer reads or rewrites Claude Code session model state`);
     } else if (validModes.has(arg) && !parsed.mode) {
+      positionalMode = arg;
       parsed.mode = arg;
     } else {
       parsed.userArgs.push(arg);
     }
+  }
+
+  if (parsed.plainClaude && positionalMode && positionalMode !== "plain") {
+    throw new Error(`--plain cannot be combined with positional mode "${positionalMode}"`);
   }
 
   return parsed;

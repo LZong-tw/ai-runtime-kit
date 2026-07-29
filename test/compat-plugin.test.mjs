@@ -1759,7 +1759,7 @@ async function observePromptSettlement(pending, response) {
   return outcome;
 }
 
-test("bare Claude models are routed before raw passthrough; qualified models pass byte-identical", async () => {
+test("known bare Claude families are routed before raw passthrough; unknown and qualified models pass byte-identical", async () => {
   const forwarded = [];
   const routes = [];
   await plugin.setup({
@@ -1798,12 +1798,12 @@ test("bare Claude models are routed before raw passthrough; qualified models pas
   });
   assert.equal(JSON.parse(background.sent.toString()).model, "demo-provider/cheap-coder");
 
-  const fallthrough = await invoke({
+  const unknown = await invoke({
     model: "claude-fable-5",
     max_tokens: 8,
     messages: [{ role: "user", content: "hi" }],
   });
-  assert.equal(JSON.parse(fallthrough.sent.toString()).model, "demo-provider/steady-coder");
+  assert.deepEqual(unknown.sent, unknown.raw, "unknown Claude family stays byte-identical");
 
   const qualified = await invoke({
     model: "other-provider/claude-sonnet",
