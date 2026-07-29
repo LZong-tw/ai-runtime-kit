@@ -44,10 +44,31 @@ const reusableRuntimeLessonsPrompt = [
   "When a command fails inside a shell wrapper, first verify whether the command is a shell wrapper or the real binary with type, command -v, or whence. Rule out local shell wrapper/helper leakage before diagnosing the remote service.",
 ].join(" ");
 
-export async function loadCatalog(path = defaultCatalogPath) {
+export async function loadCatalog(path = defaultCatalogPath, options = {}) {
   const raw = await readFile(path, "utf8");
   const catalog = JSON.parse(raw);
   validateCatalog(catalog);
+
+  if (options.includeLocal !== false) {
+    const localPath = join(dirname(path), "catalog.local.json");
+    try {
+      const localRaw = await readFile(localPath, "utf8");
+      const localCatalog = JSON.parse(localRaw);
+      if (localCatalog && Array.isArray(localCatalog.profiles)) {
+        for (const p of localCatalog.profiles) {
+          const existingIdx = catalog.profiles.findIndex((item) => item.name === p.name);
+          if (existingIdx >= 0) {
+            catalog.profiles[existingIdx] = p;
+          } else {
+            catalog.profiles.push(p);
+          }
+        }
+      }
+    } catch {
+      // Ignore missing or unreadable local catalog
+    }
+  }
+
   return catalog;
 }
 
@@ -909,6 +930,26 @@ function validateLaunch(profile) {
 }
 
 function validateShell(profile) {
+  const providerTokenOpRefs = profile.shell?.providerTokenOpRefs;
+  if (providerTokenOpRefs !== undefined) {
+    if (!isPlainObject(providerTokenOpRefs)) {
+      throw new Error(`profile "${profile.name}" shell.providerTokenOpRefs must be an object`);
+    }
+    const providers = new Map((profile.ccr?.Providers ?? []).map((provider) => [provider.name, provider]));
+    for (const [providerName, ref] of Object.entries(providerTokenOpRefs)) {
+      const provider = providers.get(providerName);
+      if (!provider) {
+        throw new Error(`profile "${profile.name}" providerTokenOpRefs references unknown provider: ${providerName}`);
+      }
+      if (typeof ref !== "string" || !ref.startsWith("op://")) {
+        throw new Error(`profile "${profile.name}" providerTokenOpRefs.${providerName} must be an op:// reference`);
+      }
+      if (!/^\$[A-Z_][A-Z0-9_]*$/.test(String(provider.api_key ?? ""))) {
+        throw new Error(`profile "${profile.name}" providerTokenOpRefs.${providerName} requires an environment-placeholder api_key`);
+      }
+    }
+  }
+
   const exports = profile.shell?.exports;
   if (exports === undefined) return;
   if (!Array.isArray(exports)) {
@@ -2120,19 +2161,34 @@ async function resolveProviderApiKeys(catalog, profileName, plan, options) {
   // credential source; fall through to the profile's op reference.
   const nested = Boolean(env.AIRCLAUDE_PROFILE || env.AIRCLAUDE_MODE);
   const apiKeys = {};
+  const providerTokenOpRefs = profile.shell?.providerTokenOpRefs ?? {};
+  const commandExists = options.commandExists ?? commandExistsOnPath;
+  const runCommand = options.runCommand ?? runCommandSync;
+  const timeoutMs = options.commandTimeoutMs ?? 30000;
+  for (const [providerName, ref] of Object.entries(providerTokenOpRefs)) {
+    if (!(await commandExists("op"))) {
+      throw new Error(`op not found; cannot resolve ${ref}`);
+    }
+    const token = await runCommand("op", ["read", ref, "--no-newline"], { env, timeoutMs });
+    if (!token.ok) {
+      throw new Error(`unable to read ${ref} from 1Password; run op signin and retry`);
+    }
+    apiKeys[providerName] = token.stdout;
+  }
   const unresolved = [];
   for (const provider of profile.ccr?.Providers ?? []) {
     const match = String(provider.api_key ?? "").match(/^\$([A-Za-z_][A-Za-z0-9_]*)$/);
     if (!match) continue;
+    if (Object.hasOwn(providerTokenOpRefs, provider.name)) continue;
     if (env[match[1]] && !nested) apiKeys[provider.name] = env[match[1]];
     else unresolved.push({ providerName: provider.name, envName: match[1] });
   }
   if (unresolved.length > 0 && plan.credential.ccrTokenOpRef) {
     const auth = await resolveCcrAuthEnv(plan, {
-      commandExists: options.commandExists ?? commandExistsOnPath,
+      commandExists,
       env,
-      runCommand: options.runCommand ?? runCommandSync,
-      timeoutMs: options.commandTimeoutMs ?? 30000,
+      runCommand,
+      timeoutMs,
     });
     if (!auth.ok) throw new Error(auth.reason);
     if (auth.env.ANTHROPIC_AUTH_TOKEN) {

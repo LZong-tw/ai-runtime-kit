@@ -2694,6 +2694,108 @@ test("prepareLaunch resolves ccrTokenOpRef once for the CCR 3 config merge", asy
   }
 });
 
+test("provider-specific credential references require configured placeholder providers", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-provider-token-schema-"));
+  const catalog = launchCatalog();
+  catalog.profiles[0].ccr.Providers.push({
+    name: "secondary-provider",
+    type: "openai_chat_completions",
+    api_base_url: "https://example.invalid/v1/chat/completions",
+    api_key: "$SECONDARY_PROVIDER_API_KEY",
+    models: ["secondary-model"],
+  });
+  catalog.profiles[0].shell = {
+    ccrTokenOpRef: "op://Test/API/primary",
+    providerTokenOpRefs: { "secondary-provider": "op://Test/API/secondary" },
+  };
+
+  const cases = [
+    [catalog, null],
+    [{ ...catalog, profiles: [{ ...catalog.profiles[0], shell: {
+      ...catalog.profiles[0].shell,
+      providerTokenOpRefs: { unknown: "op://Test/API/secondary" },
+    } }] }, /providerTokenOpRefs references unknown provider: unknown/],
+    [{ ...catalog, profiles: [{ ...catalog.profiles[0], shell: {
+      ...catalog.profiles[0].shell,
+      providerTokenOpRefs: { "secondary-provider": "not-an-op-reference" },
+    } }] }, /providerTokenOpRefs\.secondary-provider must be an op:\/\/ reference/],
+    [{ ...catalog, profiles: [{ ...catalog.profiles[0], ccr: {
+      ...catalog.profiles[0].ccr,
+      Providers: catalog.profiles[0].ccr.Providers.map((provider) => provider.name === "secondary-provider"
+        ? { ...provider, api_key: "literal-api-key" }
+        : provider),
+    } }] }, /providerTokenOpRefs\.secondary-provider requires an environment-placeholder api_key/],
+  ];
+
+  try {
+    for (const [index, [candidate, expected]] of cases.entries()) {
+      const catalogPath = join(root, `${index}.json`);
+      await writeFile(catalogPath, `${JSON.stringify(candidate)}\n`);
+      if (expected) await assert.rejects(loadCatalog(catalogPath, { includeLocal: false }), expected);
+      else await assert.doesNotReject(loadCatalog(catalogPath, { includeLocal: false }));
+    }
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("provider-specific credential references isolate managed provider tokens", async () => {
+  const catalog = launchCatalog();
+  catalog.profiles[0].ccr.Providers[0].api_key = "$ANTHROPIC_AUTH_TOKEN";
+  catalog.profiles[0].ccr.Providers.push({
+    name: "secondary-provider",
+    type: "openai_chat_completions",
+    api_base_url: "https://example.invalid/v1/chat/completions",
+    api_key: "$SECONDARY_PROVIDER_API_KEY",
+    models: ["secondary-model"],
+  });
+  catalog.profiles[0].shell = {
+    ccrTokenOpRef: "op://Test/API/primary",
+    providerTokenOpRefs: { "secondary-provider": "op://Test/API/secondary" },
+  };
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-provider-token-resolution-"));
+  const saved = [];
+  const calls = [];
+
+  try {
+    await prepareLaunch(catalog, "launch-example", {
+      configDir,
+      ccrClient: ccrTestClient(saved),
+      commandExists: async () => true,
+      env: { HOME: configDir },
+      launch: false,
+      runtimeVersions: passingRuntimeVersions(),
+      runCommand: async (command, args) => {
+        calls.push({ command, args });
+        return {
+          ok: true,
+          status: 0,
+          stdout: args[1] === "op://Test/API/secondary" ? "secondary-token-sentinel" : "primary-token-sentinel",
+        };
+      },
+    });
+
+    assert.deepEqual(calls, [
+      { command: "op", args: ["read", "op://Test/API/secondary", "--no-newline"] },
+      { command: "op", args: ["read", "op://Test/API/primary", "--no-newline"] },
+    ]);
+    assert.equal(
+      saved[0].Providers.find((provider) => provider.id === "airkit-provider-launch-example-demo").api_key,
+      "primary-token-sentinel",
+    );
+    assert.equal(
+      saved[0].Providers.find((provider) => provider.id === "airkit-provider-launch-example-secondary-provider").api_key,
+      "secondary-token-sentinel",
+    );
+    const renderedCcr = JSON.stringify(airkitRuntime.buildCcrConfig(catalog, "launch-example", { configDir }));
+    const renderedShell = buildShellSnippet(catalog, "launch-example", { configDir });
+    assert.doesNotMatch(renderedCcr, /(?:primary|secondary)-token-sentinel/);
+    assert.doesNotMatch(renderedShell, /(?:primary|secondary)-token-sentinel/);
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
 test("a launch from inside a launched session never adopts the gateway key as the provider credential", async () => {
   const catalog = compatibilityCatalog();
   for (const provider of catalog.profiles[0].ccr.Providers) {
