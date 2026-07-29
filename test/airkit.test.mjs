@@ -540,6 +540,42 @@ test("CCR compatibility opt-in resolves the installed plugin and preserves unrel
   assert.deepEqual(repeated.config, merged.config);
 });
 
+test("CCR compatibility preserves the managed opus route selector", () => {
+  const catalog = compatibilityCatalog();
+  catalog.profiles[0].ccr.Providers.push(
+    {
+      name: "oneportal-anthropic",
+      type: "anthropic_messages",
+      api_base_url: "https://oneportal.example.invalid/v1/messages",
+      api_key: "$DEMO_API_KEY",
+      models: ["claude-sonnet-5"],
+    },
+    {
+      name: "web-litellm-anthropic",
+      type: "anthropic_messages",
+      api_base_url: "https://litellm.example.invalid/v1/messages",
+      api_key: "$DEMO_API_KEY",
+      models: ["claude-opus-5"],
+    },
+  );
+  catalog.profiles[0].ccr.Router = {
+    default: "oneportal-anthropic,claude-sonnet-5",
+    background: "oneportal-anthropic,claude-sonnet-5",
+    opus: "web-litellm-anthropic,claude-opus-5",
+  };
+
+  const merged = airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {}, {
+    configDir: "/tmp/airkit-compatibility-opus",
+  });
+  const plugin = merged.config.plugins.find((candidate) => candidate.id === "airkit-compatibility");
+
+  assert.deepEqual(plugin.config.routes, {
+    default: "airkit-provider-launch-example-oneportal-anthropic/claude-sonnet-5",
+    background: "airkit-provider-launch-example-oneportal-anthropic/claude-sonnet-5",
+    opus: "airkit-provider-launch-example-web-litellm-anthropic/claude-opus-5",
+  });
+});
+
 test("CCR compatibility binds every family fallback to its managed provider", () => {
   const catalog = compatibilityCatalog();
   catalog.profiles[0].ccr.Providers.push({
