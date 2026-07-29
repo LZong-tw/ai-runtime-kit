@@ -262,6 +262,7 @@ function bindManagedCompatibilityRoutes(ccrConfig, managedRouteSelector, modeCon
     ? {
       default: managedRouteSelector(router.default),
       background: managedRouteSelector(router.background ?? router.default),
+      ...(router.opus ? { opus: managedRouteSelector(router.opus) } : {}),
     }
     : null);
   const routes = routeTable(ccrConfig.Router);

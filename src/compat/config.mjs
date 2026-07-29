@@ -24,7 +24,7 @@ const CONFIG_KEYS = new Set([
 const FALLBACK_KEYS = new Set(["provider", "model", "maxContinuationTurns"]);
 const FAMILY_KEYS = new Set(["mode", "fallback"]);
 const FAMILY_FALLBACK_KEYS = new Set(["provider", "model"]);
-const ROUTE_KEYS = new Set(["default", "background"]);
+const ROUTE_KEYS = new Set(["default", "background", "opus"]);
 const ROUTE_SELECTOR_PATTERN = /^[a-z0-9][a-z0-9._-]*\/\S+$/i;
 const MODE_PATTERN = /^[a-z0-9][a-z0-9._-]*$/i;
 
@@ -144,9 +144,11 @@ export function routeBareClaudeModel(body, routes) {
   if (!isRecord(body) || typeof body.model !== "string") return null;
   if (!isRecord(routes)) return null;
   if (body.model.includes("/") || !body.model.startsWith("claude-")) return null;
-  const target = body.model.startsWith("claude-haiku")
-    ? routes.background ?? routes.default
-    : routes.default;
+  const target = body.model.startsWith("claude-opus-")
+    ? routes.opus ?? routes.default
+    : body.model.startsWith("claude-haiku-")
+      ? routes.background ?? routes.default
+      : routes.default;
   if (typeof target !== "string" || target === "" || target === body.model) return null;
   return { ...body, model: target };
 }
