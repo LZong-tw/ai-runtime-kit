@@ -924,6 +924,36 @@ test("ordinary Messages requests preserve raw bytes and abort propagation", asyn
   assert.deepEqual(response.body, Buffer.from("raw-response"));
 });
 
+test("ordinary Messages requests translate Claude effort before OpenAI-compatible forwarding", async () => {
+  const calls = [];
+  const fixture = await createPluginFixture({
+    coreClient: createPluginCoreClient({
+      async forwardRaw(input) {
+        calls.push(JSON.parse(input.body.toString("utf8")));
+      },
+    }),
+  });
+  const body = {
+    model: "oneportal/deepseek-v4-flash",
+    max_tokens: 8,
+    output_config: { effort: "low" },
+    messages: [{ role: "user", content: "hi" }],
+  };
+
+  await fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify(body))),
+    createRecordingResponse(),
+    fixture.helpers,
+  );
+
+  assert.deepEqual(calls, [{
+    model: "oneportal/deepseek-v4-flash",
+    max_tokens: 8,
+    reasoning_effort: "high",
+    messages: [{ role: "user", content: "hi" }],
+  }]);
+});
+
 test("Claude Code WebFetch client requests fail closed to the Anthropic route", async () => {
   const calls = [];
   const fixture = await createPluginFixture({

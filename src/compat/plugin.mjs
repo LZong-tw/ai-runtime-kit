@@ -15,6 +15,7 @@ import {
   validateCompatibilityConfig,
   validateCompatibilityProviderBinding,
 } from "./config.mjs";
+import { rewriteClaudeEffortForOpenAI } from "./effort.mjs";
 import { inspectPendingServerHistory } from "./server-history.mjs";
 import { inspectServerToolRequest } from "./server-tools.mjs";
 
@@ -127,8 +128,11 @@ function createMessagesHandler({ config, coreClient, policies }) {
       // caller's own mode label picks the table.
       const mode = requestedMode(request?.headers);
       const routed = routeBareClaudeModel(body, resolveModeRoutes(config, mode));
-      const outboundBody = routed ?? body;
-      const outboundRaw = routed ? Buffer.from(JSON.stringify(routed), "utf8") : rawBody;
+      const routedBody = routed ?? body;
+      const outboundBody = rewriteClaudeEffortForOpenAI(routedBody);
+      const outboundRaw = outboundBody === body
+        ? rawBody
+        : Buffer.from(JSON.stringify(outboundBody), "utf8");
       const compat = isRecord(outboundBody) && isConfiguredCompatibilityRequest(outboundBody, policies);
       logRouteDecision({
         enabled: config.routeLog,
