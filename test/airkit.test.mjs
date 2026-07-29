@@ -12,6 +12,7 @@ import {
   parseTaskCapsule,
   processContextHook,
 } from "../src/context-heartbeat.mjs";
+import { validateCompatibilityProviderBinding } from "../src/compat/config.mjs";
 
 import {
   buildLaunchPlan,
@@ -537,6 +538,38 @@ test("CCR compatibility opt-in resolves the installed plugin and preserves unrel
     { configDir: "/tmp/airkit-compatibility" },
   );
   assert.deepEqual(repeated.config, merged.config);
+});
+
+test("CCR compatibility binds every family fallback to its managed provider", () => {
+  const catalog = compatibilityCatalog();
+  catalog.profiles[0].ccr.Providers.push({
+    name: "advisor-anthropic",
+    type: "anthropic_messages",
+    api_base_url: "https://advisor.example.invalid/v1/messages",
+    api_key: "$DEMO_API_KEY",
+    models: ["claude-opus-5"],
+  });
+  catalog.profiles[0].ccr.plugins[0].config.advisor = {
+    mode: "anthropic-fallback",
+    fallback: {
+      provider: "advisor-anthropic",
+      model: "claude-opus-5",
+    },
+  };
+
+  const merged = airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {}, {
+    configDir: "/tmp/airkit-family-fallback",
+  });
+  const plugin = merged.config.plugins.find((candidate) => candidate.id === "airkit-compatibility");
+
+  assert.equal(
+    plugin.config.advisor.fallback.provider,
+    "airkit-provider-launch-example-advisor-anthropic",
+  );
+  assert.doesNotThrow(() => validateCompatibilityProviderBinding(
+    plugin.config,
+    merged.config.Providers,
+  ));
 });
 
 test("a non-lowercase catalog mode renders one canonical label everywhere", () => {

@@ -1,5 +1,6 @@
 import { compatibilityFallbackSelector, resolveCompatibilityPolicies } from "./config.mjs";
 import { inspectPendingServerHistory } from "./server-history.mjs";
+import { inspectServerToolRequest } from "./server-tools.mjs";
 
 const SAFE_HEADER_NAMES = new Set([
   "accept",
@@ -28,7 +29,7 @@ const SAFE_HEADER_NAMES = new Set([
 
 export function createFallbackRouter({ coreClient, config }) {
   if (typeof coreClient !== "function") throw new TypeError("fallback coreClient must be a function");
-  const { fallback } = resolveCompatibilityPolicies(config, {});
+  const { fallback, familyFallbacks } = resolveCompatibilityPolicies(config, {});
 
   return async function route({ body, headers = {}, signal } = {}) {
     if (body === null || typeof body !== "object" || Array.isArray(body)) {
@@ -37,14 +38,18 @@ export function createFallbackRouter({ coreClient, config }) {
     if (signal?.aborted) throw new DOMException("This operation was aborted", "AbortError");
 
     const history = inspectPendingServerHistory(body);
-    if (history.continuationTurns >= fallback.maxContinuationTurns) {
+    const families = new Set([...history.families, ...inspectServerToolRequest(body).families]);
+    const selectedFallback = families.has("advisor") && familyFallbacks.advisor !== undefined
+      ? familyFallbacks.advisor
+      : fallback;
+    if (history.continuationTurns >= selectedFallback.maxContinuationTurns) {
       throw Object.assign(new Error("Server-tool compatibility continuation limit reached"), {
         code: "compatibility_continuation_limit",
       });
     }
 
     return coreClient({
-      body: { ...body, model: compatibilityFallbackSelector(fallback) },
+      body: { ...body, model: compatibilityFallbackSelector(selectedFallback) },
       headers: copyAllowedHeaders(headers),
       signal,
     });

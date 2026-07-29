@@ -161,7 +161,13 @@ entry in `ccr.plugins`:
       "model": "claude-sonnet",
       "maxContinuationTurns": 8
     },
-    "advisor": { "mode": "anthropic-fallback" },
+    "advisor": {
+      "mode": "anthropic-fallback",
+      "fallback": {
+        "provider": "your-advisor-anthropic-provider",
+        "model": "claude-opus"
+      }
+    },
     "codeExecution": { "mode": "anthropic-fallback" },
     "mcpConnector": { "mode": "anthropic-fallback" },
     "toolSearch": { "mode": "bridge" },
@@ -176,10 +182,14 @@ The provider and model strings above are schema examples, not defaults.
 whose type is exactly `anthropic_messages`; `fallback.model` must be a bare
 Anthropic-family model in that provider's `models`. AirKit binds the source
 name to its managed CCR ID and validates the complete configuration before CCR
-RPC, managed saves, or credential resolution.
+RPC, managed saves, or credential resolution. Any family may optionally declare
+its own `fallback` with `provider` and `model`; that provider follows the same
+Anthropic Messages and local-model validation, and AirKit binds it to its own
+managed CCR ID. Families without an override inherit the shared fallback and
+its `maxContinuationTurns`.
 Removed Advisor bridge fields such as `advisor.model` and
 `advisor.fallbackModel` are rejected with a migration error; their replacement
-is the single generic `fallback` section.
+is either the shared `fallback` section or `advisor.fallback`.
 
 The supported source modes are:
 

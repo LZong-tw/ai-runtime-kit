@@ -22,7 +22,8 @@ const CONFIG_KEYS = new Set([
   ...Object.keys(FAMILY_MODES),
 ]);
 const FALLBACK_KEYS = new Set(["provider", "model", "maxContinuationTurns"]);
-const FAMILY_KEYS = new Set(["mode"]);
+const FAMILY_KEYS = new Set(["mode", "fallback"]);
+const FAMILY_FALLBACK_KEYS = new Set(["provider", "model"]);
 const ROUTE_KEYS = new Set(["default", "background"]);
 const ROUTE_SELECTOR_PATTERN = /^[a-z0-9][a-z0-9._-]*\/\S+$/i;
 const MODE_PATTERN = /^[a-z0-9][a-z0-9._-]*$/i;
@@ -37,18 +38,7 @@ export function validateCompatibilityConfig(config) {
   assertRecord(config, "compatibility config");
   rejectUnknownKeys(config, CONFIG_KEYS, "compatibility");
 
-  assertRecord(config.fallback, "fallback", true);
-  rejectUnknownKeys(config.fallback, FALLBACK_KEYS, "fallback");
-  if (
-    typeof config.fallback.provider !== "string" ||
-    !/^[a-z0-9][a-z0-9._-]*$/i.test(config.fallback.provider)
-  ) {
-    throw new Error("fallback.provider must be a provider identifier");
-  }
-  assertAnthropicFamilyModel(config.fallback.model, "fallback.model");
-  if (config.fallback.model.includes("/")) {
-    throw new Error("fallback.model must be a provider-local Claude model identifier");
-  }
+  validateFallback(config.fallback, "fallback", FALLBACK_KEYS, true);
   if (
     !Number.isInteger(config.fallback.maxContinuationTurns) ||
     config.fallback.maxContinuationTurns < 1 ||
@@ -62,6 +52,9 @@ export function validateCompatibilityConfig(config) {
     assertRecord(definition, family, true);
     if (family === "advisor") rejectRemovedAdvisorConfig(definition);
     rejectUnknownKeys(definition, FAMILY_KEYS, family);
+    if (definition.fallback !== undefined) {
+      validateFallback(definition.fallback, `${family}.fallback`, FAMILY_FALLBACK_KEYS, false);
+    }
     if (!modes.includes(definition.mode)) {
       throw new Error(`${family}.mode must be one of: ${modes.join(", ")}`);
     }
@@ -173,8 +166,18 @@ export function resolveCompatibilityPolicies(config, nativeCapabilities = {}) {
     toolSearch: config.toolSearch.mode === "bridge" ? "bridge" : "anthropic-fallback",
     mcpConnector: "anthropic-fallback",
   });
+  const familyFallbacks = Object.freeze(Object.fromEntries(
+    Object.keys(FAMILY_MODES).flatMap((family) => {
+      const override = config[family].fallback;
+      return override === undefined ? [] : [[family, Object.freeze({
+        provider: override.provider,
+        model: assertAnthropicFamilyModel(override.model, `${family}.fallback.model`),
+        maxContinuationTurns: fallback.maxContinuationTurns,
+      })]];
+    }),
+  ));
 
-  return Object.freeze({ fallback, policies });
+  return Object.freeze({ fallback, familyFallbacks, policies });
 }
 
 export function compatibilityFallbackSelector(fallback) {
@@ -182,18 +185,40 @@ export function compatibilityFallbackSelector(fallback) {
 }
 
 export function validateCompatibilityProviderBinding(config, providers) {
-  const matches = (providers ?? []).filter(({ name }) => name === config.fallback.provider);
+  const { fallback, familyFallbacks } = resolveCompatibilityPolicies(config, {});
+  for (const [label, selected] of [["fallback", fallback], ...Object.entries(familyFallbacks)]) {
+    validateFallbackProvider(selected, providers, label);
+  }
+}
+
+function validateFallbackProvider(fallback, providers, label) {
+  const matches = (providers ?? []).filter(({ name }) => name === fallback.provider);
   if (matches.length !== 1) {
-    throw new Error(`fallback provider must resolve exactly once: ${config.fallback.provider}`);
+    throw new Error(`${label} provider must resolve exactly once: ${fallback.provider}`);
   }
   const [provider] = matches;
   if (provider.type !== "anthropic_messages") {
     throw new Error(`fallback provider must use anthropic_messages: ${provider.name}`);
   }
-  if (!provider.models?.includes(config.fallback.model)) {
-    throw new Error(`fallback model is missing from provider ${provider.name}: ${config.fallback.model}`);
+  if (!provider.models?.includes(fallback.model)) {
+    throw new Error(`${label} model is missing from provider ${provider.name}: ${fallback.model}`);
   }
   return provider;
+}
+
+function validateFallback(fallback, label, allowedKeys, requireContinuationLimit) {
+  assertRecord(fallback, label, true);
+  rejectUnknownKeys(fallback, allowedKeys, label);
+  if (typeof fallback.provider !== "string" || !/^[a-z0-9][a-z0-9._-]*$/i.test(fallback.provider)) {
+    throw new Error(`${label}.provider must be a provider identifier`);
+  }
+  assertAnthropicFamilyModel(fallback.model, `${label}.model`);
+  if (fallback.model.includes("/")) {
+    throw new Error(`${label}.model must be a provider-local Claude model identifier`);
+  }
+  if (requireContinuationLimit === true && (!Number.isInteger(fallback.maxContinuationTurns) || fallback.maxContinuationTurns < 1 || fallback.maxContinuationTurns > 32)) {
+    throw new Error("fallback.maxContinuationTurns must be an integer from 1 through 32");
+  }
 }
 
 function resolveNativeFirst(mode, nativeCapability) {
