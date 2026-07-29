@@ -224,8 +224,9 @@ function buildManagedRouterRules(baseConfig, managedRouteSelector, managedPrefix
     };
   };
   return [
-    rule("background", "AirKit background route", "claude-haiku", router.background ?? router.default),
-    rule("default", "AirKit default route", "claude-", router.default),
+    rule("background", "AirKit background route", "claude-haiku-", router.background ?? router.default),
+    rule("opus", "AirKit Opus route", "claude-opus-", router.opus ?? router.default),
+    rule("default", "AirKit default route", "claude-sonnet-", router.default),
   ];
 }
 
