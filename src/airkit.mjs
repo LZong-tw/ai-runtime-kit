@@ -955,6 +955,12 @@ function validateShell(profile) {
   if (plainClaude === true && (!profile.ccr || !profile.launch)) {
     throw new Error(`profile "${profile.name}" shell.plainClaude requires CCR and launch`);
   }
+  if (plainClaude === true && !hasUsableCcrLaunchContract(profile)) {
+    throw new Error(`profile "${profile.name}" shell.plainClaude requires a usable CCR launch contract`);
+  }
+  if (plainClaude === true && (profile.shell?.wrappers ?? []).some((wrapper) => wrapper?.name === "claude")) {
+    throw new Error(`profile "${profile.name}" shell.plainClaude cannot be combined with shell.wrappers named "claude"`);
+  }
 
   const providerTokenOpRefs = profile.shell?.providerTokenOpRefs;
   if (providerTokenOpRefs !== undefined) {
@@ -999,6 +1005,24 @@ function validateShell(profile) {
       throw new Error(`profile "${profile.name}" shell export "${entry.name}" command must be a string`);
     }
   }
+}
+
+function hasUsableCcrLaunchContract(profile) {
+  const { ccr, launch } = profile;
+  if (!isPlainObject(launch) || typeof launch.binary !== "string" || launch.binary.trim() === "") return false;
+  if (!isPlainObject(ccr) || !Array.isArray(ccr.Providers) || ccr.Providers.length === 0 || !isPlainObject(ccr.Router)) {
+    return false;
+  }
+
+  const defaultRoute = ccr.Router.default;
+  if (typeof defaultRoute !== "string") return false;
+  const { model, provider } = splitRoute(defaultRoute);
+  if (!provider || !model) return false;
+
+  return ccr.Providers.some((candidate) => isPlainObject(candidate)
+    && candidate.name === provider
+    && Array.isArray(candidate.models)
+    && candidate.models.includes(model));
 }
 
 function validateCcr(profileName, ccr) {
