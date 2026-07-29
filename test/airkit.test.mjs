@@ -1295,6 +1295,59 @@ test("generated shell wrappers delegate to the managed CCR 3 launch path", async
   assert.doesNotMatch(snippet, /\n  cclaude /);
 });
 
+test("plainClaude renders a nonrecursive raw Claude delegate", () => {
+  const catalog = launchCatalog();
+  catalog.profiles[0].shell = { plainClaude: true };
+
+  const snippet = buildShellSnippet(catalog, "launch-example", {
+    configDir: "/tmp/airkit-test",
+  });
+
+  assert.match(
+    snippet,
+    /claude\(\) \{\n  command airclaude --plain --profile 'launch-example' -- "\$@"\n\}/,
+  );
+  assert.doesNotMatch(snippet, /ANTHROPIC_AUTH_TOKEN_OP_REF|api-key-helper/);
+});
+
+test("plainClaude requires a CCR-backed launch and a boolean value", async () => {
+  const catalog = launchCatalog();
+  const nonCcrProfile = {
+    ...catalog.profiles[0],
+    ccr: undefined,
+    name: "non-ccr",
+    shell: { plainClaude: true },
+  };
+  const noLaunchProfile = {
+    ...catalog.profiles[0],
+    launch: undefined,
+    name: "no-launch",
+    shell: { plainClaude: true },
+  };
+
+  assert.throws(
+    () => buildShellSnippet({ profiles: [nonCcrProfile] }, "non-ccr"),
+    /shell\.plainClaude requires CCR/,
+  );
+  assert.throws(
+    () => buildShellSnippet({ profiles: [noLaunchProfile] }, "no-launch"),
+    /shell\.plainClaude requires CCR/,
+  );
+
+  const root = await mkdtemp(join(tmpdir(), "airkit-invalid-plain-claude-"));
+  try {
+    for (const [index, plainClaude] of ["true", 1, null].entries()) {
+      const invalidCatalog = launchCatalog();
+      invalidCatalog.profiles[0].shell = { plainClaude };
+      const catalogPath = join(root, `${index}.json`);
+      await writeFile(catalogPath, `${JSON.stringify(invalidCatalog)}\n`);
+      await assert.rejects(loadCatalog(catalogPath), /shell\.plainClaude must be a boolean/);
+    }
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
 test("shell wrapper args can use config dir templates", async () => {
   const configDir = await mkdtemp(join(tmpdir(), "airkit-oss-wrapper-args-"));
   const catalog = {

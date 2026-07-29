@@ -361,6 +361,11 @@ output.
   executable guard that captures the command's output, so credential values
   never appear in the rendered snippet; when the helper is missing, the export
   is skipped with a warning on stderr.
+- `plainClaude`: optional boolean, valid only for a CCR-backed profile with a
+  launch contract. When `true`, it routes only the normal `claude` command to
+  `airclaude --plain --profile <name>`; it does not affect `claude-sub`, adds
+  no AirClaude prompt, permission, model, or plugin arguments, and fails
+  closed when the supervised CCR gateway cannot recover.
 - `wrappers`: generated shell functions.
 - `wrappers[].name`: shell function name.
 - `wrappers[].command`, `args`, and `env`: launch inputs.
