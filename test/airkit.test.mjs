@@ -767,6 +767,33 @@ test("the mode header joins inherited custom headers and replaces a stale mode l
   );
 });
 
+test("plain Claude launch uses managed CCR without AirClaude argument overlays", () => {
+  const catalog = launchCatalog();
+  catalog.profiles[0].launch.modes.plain = {};
+  catalog.profiles[0].launch.context = {
+    autoCompactPercentage: 25,
+    autoCompactWindow: 240000,
+  };
+
+  const plan = buildLaunchPlan(catalog, "launch-example", {
+    mode: "plain",
+    plainClaude: true,
+    userArgs: ["--model", "opus", "-p", "hi"],
+  });
+
+  assert.equal(plan.mode, "plain");
+  assert.deepEqual(plan.launch.args, []);
+  assert.deepEqual(plan.launch.userArgs, ["--model", "opus", "-p", "hi"]);
+  assert.equal(plan.launch.env.ANTHROPIC_CUSTOM_HEADERS, "x-airkit-mode: plain");
+  assert.equal(plan.launch.env.CLAUDE_CONFIG_DIR, undefined);
+  assert.equal(plan.launch.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, undefined);
+  assert.equal(plan.launch.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, undefined);
+  assert.equal(plan.launch.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY, "1");
+  for (const arg of ["--permission-mode", "--append-system-prompt", "--model", "--plugin-dir"]) {
+    assert.equal(plan.launch.args.includes(arg), false, `${arg} must not be added to a plain launch`);
+  }
+});
+
 test("launch spawns Claude against the shared home, not an isolated CCR profile", async () => {
   const home = await mkdtemp(join(tmpdir(), "airkit-shared-home-"));
   const configDir = await mkdtemp(join(tmpdir(), "airkit-shared-config-"));
@@ -3050,6 +3077,105 @@ test("runAirclaudeCli dry run supports positional pro mode and avoids launching"
   }
 });
 
+test("plain Claude CLI spawns only user arguments after the gateway is ready", async () => {
+  const catalog = launchCatalog();
+  catalog.profiles[0].launch.modes.plain = {};
+  const catalogPath = await writeLaunchCatalog(catalog);
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-plain-cli-"));
+  const events = [];
+  const spawnCalls = [];
+  const ccrClient = ccrTestClient([]);
+  ccrClient.ensureGateway = async () => events.push("gateway-ready");
+
+  try {
+    const exitCode = await runAirclaudeCli([
+      "--plain",
+      "--profile", "launch-example",
+      "--model", "opus",
+      "-p", "hi",
+    ], {
+      catalogPath,
+      ccrClient,
+      commandExists: async (command) => ["ccr", "claude"].includes(command),
+      configDir,
+      env: { DEMO_API_KEY: "runtime-secret", HOME: "/tmp/airkit-plain-home" },
+      runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
+      runtimeVersions: passingRuntimeVersions(),
+      spawnCommand: (command, args, options) => {
+        events.push("spawn");
+        spawnCalls.push({ args, command, env: options.env });
+        return { status: 0 };
+      },
+      stdout: { write: () => {} },
+    });
+
+    assert.equal(exitCode, 0);
+    assert.deepEqual(events, ["gateway-ready", "spawn"]);
+    assert.equal(spawnCalls.length, 1);
+    assert.equal(spawnCalls[0].command, "claude");
+    assert.deepEqual(spawnCalls[0].args, ["--model", "opus", "-p", "hi"]);
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+    await rm(resolve(catalogPath, ".."), { force: true, recursive: true });
+  }
+});
+
+test("plain Claude CLI rejects a different positional mode", async () => {
+  const catalog = launchCatalog();
+  catalog.profiles[0].launch.modes.plain = {};
+  const catalogPath = await writeLaunchCatalog(catalog);
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-plain-mode-"));
+
+  try {
+    await assert.rejects(
+      () => runAirclaudeCli(["--plain", "pro", "--dry-run", "--profile", "launch-example", "--config-dir", configDir], {
+        catalogPath,
+        commandExists: async () => true,
+        stdout: { write: () => {} },
+      }),
+      /--plain cannot be combined with positional mode "pro"/,
+    );
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+    await rm(resolve(catalogPath, ".."), { force: true, recursive: true });
+  }
+});
+
+test("plain Claude CLI fails closed when the gateway is not healthy", async () => {
+  const catalog = launchCatalog();
+  catalog.profiles[0].launch.modes.plain = {};
+  const catalogPath = await writeLaunchCatalog(catalog);
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-plain-gateway-"));
+  const spawnCalls = [];
+  let ensureGatewayCalls = 0;
+  const ccrClient = ccrTestClient([]);
+  ccrClient.ensureGateway = async () => {
+    ensureGatewayCalls += 1;
+    throw new Error("CCR gateway is not healthy");
+  };
+
+  try {
+    await assert.rejects(
+      () => runAirclaudeCli(["--plain", "--profile", "launch-example", "-p", "hi"], {
+        catalogPath,
+        ccrClient,
+        commandExists: async (command) => ["ccr", "claude"].includes(command),
+        configDir,
+        env: { DEMO_API_KEY: "runtime-secret", HOME: "/tmp/airkit-plain-home" },
+        runtimeVersions: passingRuntimeVersions(),
+        spawnCommand: (...args) => spawnCalls.push(args),
+        stdout: { write: () => {} },
+      }),
+      /CCR gateway is not healthy/,
+    );
+    assert.equal(spawnCalls.length, 0);
+    assert.equal(ensureGatewayCalls, 1);
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+    await rm(resolve(catalogPath, ".."), { force: true, recursive: true });
+  }
+});
+
 test("runAirclaudeCli treats any profile-defined mode as a bare positional, not just auto/pro", async () => {
   const catalogPath = await writeLaunchCatalog();
   const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-cli-"));
@@ -3285,9 +3411,9 @@ function ccrTestClient(saved) {
   };
 }
 
-async function writeLaunchCatalog() {
+async function writeLaunchCatalog(catalog = launchCatalog()) {
   const dir = await mkdtemp(join(tmpdir(), "airkit-launch-catalog-"));
   const path = join(dir, "catalog.json");
-  await writeFile(path, `${JSON.stringify(launchCatalog(), null, 2)}\n`);
+  await writeFile(path, `${JSON.stringify(catalog, null, 2)}\n`);
   return path;
 }

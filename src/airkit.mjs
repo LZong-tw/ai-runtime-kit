@@ -609,6 +609,7 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
   const managedProfileId = `airkit-${slug(profile.name)}-${slug(mode)}`;
   const gatewayEndpoint = profileGatewayEndpoint(ccrConfig);
   const renderedLaunchArgs = (launch.args ?? []).map((arg) => renderTemplateValue(arg, launchVars));
+  const plainClaude = options.plainClaude === true;
   // Passthrough arguments reach the same Claude argv as profile args, so both
   // go through the apiKeyHelper rejection.
   assertNoManagedApiKeyHelperOverride([...renderedLaunchArgs, ...(options.userArgs ?? [])]);
@@ -620,21 +621,23 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
       throw new Error(`launch.env must not set ${key}; the launched Claude inherits the caller's home`);
     }
   }
-  const claudeArgs = withHeartbeatPluginArg(
-    appendLaunchRuntimePrompts(
-      withAirclaudeModelArg(
-        renderedLaunchArgs,
+  const claudeArgs = plainClaude
+    ? []
+    : withHeartbeatPluginArg(
+      appendLaunchRuntimePrompts(
+        withAirclaudeModelArg(
+          renderedLaunchArgs,
+          launch.binary,
+          claudeModel,
+        ),
         launch.binary,
+        mode,
+        ccrConfig,
         claudeModel,
       ),
       launch.binary,
-      mode,
-      ccrConfig,
-      claudeModel,
-    ),
-    launch.binary,
-    configDir,
-  );
+      configDir,
+    );
 
   return {
     profile: basePlan.profile,
@@ -657,7 +660,7 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
       env: {
         ...airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, options.env),
         ...renderedLaunchEnv,
-        ...contextLaunchEnv(profile),
+        ...(plainClaude ? {} : contextLaunchEnv(profile)),
         ...(gatewayEndpoint ? gatewayBaseUrlEnv(gatewayEndpoint) : {}),
         ANTHROPIC_CUSTOM_HEADERS: mergedCustomHeaders((options.env ?? process.env).ANTHROPIC_CUSTOM_HEADERS, mode),
         // The old `ccr <profile> cli` path injected this from the managed
@@ -1267,7 +1270,8 @@ export async function runAirclaudeCli(argv = process.argv.slice(2), options = {}
     doctor: parsed.doctor,
     dryRun: parsed.dryRun || parsed.doctor,
     launch: !parsed.dryRun && !parsed.doctor,
-    mode: parsed.mode,
+    mode: parsed.plainClaude ? "plain" : parsed.mode,
+    plainClaude: parsed.plainClaude,
     userArgs: parsed.userArgs,
   });
   stdout.write(renderLaunchResult(result, { doctor: parsed.doctor, dryRun: parsed.dryRun }));
@@ -1306,6 +1310,8 @@ function parseAirclaudeArgs(argv, validModes = new Set(["auto", "pro"])) {
       parsed.configDir = ownArgs[++index];
     } else if (arg === "--mode") {
       parsed.mode = ownArgs[++index];
+    } else if (arg === "--plain") {
+      parsed.plainClaude = true;
     } else if (arg === "--dry-run") {
       parsed.dryRun = true;
     } else if (arg === "--doctor") {
@@ -1313,6 +1319,9 @@ function parseAirclaudeArgs(argv, validModes = new Set(["auto", "pro"])) {
     } else if (["--repair-restore", "--restore-projects-dir", "--restore-backups-dir"].includes(arg)) {
       throw new Error(`${arg} was removed; AirKit no longer reads or rewrites Claude Code session model state`);
     } else if (validModes.has(arg) && !parsed.mode) {
+      if (parsed.plainClaude && arg !== "plain") {
+        throw new Error(`--plain cannot be combined with positional mode "${arg}"`);
+      }
       parsed.mode = arg;
     } else {
       parsed.userArgs.push(arg);
