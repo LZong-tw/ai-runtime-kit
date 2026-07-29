@@ -170,6 +170,13 @@ categories are not presented as active CCR 3 routes.
 Legacy CCR 2 `transformers` are rejected instead of being silently discarded by
 CCR 3 persistence; remove them or migrate the behavior to a native CCR 3 gateway
 plugin.
+For OpenAI-compatible coding routes, the gateway translates Claude Code's
+`output_config.effort` into `reasoning_effort`. GLM 5.2 and Kimi K3 preserve
+Claude Code's `low`, `medium`, `high`, `xhigh`, and `max` levels. DeepSeek V4
+uses its native two-level contract: `low`, `medium`, and `high` select `high`;
+`xhigh` and `max` select `max`. Other models and unknown levels remain
+untouched so an unsupported request fails visibly instead of being silently
+downgraded.
 Do not pass a JSON `--settings` override containing `apiKeyHelper`. An
 `apiKeyHelper` outranks the gateway key the launch puts in the environment, so
 it would silently authenticate the session as somebody else; AirKit rejects
