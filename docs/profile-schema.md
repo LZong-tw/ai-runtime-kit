@@ -339,6 +339,11 @@ output.
 
 - `ccrTokenOpRef`: optional credential-manager reference; omit private
   references from public profiles.
+- `providerTokenOpRefs`: optional map of configured provider names to `op://`
+  credential-manager references. Each mapped provider must use an
+  uppercase environment-placeholder `api_key` such as `$EXAMPLE_API_KEY`.
+  AirKit resolves each reference only while preparing the managed CCR config;
+  credential values are not rendered into profile or shell files.
 - `exports`: optional global exports rendered before the wrapper functions.
 - `exports[].name`: environment variable name matching `^[A-Z][A-Z0-9_]*$`.
 - `exports[].value` or `exports[].command`: exactly one of the two, as a
