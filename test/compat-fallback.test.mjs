@@ -21,6 +21,29 @@ const VALID_CONFIG = {
   mcpConnector: { mode: "anthropic-fallback" },
 };
 
+test("routes Advisor through its family fallback while other tools retain the shared fallback", async () => {
+  const calls = [];
+  const route = createFallbackRouter({
+    config: {
+      ...VALID_CONFIG,
+      advisor: {
+        mode: "anthropic-fallback",
+        fallback: { provider: "web-litellm-anthropic", model: "claude-opus-5" },
+      },
+    },
+    async coreClient(request) {
+      calls.push(request);
+      return {};
+    },
+  });
+
+  await route({ body: { model: "main", messages: [], tools: [{ type: "advisor_20260301" }] } });
+  await route({ body: { model: "main", messages: [], tools: [{ type: "code_execution_20260120" }] } });
+
+  assert.equal(calls[0].body.model, "web-litellm-anthropic/claude-opus-5");
+  assert.equal(calls[1].body.model, "anthropic-messages/claude-sonnet");
+});
+
 test("routes typed Advisor and Code Execution requests by changing only the model", async () => {
   for (const type of ["advisor_20260301", "code_execution_20260120"]) {
     const calls = [];

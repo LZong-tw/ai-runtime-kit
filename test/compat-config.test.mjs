@@ -34,6 +34,7 @@ test("resolves all six policies and verified native web capabilities", () => {
 
   assert.deepEqual(resolved, {
     fallback: VALID_CONFIG.fallback,
+    familyFallbacks: {},
     policies: {
       webSearch: "native",
       webFetch: "native",
@@ -91,6 +92,23 @@ test("accepts exact supported modes", () => {
       });
     }
   }
+});
+
+test("accepts an Advisor-specific Anthropic fallback override", () => {
+  const config = {
+    ...VALID_CONFIG,
+    advisor: {
+      mode: "anthropic-fallback",
+      fallback: { provider: "web-litellm-anthropic", model: "claude-opus-5" },
+    },
+  };
+
+  assert.doesNotThrow(() => validateCompatibilityConfig(config));
+  assert.deepEqual(resolveCompatibilityPolicies(config, {}).familyFallbacks.advisor, {
+    provider: "web-litellm-anthropic",
+    model: "claude-opus-5",
+    maxContinuationTurns: 8,
+  });
 });
 
 test("legacy MCP requires an explicit webSearch mode and keeps typed requests on fallback", () => {

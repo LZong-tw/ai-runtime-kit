@@ -241,9 +241,12 @@ function bindManagedCompatibilityProvider(ccrConfig, managedProviderIds) {
   const compatibility = configuredCompatibility(ccrConfig);
   if (!compatibility) return;
 
-  const sourceName = compatibility.fallback.provider;
   validateCompatibilityProviderBinding(compatibility, ccrConfig.Providers);
-  compatibility.fallback.provider = managedProviderIds.get(sourceName);
+  const { familyFallbacks } = resolveCompatibilityPolicies(compatibility, {});
+  compatibility.fallback.provider = managedProviderIds.get(compatibility.fallback.provider);
+  for (const [family, fallback] of Object.entries(familyFallbacks)) {
+    compatibility[family].fallback.provider = managedProviderIds.get(fallback.provider);
+  }
 }
 
 // The compatibility plugin owns POST /v1/messages, so bare Claude model names
