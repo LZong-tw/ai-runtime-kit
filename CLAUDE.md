@@ -135,6 +135,13 @@ npm run verify:ccr3:e2e
   verified.
 - Keep `modelCatalog.lastReviewed` current whenever provider prices, context
   windows, model IDs, LiteLLM prefixes, or Azure routing metadata change.
+- A refresh adds and corrects entries; it does not prune on generation. An entry
+  the vendor still lists as available stays, marked `availability: "legacy"`
+  when the vendor files it that way. Remove an entry only once the vendor
+  retires it. A newer generation shipping is not evidence the older model is
+  gone, and deleting a live one is not cosmetic: `contextWindowFromCatalog` and
+  `catalogInputPrice` both fall back to nothing, so the statusline silently
+  loses that model's window and price.
 - Azure entries should describe public base-model families and LiteLLM routing
   shape only. Do not commit tenant-specific deployment names, regions, quotas,
   or negotiated pricing.
