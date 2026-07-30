@@ -1982,6 +1982,87 @@ test("freshness reports missing information rather than guessing", async () => {
   }
 });
 
+// Drives the real process lookup instead of injecting pluginHostStartedAt, so
+// the pgrep/ps chain itself is covered rather than only the mtime comparison.
+function fakeProcessTable({ candidates, cores, starts }) {
+  const answer = (stdout) => ({ ok: stdout !== "", status: stdout === "" ? 1 : 0, stderr: "", stdout });
+  return async (command, args) => {
+    if (command === "pgrep") {
+      return answer((args[1].includes("ai-gateway") ? cores : candidates).join("\n"));
+    }
+    if (command === "ps") {
+      const pid = args[3];
+      return answer(args[1] === "ppid=" ? String(starts[pid]?.parent ?? "") : (starts[pid]?.lstart ?? ""));
+    }
+    return answer("");
+  };
+}
+
+test("the plugin host is attributed to the parent of the gateway core, not a sibling", async () => {
+  const pluginDir = await mkdtemp(join(tmpdir(), "airkit-oss-plugin-parentage-"));
+  try {
+    await writeFile(join(pluginDir, "plugin.mjs"), "export default {};\n");
+
+    // The live shape this was written against: two services match the daemon-child
+    // command line and started in the same second, so only the core's ppid tells
+    // them apart. The sibling is deliberately the newer of the two.
+    const result = await pluginFreshnessDoctor(pluginDir, {
+      runCommand: fakeProcessTable({
+        candidates: ["96321", "96373"],
+        cores: ["96470"],
+        starts: {
+          96321: { lstart: "Thu Jul 30 11:00:46 2036" },
+          96373: { lstart: "Thu Jul 30 11:00:46 2000" },
+          96470: { parent: 96373 },
+        },
+      }),
+    });
+
+    const check = result.runtime.pluginFreshness;
+    assert.equal(check.warn, true, "the host is the 2000 parent, so a current module is stale");
+    assert.match(check.hostStartedAt, /^2000-/, "a sibling's start time must never be used");
+  } finally {
+    await rm(pluginDir, { force: true, recursive: true });
+  }
+});
+
+test("a plugin host with no gateway core is still located when the match is unique", async () => {
+  const pluginDir = await mkdtemp(join(tmpdir(), "airkit-oss-plugin-nocore-"));
+  try {
+    await writeFile(join(pluginDir, "plugin.mjs"), "export default {};\n");
+
+    // `--restart-stale` and `ccr start --no-gateway` both leave this state, and it
+    // is where a false clean would hurt most: the host is up with plugins loaded.
+    const unique = await pluginFreshnessDoctor(pluginDir, {
+      runCommand: fakeProcessTable({
+        candidates: ["96373"],
+        cores: [],
+        starts: { 96373: { lstart: "Thu Jul 30 11:00:46 2000" } },
+      }),
+    });
+    assert.equal(unique.runtime.pluginFreshness.warn, true);
+    assert.match(unique.runtime.pluginFreshness.hostStartedAt, /^2000-/);
+
+    // Ambiguity is missing information, not absence. Reporting "not running" for a
+    // service that is running would be the false clean this check exists to remove.
+    const ambiguous = await pluginFreshnessDoctor(pluginDir, {
+      runCommand: fakeProcessTable({
+        candidates: ["96321", "96373"],
+        cores: [],
+        starts: {
+          96321: { lstart: "Thu Jul 30 11:00:46 2000" },
+          96373: { lstart: "Thu Jul 30 11:00:46 2000" },
+        },
+      }),
+    });
+    assert.equal(ambiguous.runtime.pluginFreshness.skipped, true);
+    assert.match(ambiguous.runtime.pluginFreshness.reason, /cannot tell which of 2/);
+    assert.doesNotMatch(ambiguous.runtime.pluginFreshness.reason, /not running/);
+  } finally {
+    await rm(pluginDir, { force: true, recursive: true });
+  }
+});
+
 test("native-first compatibility renders no duplicate MCP and reports six policies", async () => {
   const catalog = compatibilityCatalog();
   const configDir = await mkdtemp(join(tmpdir(), "airkit-compatibility-doctor-"));
