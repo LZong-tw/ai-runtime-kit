@@ -344,6 +344,10 @@ function findOrphanedManagedState(catalog, currentConfig = {}, options = {}) {
 async function inspectLiveCcrState(catalog, options = {}) {
   const createCcrClient = options.createCcrClient ?? createCcr3Client;
   const client = options.ccrClient ?? createCcrClient({ ...options, autoStart: false });
+  // Counted before the RPC and reported either way: a duplicate service is a
+  // plausible reason for the RPC to answer from somewhere unexpected, or not at
+  // all, so it is exactly the case where suppressing it would hide the cause.
+  const managementServices = await inspectManagementServices(options);
   let currentConfig;
   try {
     currentConfig = await client.getConfig();
@@ -351,11 +355,13 @@ async function inspectLiveCcrState(catalog, options = {}) {
     const reason = `live CCR state not inspected: ${error.message}`;
     return {
       managedState: { ok: true, skipped: true, reason },
+      managementServices,
       pluginFreshness: { ok: true, skipped: true, reason },
     };
   }
   return {
     managedState: inspectOrphanedManagedState(catalog, currentConfig, options),
+    managementServices,
     pluginFreshness: await inspectPluginFreshness(currentConfig, options),
   };
 }
@@ -383,6 +389,63 @@ function inspectOrphanedManagedState(catalog, currentConfig, options = {}) {
 
 const HOST_NOT_RUNNING = "CCR plugin host is not running, so nothing is loaded to be stale";
 
+// The daemon may be supervised by launchd — AirKit's installer registers
+// com.airkit.ccr-daemon with KeepAlive. Under a supervisor `ccr stop` is not a
+// stop: launchd brings the job back within its ThrottleInterval, and the
+// `ccr start` that follows races that restart and wins often enough to leave two
+// management services alive at once. So route the lifecycle through the
+// supervisor, and only when it owns this exact label — kickstarting a job
+// somebody else registered is worse than leaving the plain commands in place.
+const CCR_DAEMON_LABEL = "com.airkit.ccr-daemon";
+
+async function ccrSupervisorTarget(runCommand, env) {
+  if (typeof process.getuid !== "function") return null;
+  const target = `gui/${process.getuid()}/${CCR_DAEMON_LABEL}`;
+  const printed = await runCommand("launchctl", ["print", target], { env, timeoutMs: 5000 });
+  return printed?.ok ? target : null;
+}
+
+const MANAGEMENT_SERVICE_PATTERN = "cli.js serve --daemon-child --no-open$";
+
+async function runLines(runCommand, command, args) {
+  const result = await runCommand(command, args, { timeoutMs: 5000 });
+  if (!result?.ok) return [];
+  return String(result.stdout ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+}
+
+// One CCR install is meant to have one management service. A second one is not
+// idle: both answer the same RPCs and only one holds the port, so a launch can
+// read its configuration from one and reach the gateway of the other — which is
+// how a freshly written profile appears to have had no effect. The pair comes
+// from starting CCR beside a KeepAlive supervisor, so the way out is to restart
+// through the supervisor and kill what it does not own, never to start again.
+async function inspectManagementServices(options = {}) {
+  const runCommand = options.runCommand ?? runCommandSync;
+  const pids = await runLines(runCommand, "pgrep", ["-f", MANAGEMENT_SERVICE_PATTERN]);
+  if (pids.length <= 1) return { ok: true, pids };
+
+  const supervisor = await ccrSupervisorTarget(runCommand, options.env);
+  const supervisedPid = supervisor
+    ? (await runLines(runCommand, "launchctl", ["list"]))
+      .map((line) => line.split(/\s+/))
+      .find((fields) => fields[2] === CCR_DAEMON_LABEL)?.[0] ?? null
+    : null;
+  const remedy = supervisor
+    ? `\`launchctl kickstart -k ${supervisor}\` restarts the supervised one${supervisedPid ? `, so every pid other than ${supervisedPid} is a leftover to kill` : ""}`
+    : "stop every one of them and start a single service";
+  return {
+    ok: true,
+    warn: true,
+    pids,
+    supervisedPid,
+    supervisor,
+    reason: `${pids.length} CCR management services are running (pids ${pids.join(", ")}); they answer the same RPCs but only one holds the port, so a launch can write configuration to one and route through the other — ${remedy}`,
+  };
+}
+
 // Attribute the plugin host by parentage: the host is whichever service fathered
 // the running gateway core. Several `--no-gateway` daemon children outlive their
 // gateway and match the same command line, so picking by uptime or by listening
@@ -397,14 +460,7 @@ const HOST_NOT_RUNNING = "CCR plugin host is not running, so nothing is loaded t
 // running" have to stay distinguishable: reporting ambiguity as absence is the
 // same false clean this check exists to prevent.
 async function readPluginHostStart(runCommand) {
-  const lines = async (command, args) => {
-    const result = await runCommand(command, args, { timeoutMs: 5000 });
-    if (!result?.ok) return [];
-    return String(result.stdout ?? "")
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line !== "");
-  };
+  const lines = (command, args) => runLines(runCommand, command, args);
   const startedAt = async (pid) => {
     const [started] = await lines("ps", ["-o", "lstart=", "-p", pid]);
     const at = started ? new Date(started) : null;
@@ -424,7 +480,7 @@ async function readPluginHostStart(runCommand) {
   // a freshness answer matters most. Fall back to matching the service directly,
   // but only when the match is unique — with no core to disambiguate, choosing
   // between siblings would date the check against the wrong process.
-  const candidates = await lines("pgrep", ["-f", "cli.js serve --daemon-child --no-open$"]);
+  const candidates = await lines("pgrep", ["-f", MANAGEMENT_SERVICE_PATTERN]);
   if (candidates.length === 1) return await startedAt(candidates[0]);
   if (candidates.length === 0) return { at: null, reason: HOST_NOT_RUNNING };
   return {
@@ -490,12 +546,18 @@ async function inspectPluginFreshness(currentConfig = {}, options = {}) {
     if (newest && newest > hostStartedAt) stale.push(`${module} (changed ${newest.toISOString()})`);
   }
   if (stale.length === 0) return { ok: true, hostStartedAt: hostStartedAt.toISOString(), stale: [] };
+  // Resolved here rather than at the top so an unaffected launch never shells
+  // out to launchctl, and carried on the result so the restart path below does
+  // not have to ask a second time.
+  const supervisor = await ccrSupervisorTarget(runCommand, options.env);
+  const remedy = supervisor ? `launchctl kickstart -k ${supervisor}` : "ccr stop && ccr start";
   return {
     ok: true,
     warn: true,
     hostStartedAt: hostStartedAt.toISOString(),
     stale,
-    reason: `the CCR plugin host started ${hostStartedAt.toISOString()} and cannot have loaded ${stale.join(", ")}; a gateway restart re-runs the plugin from the same cached module graph, so run \`ccr stop && ccr start\``,
+    supervisor,
+    reason: `the CCR plugin host started ${hostStartedAt.toISOString()} and cannot have loaded ${stale.join(", ")}; a gateway restart re-runs the plugin from the same cached module graph, so run \`${remedy}\``,
   };
 }
 
@@ -1203,6 +1265,7 @@ export async function doctorProfile(catalog, profileName, options = {}) {
       }),
     },
     managedState: live.managedState,
+    managementServices: live.managementServices,
     pluginFreshness: live.pluginFreshness,
     shellSource: files.shellSnippet.ok
       ? await checkShellSourceability(plan.files.shellSnippet, profile, options.sourceShellSnippet ?? sourceShellSnippet)
@@ -1695,9 +1758,24 @@ async function announcePluginFreshness(currentConfig, options = {}) {
   }
 
   const runCommand = options.runCommand ?? runCommandSync;
+  const timeoutMs = options.commandTimeoutMs ?? 30000;
+  // A supervised daemon gets restarted in place. Stopping it here would hand the
+  // replacement to launchd and then race it with a start of our own, which is
+  // how two management services end up holding one port between them.
+  if (pluginFreshness.supervisor) {
+    stdout.write(`     --restart-stale: running \`launchctl kickstart -k ${pluginFreshness.supervisor}\`\n`);
+    const kicked = await runCommand("launchctl", ["kickstart", "-k", pluginFreshness.supervisor], { timeoutMs });
+    if (!kicked?.ok) {
+      stdout.write(`     launchctl kickstart failed: ${kicked?.stderr || `exit ${kicked?.status}`}\n`);
+      return pluginFreshness;
+    }
+    stdout.write("     plugin host restarted\n");
+    return pluginFreshness;
+  }
+
   stdout.write("     --restart-stale: running `ccr stop` then `ccr start --no-gateway`\n");
   for (const args of [["stop"], ["start", "--no-gateway"]]) {
-    const result = await runCommand("ccr", args, { timeoutMs: options.commandTimeoutMs ?? 30000 });
+    const result = await runCommand("ccr", args, { timeoutMs });
     if (!result?.ok) {
       // Report and continue to the launch: a failed reload leaves the previous
       // service running, which is worse to hide than to name.
@@ -2027,6 +2105,7 @@ ${fileLines.join("\n")}
 - ${result.liveCcrConfig.status} CCR state database: ${result.liveCcrConfig.path}
 ${[
   ...(result.managedState ? renderManagedStateLines(result.managedState) : []),
+  ...(result.managementServices ? renderManagementServiceLines(result.managementServices) : []),
   ...(result.pluginFreshness ? renderPluginFreshnessLines(result.pluginFreshness) : []),
 ]
   .map((line) => (line.startsWith("  ") ? line : `- ${line}`))
@@ -2665,12 +2744,35 @@ export function createCcr3Client(options = {}) {
 
   async function startService() {
     if (options.autoStart === false) throw serviceUnavailable();
-    const started = await runCommand("ccr", ["start", "--no-gateway"], {
-      env: options.env,
-      timeoutMs: options.commandTimeoutMs ?? 30000,
-    });
+    const timeoutMs = options.commandTimeoutMs ?? 30000;
+    const supervisor = await ccrSupervisorTarget(runCommand, options.env);
+    if (supervisor) {
+      // `kickstart` without -k starts a job that is down and does nothing to one
+      // that is already up, so it cannot add a second service the way a bare
+      // `ccr start` beside launchd can. It returns when the job is submitted,
+      // not when the service is listening, so wait for what the caller needs.
+      const kicked = await runCommand("launchctl", ["kickstart", supervisor], { env: options.env, timeoutMs });
+      if (!kicked?.ok) {
+        throw new Error(`unable to start supervised CCR 3 management service ${supervisor}${kicked?.stderr ? `: ${kicked.stderr}` : ""}`);
+      }
+      if (!(await waitForServiceFile(options.serviceReadyTimeoutMs ?? 15000))) {
+        throw new Error(`supervised CCR 3 management service ${supervisor} did not publish service.json`);
+      }
+      return;
+    }
+    const started = await runCommand("ccr", ["start", "--no-gateway"], { env: options.env, timeoutMs });
     if (!started.ok) {
       throw new Error(`unable to start CCR 3 management service${started.stderr ? `: ${started.stderr}` : ""}`);
+    }
+  }
+
+  async function waitForServiceFile(timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const service = await readServiceFile();
+      if (service) return service;
+      if (Date.now() >= deadline) return null;
+      await new Promise((settle) => setTimeout(settle, 100));
     }
   }
 
@@ -2712,10 +2814,24 @@ export function createCcr3Client(options = {}) {
       response = await request();
     } catch {
       if (options.autoStart === false) throw serviceUnavailable();
-      service = await loadService(true);
-      serviceUrl = new URL(service.url);
-      token = serviceUrl.searchParams.get("ccr_web_token");
-      response = await request();
+      // A restart mints a new port and token, so a connection failure often means
+      // only that this client is holding the previous service.json. Re-read and
+      // retry before starting anything: an unconditional start here is the most
+      // direct way to end up with a second management service beside a supervised
+      // one that launchd is already bringing back.
+      const current = await readServiceFile();
+      if (current && current.url !== service.url) {
+        service = current;
+        serviceUrl = new URL(service.url);
+        token = serviceUrl.searchParams.get("ccr_web_token");
+        response = await request().catch(() => undefined);
+      }
+      if (!response) {
+        service = await loadService(true);
+        serviceUrl = new URL(service.url);
+        token = serviceUrl.searchParams.get("ccr_web_token");
+        response = await request();
+      }
     }
     // A management-service restart mints a new web token on the same port, so a
     // client holding the previous service.json authenticates against a service
@@ -2886,6 +3002,7 @@ function renderDoctorResult(result) {
     ),
     `${statusOf(result.runtime.ccr)} CCR availability: ${result.runtime.ccr.command}`,
     ...renderManagedStateLines(result.runtime.managedState),
+    ...renderManagementServiceLines(result.runtime.managementServices),
     ...renderPluginFreshnessLines(result.runtime.pluginFreshness),
     `${statusOf(result.runtime.shellSource)} shell source: ${result.runtime.shellSource.path}`,
     renderContextWindow(result.runtime.context),
@@ -3015,6 +3132,11 @@ function renderManagedStateLines(managedState) {
     if (check.skipped) return "not inspected";
     return check.count === 0 ? "none" : `${check.count} artifact(s) owned by no installed profile`;
   });
+}
+
+function renderManagementServiceLines(managementServices) {
+  return renderWarnableCheck("CCR management services", managementServices, (check) =>
+    check.pids.length <= 1 ? `${check.pids.length} running` : `${check.pids.length} running, only one can hold the port`);
 }
 
 function renderPluginFreshnessLines(pluginFreshness) {

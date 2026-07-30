@@ -109,7 +109,15 @@ inherited, so its sessions live in the user's own Claude home alongside every
 other launcher's.
 
 If the CCR management service is missing, AirKit starts it with
-`ccr start --no-gateway`. Its first RPC reads the live configuration; managed
+`ccr start --no-gateway` — unless launchd already supervises the daemon under
+`com.airkit.ccr-daemon`, in which case it starts that job with
+`launchctl kickstart` instead. Starting CCR beside a supervisor leaves two
+management services running: both answer the same RPCs, only one holds the
+port, and a launch can then write configuration to one and route through the
+other. For the same reason `--restart-stale` restarts a supervised daemon with
+`launchctl kickstart -k` rather than `ccr stop && ccr start`, and `doctor`
+warns when it finds more than one service, naming which pid the supervisor
+owns. Its first RPC reads the live configuration; managed
 updates use `saveConfig(..., { applyProfile: false })`, so saving does not apply
 or reconcile a global profile. Gateway startup happens only after takeover and
 runtime checks pass.
@@ -262,6 +270,7 @@ node src/airkit.mjs doctor --profile openai-compatible-example
 
 - the rendered CCR config exists and matches the catalog
 - the rendered shell snippet exists and matches the catalog
+- only one CCR management service is running
 - `ccr` is available on `PATH`
 - the shell snippet can be sourced by `zsh`
 
