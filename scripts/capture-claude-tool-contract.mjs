@@ -87,7 +87,7 @@ export async function runCapture({ claudePath = "claude", tool = "WebSearch" } =
     assert.equal(version.status, 0, `Claude version probe failed: ${version.stderr}`);
     const childArgs = [
       "--safe-mode",
-      "--model", "claude-sonnet-4-6",
+      "--model", "claude-sonnet-5",
       "--permission-mode", "dontAsk",
       "--tools", "WebSearch",
       "--allowedTools", "WebSearch",

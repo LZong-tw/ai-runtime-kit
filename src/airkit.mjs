@@ -2246,8 +2246,8 @@ function airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, runtimeEnv = proc
     // is a no-op — it does not appear in the 2.1.178 binary.) 1M is gated purely on the resolved
     // model string ending in the literal suffix `[1m]` (Jf = /\[1m\]/i, checked first in the window
     // resolver), with CLAUDE_CODE_DISABLE_1M_CONTEXT as the only opt-out. So 1M is achieved by giving
-    // the launch model a `[1m]` suffix (launch.claudeModel: claude-sonnet-4-6[1m]); the API
-    // id is normalized back to claude-sonnet-4-6 on the wire, so the suffix is a Claude-Code-local
+    // the launch model a `[1m]` suffix (launch.claudeModel: claude-sonnet-5[1m]); the API
+    // id is normalized back to claude-sonnet-5 on the wire, so the suffix is a Claude-Code-local
     // marker and the gateway never sees it. See resolveClaudeLaunchModel.
     // Claude Code sources the user's zsh snapshot in its non-interactive command shells. A
     // Powerlevel10k instant prompt there re-evals its git/dir segments and spams

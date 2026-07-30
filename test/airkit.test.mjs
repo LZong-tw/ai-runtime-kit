@@ -2272,7 +2272,7 @@ test("buildLaunchPlan applies pro mode CCR routing overlay without mutating the 
     assert.equal(plan.launch.args[0], "--append-system-prompt");
     assert.match(
       plan.launch.args[1],
-      /AirClaude mode pro routes default to strong-coder while Claude launch uses claude-sonnet-4-6\./,
+      /AirClaude mode pro routes default to strong-coder while Claude launch uses claude-sonnet-5\./,
     );
     assert.match(plan.launch.args[1], /AirKit reusable runtime lessons/);
     assert.match(plan.launch.args[1], /AirClaude active routing/);
@@ -3424,7 +3424,7 @@ test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves
     assert.equal(spawned[0].args[0], "--append-system-prompt");
     assert.match(
       spawned[0].args[1],
-      /AirClaude mode pro routes default to strong-coder while Claude launch uses claude-sonnet-4-6\./,
+      /AirClaude mode pro routes default to strong-coder while Claude launch uses claude-sonnet-5\./,
     );
     assert.match(spawned[0].args[1], /AirKit reusable runtime lessons/);
     assert.match(spawned[0].args[1], /AirClaude active routing/);
@@ -3433,7 +3433,7 @@ test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves
     // AirClaude selects its display model for this launch only; passthrough args
     // still follow and can override it for the same process.
     assert.equal(spawned[0].args[2], "--model");
-    assert.equal(spawned[0].args[3], "claude-sonnet-4-6");
+    assert.equal(spawned[0].args[3], "claude-sonnet-5");
     assert.equal(spawned[0].args.at(-1), "--dangerously-skip-permissions");
     assert.deepEqual(spawned[0].env, {
       HOME: "/tmp/airkit-isolated-home",
@@ -4292,7 +4292,7 @@ function launchCatalog() {
             "AirClaude mode {{launchMode}} routes default to {{routeDefaultModel}} while Claude launch uses {{claudeModel}}.",
           ],
           env: { CCR_PROFILE: "{{profileName}}" },
-          claudeModel: "claude-sonnet-4-6",
+          claudeModel: "claude-sonnet-5",
           defaultMode: "auto",
           modes: {
             auto: {},
