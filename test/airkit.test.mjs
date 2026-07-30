@@ -12,7 +12,11 @@ import {
   parseTaskCapsule,
   processContextHook,
 } from "../src/context-heartbeat.mjs";
-import { validateCompatibilityProviderBinding } from "../src/compat/config.mjs";
+import {
+  routeBareClaudeModel,
+  validateCompatibilityConfig,
+  validateCompatibilityProviderBinding,
+} from "../src/compat/config.mjs";
 import compatibilityPlugin from "../src/compat/plugin.mjs";
 
 import {
@@ -51,6 +55,9 @@ test("catalog rejects invalid proactive compaction policy", async () => {
     [{ autoCompactWindow: 300000.5 }, /autoCompactWindow must be an integer from 100000 to 1000000/],
     [{ autoCompactPercentage: 0 }, /autoCompactPercentage must be "default" or an integer from 1 to 100/],
     [{ autoCompactPercentage: "40" }, /autoCompactPercentage must be "default" or an integer from 1 to 100/],
+    [{ maxOutputTokens: 1023 }, /maxOutputTokens must be an integer from 1024 to 512000/],
+    [{ maxOutputTokens: 512001 }, /maxOutputTokens must be an integer from 1024 to 512000/],
+    [{ maxOutputTokens: "64000" }, /maxOutputTokens must be an integer from 1024 to 512000/],
     [{ extra: true }, /launch\.context contains unsupported field: extra/],
   ];
 
@@ -2353,6 +2360,62 @@ test("airclaude launch scopes proactive compaction policy to the managed child",
     assert.equal(managedProfile.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "300000");
     assert.equal(managedProfile.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, "");
     assert.equal(env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, "40");
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("a dedicated launch id frees the sonnet route and keeps full output length", async () => {
+  const catalog = compatibilityCatalog();
+  const profile = catalog.profiles[0];
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-id-"));
+  // Claude Code strips `[1m]` before it builds the request, so the catalog can
+  // carry the suffix while the plugin must be told the bare id that arrives.
+  profile.launch.claudeModel = "claude-airkit-mode[1m]";
+  profile.launch.context = { maxOutputTokens: 64000 };
+  profile.ccr.Router.sonnet = "anthropic-messages,claude-sonnet";
+
+  try {
+    const plan = buildLaunchPlan(catalog, "launch-example", { configDir, env: { HOME: configDir } });
+    const merged = airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {}, { configDir });
+    const plugin = merged.config.plugins.find((candidate) => candidate.id === "airkit-compatibility");
+
+    assert.equal(plugin.config.launchModel, "claude-airkit-mode", "the `[1m]` marker never reaches the wire");
+    assert.doesNotThrow(() => validateCompatibilityConfig(plugin.config));
+    assert.equal(
+      plugin.config.routes.sonnet,
+      "airkit-provider-launch-example-anthropic-messages/claude-sonnet",
+    );
+    assert.equal(
+      plugin.config.modeRoutes.pro.sonnet,
+      "airkit-provider-launch-example-anthropic-messages/claude-sonnet",
+      "modes inherit the base sonnet route, so one key covers every mode",
+    );
+    assert.equal(
+      plugin.config.modeRoutes.fast.sonnet,
+      "airkit-provider-launch-example-anthropic-messages/claude-sonnet",
+    );
+    assert.equal(
+      routeBareClaudeModel(
+        { model: "claude-airkit-mode", max_tokens: 8, messages: [] },
+        plugin.config.modeRoutes.pro,
+        plugin.config.launchModel,
+      ).model,
+      "airkit-provider-launch-example-demo/strong-coder",
+      "the launcher's own traffic is the mode's model",
+    );
+    assert.equal(
+      routeBareClaudeModel(
+        { model: "claude-sonnet-5", max_tokens: 8, messages: [] },
+        plugin.config.modeRoutes.pro,
+        plugin.config.launchModel,
+      ).model,
+      "airkit-provider-launch-example-anthropic-messages/claude-sonnet",
+      "an in-session Sonnet pick is no longer swallowed by the mode",
+    );
+    // An id Claude Code does not recognize falls back to 32000 max output; this
+    // override is what makes the rename free.
+    assert.equal(plan.launch.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS, "64000");
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }

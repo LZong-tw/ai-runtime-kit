@@ -108,8 +108,14 @@ Provider fields:
 
 Active CCR Router fields are only:
 
-- `default`: normal model route.
-- `background`: small/background model route.
+- `default`: normal model route, and the route for `launch.claudeModel`.
+- `background`: small/background model route (`claude-haiku-*`).
+- `opus`: optional route for `claude-opus-*`; falls back to `default`.
+- `sonnet`: optional route for `claude-sonnet-*`; falls back to `default`.
+
+`opus` and `sonnet` exist so a user who picks a Claude model mid-session reaches
+that model rather than the mode's own. A mode overlay inherits whichever of
+these the base `ccr.Router` sets, so one key at the base covers every mode.
 
 Router values use `provider,model`. CCR 2 `think`, `longContext`,
 `longContextThreshold`, `webSearch`, and transformer fields are unsupported.
@@ -126,12 +132,25 @@ during the managed merge AirKit translates them three ways:
    gateway route — with the compatibility plugin enabled, that means the
    rules never see `POST /v1/messages`; they still cover other protocol
    paths.
-3. Into the compatibility plugin's `routes` config. The plugin owns
-   `POST /v1/messages`, so it performs the bare-Claude-model rewrite itself
-   before forwarding to the core: `claude-haiku*` → background route, other
-   bare `claude-*` → default route. Provider-qualified selectors (named
-   profiles, the whole-request Anthropic fallback) pass through untouched,
-   and without `routes` the plugin forwards byte-identical bytes as before.
+3. Into the compatibility plugin's `routes` config, plus a `launchModel` key
+   holding `launch.claudeModel` with any `[1m]` suffix stripped. The plugin
+   owns `POST /v1/messages`, so it performs the bare-Claude-model rewrite
+   itself before forwarding to the core: an exact match on `launchModel` →
+   default route, then `claude-haiku-*` → background, `claude-opus-*` → opus,
+   `claude-sonnet-*` → sonnet, each falling back to default. The launch id is
+   matched first, so a profile that still launches on a family id keeps its
+   old target. Provider-qualified selectors (named profiles, the whole-request
+   Anthropic fallback) pass through untouched, and without `routes` the plugin
+   forwards byte-identical bytes as before.
+
+Claude Code sends a bare model id on the wire and carries `[1m]` only as an
+`anthropic-beta` header, so a profile whose `launch.claudeModel` is
+`claude-sonnet-5` cannot also offer Sonnet 5 as an in-session choice — both
+arrive as the same string. Giving the launcher its own id
+(`claude-airkit-mode`, say) separates them and is what makes `routes.sonnet`
+usable. Claude Code forwards an id it does not recognize verbatim; the only
+cost is that it assumes a 32000 max output, which
+`launch.context.maxOutputTokens` restores.
 
 This is what lets bare Claude model names — plain `claude` launched outside a
 named profile, including its constant claude-haiku background requests —
@@ -264,8 +283,16 @@ rendered.
 - `env`: non-secret launch environment. Values may use `{{profileName}}`,
   `{{configDir}}`, `{{home}}`, `{{launchMode}}`, `{{claudeModel}}`,
   `{{statuslineLabel}}`, and default/background route variables.
-- `claudeModel`: Claude-recognized model passed only as the launched process's
-  `--model` argument.
+- `claudeModel`: the model id passed as the launched process's `--model`
+  argument, and the id the compatibility plugin routes to `Router.default`.
+  Claude Code accepts any string here. Use a dedicated id such as
+  `claude-airkit-mode[1m]` when the profile also wants `Router.sonnet` to serve
+  a real in-session Sonnet pick; use a Claude-recognized id when it does not.
+- `context.maxOutputTokens`: optional integer from `1024` through `512000`
+  passed as `CLAUDE_CODE_MAX_OUTPUT_TOKENS` to the managed AirClaude child.
+  Claude Code derives max output from the launch model id and falls back to
+  `32000` for an id it does not recognize, so a profile using a dedicated
+  `claudeModel` sets this to the value its routed model can actually produce.
 - `context.autoCompactWindow`: optional integer from `100000` through `1000000`
   passed as `CLAUDE_CODE_AUTO_COMPACT_WINDOW` to the managed AirClaude child.
   It changes when Claude Code compacts, not the model's real context window or
@@ -385,7 +412,8 @@ do not add a daemon-control wrapper layer.
 - Keep shared behavior and public facts free of company identifiers.
 - Require Node.js 22+, Claude Code 2.1.208+, and CCR 3.0.4 through latest 3.x.
 - Declare an explicit provider `type`.
-- Use only `default` and `background` in active CCR Router config.
+- Use only `default`, `background`, `opus`, and `sonnet` in active CCR Router
+  config.
 - Define an explicit Claude launch contract.
 - Do not override CCR's managed `apiKeyHelper` in launch arguments.
 - Keep provider API keys as environment placeholders.

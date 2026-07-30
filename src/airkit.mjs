@@ -138,7 +138,7 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
   const modeConfigs = new Map(
     modes.map((mode) => [mode, applyLaunchModeOverlay(structuredClone(baseConfig), profile, mode, templateVars)]),
   );
-  bindManagedCompatibilityRoutes(baseConfig, managedRouteSelector, modeConfigs);
+  bindManagedCompatibilityRoutes(baseConfig, managedRouteSelector, modeConfigs, resolveClaudeLaunchModel(profile));
   const managedProviderNames = new Set(managedProviderEntries.map((entry) => entry.sourceName));
   const managedProviderIdSet = new Set(managedProviders.map((provider) => provider.id));
   for (const provider of currentConfig.Providers ?? []) {
@@ -587,7 +587,7 @@ function buildManagedRouterRules(baseConfig, managedRouteSelector, managedPrefix
   return [
     rule("background", "AirKit background route", "claude-haiku-", router.background ?? router.default),
     rule("opus", "AirKit Opus route", "claude-opus-", router.opus ?? router.default),
-    rule("default", "AirKit default route", "claude-sonnet-", router.default),
+    rule("default", "AirKit default route", "claude-sonnet-", router.sonnet ?? router.default),
   ];
 }
 
@@ -623,7 +623,7 @@ function bindManagedCompatibilityProvider(ccrConfig, managedProviderIds) {
 // plugin instance serves every mode, so each mode's overlaid routes ship too,
 // keyed by the mode label the launcher stamps on its requests; the flat table
 // stays as the fallback for unlabelled callers.
-function bindManagedCompatibilityRoutes(ccrConfig, managedRouteSelector, modeConfigs = new Map()) {
+function bindManagedCompatibilityRoutes(ccrConfig, managedRouteSelector, modeConfigs = new Map(), launchModel = null) {
   const compatibility = configuredCompatibility(ccrConfig);
   if (!compatibility) return;
   const routeTable = (router) => (router?.default
@@ -631,11 +631,17 @@ function bindManagedCompatibilityRoutes(ccrConfig, managedRouteSelector, modeCon
       default: managedRouteSelector(router.default),
       background: managedRouteSelector(router.background ?? router.default),
       ...(router.opus ? { opus: managedRouteSelector(router.opus) } : {}),
+      ...(router.sonnet ? { sonnet: managedRouteSelector(router.sonnet) } : {}),
     }
     : null);
   const routes = routeTable(ccrConfig.Router);
   if (!routes) return;
   compatibility.routes = routes;
+  // The plugin needs the launcher's own model id to tell the launch route apart
+  // from an in-session pick of the same family. `[1m]` is a Claude-Code-local
+  // marker that never reaches the wire, so strip it to match what arrives.
+  const bareLaunchModel = bareClaudeModelId(launchModel);
+  if (bareLaunchModel) compatibility.launchModel = bareLaunchModel;
   const modeRoutes = {};
   for (const [mode, modeConfig] of modeConfigs) {
     // Mode labels are validated against the header contract where the modes
@@ -1311,11 +1317,20 @@ function validateLaunch(profile) {
     throw new Error(`profile "${profile.name}" launch.context must be an object`);
   }
 
-  const supportedFields = new Set(["autoCompactPercentage", "autoCompactWindow"]);
+  const supportedFields = new Set(["autoCompactPercentage", "autoCompactWindow", "maxOutputTokens"]);
   for (const field of Object.keys(context)) {
     if (!supportedFields.has(field)) {
       throw new Error(`profile "${profile.name}" launch.context contains unsupported field: ${field}`);
     }
+  }
+
+  // Claude Code derives max output from the launch model id, and falls back to
+  // 32000 for any id it does not recognize — including the dedicated launch id
+  // a profile needs so an in-session model pick is distinguishable. Setting this
+  // restores the value the routed model can actually produce.
+  const maxOutput = context.maxOutputTokens;
+  if (maxOutput !== undefined && (!Number.isInteger(maxOutput) || maxOutput < 1024 || maxOutput > 512000)) {
+    throw new Error(`profile "${profile.name}" launch.context.maxOutputTokens must be an integer from 1024 to 512000`);
   }
 
   const window = context.autoCompactWindow;
@@ -2284,6 +2299,9 @@ function contextLaunchEnv(profile) {
   } else if (context.autoCompactPercentage !== undefined) {
     env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = String(context.autoCompactPercentage);
   }
+  if (context.maxOutputTokens !== undefined) {
+    env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(context.maxOutputTokens);
+  }
   return env;
 }
 
@@ -2422,6 +2440,14 @@ function toEnvKey(value) {
 
 function resolveClaudeLaunchModel(profile) {
   return profile.launch?.claudeModel ?? null;
+}
+
+// Claude Code strips `[1m]` before it builds the request, so the gateway only
+// ever sees the bare id. Match what arrives, not what was typed.
+function bareClaudeModelId(model) {
+  if (typeof model !== "string") return null;
+  const bare = model.replace(/\[1m\]$/i, "").trim();
+  return /^claude-[a-z0-9][a-z0-9._-]*$/i.test(bare) ? bare : null;
 }
 
 function timestampForPath() {
