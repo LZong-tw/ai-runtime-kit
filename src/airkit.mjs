@@ -316,6 +316,54 @@ function classifyManagedId(id, { managedPrefix, ownedPrefixes, namespace }) {
   return owner === null ? (ownedPrefixes.length === 0 ? "foreign" : "orphan") : "other";
 }
 
+function orphanManagedIds(ids, ownedPrefixes, namespace) {
+  if (ownedPrefixes.length === 0) return [];
+  return ids
+    .map((id) => String(id ?? ""))
+    .filter((id) => id.startsWith(namespace) && managedIdOwner(id, ownedPrefixes, namespace) === null);
+}
+
+// A launch removes orphaned state, but a launch is also the only thing that
+// does, so until one happens those rules keep deciding live traffic. Reporting
+// the same set read-only lets doctor name what is wrong now instead of leaving
+// the user to infer it from a routing symptom.
+export function findOrphanedManagedState(catalog, currentConfig = {}, options = {}) {
+  const configDir = resolve(options.configDir ?? defaultConfigDir());
+  const owned = catalogManagedPrefixes(catalog, installedProfileNames(configDir));
+  return {
+    profiles: orphanManagedIds((currentConfig.profile?.profiles ?? []).map(({ id }) => id), owned.profiles, "airkit-"),
+    providers: orphanManagedIds((currentConfig.Providers ?? []).map(({ id }) => id), owned.providers, "airkit-provider-"),
+    rules: orphanManagedIds((currentConfig.Router?.rules ?? []).map(({ id }) => id), owned.profiles, "airkit-"),
+  };
+}
+
+// Doctor must never change what it inspects: `autoStart: false` reports a
+// stopped management service instead of starting one, and a service it cannot
+// reach is missing information rather than a failed check.
+async function inspectOrphanedManagedState(catalog, options = {}) {
+  const createCcrClient = options.createCcrClient ?? createCcr3Client;
+  const client = options.ccrClient ?? createCcrClient({ ...options, autoStart: false });
+  let currentConfig;
+  try {
+    currentConfig = await client.getConfig();
+  } catch (error) {
+    return { ok: true, skipped: true, reason: `live CCR state not inspected: ${error.message}` };
+  }
+  const orphans = findOrphanedManagedState(catalog, currentConfig, options);
+  const ids = [
+    ...orphans.rules.map((id) => `router rule ${id}`),
+    ...orphans.providers.map((id) => `provider ${id}`),
+    ...orphans.profiles.map((id) => `ccr profile ${id}`),
+  ];
+  if (ids.length === 0) return { ok: true, orphans, count: 0 };
+  return {
+    ok: false,
+    orphans,
+    count: ids.length,
+    reason: `CCR state owned by no installed profile is still deciding live routes: ${ids.join(", ")}; the next airclaude launch removes it`,
+  };
+}
+
 // CCR 3 strips CCR 2 Router.default/background keys on load, so bare Claude
 // model names (plain `claude` outside a named profile, including its constant
 // claude-haiku background requests) would fail gateway model resolution.
@@ -905,6 +953,11 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
       write: false,
       files,
       liveCcrConfig: { ...plan.liveCcrConfig, status: "would-manage" },
+      // A dry run stays free of any RPC so it keeps proving the launch contract
+      // offline; --doctor is the diagnostic mode, so it reads live state.
+      managedState: options.doctor
+        ? await inspectOrphanedManagedState(catalog, { ...options, configDir: plan.configDir })
+        : undefined,
       runtime: await checkLaunchRuntime(plan, options),
     };
   }
@@ -1008,6 +1061,7 @@ export async function doctorProfile(catalog, profileName, options = {}) {
         usage: options.completionUsage,
       }),
     },
+    managedState: await inspectOrphanedManagedState(catalog, { ...options, configDir: plan.configDir }),
     shellSource: files.shellSnippet.ok
       ? await checkShellSourceability(plan.files.shellSnippet, profile, options.sourceShellSnippet ?? sourceShellSnippet)
       : { ok: true, skipped: true, path: plan.files.shellSnippet },
@@ -1768,7 +1822,7 @@ Routes:
 Files:
 ${fileLines.join("\n")}
 - ${result.liveCcrConfig.status} CCR state database: ${result.liveCcrConfig.path}
-
+${result.managedState ? `- ${statusOf(result.managedState)} orphaned CCR state: ${describeOrphanCount(result.managedState)}\n${result.managedState.ok ? "" : `  ${result.managedState.reason}\n`}` : ""}
 Runtime:
 ${runtimeLines.join("\n") || "- skipped"}
 Launch:
@@ -2595,6 +2649,7 @@ function renderDoctorResult(result) {
       (file) => `${file.ok ? "ok" : "fail"} ${file.label ?? "managed file"}: ${file.path}`,
     ),
     `${statusOf(result.runtime.ccr)} CCR availability: ${result.runtime.ccr.command}`,
+    `${statusOf(result.runtime.managedState)} orphaned CCR state: ${describeOrphanCount(result.runtime.managedState)}`,
     `${statusOf(result.runtime.shellSource)} shell source: ${result.runtime.shellSource.path}`,
     renderContextWindow(result.runtime.context),
     renderAutoCompactWindow(result.runtime.context),
@@ -2705,6 +2760,11 @@ function shellFunctionNames(profile) {
 function statusOf(check) {
   if (check.skipped) return "skip";
   return check.ok ? "ok" : "fail";
+}
+
+function describeOrphanCount(managedState) {
+  if (managedState.skipped) return "not inspected";
+  return managedState.count === 0 ? "none" : `${managedState.count} artifact(s) owned by no installed profile`;
 }
 
 function profileTemplateVars(profile, configDir = defaultConfigDir()) {
