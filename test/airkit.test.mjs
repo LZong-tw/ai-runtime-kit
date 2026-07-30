@@ -1518,7 +1518,10 @@ test("airclaude launch injects reusable runtime lessons", async () => {
   assert.match(prompt, /default: openai-compatible,steady-coder \(model steady-coder\)/);
   assert.match(prompt, /background: openai-compatible,fast-coder \(model fast-coder\)/);
   assert.doesNotMatch(prompt, /- think:|- longContext:|- webSearch:/);
-  assert.match(prompt, /Claude launch\/display model is compatibility metadata only/);
+  assert.match(prompt, /Claude launch\/display model is the launcher's own id, not a served model/);
+  // The example profile routes every Claude family to `default`, so there is no
+  // in-session pick to describe and the extra line stays out.
+  assert.doesNotMatch(prompt, /Picking a Claude model in session/);
 });
 
 test("generated shell wrappers delegate to the managed CCR 3 launch path", async () => {
@@ -2416,6 +2419,13 @@ test("a dedicated launch id frees the sonnet route and keeps full output length"
     // An id Claude Code does not recognize falls back to 32000 max output; this
     // override is what makes the rename free.
     assert.equal(plan.launch.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS, "64000");
+
+    // The session is told where an in-session pick actually lands, because with
+    // a dedicated launch id that pick does change the route.
+    const prompt = appendSystemPromptText(plan.launch.args);
+    assert.match(prompt, /- sonnet: anthropic-messages,claude-sonnet \(model claude-sonnet\)/);
+    assert.match(prompt, /Picking a Claude model in session does change the route/);
+    assert.match(prompt, /not a served model: claude-airkit-mode\[1m\]/);
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }
