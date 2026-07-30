@@ -241,13 +241,13 @@ or transcripts. Claude Code remains responsible for `/model` and its normal
 model-choice persistence. The suffix is stripped back to `claude-sonnet-5`
 for the on-wire API id, so the gateway never sees it.
 
-Because the suffix lives in that resolved string and nowhere else, switching
-models with `/model` inside a running session replaces it: a bare model name no
-longer ends in `[1m]`, and the session goes back to the default budget even
-though the provider's own window did not change. Relaunching through the
-profile restores it. Behind a gateway this matters more than it looks, because
+Because the suffix lives in that launch argument and nowhere else, AirKit can
+only guarantee it for the model the profile launches with. Whether Claude Code
+carries it across an in-session model change is Claude Code's behavior, not
+AirKit's, and is not verified here; relaunching through the profile is the
+reliable way to get it back. Behind a gateway the general point still holds:
 Claude Code cannot ask the provider what the real window is and budgets against
-what the model string claims — so the suffix is a belief, and every route the
+what the model string claims, so the suffix is a belief — every route the
 profile can reach should actually have the window the belief asserts.
 
 ## Run Doctor

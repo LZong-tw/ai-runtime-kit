@@ -279,6 +279,91 @@
               "anthropicModels",
               "anthropicPricing"
             ]
+          },
+          {
+            "id": "claude-opus-4-8",
+            "litellm": "anthropic/claude-opus-4-8",
+            "level": "frontier",
+            "availability": "legacy",
+            "taskFit": [
+              "think",
+              "longContext",
+              "coding"
+            ],
+            "contextWindow": 1000000,
+            "maxOutputTokens": 128000,
+            "pricingUsdPer1M": {
+              "input": 5,
+              "output": 25
+            },
+            "capabilities": [
+              "reasoning",
+              "coding",
+              "vision",
+              "adaptive-thinking",
+              "tool-use"
+            ],
+            "sourceRefs": [
+              "anthropicModels",
+              "anthropicPricing"
+            ]
+          },
+          {
+            "id": "claude-opus-4-7",
+            "litellm": "anthropic/claude-opus-4-7",
+            "level": "frontier",
+            "availability": "legacy",
+            "taskFit": [
+              "think",
+              "longContext",
+              "coding"
+            ],
+            "contextWindow": 1000000,
+            "maxOutputTokens": 128000,
+            "pricingUsdPer1M": {
+              "input": 5,
+              "output": 25
+            },
+            "capabilities": [
+              "reasoning",
+              "coding",
+              "vision",
+              "adaptive-thinking",
+              "tool-use"
+            ],
+            "sourceRefs": [
+              "anthropicModels",
+              "anthropicPricing"
+            ]
+          },
+          {
+            "id": "claude-sonnet-4-6",
+            "litellm": "anthropic/claude-sonnet-4-6",
+            "level": "balanced",
+            "availability": "legacy",
+            "taskFit": [
+              "default",
+              "think",
+              "coding"
+            ],
+            "contextWindow": 1000000,
+            "maxOutputTokens": 128000,
+            "pricingUsdPer1M": {
+              "input": 3,
+              "output": 15
+            },
+            "capabilities": [
+              "reasoning",
+              "coding",
+              "vision",
+              "extended-thinking",
+              "adaptive-thinking",
+              "tool-use"
+            ],
+            "sourceRefs": [
+              "anthropicModels",
+              "anthropicPricing"
+            ]
           }
         ]
       },
@@ -698,6 +783,71 @@
               "vision",
               "function-calling",
               "computer-use"
+            ],
+            "pricingNotes": [
+              "Azure pricing depends on region and deployment type; keep the concrete deployment and price in a local overlay."
+            ],
+            "sourceRefs": [
+              "azureModels",
+              "litellmAzure"
+            ]
+          },
+          {
+            "id": "gpt-5",
+            "litellm": "azure/<deployment-name>",
+            "baseModel": "gpt-5",
+            "level": "frontier",
+            "taskFit": [
+              "default",
+              "think",
+              "coding"
+            ],
+            "capabilities": [
+              "reasoning",
+              "coding"
+            ],
+            "pricingNotes": [
+              "Azure pricing depends on region and deployment type; keep the concrete deployment and price in a local overlay."
+            ],
+            "sourceRefs": [
+              "azureModels",
+              "litellmAzure"
+            ]
+          },
+          {
+            "id": "gpt-5-mini",
+            "litellm": "azure/<deployment-name>",
+            "baseModel": "gpt-5-mini",
+            "level": "economy",
+            "taskFit": [
+              "background",
+              "default",
+              "coding"
+            ],
+            "capabilities": [
+              "reasoning",
+              "coding"
+            ],
+            "pricingNotes": [
+              "Azure pricing depends on region and deployment type; keep the concrete deployment and price in a local overlay."
+            ],
+            "sourceRefs": [
+              "azureModels",
+              "litellmAzure"
+            ]
+          },
+          {
+            "id": "gpt-4.1",
+            "litellm": "azure/<deployment-name>",
+            "baseModel": "gpt-4.1",
+            "level": "balanced",
+            "taskFit": [
+              "default",
+              "coding"
+            ],
+            "capabilities": [
+              "coding",
+              "vision"
             ],
             "pricingNotes": [
               "Azure pricing depends on region and deployment type; keep the concrete deployment and price in a local overlay."
