@@ -156,11 +156,19 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
   }
   const preservedProviders = (currentConfig.Providers ?? []).filter((provider) => {
     if (managedProviderNames.has(provider.name) || managedProviderIdSet.has(provider.id)) return false;
-    if (isOrphanManagedId(provider.id, ownedPrefixes.providers, "airkit-provider-")) {
-      pruned.providers.push(provider.id);
-      return false;
+    const owned = {
+      managedPrefix: `airkit-provider-${slug(profile.name)}-`,
+      ownedPrefixes: ownedPrefixes.providers,
+      namespace: "airkit-provider-",
+    };
+    switch (classifyManagedId(provider.id, owned)) {
+      // Inside this profile's own namespace but absent from what it now
+      // generates: a provider dropped from the profile, replaced like any other
+      // regenerated state rather than reported as somebody else's leftovers.
+      case "mine": return false;
+      case "orphan": pruned.providers.push(provider.id); return false;
+      default: return true;
     }
-    return true;
   });
   const managedProfiles = modes.map((mode) => {
     const modeConfig = modeConfigs.get(mode);
@@ -203,12 +211,12 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
         enabled: true,
         profiles: [
           ...currentProfiles.filter((candidate) => {
-            if (candidate.id?.startsWith(managedPrefix)) return false;
-            if (isOrphanManagedId(candidate.id, ownedPrefixes.profiles, "airkit-")) {
-              pruned.profiles.push(candidate.id);
-              return false;
+            const owned = { managedPrefix, ownedPrefixes: ownedPrefixes.profiles, namespace: "airkit-" };
+            switch (classifyManagedId(candidate.id, owned)) {
+              case "mine": return false;
+              case "orphan": pruned.profiles.push(candidate.id); return false;
+              default: return true;
             }
-            return true;
           }),
           ...managedProfiles,
         ],
@@ -229,10 +237,10 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
 //
 // Ownership is decided by prefix membership, not by parsing a profile name back
 // out of an id: slugs contain dashes, so `airkit-web-litellm-route-default` is
-// not attributable to "web" versus "web-litellm" by parsing. Membership can
-// only err toward keeping an id — profile "web" claims "web-litellm"'s
-// artifacts while both are in the catalog — which is the safe direction for a
-// removal.
+// not attributable to "web" versus "web-litellm" by parsing. Because prefixes
+// nest, membership alone is not enough — see managedIdOwner, which resolves an
+// id to its longest matching owner so a launch of "web" cannot claim, and
+// therefore silently replace, "web-litellm"'s artifacts.
 // Removing state on the user's behalf has to be visible, so name what went and
 // which profile it belonged to rather than letting a launch quietly shrink the
 // live config.
@@ -279,12 +287,33 @@ function installedProfileNames(configDir) {
   }
 }
 
-function isOrphanManagedId(id, ownedPrefixes, namespace) {
+// Slugs contain dashes, so one owner prefix can be a prefix of another: with
+// both "web" and "web-litellm" installed, `airkit-web-litellm-route-default`
+// starts with `airkit-web-` too. The longest matching owner wins, because the
+// shorter one winning would let a launch of "web" replace its sibling's live
+// state — and that deletion is silent, since state claimed as the launching
+// profile's own is never reported as pruned.
+function managedIdOwner(id, ownedPrefixes, namespace) {
   const value = String(id ?? "");
-  // An empty owner list would make every managed id look orphaned; a catalog
-  // that resolved a profile always has at least one.
-  if (ownedPrefixes.length === 0 || !value.startsWith(namespace)) return false;
-  return !ownedPrefixes.some((prefix) => value.startsWith(prefix));
+  if (!value.startsWith(namespace)) return null;
+  let owner = null;
+  for (const prefix of ownedPrefixes) {
+    if (value.startsWith(prefix) && (owner === null || prefix.length > owner.length)) owner = prefix;
+  }
+  return owner;
+}
+
+// "mine" is replaced by freshly generated state, "other" belongs to a profile
+// that is still installed and must survive untouched, "orphan" is owned by
+// nobody and gets removed, and "foreign" was never AirKit's to begin with.
+function classifyManagedId(id, { managedPrefix, ownedPrefixes, namespace }) {
+  const value = String(id ?? "");
+  if (!value.startsWith(namespace)) return "foreign";
+  const owner = managedIdOwner(value, [...ownedPrefixes, managedPrefix], namespace);
+  if (owner === managedPrefix) return "mine";
+  // An empty owner list would make every managed id look orphaned; treat an
+  // unattributable id as foreign rather than removing it on a guess.
+  return owner === null ? (ownedPrefixes.length === 0 ? "foreign" : "orphan") : "other";
 }
 
 // CCR 3 strips CCR 2 Router.default/background keys on load, so bare Claude
@@ -322,12 +351,11 @@ function mergeManagedRouter(currentRouter, managedRules, managedPrefix, orphans 
   const ownedPrefixes = orphans.ownedPrefixes ?? [];
   const preserved = (router.rules ?? []).filter((candidate) => {
     const id = String(candidate?.id ?? "");
-    if (id.startsWith(managedPrefix)) return false;
-    if (isOrphanManagedId(id, ownedPrefixes, "airkit-")) {
-      orphans.pruned?.push(id);
-      return false;
+    switch (classifyManagedId(id, { managedPrefix, ownedPrefixes, namespace: "airkit-" })) {
+      case "mine": return false;
+      case "orphan": orphans.pruned?.push(id); return false;
+      default: return true;
     }
-    return true;
   });
   return { ...router, rules: [...preserved, ...managedRules] };
 }

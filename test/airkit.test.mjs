@@ -555,6 +555,57 @@ test("state belonging to a profile installed from another catalog is not treated
   }
 });
 
+test("a profile whose slug prefixes another profile's slug does not replace that profile's state", async () => {
+  // Slugs contain dashes, so "launch" claims every id belonging to
+  // "launch-example" under a plain startsWith test. That deletion is the
+  // dangerous kind: state read as the launching profile's own is replaced
+  // without ever being reported as pruned.
+  const catalog = launchCatalog();
+  catalog.profiles = [...catalog.profiles, { ...catalog.profiles[0], name: "launch" }];
+
+  const current = {
+    Providers: [
+      { id: "airkit-provider-launch-example-demo", name: "airkit-provider-launch-example-demo", api_base_url: "https://sibling.invalid/v1", models: ["steady-coder"] },
+    ],
+    Router: { rules: [{ id: "airkit-launch-example-route-default", name: "Sibling route", enabled: true }] },
+    profile: { profiles: [{ id: "airkit-launch-example-auto", name: "Sibling auto" }] },
+  };
+
+  const merged = airkitRuntime.buildCcr3ManagedConfig(catalog, "launch", current, {
+    configDir: "/tmp/airkit-nested-slugs",
+  });
+
+  assert.deepEqual(merged.pruned, { profiles: [], providers: [], rules: [] }, "nothing is orphaned here");
+  assert.ok(
+    merged.config.Router.rules.some(({ id }) => id === "airkit-launch-example-route-default"),
+    "the longer-slug profile keeps its rule when the shorter-slug profile launches",
+  );
+  assert.ok(merged.config.Providers.some(({ id }) => id === "airkit-provider-launch-example-demo"));
+  assert.ok(merged.config.profile.profiles.some(({ id }) => id === "airkit-launch-example-auto"));
+});
+
+test("a launch still replaces its own state that it no longer generates", async () => {
+  // The longest-owner rule must not turn into a licence to keep everything: a
+  // mode or provider dropped from the launching profile has to go.
+  const current = {
+    Providers: [
+      { id: "airkit-provider-launch-example-retired", name: "airkit-provider-launch-example-retired", api_base_url: "https://retired.invalid/v1", models: ["gone"] },
+    ],
+    Router: { rules: [{ id: "airkit-launch-example-route-retired", name: "Retired route", enabled: true }] },
+    profile: { profiles: [{ id: "airkit-launch-example-retired-mode", name: "Retired mode" }] },
+  };
+
+  const merged = airkitRuntime.buildCcr3ManagedConfig(launchCatalog(), "launch-example", current, {
+    configDir: "/tmp/airkit-own-stale",
+  });
+
+  assert.ok(!merged.config.Router.rules.some(({ id }) => id === "airkit-launch-example-route-retired"));
+  assert.ok(!merged.config.Providers.some(({ id }) => id === "airkit-provider-launch-example-retired"));
+  assert.ok(!merged.config.profile.profiles.some(({ id }) => id === "airkit-launch-example-retired-mode"));
+  assert.deepEqual(merged.pruned, { profiles: [], providers: [], rules: [] },
+    "refreshing the launching profile's own state is routine, not a reported removal");
+});
+
 test("outer compatibility routing and managed core rules preserve unknown Claude models", async () => {
   const merged = airkitRuntime.buildCcr3ManagedConfig(
     compatibilityCatalog(),
