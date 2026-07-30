@@ -381,26 +381,56 @@ function inspectOrphanedManagedState(catalog, currentConfig, options = {}) {
   };
 }
 
-// Attribute the plugin host by parentage. Several `--no-gateway` daemon children
-// can outlive their gateway and match the same command line, so picking by
-// uptime or by listening port names the wrong process — the host is whichever
-// service fathered the running gateway core.
-// runCommand is awaited throughout this file because callers inject async
-// stubs; treating its result as synchronous here would read `ok` off a promise
-// and silently report every host as unlocatable.
+const HOST_NOT_RUNNING = "CCR plugin host is not running, so nothing is loaded to be stale";
+
+// Attribute the plugin host by parentage: the host is whichever service fathered
+// the running gateway core. Several `--no-gateway` daemon children outlive their
+// gateway and match the same command line, so picking by uptime or by listening
+// port names the wrong process — observed on one machine, two candidates started
+// in the same second, only one of them the parent of the core.
+//
+// runCommand is awaited throughout this file because callers inject async stubs;
+// treating its result as synchronous here would read `ok` off a promise and
+// silently report every host as unlocatable.
+//
+// Returns the start time, or the reason there isn't one. "Cannot tell" and "not
+// running" have to stay distinguishable: reporting ambiguity as absence is the
+// same false clean this check exists to prevent.
 async function readPluginHostStart(runCommand) {
-  const firstLine = async (command, args) => {
+  const lines = async (command, args) => {
     const result = await runCommand(command, args, { timeoutMs: 5000 });
-    return result?.ok ? (String(result.stdout ?? "").split("\n")[0] ?? "").trim() : "";
+    if (!result?.ok) return [];
+    return String(result.stdout ?? "")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== "");
   };
-  const corePid = await firstLine("pgrep", ["-f", "ai-gateway/dist/index.js"]);
-  if (corePid === "") return null;
-  const hostPid = await firstLine("ps", ["-o", "ppid=", "-p", corePid]);
-  if (hostPid === "") return null;
-  const started = await firstLine("ps", ["-o", "lstart=", "-p", hostPid]);
-  if (started === "") return null;
-  const at = new Date(started);
-  return Number.isNaN(at.getTime()) ? null : at;
+  const startedAt = async (pid) => {
+    const [started] = await lines("ps", ["-o", "lstart=", "-p", pid]);
+    const at = started ? new Date(started) : null;
+    return at && !Number.isNaN(at.getTime())
+      ? { at }
+      : { at: null, reason: `CCR plugin host ${pid} did not report a start time` };
+  };
+
+  const [corePid] = await lines("pgrep", ["-f", "ai-gateway/dist/index.js"]);
+  if (corePid) {
+    const [hostPid] = await lines("ps", ["-o", "ppid=", "-p", corePid]);
+    return hostPid ? await startedAt(hostPid) : { at: null, reason: HOST_NOT_RUNNING };
+  }
+
+  // Both `--restart-stale` and a plain `ccr start --no-gateway` leave the
+  // management service up with no core to be fathered, and that is exactly when
+  // a freshness answer matters most. Fall back to matching the service directly,
+  // but only when the match is unique — with no core to disambiguate, choosing
+  // between siblings would date the check against the wrong process.
+  const candidates = await lines("pgrep", ["-f", "cli.js serve --daemon-child --no-open$"]);
+  if (candidates.length === 1) return await startedAt(candidates[0]);
+  if (candidates.length === 0) return { at: null, reason: HOST_NOT_RUNNING };
+  return {
+    at: null,
+    reason: `cannot tell which of ${candidates.length} management services loaded the plugins: no gateway core is running to attribute them by parentage`,
+  };
 }
 
 // The entry module is not enough: today's failure came from a sibling this file
@@ -448,10 +478,11 @@ async function inspectPluginFreshness(currentConfig = {}, options = {}) {
   if (modules.length === 0) return { ok: true, skipped: true, reason: "no CCR plugins registered" };
 
   const runCommand = options.runCommand ?? runCommandSync;
-  const hostStartedAt = options.pluginHostStartedAt ?? (await readPluginHostStart(runCommand));
-  if (!hostStartedAt) {
-    return { ok: true, skipped: true, reason: "CCR plugin host is not running, so nothing is loaded to be stale" };
-  }
+  const host = options.pluginHostStartedAt
+    ? { at: options.pluginHostStartedAt }
+    : await readPluginHostStart(runCommand);
+  if (!host.at) return { ok: true, skipped: true, reason: host.reason };
+  const hostStartedAt = host.at;
 
   const stale = [];
   for (const module of modules) {
@@ -1659,7 +1690,11 @@ async function announcePluginFreshness(currentConfig, options = {}) {
       return pluginFreshness;
     }
   }
-  stdout.write("     plugin host restarted; it now loads the current modules\n");
+  // Two zero exit codes mean the commands ran, not that a plugin loaded. The
+  // failure this feature exists for is a plugin that starts and disables itself
+  // behind a `/health` that still answers ok, so claiming the modules are loaded
+  // would be the same lie in a new place.
+  stdout.write("     plugin host restarted\n");
   return pluginFreshness;
 }
 
