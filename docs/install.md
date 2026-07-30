@@ -303,6 +303,34 @@ node src/airkit.mjs update --profile openai-compatible-example --write
 node src/airkit.mjs doctor --profile openai-compatible-example
 ```
 
+## Removing A Profile
+
+Deleting a profile from the catalog does not by itself remove what it wrote
+into CCR. Its Router rules, providers, and CCR agent profiles are namespaced by
+profile name (`airkit-<profile>-…`, `airkit-provider-<profile>-…`), and every
+managed merge preserves ids outside the profile being prepared.
+
+Leftover rules are not harmless. CCR evaluates Router rules in order and takes
+the first match, so a rule left behind by an older build — for example one
+matching the bare prefix `claude-` — outranks the correctly scoped
+`claude-opus-` and `claude-sonnet-` rules that follow it, and the routes that
+appear correct in the config never run.
+
+The next launch removes managed state whose profile is present in neither the
+loaded catalog nor `<configDir>/ccr`, and prints what it removed:
+
+```text
+airkit: removed CCR state left by profiles no longer in the catalog:
+  - router rule airkit-old-profile-route-default
+  - provider airkit-provider-old-profile-gateway
+```
+
+Both records are consulted because one CCR install can be driven by more than
+one catalog. A profile that is still installed keeps its state even when the
+catalog in use does not declare it, so removing a profile means removing its
+generated `<configDir>/ccr/<profile>.json` as well. Providers, rules, and
+profiles that are not AirKit-managed are never touched.
+
 ## LLM Agent Workflow
 
 When guiding a user, keep the agent's write boundary clear:
