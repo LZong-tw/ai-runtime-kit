@@ -33,6 +33,7 @@ test("resolves all six policies and verified native web capabilities", () => {
   });
 
   assert.deepEqual(resolved, {
+    advisorUnsupported: "strip",
     fallback: VALID_CONFIG.fallback,
     familyFallbacks: {},
     policies: {
@@ -44,6 +45,30 @@ test("resolves all six policies and verified native web capabilities", () => {
       mcpConnector: "anthropic-fallback",
     },
   });
+});
+
+test("advisor.unsupported defaults to strip, accepts passthrough, rejects anything else", () => {
+  const withValue = (unsupported) => ({
+    ...VALID_CONFIG,
+    advisor: { ...VALID_CONFIG.advisor, unsupported },
+  });
+
+  assert.equal(resolveCompatibilityPolicies(VALID_CONFIG, {}).advisorUnsupported, "strip");
+  assert.equal(
+    resolveCompatibilityPolicies(withValue("passthrough"), {}).advisorUnsupported,
+    "passthrough",
+  );
+  assert.equal(resolveCompatibilityPolicies(withValue("strip"), {}).advisorUnsupported, "strip");
+  assert.throws(() => resolveCompatibilityPolicies(withValue("drop"), {}), /advisor\.unsupported/);
+  // The key belongs to advisor alone; no other family diverts on a definition
+  // the route cannot resolve.
+  assert.throws(
+    () => resolveCompatibilityPolicies({
+      ...VALID_CONFIG,
+      webFetch: { ...VALID_CONFIG.webFetch, unsupported: "strip" },
+    }, {}),
+    /unknown webFetch key/,
+  );
 });
 
 test("native-first falls back unless the matching capability is verified", () => {

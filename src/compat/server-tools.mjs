@@ -51,6 +51,18 @@ export function classifyToolDefinition(tool = {}) {
   return { kind: "client", family: null, type: type ?? null, known: false };
 }
 
+// Removing a family's tool definitions is the only way to stop it from
+// diverting a request it was never used in: `families` below is built from the
+// presence of a definition, and requiresWholeRequestFallback sends the whole
+// request to the fallback route on the strength of that alone. Returns the same
+// object when nothing matched so callers can keep replaying the original bytes.
+export function stripServerToolFamily(body, family) {
+  const types = SERVER_TOOL_TYPES[family];
+  if (types === undefined || !Array.isArray(body?.tools)) return body;
+  const tools = body.tools.filter((tool) => !types.includes(tool?.type));
+  return tools.length === body.tools.length ? body : { ...body, tools };
+}
+
 export function inspectServerToolRequest(body = {}) {
   const tools = Array.isArray(body?.tools) ? body.tools : [];
   const clientFamilies = new Set();

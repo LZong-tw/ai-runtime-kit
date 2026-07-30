@@ -1403,11 +1403,26 @@ function buildCompatibilityLaunch(ccrConfig, env) {
 
 function compatibilityCapabilityStatus(ccrConfig) {
   const config = configuredCompatibility(ccrConfig);
-  if (!config) return { capabilities: {}, ok: true, skipped: true };
-  const { policies } = resolveCompatibilityPolicies(config, VERIFIED_NATIVE_COMPATIBILITY);
+  if (!config) return { capabilities: {}, notes: [], ok: true, skipped: true };
+  const { policies, advisorUnsupported } = resolveCompatibilityPolicies(
+    config,
+    VERIFIED_NATIVE_COMPATIBILITY,
+  );
+  const stripped = advisorUnsupported === "strip";
   return {
+    notes: stripped
+      ? [
+        "advisor tool definitions are removed from requests, so a request that "
+        + "carries one stays on its normal route instead of diverting to the "
+        + "fallback route. Advisor itself does not work through this gateway: "
+        + "the tool definition carries its own model, which the gateway resolves "
+        + "in a separate call it has no api_base or credentials for. Set "
+        + 'advisor.unsupported to "passthrough" and re-test after the gateway '
+        + "changes.",
+      ]
+      : [],
     capabilities: {
-      advisor: policyStatus(policies.advisor),
+      advisor: stripped ? "stripped" : policyStatus(policies.advisor),
       codeExecution: policyStatus(policies.codeExecution),
       mcpConnector: policyStatus(policies.mcpConnector),
       toolSearch: policyStatus(policies.toolSearch),
@@ -2880,6 +2895,9 @@ function renderDoctorResult(result) {
   if (!result.runtime.compatibility.skipped) {
     for (const [capability, status] of Object.entries(result.runtime.compatibility.capabilities)) {
       lines.push(`${status} compatibility ${capability}`);
+    }
+    for (const note of result.runtime.compatibility.notes ?? []) {
+      lines.push(`  note: ${note}`);
     }
   }
   for (const failure of result.failures) {

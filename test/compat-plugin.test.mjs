@@ -924,6 +924,61 @@ test("ordinary Messages requests preserve raw bytes and abort propagation", asyn
   assert.deepEqual(response.body, Buffer.from("raw-response"));
 });
 
+// The whole point of the strip is where it happens: a server-tool definition
+// diverts the request on presence alone, so removing advisor after that
+// decision would be too late. These two assert the decision itself flips.
+test("an advisor definition is stripped before the compatibility decision", async () => {
+  const forwarded = [];
+  const fixture = await createPluginFixture({
+    coreClient: createPluginCoreClient({
+      async forwardRaw(input) {
+        forwarded.push(JSON.parse(input.body.toString("utf8")));
+        input.response.end();
+      },
+    }),
+  });
+  const body = Buffer.from(JSON.stringify({
+    model: "claude-sonnet-5",
+    messages: [{ role: "user", content: "hi" }],
+    tools: [{ name: "Bash" }, { type: "advisor_20260301" }],
+  }), "utf8");
+
+  await fixture.messages.handler(
+    createPluginRequest(body),
+    createRecordingResponse(),
+    fixture.helpers,
+  );
+
+  assert.equal(forwarded.length, 1, "the request must stay on the raw passthrough");
+  assert.deepEqual(forwarded[0].tools, [{ name: "Bash" }]);
+});
+
+test("advisor.unsupported passthrough leaves the definition in place and diverts", async () => {
+  const forwarded = [];
+  const fixture = await createPluginFixture({
+    pluginConfig: { advisor: { mode: "anthropic-fallback", unsupported: "passthrough" } },
+    coreClient: createPluginCoreClient({
+      async forwardRaw(input) {
+        forwarded.push(JSON.parse(input.body.toString("utf8")));
+        input.response.end();
+      },
+    }),
+  });
+  const body = Buffer.from(JSON.stringify({
+    model: "claude-sonnet-5",
+    messages: [{ role: "user", content: "hi" }],
+    tools: [{ name: "Bash" }, { type: "advisor_20260301" }],
+  }), "utf8");
+
+  await fixture.messages.handler(
+    createPluginRequest(body),
+    createRecordingResponse(),
+    fixture.helpers,
+  );
+
+  assert.equal(forwarded.length, 0, "the advisor definition must still divert the request");
+});
+
 test("ordinary Messages requests translate Claude effort before OpenAI-compatible forwarding", async () => {
   const calls = [];
   const fixture = await createPluginFixture({
