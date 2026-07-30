@@ -2,7 +2,7 @@
 
 import { access, chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { readdirSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -102,7 +102,7 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
     }
   }
   const managedPrefix = `airkit-${slug(profile.name)}-`;
-  const ownedPrefixes = catalogManagedPrefixes(catalog);
+  const ownedPrefixes = catalogManagedPrefixes(catalog, installedProfileNames(configDir));
   const pruned = { profiles: [], providers: [], rules: [] };
   const providerBaseUrl = String(
     options.providerBaseUrl ?? options.env?.AIRCLAUDE_PROVIDER_BASE_URL ?? "",
@@ -246,15 +246,37 @@ function reportPrunedManagedState(pruned, stderr) {
   stderr.write(`airkit: removed CCR state left by profiles no longer in the catalog:\n${removed.map((entry) => `  - ${entry}\n`).join("")}`);
 }
 
-function catalogManagedPrefixes(catalog) {
+function catalogManagedPrefixes(catalog, installedNames = []) {
   const profiles = [];
   const providers = [];
+  const names = new Set(installedNames);
   for (const candidate of catalog?.profiles ?? []) {
     if (typeof candidate?.name !== "string" || candidate.name === "") continue;
-    profiles.push(`airkit-${slug(candidate.name)}-`);
-    providers.push(`airkit-provider-${slug(candidate.name)}-`);
+    names.add(candidate.name);
+  }
+  for (const name of names) {
+    profiles.push(`airkit-${slug(name)}-`);
+    providers.push(`airkit-provider-${slug(name)}-`);
   }
   return { profiles, providers };
+}
+
+// One CCR install can be driven by more than one catalog: the private overlay
+// repo ships `oneportal-lowcost` while the OSS checkout ships only its example,
+// so ownership decided from the loaded catalog alone would let a launch from
+// either side delete the other's live state. The generated profile files are the
+// machine's record of which AirKit profiles are actually installed, so they own
+// their prefixes too. An unreadable or absent directory just means no extra
+// owners, never a licence to remove more.
+function installedProfileNames(configDir) {
+  if (typeof configDir !== "string" || configDir === "") return [];
+  try {
+    return readdirSync(join(configDir, "ccr"))
+      .filter((entry) => entry.endsWith(".json"))
+      .map((entry) => entry.slice(0, -".json".length));
+  } catch {
+    return [];
+  }
 }
 
 function isOrphanManagedId(id, ownedPrefixes, namespace) {
