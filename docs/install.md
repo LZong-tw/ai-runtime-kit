@@ -235,11 +235,20 @@ The 1M context window is **not** controlled by an env var (there is no such env
 var in Claude Code — `ANTHROPIC_1M_CONTEXT` is a no-op). Claude Code enables 1M
 only when the resolved model string ends in the literal `[1m]` suffix, so the
 masked context window is selected per launch via the profile's
-`launch.claudeModel` (`claude-sonnet-4-6[1m]`). AirKit passes that value only as
+`launch.claudeModel` (`claude-sonnet-5[1m]`). AirKit passes that value only as
 Claude Code's `--model` argument; it never writes a model into Claude settings
 or transcripts. Claude Code remains responsible for `/model` and its normal
-model-choice persistence. The suffix is stripped back to `claude-sonnet-4-6`
+model-choice persistence. The suffix is stripped back to `claude-sonnet-5`
 for the on-wire API id, so the gateway never sees it.
+
+Because the suffix lives in that resolved string and nowhere else, switching
+models with `/model` inside a running session replaces it: a bare model name no
+longer ends in `[1m]`, and the session goes back to the default budget even
+though the provider's own window did not change. Relaunching through the
+profile restores it. Behind a gateway this matters more than it looks, because
+Claude Code cannot ask the provider what the real window is and budgets against
+what the model string claims — so the suffix is a belief, and every route the
+profile can reach should actually have the window the belief asserts.
 
 ## Run Doctor
 

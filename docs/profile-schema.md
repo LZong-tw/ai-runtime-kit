@@ -239,7 +239,7 @@ rendered.
     "env": {
       "CCR_PROFILE": "{{profileName}}"
     },
-    "claudeModel": "claude-sonnet-4-6",
+    "claudeModel": "claude-sonnet-5",
     "context": {
       "autoCompactWindow": 300000,
       "autoCompactPercentage": "default"
