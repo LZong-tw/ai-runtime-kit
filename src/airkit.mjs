@@ -102,6 +102,8 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
     }
   }
   const managedPrefix = `airkit-${slug(profile.name)}-`;
+  const ownedPrefixes = catalogManagedPrefixes(catalog);
+  const pruned = { profiles: [], providers: [], rules: [] };
   const providerBaseUrl = String(
     options.providerBaseUrl ?? options.env?.AIRCLAUDE_PROVIDER_BASE_URL ?? "",
   ).trim();
@@ -152,9 +154,14 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
       throw new Error(`unowned CCR provider name collision: ${provider.name}`);
     }
   }
-  const preservedProviders = (currentConfig.Providers ?? []).filter(
-    (provider) => !managedProviderNames.has(provider.name) && !managedProviderIdSet.has(provider.id),
-  );
+  const preservedProviders = (currentConfig.Providers ?? []).filter((provider) => {
+    if (managedProviderNames.has(provider.name) || managedProviderIdSet.has(provider.id)) return false;
+    if (isOrphanManagedId(provider.id, ownedPrefixes.providers, "airkit-provider-")) {
+      pruned.providers.push(provider.id);
+      return false;
+    }
+    return true;
+  });
   const managedProfiles = modes.map((mode) => {
     const modeConfig = modeConfigs.get(mode);
     const claudeModel = resolveClaudeLaunchModel(profile);
@@ -188,16 +195,74 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
         currentConfig.Router,
         buildManagedRouterRules(baseConfig, managedRouteSelector, managedPrefix),
         managedPrefix,
+        { ownedPrefixes: ownedPrefixes.profiles, pruned: pruned.rules },
       ),
       ...mergeManagedConfigArrays(currentConfig, baseConfig, managedPrefix),
       profile: {
         ...(currentConfig.profile ?? {}),
         enabled: true,
-        profiles: [...currentProfiles.filter((candidate) => !candidate.id?.startsWith(managedPrefix)), ...managedProfiles],
+        profiles: [
+          ...currentProfiles.filter((candidate) => {
+            if (candidate.id?.startsWith(managedPrefix)) return false;
+            if (isOrphanManagedId(candidate.id, ownedPrefixes.profiles, "airkit-")) {
+              pruned.profiles.push(candidate.id);
+              return false;
+            }
+            return true;
+          }),
+          ...managedProfiles,
+        ],
       },
     },
     profileIds: Object.fromEntries(modes.map((mode) => [mode, `${managedPrefix}${slug(mode)}`])),
+    pruned,
   };
+}
+
+// Every merge above preserves whatever lies outside the current profile's
+// prefix, so a profile that leaves the catalog — renamed, removed, or folded
+// into another profile's mode — strands its managed CCR artifacts with no code
+// path left that can remove them. Stale Router rules are not inert: CCR picks
+// the first matching rule, so an orphan whose condition is broader than the
+// live ones (a bare `claude-` prefix emitted by an older AirKit build) silently
+// outranks every correct route. Drop artifacts owned by no catalog profile.
+//
+// Ownership is decided by prefix membership, not by parsing a profile name back
+// out of an id: slugs contain dashes, so `airkit-web-litellm-route-default` is
+// not attributable to "web" versus "web-litellm" by parsing. Membership can
+// only err toward keeping an id — profile "web" claims "web-litellm"'s
+// artifacts while both are in the catalog — which is the safe direction for a
+// removal.
+// Removing state on the user's behalf has to be visible, so name what went and
+// which profile it belonged to rather than letting a launch quietly shrink the
+// live config.
+function reportPrunedManagedState(pruned, stderr) {
+  const removed = [
+    ...(pruned?.rules ?? []).map((id) => `router rule ${id}`),
+    ...(pruned?.providers ?? []).map((id) => `provider ${id}`),
+    ...(pruned?.profiles ?? []).map((id) => `ccr profile ${id}`),
+  ];
+  if (removed.length === 0) return;
+  stderr.write(`airkit: removed CCR state left by profiles no longer in the catalog:\n${removed.map((entry) => `  - ${entry}\n`).join("")}`);
+}
+
+function catalogManagedPrefixes(catalog) {
+  const profiles = [];
+  const providers = [];
+  for (const candidate of catalog?.profiles ?? []) {
+    if (typeof candidate?.name !== "string" || candidate.name === "") continue;
+    profiles.push(`airkit-${slug(candidate.name)}-`);
+    providers.push(`airkit-provider-${slug(candidate.name)}-`);
+  }
+  return { profiles, providers };
+}
+
+function isOrphanManagedId(id, ownedPrefixes, namespace) {
+  const value = String(id ?? "");
+  // An empty owner list would make every managed id look orphaned; a catalog
+  // that resolved a profile always has at least one.
+  if (ownedPrefixes.length === 0 || !value.startsWith(namespace)) return false;
+  return !ownedPrefixes.some((prefix) => value.startsWith(prefix));
 }
 
 // CCR 3 strips CCR 2 Router.default/background keys on load, so bare Claude
@@ -230,11 +295,18 @@ function buildManagedRouterRules(baseConfig, managedRouteSelector, managedPrefix
   ];
 }
 
-function mergeManagedRouter(currentRouter, managedRules, managedPrefix) {
+function mergeManagedRouter(currentRouter, managedRules, managedPrefix, orphans = {}) {
   const router = structuredClone(currentRouter ?? {});
-  const preserved = (router.rules ?? []).filter(
-    (candidate) => !String(candidate?.id ?? "").startsWith(managedPrefix),
-  );
+  const ownedPrefixes = orphans.ownedPrefixes ?? [];
+  const preserved = (router.rules ?? []).filter((candidate) => {
+    const id = String(candidate?.id ?? "");
+    if (id.startsWith(managedPrefix)) return false;
+    if (isOrphanManagedId(id, ownedPrefixes, "airkit-")) {
+      orphans.pruned?.push(id);
+      return false;
+    }
+    return true;
+  });
   return { ...router, rules: [...preserved, ...managedRules] };
 }
 
@@ -811,6 +883,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     ? { args: [], env: {} }
     : buildCompatibilityLaunch(managed.config, options.env ?? process.env);
   if (!isDeepStrictEqual(managed.config, currentConfig)) {
+    reportPrunedManagedState(managed.pruned, options.stderr ?? process.stderr);
     await ccrClient.saveConfig(managed.config, { applyProfile: false });
   }
   let child = null;
