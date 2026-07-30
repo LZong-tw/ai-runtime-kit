@@ -1783,12 +1783,14 @@ test("doctorProfile reports rendered file drift and runtime availability", async
     await writeFile(join(configDir, "ccr", `${profile}.json`), "{ \"stale\": true }\n");
 
     const result = await doctorProfile(catalog, profile, {
+      ccrClient: { getConfig: async () => ({}) },
       commandExists: async (command) => command !== "ccr",
       configDir,
       sourceShellSnippet: async () => ({ ok: true }),
     });
 
     assert.equal(result.ok, false);
+    assert.equal(result.runtime.managedState.count, 0, "an empty live config has nothing orphaned");
     assert.equal(result.files.ccrConfig.ok, false);
     assert.equal(result.files.shellSnippet.ok, true);
     assert.equal(result.runtime.ccr.ok, false);
@@ -1796,6 +1798,65 @@ test("doctorProfile reports rendered file drift and runtime availability", async
     assert.equal(result.runtime.context.usage.cacheDetails, "unavailable");
     assert.match(result.failures.join("\n"), /stale CCR config/);
     assert.match(result.failures.join("\n"), /missing command: ccr/);
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("doctorProfile fails and names CCR state owned by no installed profile", async () => {
+  const catalog = await loadCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-oss-doctor-orphans-"));
+
+  try {
+    await installProfile(catalog, profile, { configDir, write: true });
+
+    const live = {
+      Providers: [{ id: "airkit-provider-gone-example-demo" }, { id: "unrelated-provider" }],
+      Router: { rules: [{ id: "airkit-gone-example-route-default" }, { id: "unrelated-rule" }] },
+      profile: { profiles: [{ id: "airkit-gone-example-auto" }, { id: "unrelated-profile" }] },
+    };
+
+    const result = await doctorProfile(catalog, profile, {
+      ccrClient: { getConfig: async () => live },
+      commandExists: async () => true,
+      configDir,
+      sourceShellSnippet: async () => ({ ok: true }),
+    });
+
+    assert.equal(result.ok, false, "stale state still decides live routes, so doctor must not pass");
+    assert.deepEqual(result.runtime.managedState.orphans, {
+      profiles: ["airkit-gone-example-auto"],
+      providers: ["airkit-provider-gone-example-demo"],
+      rules: ["airkit-gone-example-route-default"],
+    });
+    assert.match(result.failures.join("\n"), /airkit-gone-example-route-default/);
+    assert.match(result.failures.join("\n"), /next airclaude launch removes it/);
+    assert.ok(
+      !result.failures.join("\n").includes("unrelated-"),
+      "foreign CCR artifacts are never reported as AirKit's to remove",
+    );
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("doctor reports a stopped management service as missing information, not a failure", async () => {
+  const catalog = await loadCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-oss-doctor-nostate-"));
+
+  try {
+    await installProfile(catalog, profile, { configDir, write: true });
+
+    const result = await doctorProfile(catalog, profile, {
+      ccrClient: { getConfig: async () => { throw new Error("CCR 3 management service is not running"); } },
+      commandExists: async () => true,
+      configDir,
+      sourceShellSnippet: async () => ({ ok: true }),
+    });
+
+    assert.equal(result.runtime.managedState.skipped, true);
+    assert.equal(result.runtime.managedState.ok, true, "doctor never turns an unreadable source into a verdict");
+    assert.ok(!result.failures.some((reason) => reason?.includes("owned by no installed profile")));
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }
@@ -1818,6 +1879,7 @@ test("native-first compatibility renders no duplicate MCP and reports six polici
     });
     await installProfile(catalog, "launch-example", { configDir, write: true });
     const result = await doctorProfile(catalog, "launch-example", {
+      ccrClient: { getConfig: async () => ({}) },
       commandExists: async () => true,
       configDir,
       sourceShellSnippet: async () => ({ ok: true }),
@@ -1855,7 +1917,10 @@ test("doctor command exits zero when rendered files match", async () => {
     await installProfile(catalog, profile, { configDir, write: true });
 
     const result = runAirkitWithEnv(
-      { PATH: `${fakeBin}:${process.env.PATH ?? ""}` },
+      // Point CCR's state dir at an empty directory so this stays a check of
+      // rendered files: the developer's own live CCR state must not decide
+      // whether the CLI contract passes.
+      { CCR_INTERNAL_HOME_DIR: configDir, PATH: `${fakeBin}:${process.env.PATH ?? ""}` },
       "doctor",
       "--profile",
       profile,
@@ -1864,6 +1929,7 @@ test("doctor command exits zero when rendered files match", async () => {
     );
 
     assert.equal(result.status, 0);
+    assert.match(result.stdout, /skip orphaned CCR state: not inspected/);
     assert.match(result.stdout, /ok CCR config/);
     assert.match(result.stdout, /ok shell snippet/);
     assert.match(result.stdout, /ok CCR availability/);
