@@ -2807,6 +2807,82 @@ test("createCcr3Client autoStart false rejects missing and stale services withou
   }
 });
 
+test("a rotated management token is re-read once and never force-starts a live service", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-ccr-token-rotation-"));
+  const stateDir = join(root, ".claude-code-router");
+  const servicePath = join(stateDir, "service.json");
+  const tokens = [];
+  const calls = [];
+  try {
+    await mkdir(stateDir, { recursive: true });
+    const rotate = async (token) => {
+      live = token;
+      await writeFile(servicePath, JSON.stringify({ url: `http://127.0.0.1:3462/?ccr_web_token=${token}` }));
+    };
+    let live;
+    await rotate("before-restart");
+
+    const client = airkitRuntime.createCcr3Client({
+      // autoStart false proves the recovery reads the file rather than starting
+      // a service: something is answering on the wire, so there is nothing to start.
+      autoStart: false,
+      env: { HOME: root },
+      fetch: async (url, init) => {
+        const token = init.headers["x-ccr-web-auth"];
+        tokens.push(token);
+        if (token !== live) return { ok: false, status: 401 };
+        return { json: async () => ({ value: { PORT: 3456 } }), ok: true, status: 200 };
+      },
+      runCommand: async () => {
+        calls.push("runner");
+        return { ok: true, status: 0, stdout: "" };
+      },
+    });
+
+    // The client caches service.json on its first RPC, which is what makes the
+    // token it holds go stale when --restart-stale replaces the service.
+    await client.getConfig();
+    await rotate("after-restart");
+
+    assert.deepEqual(await client.getConfig(), { PORT: 3456 });
+    assert.deepEqual(
+      tokens,
+      ["before-restart", "before-restart", "after-restart"],
+      "the stale token is tried once, then exactly one retry with the rotated one",
+    );
+    assert.deepEqual(calls, [], "a service that answers must never be started");
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("an unauthorized RPC that is not token rotation fails without a retry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-ccr-unauthorized-"));
+  const stateDir = join(root, ".claude-code-router");
+  const attempts = [];
+  try {
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(join(stateDir, "service.json"), JSON.stringify({
+      url: "http://127.0.0.1:3462/?ccr_web_token=unchanged",
+    }));
+
+    const client = airkitRuntime.createCcr3Client({
+      autoStart: false,
+      env: { HOME: root },
+      fetch: async () => {
+        attempts.push("fetch");
+        return { ok: false, status: 403 };
+      },
+      runCommand: async () => ({ ok: true, status: 0, stdout: "" }),
+    });
+
+    await assert.rejects(client.getConfig(), /CCR RPC getConfig failed: HTTP 403/);
+    assert.deepEqual(attempts, ["fetch"], "an unchanged token must not be retried");
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
 test("missing CCR starts management-only before getConfig and launch performs no later action before safety", async () => {
   const root = await mkdtemp(join(tmpdir(), "airkit-codex-management-start-"));
   const stateDir = join(root, ".claude-code-router");
@@ -3581,6 +3657,99 @@ test("runAirclaudeCli dry run supports positional pro mode and avoids launching"
     await rm(configDir, { force: true, recursive: true });
     await rm(resolve(catalogPath, ".."), { force: true, recursive: true });
   }
+});
+
+// A stale plugin host must be announced before the child starts, because a
+// launch renders its own report only after the session ends.
+async function staleHostLaunch(extraArgv, { ccrResult, restartStale }) {
+  const catalog = launchCatalog();
+  const catalogPath = await writeLaunchCatalog(catalog);
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-restart-stale-"));
+  const pluginDir = await mkdtemp(join(tmpdir(), "airkit-restart-stale-plugin-"));
+  const events = [];
+  const output = [];
+  const ccrClient = ccrTestClient([]);
+  const liveConfig = await ccrClient.getConfig();
+  // The freshness check reads the *live* plugin list, so it has to be injected
+  // on top of the real config shape rather than replacing it.
+  ccrClient.getConfig = async () => ({
+    ...liveConfig,
+    plugins: [{ id: "airkit-compatibility", module: join(pluginDir, "plugin.mjs") }],
+  });
+  ccrClient.ensureGateway = async () => events.push("gateway-ready");
+
+  await writeFile(join(pluginDir, "plugin.mjs"), "export default {};\n");
+
+  try {
+    await runAirclaudeCli(["--profile", "launch-example", ...extraArgv], {
+      catalogPath,
+      ccrClient,
+      commandExists: async (command) => ["ccr", "claude"].includes(command),
+      configDir,
+      env: { DEMO_API_KEY: "runtime-secret", HOME: "/tmp/airkit-restart-stale-home" },
+      // The host predates the module, so the check must fire.
+      pluginHostStartedAt: new Date("2000-01-01T00:00:00Z"),
+      runCommand: async (command, args) => {
+        if (command !== "ccr") return { ok: true, status: 0, stdout: "gateway-key-from-helper", stderr: "" };
+        events.push(`ccr ${args.join(" ")}`);
+        return ccrResult ?? { ok: true, status: 0, stdout: "", stderr: "" };
+      },
+      restartStale,
+      runtimeVersions: passingRuntimeVersions(),
+      spawnCommand: () => {
+        events.push("spawn");
+        return { status: 0 };
+      },
+      stdout: { write: (chunk) => output.push(chunk) },
+    });
+    return { events, output: output.join("") };
+  } finally {
+    await rm(pluginDir, { force: true, recursive: true });
+    await rm(configDir, { force: true, recursive: true });
+    await rm(resolve(catalogPath, ".."), { force: true, recursive: true });
+  }
+}
+
+test("a stale plugin host is reported before the session starts and left alone", async () => {
+  const { events, output } = await staleHostLaunch([], { restartStale: false });
+
+  assert.match(output, /warn CCR plugin freshness/);
+  assert.match(output, /ccr stop && ccr start/, "the message has to name the fix");
+  assert.match(output, /--restart-stale/, "and the flag that performs it");
+  // The warning has to precede the child, or it arrives after the session ends.
+  assert.ok(
+    output.indexOf("warn CCR plugin freshness") >= 0 && events.indexOf("spawn") === events.length - 1,
+    "the announcement comes before the spawn",
+  );
+  assert.ok(
+    !events.some((event) => event.startsWith("ccr stop")),
+    "reporting must never stop a service the user did not ask to stop",
+  );
+});
+
+test("--restart-stale reloads the plugin host before the gateway and the child", async () => {
+  const { events, output } = await staleHostLaunch(["--restart-stale"], { restartStale: true });
+
+  assert.match(output, /--restart-stale: running/);
+  assert.match(output, /plugin host restarted/);
+  // Order matters: the reload has to land before the gateway comes up, and both
+  // before the child, or the session attaches to the service being replaced.
+  const sequence = events.filter((event) => event.startsWith("ccr ") || ["gateway-ready", "spawn"].includes(event));
+  assert.deepEqual(sequence, ["ccr stop", "ccr start --no-gateway", "gateway-ready", "spawn"]);
+});
+
+test("a failed --restart-stale reload is named and the session still starts", async () => {
+  const { events, output } = await staleHostLaunch(["--restart-stale"], {
+    ccrResult: { ok: false, status: 1, stdout: "", stderr: "ccr: service is not managed by this user" },
+    restartStale: true,
+  });
+
+  assert.match(output, /ccr stop failed: ccr: service is not managed by this user/);
+  // Stop failed, so start must not run against a service in an unknown state —
+  // and the launch still proceeds, because the previous host is still up and
+  // blocking the session would be worse than running against a stale plugin.
+  assert.deepEqual(events.filter((event) => event.startsWith("ccr ")), ["ccr stop"]);
+  assert.ok(events.includes("spawn"), "a failed reload must not block the session");
 });
 
 test("plain Claude CLI spawns only user arguments after the gateway is ready", async () => {
