@@ -158,9 +158,12 @@ launch supplies is the gateway base URL, the profile's gateway key (resolved at
 spawn, never through argv), and a `x-airkit-mode` header naming the routing
 mode. Model variables inherited from the shell are cleared, because a stale one
 would silently outrank the launch model.
-AirKit starts a missing CCR service only with `ccr start --no-gateway`, reads
-configuration before any mutation-capable operation, and saves managed state
-with profile application disabled. If it detects an enabled global Codex
+AirKit starts a missing CCR service only with `ccr start --no-gateway`, or with
+`launchctl kickstart` when launchd supervises the daemon as
+`com.airkit.ccr-daemon` — starting one beside a supervisor leaves two
+management services answering the same RPCs while only one holds the port. It
+reads configuration before any mutation-capable operation, and saves managed
+state with profile application disabled. If it detects an enabled global Codex
 profile, a CCR takeover record, or CCR-managed blocks in Codex configuration,
 launch stops and directs the user to the preview-first takeover repair flow.
 `airclaude pro` applies the profile's stronger routing overlay before launch.

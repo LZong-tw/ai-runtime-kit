@@ -1887,6 +1887,10 @@ async function pluginFreshnessDoctor(pluginDir, overrides = {}) {
       },
       commandExists: async () => true,
       configDir,
+      // Pin supervision rather than letting the check shell out: whether this
+      // particular machine has the launchd job loaded must not decide which
+      // remediation the assertions below expect.
+      runCommand: async () => ({ ok: false, status: 1, stdout: "", stderr: "" }),
       sourceShellSnippet: async () => ({ ok: true }),
       ...overrides,
     });
@@ -1913,6 +1917,83 @@ test("doctor warns when a plugin module is newer than the process that loaded it
     // Same reasoning as orphaned state: this is not a verdict on the profile.
     assert.equal(result.ok, true);
     assert.deepEqual(result.failures, []);
+  } finally {
+    await rm(pluginDir, { force: true, recursive: true });
+  }
+});
+
+test("doctor warns when a second CCR management service is running", async () => {
+  const pluginDir = await mkdtemp(join(tmpdir(), "airkit-oss-plugin-duplicate-"));
+  try {
+    await writeFile(join(pluginDir, "plugin.mjs"), "export default {};\n");
+
+    const result = await pluginFreshnessDoctor(pluginDir, {
+      pluginHostStartedAt: new Date("2000-01-01T00:00:00Z"),
+      runCommand: async (command, args) => {
+        if (command === "pgrep") return { ok: true, status: 0, stderr: "", stdout: "4711\n4712\n" };
+        if (command === "launchctl" && args[0] === "print") return { ok: true, status: 0, stderr: "", stdout: "" };
+        if (command === "launchctl" && args[0] === "list") {
+          return { ok: true, status: 0, stderr: "", stdout: "4712\t0\tcom.airkit.ccr-daemon\n" };
+        }
+        return { ok: false, status: 1, stderr: "", stdout: "" };
+      },
+    });
+
+    const check = result.runtime.managementServices;
+    assert.equal(check.warn, true);
+    assert.deepEqual(check.pids, ["4711", "4712"]);
+    assert.equal(check.supervisedPid, "4712", "the user needs to know which one survives a restart");
+    assert.match(check.reason, /launchctl kickstart -k/);
+    assert.match(check.reason, /every pid other than 4712/);
+    // Two services say something is wrong with the machine, not with the profile.
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.failures, []);
+  } finally {
+    await rm(pluginDir, { force: true, recursive: true });
+  }
+});
+
+test("a single management service is reported without a warning", async () => {
+  const pluginDir = await mkdtemp(join(tmpdir(), "airkit-oss-plugin-single-"));
+  try {
+    await writeFile(join(pluginDir, "plugin.mjs"), "export default {};\n");
+
+    const result = await pluginFreshnessDoctor(pluginDir, {
+      pluginHostStartedAt: new Date("2000-01-01T00:00:00Z"),
+      runCommand: async (command) =>
+        command === "pgrep"
+          ? { ok: true, status: 0, stderr: "", stdout: "4711\n" }
+          : { ok: false, status: 1, stderr: "", stdout: "" },
+    });
+
+    assert.equal(result.runtime.managementServices.warn, undefined);
+    assert.deepEqual(result.runtime.managementServices.pids, ["4711"]);
+  } finally {
+    await rm(pluginDir, { force: true, recursive: true });
+  }
+});
+
+test("the stale-plugin remedy names the supervisor when launchd owns the daemon", async () => {
+  const pluginDir = await mkdtemp(join(tmpdir(), "airkit-oss-plugin-supervised-"));
+  try {
+    await writeFile(join(pluginDir, "plugin.mjs"), "export default {};\n");
+
+    const result = await pluginFreshnessDoctor(pluginDir, {
+      pluginHostStartedAt: new Date("2000-01-01T00:00:00Z"),
+      runCommand: async (command, args) => ({
+        ok: command === "launchctl" && args[0] === "print",
+        status: 0,
+        stderr: "",
+        stdout: "",
+      }),
+    });
+
+    const check = result.runtime.pluginFreshness;
+    assert.equal(check.supervisor, `gui/${process.getuid()}/com.airkit.ccr-daemon`);
+    assert.match(check.reason, /launchctl kickstart -k gui\/\d+\/com\.airkit\.ccr-daemon/);
+    // Telling a supervised user to stop the daemon sends them to the command
+    // that produces the duplicate service this check is meant to keep them out of.
+    assert.doesNotMatch(check.reason, /ccr stop/);
   } finally {
     await rm(pluginDir, { force: true, recursive: true });
   }
@@ -2965,6 +3046,41 @@ test("an unauthorized RPC that is not token rotation fails without a retry", asy
   }
 });
 
+test("a supervised daemon is started through launchctl, never beside it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-supervised-start-"));
+  const stateDir = join(root, ".claude-code-router");
+  const commands = [];
+  try {
+    const client = airkitRuntime.createCcr3Client({
+      env: { HOME: root },
+      fetch: async () => ({ ok: true, json: async () => ({ value: { profile: { profiles: [] } } }) }),
+      runCommand: async (command, args) => {
+        commands.push(`${command} ${args.join(" ")}`);
+        if (command === "launchctl" && args[0] === "kickstart") {
+          await mkdir(stateDir, { recursive: true });
+          await writeFile(join(stateDir, "service.json"), JSON.stringify({
+            url: "http://127.0.0.1:9/?ccr_web_token=synthetic-token",
+          }));
+        }
+        return { ok: true, status: 0, stderr: "", stdout: "" };
+      },
+    });
+
+    await client.getConfig();
+
+    // Without -k: this call has to start a job that is down and do nothing to
+    // one that is up. `-k` here would kill a healthy service out from under
+    // every session attached to it.
+    assert.ok(commands.includes(`launchctl kickstart gui/${process.getuid()}/com.airkit.ccr-daemon`));
+    assert.ok(
+      !commands.some((command) => command.startsWith("ccr ")),
+      "starting CCR beside launchd is exactly what produces a second management service",
+    );
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
 test("missing CCR starts management-only before getConfig and launch performs no later action before safety", async () => {
   const root = await mkdtemp(join(tmpdir(), "airkit-codex-management-start-"));
   const stateDir = join(root, ".claude-code-router");
@@ -2984,6 +3100,9 @@ test("missing CCR starts management-only before getConfig and launch performs no
           return { ok: true, json: async () => ({ value }) };
         },
         runCommand: async (command, args) => {
+          // No launchd job owns the daemon here, so the client must take the
+          // plain start path rather than kickstarting somebody else's label.
+          if (command === "launchctl") return { ok: false, status: 1, stdout: "", stderr: "Could not find service" };
           calls.push(`run:${command}:${args.join(":")}`);
           await mkdir(stateDir, { recursive: true });
           await writeFile(join(stateDir, "service.json"), JSON.stringify({
@@ -3032,6 +3151,9 @@ test("management-only startup rejects hazardous first config before version, sav
           } }) };
         },
         runCommand: async (command, args) => {
+          // No launchd job owns the daemon here, so the client must take the
+          // plain start path rather than kickstarting somebody else's label.
+          if (command === "launchctl") return { ok: false, status: 1, stdout: "", stderr: "Could not find service" };
           calls.push(`run:${command}:${args.join(":")}`);
           await mkdir(stateDir, { recursive: true });
           await writeFile(join(stateDir, "service.json"), JSON.stringify({
@@ -3743,7 +3865,7 @@ test("runAirclaudeCli dry run supports positional pro mode and avoids launching"
 
 // A stale plugin host must be announced before the child starts, because a
 // launch renders its own report only after the session ends.
-async function staleHostLaunch(extraArgv, { ccrResult, restartStale }) {
+async function staleHostLaunch(extraArgv, { ccrResult, launchctlResult, restartStale, supervised = false }) {
   const catalog = launchCatalog();
   const catalogPath = await writeLaunchCatalog(catalog);
   const configDir = await mkdtemp(join(tmpdir(), "airkit-restart-stale-"));
@@ -3772,6 +3894,13 @@ async function staleHostLaunch(extraArgv, { ccrResult, restartStale }) {
       // The host predates the module, so the check must fire.
       pluginHostStartedAt: new Date("2000-01-01T00:00:00Z"),
       runCommand: async (command, args) => {
+        if (command === "launchctl") {
+          // `print` answers whether the daemon is supervised at all; every other
+          // launchctl verb is the restart itself and belongs in the event log.
+          if (args[0] === "print") return { ok: supervised, status: supervised ? 0 : 1, stdout: "", stderr: "" };
+          events.push(`launchctl ${args.join(" ")}`);
+          return launchctlResult ?? { ok: true, status: 0, stdout: "", stderr: "" };
+        }
         if (command !== "ccr") return { ok: true, status: 0, stdout: "gateway-key-from-helper", stderr: "" };
         events.push(`ccr ${args.join(" ")}`);
         return ccrResult ?? { ok: true, status: 0, stdout: "", stderr: "" };
@@ -3818,6 +3947,36 @@ test("--restart-stale reloads the plugin host before the gateway and the child",
   // before the child, or the session attaches to the service being replaced.
   const sequence = events.filter((event) => event.startsWith("ccr ") || ["gateway-ready", "spawn"].includes(event));
   assert.deepEqual(sequence, ["ccr stop", "ccr start --no-gateway", "gateway-ready", "spawn"]);
+});
+
+test("--restart-stale restarts a supervised daemon in place instead of stopping it", async () => {
+  const { events, output } = await staleHostLaunch(["--restart-stale"], { restartStale: true, supervised: true });
+
+  assert.match(output, /launchctl kickstart -k gui\/\d+\/com\.airkit\.ccr-daemon/);
+  assert.match(output, /plugin host restarted/);
+  const sequence = events.filter((event) =>
+    event.startsWith("ccr ") || event.startsWith("launchctl ") || ["gateway-ready", "spawn"].includes(event));
+  assert.deepEqual(sequence, [
+    `launchctl kickstart -k gui/${process.getuid()}/com.airkit.ccr-daemon`,
+    "gateway-ready",
+    "spawn",
+  ]);
+  // `ccr stop` hands the replacement to launchd, and the `ccr start` that would
+  // follow races it — the pair is how two management services end up running.
+  assert.ok(!events.some((event) => event.startsWith("ccr ")), "no CCR lifecycle command may run beside the supervisor");
+});
+
+test("a failed supervised kickstart is named and never falls through to ccr stop", async () => {
+  const { events, output } = await staleHostLaunch(["--restart-stale"], {
+    launchctlResult: { ok: false, status: 1, stderr: "Could not find service", stdout: "" },
+    restartStale: true,
+    supervised: true,
+  });
+
+  assert.match(output, /launchctl kickstart failed: Could not find service/);
+  assert.doesNotMatch(output, /plugin host restarted/);
+  assert.ok(!events.some((event) => event.startsWith("ccr ")), "the fallback would be the racing path itself");
+  assert.ok(events.includes("spawn"), "a failed reload must not block the session");
 });
 
 test("a failed --restart-stale reload is named and the session still starts", async () => {
