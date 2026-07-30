@@ -546,10 +546,17 @@ test("a rejected advisor fallback is diagnosed on stderr and the response still 
     })
   );
 
-  // The diagnosis sits beside the response, never in it: the proxy contract is
-  // that the caller receives the upstream bytes and status unchanged.
+  // The one place the relay is not byte-for-byte: the caller sees the upstream
+  // message verbatim with the explanation appended, and everything else about
+  // the error — status, type, headers — is untouched.
   assert.equal(downstream.statusCode, 400);
-  assert.deepEqual(downstream.body, errorBody);
+  const delivered = JSON.parse(downstream.body.toString());
+  assert.equal(delivered.type, "error");
+  assert.equal(delivered.error.type, "invalid_request_error");
+  assert.ok(delivered.error.message.startsWith("LLM Provider NOT provided. You passed model=claude-opus-5"));
+  assert.match(delivered.error.message, /\[AirKit\]/);
+  assert.match(delivered.error.message, /no AirKit setting can supply it/);
+  assert.equal(downstream.headers["content-length"], String(Buffer.byteLength(downstream.body)));
 
   assert.equal(logged.length, 1);
   assert.equal(logged[0].status, 400);
@@ -598,6 +605,70 @@ test("a rejected non-advisor fallback is reported without the advisor explanatio
   assert.deepEqual(logged[0].families, ["codeExecution"]);
   assert.equal(logged[0].status, 403);
   assert.doesNotMatch(logged[0].hint, /advisor/);
+  // Another family's rejection has a different cause, so its body is untouched.
+  assert.doesNotMatch(downstream.body.toString(), /AirKit/);
+});
+
+test("an advisor rejection that is not a JSON error object is relayed whole", async (t) => {
+  // Nothing here can be edited safely — there is no message field to append to
+  // and the framing is already committed — so the bytes have to arrive intact
+  // even though they were read to find that out.
+  const plain = Buffer.from("upstream gateway unavailable");
+  const fixture = await createFallbackCoreFixture(t, async ({ response }) => {
+    response.writeHead(502, { "content-type": "text/plain", "x-request-id": "raw-502" });
+    response.end(plain);
+  });
+  const downstream = createFallbackResponse();
+
+  await handleCompatibilityMessage({
+    body: fallbackBody({ tools: [{ type: "advisor_20260301", model: "claude-opus-5" }] }),
+    config: VALID_CONFIG,
+    coreClient: createCoreClient(fixture.options),
+    response: downstream,
+  });
+
+  assert.equal(downstream.statusCode, 502);
+  assert.equal(downstream.headers["x-request-id"], "raw-502");
+  assert.deepEqual(downstream.body, plain);
+});
+
+test("an advisor rejection with a JSON body but no error message is relayed whole", async (t) => {
+  const oddBody = Buffer.from(JSON.stringify({ detail: "quota exceeded" }));
+  const fixture = await createFallbackCoreFixture(t, async ({ response }) => {
+    response.writeHead(429, { "content-type": "application/json", "retry-after": "7" });
+    response.end(oddBody);
+  });
+  const downstream = createFallbackResponse();
+
+  await handleCompatibilityMessage({
+    body: fallbackBody({ tools: [{ type: "advisor_20260301", model: "claude-opus-5" }] }),
+    config: VALID_CONFIG,
+    coreClient: createCoreClient(fixture.options),
+    response: downstream,
+  });
+
+  assert.equal(downstream.statusCode, 429);
+  assert.equal(downstream.headers["retry-after"], "7");
+  assert.deepEqual(downstream.body, oddBody);
+});
+
+test("a successful advisor fallback body is never rewritten", async (t) => {
+  const success = Buffer.from(JSON.stringify({ type: "message", model: "claude-opus-5" }));
+  const fixture = await createFallbackCoreFixture(t, async ({ response }) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(success);
+  });
+  const downstream = createFallbackResponse();
+
+  await handleCompatibilityMessage({
+    body: fallbackBody({ tools: [{ type: "advisor_20260301", model: "claude-opus-5" }] }),
+    config: VALID_CONFIG,
+    coreClient: createCoreClient(fixture.options),
+    response: downstream,
+  });
+
+  assert.equal(downstream.statusCode, 200);
+  assert.deepEqual(downstream.body, success);
 });
 
 test("real core fallback cancels upstream when the downstream closes", async (t) => {
