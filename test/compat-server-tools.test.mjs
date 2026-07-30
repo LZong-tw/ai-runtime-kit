@@ -6,7 +6,37 @@ import {
   classifyToolDefinition,
   inspectServerToolRequest,
   isFutureServerToolType,
+  stripServerToolFamily,
 } from "../src/compat/server-tools.mjs";
+
+test("stripping a family removes only its definitions and clears its diversion", () => {
+  const body = {
+    model: "claude-sonnet-5",
+    tools: [
+      { name: "Bash" },
+      { type: "advisor_20260301" },
+      { type: "web_search_20250305" },
+    ],
+  };
+
+  const stripped = stripServerToolFamily(body, "advisor");
+
+  assert.deepEqual(stripped.tools, [{ name: "Bash" }, { type: "web_search_20250305" }]);
+  assert.equal(stripped.model, body.model);
+  assert.equal(body.tools.length, 3, "the caller's body must not be mutated");
+  // The point of the strip: the family no longer shows up, so nothing downstream
+  // diverts a request that never used advisor onto the fallback route.
+  assert.equal(inspectServerToolRequest(body).families.has("advisor"), true);
+  assert.equal(inspectServerToolRequest(stripped).families.has("advisor"), false);
+});
+
+test("stripping returns the same object when there is nothing to remove", () => {
+  const body = { tools: [{ name: "Bash" }] };
+
+  assert.equal(stripServerToolFamily(body, "advisor"), body);
+  assert.equal(stripServerToolFamily({}, "advisor").tools, undefined);
+  assert.equal(stripServerToolFamily(body, "notAFamily"), body);
+});
 
 test("classifies every current server-tool type and ToolSearch alias", () => {
   const cases = new Map([

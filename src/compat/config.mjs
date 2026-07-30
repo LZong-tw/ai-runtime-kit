@@ -23,6 +23,15 @@ const CONFIG_KEYS = new Set([
 ]);
 const FALLBACK_KEYS = new Set(["provider", "model", "maxContinuationTurns"]);
 const FAMILY_KEYS = new Set(["mode", "fallback"]);
+// Advisor alone gets this key. A server tool the upstream route cannot resolve
+// does not fail quietly in its own lane: its mere presence in `tools` diverts
+// the entire request to the fallback route, so an unusable advisor takes down
+// turns that never asked for it. "strip" removes the definition and leaves the
+// request on its normal route; "passthrough" restores the old behavior for
+// re-testing once the gateway can resolve the advisor sub-call.
+const ADVISOR_KEYS = new Set([...FAMILY_KEYS, "unsupported"]);
+const ADVISOR_UNSUPPORTED = Object.freeze(["strip", "passthrough"]);
+export const DEFAULT_ADVISOR_UNSUPPORTED = "strip";
 const FAMILY_FALLBACK_KEYS = new Set(["provider", "model"]);
 const ROUTE_KEYS = new Set(["default", "background", "opus"]);
 const ROUTE_SELECTOR_PATTERN = /^[a-z0-9][a-z0-9._-]*\/\S+$/i;
@@ -51,7 +60,14 @@ export function validateCompatibilityConfig(config) {
     const definition = config[family];
     assertRecord(definition, family, true);
     if (family === "advisor") rejectRemovedAdvisorConfig(definition);
-    rejectUnknownKeys(definition, FAMILY_KEYS, family);
+    rejectUnknownKeys(definition, family === "advisor" ? ADVISOR_KEYS : FAMILY_KEYS, family);
+    if (
+      family === "advisor" &&
+      definition.unsupported !== undefined &&
+      !ADVISOR_UNSUPPORTED.includes(definition.unsupported)
+    ) {
+      throw new Error(`advisor.unsupported must be one of: ${ADVISOR_UNSUPPORTED.join(", ")}`);
+    }
     if (definition.fallback !== undefined) {
       validateFallback(definition.fallback, `${family}.fallback`, FAMILY_FALLBACK_KEYS, false);
     }
@@ -181,7 +197,9 @@ export function resolveCompatibilityPolicies(config, nativeCapabilities = {}) {
     }),
   ));
 
-  return Object.freeze({ fallback, familyFallbacks, policies });
+  const advisorUnsupported = config.advisor.unsupported ?? DEFAULT_ADVISOR_UNSUPPORTED;
+
+  return Object.freeze({ fallback, familyFallbacks, policies, advisorUnsupported });
 }
 
 export function compatibilityFallbackSelector(fallback) {
