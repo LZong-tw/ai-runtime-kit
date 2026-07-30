@@ -453,8 +453,54 @@ async function routeWholeRequestFallback({ body, headers, config, coreClient, re
       requestFallback(fallbackBody, fallbackHeaders, fallbackSignal),
   });
   const result = await route({ body, headers, signal });
+  reportFallbackRejection(body, result);
   if (response === undefined) return result;
   await pipeCoreResponse(result, response, signal);
+}
+
+// The fallback response is relayed byte-for-byte on purpose, so a diagnosis can
+// only live beside it, never in it. It is worth writing one because the upstream
+// error can name a model the caller never sent, which reads like a routing bug
+// here: an Anthropic server tool carries its own `model` inside the tool
+// definition, and the gateway resolves that one with a separate request that
+// does not inherit the deployment's credentials or api_base. Observed against a
+// LiteLLM gateway, one missing piece of upstream configuration produced three
+// different errors depending on how that inner model was written — a bare name
+// failed provider lookup, an `anthropic/` prefix asked for an Anthropic key, and
+// an `azure_ai/` prefix asked for an Azure api_base. None of them is fixable
+// from this side, so the only useful thing to do is say where to look.
+//
+// Unlike the per-request route log this is not gated behind routeLog: it fires
+// only when the upstream has already rejected the request, and having to enable
+// a setting before the failure you just hit is no help. The body is a stream on
+// its way to the caller and must not be read here, so the status and the
+// request's own tool families are all this can honestly report.
+//
+// The advisor hint is deliberately not written for the other families. Their
+// rejections have their own causes — a workspace that does not carry the
+// entitlement, most commonly — and printing the sub-call explanation for every
+// server tool would just be a new confident guess in place of the old one.
+function reportFallbackRejection(body, result) {
+  if (typeof result?.status !== "number" || result.status < 400) return;
+  try {
+    const families = [...new Set([
+      ...inspectPendingServerHistory(body).families,
+      ...inspectServerToolRequest(body).families,
+    ])];
+    const hint = families.includes("advisor")
+      ? "fallback routed the outer request to the configured Anthropic route, but the advisor tool definition carries its own model that the upstream gateway resolves in a separate call — that call needs its own api_base and credentials upstream, and no AirKit setting can supply them"
+      : families.length > 0
+      ? "fallback routed this request to the configured Anthropic route and the upstream rejected it, so the server tool has to be supported there"
+      : null;
+    process.stderr.write(`[airkit-fallback] ${JSON.stringify({
+      at: new Date().toISOString(),
+      families,
+      status: result.status,
+      ...(hint ? { hint } : {}),
+    })}\n`);
+  } catch {
+    // never let logging interfere with the request
+  }
 }
 
 function defaultCreateId(prefix) {

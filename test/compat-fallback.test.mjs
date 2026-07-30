@@ -521,6 +521,85 @@ test("real core fallback preserves non-2xx status, headers, and body", async (t)
   assert.deepEqual(downstream.body, errorBody);
 });
 
+test("a rejected advisor fallback is diagnosed on stderr and the response still passes through", async (t) => {
+  // The real error this reproduces names a model the caller never sent, because
+  // the upstream resolves the advisor tool's own model in a separate call.
+  const errorBody = Buffer.from(JSON.stringify({
+    type: "error",
+    error: {
+      type: "invalid_request_error",
+      message: "LLM Provider NOT provided. You passed model=claude-opus-5",
+    },
+  }));
+  const fixture = await createFallbackCoreFixture(t, async ({ response }) => {
+    response.writeHead(400, { "content-type": "application/json" });
+    response.end(errorBody);
+  });
+  const downstream = createFallbackResponse();
+
+  const logged = await captureFallbackLog(() =>
+    handleCompatibilityMessage({
+      body: fallbackBody({ tools: [{ type: "advisor_20260301", model: "claude-opus-5" }] }),
+      config: VALID_CONFIG,
+      coreClient: createCoreClient(fixture.options),
+      response: downstream,
+    })
+  );
+
+  // The diagnosis sits beside the response, never in it: the proxy contract is
+  // that the caller receives the upstream bytes and status unchanged.
+  assert.equal(downstream.statusCode, 400);
+  assert.deepEqual(downstream.body, errorBody);
+
+  assert.equal(logged.length, 1);
+  assert.equal(logged[0].status, 400);
+  assert.deepEqual(logged[0].families, ["advisor"]);
+  assert.match(logged[0].hint, /its own model/);
+  assert.match(logged[0].hint, /no AirKit setting can supply them/);
+});
+
+test("a successful fallback writes no diagnosis", async (t) => {
+  const fixture = await createFallbackCoreFixture(t, async ({ response }) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ type: "message", model: "claude-sonnet" }));
+  });
+  const downstream = createFallbackResponse();
+
+  const logged = await captureFallbackLog(() =>
+    handleCompatibilityMessage({
+      body: fallbackBody({ tools: [{ type: "advisor_20260301", model: "claude-opus-5" }] }),
+      config: VALID_CONFIG,
+      coreClient: createCoreClient(fixture.options),
+      response: downstream,
+    })
+  );
+
+  assert.equal(downstream.statusCode, 200);
+  assert.deepEqual(logged, []);
+});
+
+test("a rejected non-advisor fallback is reported without the advisor explanation", async (t) => {
+  const fixture = await createFallbackCoreFixture(t, async ({ response }) => {
+    response.writeHead(403, { "content-type": "application/json" });
+    response.end(JSON.stringify({ type: "error", error: { message: "not supported in your workspace" } }));
+  });
+  const downstream = createFallbackResponse();
+
+  const logged = await captureFallbackLog(() =>
+    handleCompatibilityMessage({
+      body: fallbackBody(),
+      config: VALID_CONFIG,
+      coreClient: createCoreClient(fixture.options),
+      response: downstream,
+    })
+  );
+
+  assert.equal(logged.length, 1);
+  assert.deepEqual(logged[0].families, ["codeExecution"]);
+  assert.equal(logged[0].status, 403);
+  assert.doesNotMatch(logged[0].hint, /advisor/);
+});
+
 test("real core fallback cancels upstream when the downstream closes", async (t) => {
   let upstreamClosed;
   const upstreamClose = new Promise((resolve) => {
@@ -561,6 +640,26 @@ function fallbackBody(overrides = {}) {
     tools: [{ type: "code_execution_20260521", name: "code_execution" }],
     ...overrides,
   };
+}
+
+// Collects only this feature's stderr lines and always restores the original
+// writer, so a failing assertion cannot leave the rest of the suite silent.
+async function captureFallbackLog(run) {
+  const PREFIX = "[airkit-fallback] ";
+  const lines = [];
+  const original = process.stderr.write;
+  process.stderr.write = (chunk, ...rest) => {
+    lines.push(String(chunk));
+    return original.call(process.stderr, chunk, ...rest);
+  };
+  try {
+    await run();
+  } finally {
+    process.stderr.write = original;
+  }
+  return lines
+    .filter((line) => line.startsWith(PREFIX))
+    .map((line) => JSON.parse(line.slice(PREFIX.length)));
 }
 
 async function createFallbackCoreFixture(t, handler) {
