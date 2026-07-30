@@ -507,6 +507,54 @@ test("managed state stranded by a profile that left the catalog is removed, and 
   assert.ok(profileIds.includes("unrelated-profile"), "foreign CCR profiles are never touched");
 });
 
+test("state belonging to a profile installed from another catalog is not treated as orphaned", async () => {
+  // One CCR install can be driven by two catalogs (the private overlay repo and
+  // the OSS checkout ship different profile sets), so ownership taken from the
+  // loaded catalog alone would let a launch from either side delete the other's
+  // live state.
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-owners-"));
+  try {
+    await mkdir(join(configDir, "ccr"), { recursive: true });
+    await writeFile(join(configDir, "ccr", "other-catalog-profile.json"), "{}\n");
+
+    const current = {
+      Providers: [
+        { id: "airkit-provider-other-catalog-profile-demo", name: "airkit-provider-other-catalog-profile-demo", api_base_url: "https://other.invalid/v1", models: ["steady-coder"] },
+        { id: "airkit-provider-gone-example-demo", name: "airkit-provider-gone-example-demo", api_base_url: "https://gone.invalid/v1", models: ["Kimi-K3"] },
+      ],
+      Router: {
+        rules: [
+          { id: "airkit-other-catalog-profile-route-default", name: "Other catalog", enabled: true },
+          { id: "airkit-gone-example-route-default", name: "Orphan", enabled: true },
+        ],
+      },
+      profile: {
+        profiles: [
+          { id: "airkit-other-catalog-profile-auto", name: "Other catalog auto" },
+          { id: "airkit-gone-example-auto", name: "Orphan auto" },
+        ],
+      },
+    };
+
+    const merged = airkitRuntime.buildCcr3ManagedConfig(launchCatalog(), "launch-example", current, { configDir });
+
+    assert.deepEqual(merged.pruned, {
+      profiles: ["airkit-gone-example-auto"],
+      providers: ["airkit-provider-gone-example-demo"],
+      rules: ["airkit-gone-example-route-default"],
+    }, "only the profile with no catalog entry and no generated config is removed");
+
+    assert.ok(
+      merged.config.Router.rules.some(({ id }) => id === "airkit-other-catalog-profile-route-default"),
+      "a generated profile config claims its own prefix even when this catalog never declares it",
+    );
+    assert.ok(merged.config.Providers.some(({ id }) => id === "airkit-provider-other-catalog-profile-demo"));
+    assert.ok(merged.config.profile.profiles.some(({ id }) => id === "airkit-other-catalog-profile-auto"));
+  } finally {
+    await rm(configDir, { recursive: true, force: true });
+  }
+});
+
 test("outer compatibility routing and managed core rules preserve unknown Claude models", async () => {
   const merged = airkitRuntime.buildCcr3ManagedConfig(
     compatibilityCatalog(),
