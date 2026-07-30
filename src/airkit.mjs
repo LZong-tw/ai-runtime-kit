@@ -2108,13 +2108,21 @@ function renderLaunchResult(result, options = {}) {
       ]
     : [];
 
+  // `opus` and `sonnet` only appear when the profile sets them, so a profile
+  // that routes every Claude family to `default` reads exactly as before. They
+  // are what an in-session `/model` pick reaches, which is worth proving in the
+  // same output that proves the mode.
+  const optionalRouteLines = ["opus", "sonnet"]
+    .filter((key) => result.ccrConfig.Router?.[key])
+    .map((key) => `- ${key}: ${result.ccrConfig.Router[key]}`);
+
   return `${action} airclaude profile: ${result.profile.name}
 mode: ${result.mode}
 
 Routes:
 - default: ${result.ccrConfig.Router?.default ?? "unset"}
 - background: ${result.ccrConfig.Router?.background ?? "unset"}
-
+${optionalRouteLines.length ? `${optionalRouteLines.join("\n")}\n` : ""}
 Files:
 ${fileLines.join("\n")}
 - ${result.liveCcrConfig.status} CCR state database: ${result.liveCcrConfig.path}
@@ -2135,8 +2143,17 @@ Environment:
 - mode header: ${result.launch.env.ANTHROPIC_CUSTOM_HEADERS ?? "unset"}
 - gateway key: resolved at launch from ${result.launch.gatewayTokenCommand}
 - inherited Claude home: CLAUDE_CONFIG_DIR is left untouched
-- cleared: ${(result.launch.clearEnv ?? []).join(", ") || "none"}
+${contextEnvLines(result.launch.env)}- cleared: ${(result.launch.clearEnv ?? []).join(", ") || "none"}
 `;
+}
+
+// `launch.context` overrides are invisible in the launch argv but change how the
+// child behaves, so a dry run that omits them under-reports the plan.
+function contextEnvLines(env = {}) {
+  return ["CLAUDE_CODE_MAX_OUTPUT_TOKENS", "CLAUDE_CODE_AUTO_COMPACT_WINDOW", "CLAUDE_CODE_AUTO_COMPACT_PERCENTAGE"]
+    .filter((name) => env[name] !== undefined)
+    .map((name) => `- ${name}: ${env[name]}\n`)
+    .join("");
 }
 
 function renderProfile(catalog, profileName, options = {}) {
@@ -2372,17 +2389,26 @@ function airclaudeRoutingPrompt(mode, ccrConfig, claudeModel) {
     "- AirClaude mode is routing mode, not Claude Code permission mode.",
     ...routeLines,
     claudeModel
-      ? `- Claude launch/display model is compatibility metadata only: ${claudeModel}`
-      : "- Claude launch/display model is compatibility metadata only.",
-    "- Do not infer the active provider route from Claude Code's displayed model name.",
+      ? `- Claude launch/display model is the launcher's own id, not a served model: ${claudeModel}`
+      : "- Claude launch/display model is the launcher's own id, not a served model.",
+    "- Do not infer the active provider route from Claude Code's displayed model name; the launch id maps to the default route above.",
+    ...(ccrConfig.Router.opus || ccrConfig.Router.sonnet
+      ? ["- Picking a Claude model in session does change the route: it follows the opus/sonnet route listed above, not the default."]
+      : []),
     "- background/tool-heavy work may use the background route when the runtime/router selects it.",
     "- When compacting, restoring, summarizing, or reporting status, preserve AirClaude mode and provider routes separately from Claude-compatible display metadata.",
     "- Every manual or automatic compact summary ends with the following seven-field, single-line-value capsule. Never include credentials or provider-private payloads in the capsule.\n[AIRKIT_TASK_CAPSULE]\nobjective: current objective\nconstraints: accepted constraints\ndecisions: accepted decisions\nchanged_files: changed files\nverification: verification state\nrepository_state: repository and worktree state\nnext_action: next concrete action\n[/AIRKIT_TASK_CAPSULE]",
   ].join(" ");
 }
 
-function sortedRouterEntries(router) {
-  return managedRouterEntries(router);
+// The routing prompt lists every active route, including the `opus`/`sonnet`
+// destinations an in-session model pick reaches. `managedRouterEntries` stays
+// narrower on purpose: it names the launch environment variables, and profiles
+// template against `default`/`background` only.
+function sortedRouterEntries(router = {}) {
+  return ["default", "background", "opus", "sonnet"]
+    .filter((key) => typeof router[key] === "string")
+    .map((key) => [key, router[key]]);
 }
 
 function managedRouterEntries(router = {}) {
