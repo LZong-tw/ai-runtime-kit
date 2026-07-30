@@ -445,6 +445,68 @@ test("CCR 3 merge translates base routes into gateway rules for bare Claude mode
   assert.deepEqual(repeated.config.Router, merged.config.Router, "router merge is idempotent");
 });
 
+test("managed state stranded by a profile that left the catalog is removed, and other profiles survive", async () => {
+  const catalog = launchCatalog();
+  catalog.profiles = [...catalog.profiles, { ...catalog.profiles[0], name: "second-example" }];
+
+  const current = {
+    Providers: [
+      { id: "unrelated-provider", name: "unrelated-provider", api_base_url: "https://example.invalid/v1", models: ["keep-me"] },
+      { id: "airkit-provider-gone-example-demo", name: "airkit-provider-gone-example-demo", api_base_url: "https://gone.invalid/v1", models: ["Kimi-K3"] },
+      { id: "airkit-provider-second-example-demo", name: "airkit-provider-second-example-demo", api_base_url: "https://second.invalid/v1", models: ["steady-coder"] },
+    ],
+    Router: {
+      rules: [
+        // The shape that broke a live install: an older AirKit build emitted a
+        // bare `claude-` prefix, and CCR takes the first matching rule, so this
+        // orphan outranks every correctly scoped rule that follows it.
+        {
+          id: "airkit-gone-example-route-default",
+          name: "Orphan catch-all",
+          enabled: true,
+          type: "condition",
+          condition: { left: "request.body.model", operator: "starts-with", right: "claude-" },
+          rewrite: { key: "request.body.model", operation: "set", value: "airkit-provider-gone-example-demo/Kimi-K3" },
+        },
+        { id: "airkit-second-example-route-default", name: "Second profile", enabled: true },
+        { id: "unrelated-rule", name: "Keep me", enabled: true, target: "unrelated/keep-me" },
+      ],
+    },
+    profile: {
+      profiles: [
+        { id: "airkit-gone-example-auto", name: "Orphan profile" },
+        { id: "airkit-second-example-auto", name: "Second profile auto" },
+        { id: "unrelated-profile", name: "Keep me" },
+      ],
+    },
+  };
+
+  const merged = airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", current, {
+    configDir: "/tmp/airkit-config",
+  });
+
+  assert.deepEqual(merged.pruned, {
+    profiles: ["airkit-gone-example-auto"],
+    providers: ["airkit-provider-gone-example-demo"],
+    rules: ["airkit-gone-example-route-default"],
+  }, "removals are reported so a launch never shrinks the live config silently");
+
+  const ruleIds = merged.config.Router.rules.map(({ id }) => id);
+  assert.ok(!ruleIds.includes("airkit-gone-example-route-default"), "the orphan rule is gone");
+  assert.ok(ruleIds.includes("airkit-second-example-route-default"), "another catalog profile's rule survives");
+  assert.ok(ruleIds.includes("unrelated-rule"), "foreign rules are never touched");
+
+  const providerIds = merged.config.Providers.map(({ id }) => id);
+  assert.ok(!providerIds.includes("airkit-provider-gone-example-demo"), "the orphan provider is gone");
+  assert.ok(providerIds.includes("airkit-provider-second-example-demo"), "another catalog profile's provider survives");
+  assert.ok(providerIds.includes("unrelated-provider"), "foreign providers are never touched");
+
+  const profileIds = merged.config.profile.profiles.map(({ id }) => id);
+  assert.ok(!profileIds.includes("airkit-gone-example-auto"), "the orphan CCR profile is gone");
+  assert.ok(profileIds.includes("airkit-second-example-auto"), "another catalog profile's CCR profile survives");
+  assert.ok(profileIds.includes("unrelated-profile"), "foreign CCR profiles are never touched");
+});
+
 test("outer compatibility routing and managed core rules preserve unknown Claude models", async () => {
   const merged = airkitRuntime.buildCcr3ManagedConfig(
     compatibilityCatalog(),
