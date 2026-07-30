@@ -385,19 +385,21 @@ function inspectOrphanedManagedState(catalog, currentConfig, options = {}) {
 // can outlive their gateway and match the same command line, so picking by
 // uptime or by listening port names the wrong process — the host is whichever
 // service fathered the running gateway core.
-function readPluginHostStart(runCommand) {
-  const pid = (args) => {
-    const result = runCommand("pgrep", args, { timeoutMs: 5000 });
-    return result.ok ? (result.stdout.split("\n")[0] ?? "").trim() : "";
+// runCommand is awaited throughout this file because callers inject async
+// stubs; treating its result as synchronous here would read `ok` off a promise
+// and silently report every host as unlocatable.
+async function readPluginHostStart(runCommand) {
+  const firstLine = async (command, args) => {
+    const result = await runCommand(command, args, { timeoutMs: 5000 });
+    return result?.ok ? (String(result.stdout ?? "").split("\n")[0] ?? "").trim() : "";
   };
-  const corePid = pid(["-f", "ai-gateway/dist/index.js"]);
+  const corePid = await firstLine("pgrep", ["-f", "ai-gateway/dist/index.js"]);
   if (corePid === "") return null;
-  const parent = runCommand("ps", ["-o", "ppid=", "-p", corePid], { timeoutMs: 5000 });
-  const hostPid = parent.ok ? parent.stdout.trim() : "";
+  const hostPid = await firstLine("ps", ["-o", "ppid=", "-p", corePid]);
   if (hostPid === "") return null;
-  const started = runCommand("ps", ["-o", "lstart=", "-p", hostPid], { timeoutMs: 5000 });
-  if (!started.ok) return null;
-  const at = new Date(started.stdout.trim());
+  const started = await firstLine("ps", ["-o", "lstart=", "-p", hostPid]);
+  if (started === "") return null;
+  const at = new Date(started);
   return Number.isNaN(at.getTime()) ? null : at;
 }
 
@@ -446,7 +448,7 @@ async function inspectPluginFreshness(currentConfig = {}, options = {}) {
   if (modules.length === 0) return { ok: true, skipped: true, reason: "no CCR plugins registered" };
 
   const runCommand = options.runCommand ?? runCommandSync;
-  const hostStartedAt = options.pluginHostStartedAt ?? readPluginHostStart(runCommand);
+  const hostStartedAt = options.pluginHostStartedAt ?? (await readPluginHostStart(runCommand));
   if (!hostStartedAt) {
     return { ok: true, skipped: true, reason: "CCR plugin host is not running, so nothing is loaded to be stale" };
   }
@@ -1093,6 +1095,11 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
   }
   let child = null;
   if (options.launch !== false) {
+    // Announced here, not in the CLI: a launch prints its own report only after
+    // the child exits, and this must reach the user before the session starts.
+    // Sequenced after saveConfig so a restart brings up a service holding both
+    // the new plugin code and the config just written.
+    await announcePluginFreshness(currentConfig, options);
     await ccrClient.ensureGateway();
     await assertNoInheritedApiKeyHelper(launchEnv);
     let gatewayToken;
@@ -1593,6 +1600,8 @@ export async function runAirclaudeCli(argv = process.argv.slice(2), options = {}
     ...options,
     configDir: parsed.configDir ?? options.configDir ?? defaultConfigDir(),
     doctor: parsed.doctor,
+    restartStale: parsed.restartStale,
+    stdout,
     dryRun: parsed.dryRun || parsed.doctor,
     launch: !parsed.dryRun && !parsed.doctor,
     mode: parsed.plainClaude ? "plain" : parsed.mode,
@@ -1621,6 +1630,39 @@ async function emitText(value, outPath, stdout = process.stdout) {
   }
 }
 
+// Reporting is the default and restarting is opt-in, because reloading plugin
+// code means stopping the management service, which drops every session on the
+// machine — not a side effect a launch may choose on the user's behalf.
+//
+// This takes the config the launch already fetched rather than reading its own.
+// A second getConfig here would land before the Codex takeover guards, and the
+// order of those RPCs is a safety contract with its own test.
+async function announcePluginFreshness(currentConfig, options = {}) {
+  const stdout = options.stdout ?? process.stdout;
+  const pluginFreshness = await inspectPluginFreshness(currentConfig, options);
+  if (!pluginFreshness.warn) return pluginFreshness;
+
+  stdout.write(`warn CCR plugin freshness: ${pluginFreshness.reason}\n`);
+  if (!options.restartStale) {
+    stdout.write("     pass --restart-stale to reload it now (this stops every CCR-backed session)\n");
+    return pluginFreshness;
+  }
+
+  const runCommand = options.runCommand ?? runCommandSync;
+  stdout.write("     --restart-stale: running `ccr stop` then `ccr start --no-gateway`\n");
+  for (const args of [["stop"], ["start", "--no-gateway"]]) {
+    const result = await runCommand("ccr", args, { timeoutMs: options.commandTimeoutMs ?? 30000 });
+    if (!result?.ok) {
+      // Report and continue to the launch: a failed reload leaves the previous
+      // service running, which is worse to hide than to name.
+      stdout.write(`     ccr ${args.join(" ")} failed: ${result.stderr || `exit ${result.status}`}\n`);
+      return pluginFreshness;
+    }
+  }
+  stdout.write("     plugin host restarted; it now loads the current modules\n");
+  return pluginFreshness;
+}
+
 function parseAirclaudeArgs(argv, validModes = new Set(["auto", "pro"])) {
   const parsed = { userArgs: [] };
   let positionalMode;
@@ -1642,6 +1684,8 @@ function parseAirclaudeArgs(argv, validModes = new Set(["auto", "pro"])) {
       parsed.dryRun = true;
     } else if (arg === "--doctor") {
       parsed.doctor = true;
+    } else if (arg === "--restart-stale") {
+      parsed.restartStale = true;
     } else if (["--repair-restore", "--restore-projects-dir", "--restore-backups-dir"].includes(arg)) {
       throw new Error(`${arg} was removed; AirKit no longer reads or rewrites Claude Code session model state`);
     } else if (validModes.has(arg) && !parsed.mode) {
@@ -1841,12 +1885,17 @@ Options:
   --mode <mode>          Select a profile-defined mode without positional syntax.
   --dry-run              Render and report the launch plan without writing or launching.
   --doctor               Run launch preflight checks without launching.
+  --restart-stale        If the CCR plugin host predates its plugin modules,
+                         reload it before launching. This stops every
+                         CCR-backed session on the machine. Without the flag a
+                         stale host is reported and left alone.
   -h, --help             Show this help.
 
 Examples:
   airclaude
   airclaude pro
   airclaude --doctor
+  airclaude --restart-stale
   airclaude -- --dangerously-skip-permissions
 `;
 }
@@ -2575,6 +2624,17 @@ export function createCcr3Client(options = {}) {
     }
   }
 
+  // Deliberately separate from loadService: this one never starts anything and
+  // never throws, because its only caller already has a service answering on
+  // the wire and is asking a narrower question — did the token change?
+  async function readServiceFile() {
+    try {
+      return JSON.parse(await readFile(join(stateDir, "service.json"), "utf8"));
+    } catch {
+      return null;
+    }
+  }
+
   async function loadService(forceStart = false) {
     if (forceStart) await startService();
     try {
@@ -2606,6 +2666,23 @@ export function createCcr3Client(options = {}) {
       serviceUrl = new URL(service.url);
       token = serviceUrl.searchParams.get("ccr_web_token");
       response = await request();
+    }
+    // A management-service restart mints a new web token on the same port, so a
+    // client holding the previous service.json authenticates against a service
+    // that no longer exists. The connection succeeds, so the reconnect path
+    // above never sees it — the rejection arrives as a status. The file on disk
+    // is already correct: re-read it and retry once. This recovers rotation
+    // only; a second rejection is a real authorization failure, and a service
+    // answering at all means there is nothing here to start.
+    if (response.status === 401 || response.status === 403) {
+      const rotated = await readServiceFile();
+      const rotatedToken = rotated ? new URL(rotated.url).searchParams.get("ccr_web_token") : null;
+      if (rotatedToken && rotatedToken !== token) {
+        service = rotated;
+        serviceUrl = new URL(rotated.url);
+        token = rotatedToken;
+        response = await request();
+      }
     }
     if (!response.ok) throw new Error(`CCR RPC ${method} failed: HTTP ${response.status}`);
     const payload = await response.json();
