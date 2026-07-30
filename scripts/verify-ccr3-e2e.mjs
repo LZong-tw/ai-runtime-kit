@@ -447,7 +447,7 @@ function fakeCatalog(providerPort) {
       // claudeModel is a bare Claude id on purpose: the fake claude sends it as
       // body.model, so the run proves the compat plugin's bare-model rewrite
       // end to end (provider must receive the routed provider-local model).
-      launch: { binary: "claude", args: [], claudeModel: "claude-sonnet-4-6", defaultMode: "auto", modes: { auto: {} } },
+      launch: { binary: "claude", args: [], claudeModel: "claude-sonnet-5", defaultMode: "auto", modes: { auto: {} } },
       ccr: {
         APIKEY: "ccr-local",
         LOG: false,

@@ -511,7 +511,7 @@ test("unsupported native history falls back without rewriting request or respons
   const fixture = createBridgeFixture([
     message({
       id: "msg_fallback",
-      model: "anthropic/claude-opus-4-8",
+      model: "anthropic/claude-opus-5",
       content: [{ type: "text", text: "Fallback response." }],
     }),
   ], {
@@ -576,7 +576,7 @@ test("cross-kind native result IDs fall back without rewriting mismatched histor
   ]) {
     const fixture = createBridgeFixture([
       message({
-        model: "anthropic/claude-opus-4-8",
+        model: "anthropic/claude-opus-5",
         content: [{ type: "text", text: "Isolated fallback." }],
       }),
     ], {
@@ -652,7 +652,7 @@ test("executor loop cap falls back after eight iterations", async () => {
     ...repeatedSearches,
     message({
       id: "msg_loop_fallback",
-      model: "anthropic/claude-opus-4-8",
+      model: "anthropic/claude-opus-5",
       content: [{ type: "text", text: "Loop fallback response." }],
     }),
   ]);
@@ -1908,7 +1908,7 @@ test("routeLog emits one redacted decision line per request and stays silent whe
     signal: undefined,
   };
   const raw = Buffer.from(
-    JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 8, messages: [] }),
+    JSON.stringify({ model: "claude-sonnet-5", max_tokens: 8, messages: [] }),
     "utf8",
   );
 
@@ -1921,7 +1921,7 @@ test("routeLog emits one redacted decision line per request and stays silent whe
     onHandler(request, {}, { readBody: async () => raw }));
   assert.equal(logged.length, 1);
   const entry = JSON.parse(logged[0].slice("[airkit-route] ".length));
-  assert.equal(entry.inModel, "claude-sonnet-4-6");
+  assert.equal(entry.inModel, "claude-sonnet-5");
   assert.equal(entry.outModel, "demo-provider/steady-coder");
   assert.equal(entry.rewritten, true);
   assert.equal(entry.path, "passthrough");
@@ -1977,14 +1977,14 @@ test("the caller's mode label selects its route table for main and background tr
   };
 
   const labelled = { "x-airkit-mode": "glm" };
-  assert.equal(await invoke("claude-sonnet-4-6", labelled), "demo-provider/glm-coder");
+  assert.equal(await invoke("claude-sonnet-5", labelled), "demo-provider/glm-coder");
   assert.equal(await invoke("claude-haiku-4-5-20251001", labelled), "demo-provider/glm-mini");
   assert.equal(
-    await invoke("claude-sonnet-4-6", { "x-airkit-mode": "unconfigured" }),
+    await invoke("claude-sonnet-5", { "x-airkit-mode": "unconfigured" }),
     "demo-provider/steady-coder",
     "an unknown mode still routes through the flat table",
   );
-  assert.equal(await invoke("claude-sonnet-4-6", {}), "demo-provider/steady-coder");
+  assert.equal(await invoke("claude-sonnet-5", {}), "demo-provider/steady-coder");
 
   const decisions = lines
     .filter((line) => line.startsWith("[airkit-route] "))

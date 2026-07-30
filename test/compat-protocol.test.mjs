@@ -35,7 +35,7 @@ test("inspection finds advisor, ToolSearch, and deferred tools without mutation"
       {
         type: "advisor_20260301",
         name: "advisor",
-        model: "claude-opus-4-8",
+        model: "claude-opus-5",
         max_uses: 3,
       },
       {
@@ -77,10 +77,10 @@ test("inspection recognizes undated ToolSearch aliases", () => {
 });
 
 test("fallback validation accepts only Anthropic-family model identifiers", () => {
-  assert.equal(assertAnthropicFamilyModel("claude-opus-4-8"), "claude-opus-4-8");
+  assert.equal(assertAnthropicFamilyModel("claude-opus-5"), "claude-opus-5");
   assert.equal(
-    assertAnthropicFamilyModel("anthropic/claude-sonnet-4-6"),
-    "anthropic/claude-sonnet-4-6",
+    assertAnthropicFamilyModel("anthropic/claude-sonnet-5"),
+    "anthropic/claude-sonnet-5",
   );
   assert.throws(
     () => assertAnthropicFamilyModel("openai/gpt-5.4", "advisor.fallbackModel"),
