@@ -128,7 +128,7 @@ function createMessagesHandler({ config, coreClient, policies }) {
       // is unaffected. Each launch mode wants a different target model, so the
       // caller's own mode label picks the table.
       const mode = requestedMode(request?.headers);
-      const routed = routeBareClaudeModel(body, resolveModeRoutes(config, mode));
+      const routed = routeBareClaudeModel(body, resolveModeRoutes(config, mode), config.launchModel ?? null);
       const routedBody = routed ?? body;
       // Before the compatibility decision, not after: an advisor definition the
       // upstream route cannot resolve would otherwise pull this whole request

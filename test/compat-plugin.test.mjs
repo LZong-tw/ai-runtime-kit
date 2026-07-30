@@ -2001,6 +2001,51 @@ test("the caller's mode label selects its route table for main and background tr
   );
 });
 
+test("the launcher's own model id routes separately from an in-session Sonnet pick", async () => {
+  const forwarded = [];
+  const routes = [];
+  await plugin.setup({
+    config: structuredClone(PLUGIN_RUNTIME_CONFIG),
+    coreClient: {
+      async forwardRaw({ body }) {
+        forwarded.push(Buffer.from(body));
+      },
+    },
+    pluginConfig: {
+      ...structuredClone(COMPLETE_PLUGIN_CONFIG),
+      launchModel: "claude-airkit-mode",
+      routes: {
+        default: "demo-provider/steady-coder",
+        background: "demo-provider/cheap-coder",
+        sonnet: "demo-provider/real-sonnet",
+      },
+      modeRoutes: {
+        glm: {
+          default: "demo-provider/glm-coder",
+          background: "demo-provider/glm-mini",
+          sonnet: "demo-provider/real-sonnet",
+        },
+      },
+    },
+    registerGatewayRoute(route) {
+      routes.push(route);
+    },
+  });
+  const handler = routes.find(({ id }) => id === "airkit-compatibility-messages").handler;
+  const invoke = async (model, headers) => {
+    const raw = Buffer.from(JSON.stringify({ model, max_tokens: 8, messages: [] }), "utf8");
+    await handler({ headers, method: "POST", signal: undefined }, {}, { readBody: async () => raw });
+    return JSON.parse(forwarded.at(-1).toString()).model;
+  };
+
+  const glm = { "x-airkit-mode": "glm" };
+  assert.equal(await invoke("claude-airkit-mode", glm), "demo-provider/glm-coder");
+  assert.equal(await invoke("claude-sonnet-5", glm), "demo-provider/real-sonnet");
+  assert.equal(await invoke("claude-haiku-4-5-20251001", glm), "demo-provider/glm-mini");
+  assert.equal(await invoke("claude-airkit-mode", {}), "demo-provider/steady-coder");
+  assert.equal(await invoke("claude-sonnet-5", {}), "demo-provider/real-sonnet");
+});
+
 test("bare Claude routing without routes config forwards byte-identical bytes", async () => {
   const forwarded = [];
   const routes = [];

@@ -16,6 +16,7 @@ const FAMILY_MODES = Object.freeze({
 
 const CONFIG_KEYS = new Set([
   "fallback",
+  "launchModel",
   "modeRoutes",
   "routeLog",
   "routes",
@@ -33,9 +34,10 @@ const ADVISOR_KEYS = new Set([...FAMILY_KEYS, "unsupported"]);
 const ADVISOR_UNSUPPORTED = Object.freeze(["strip", "passthrough"]);
 export const DEFAULT_ADVISOR_UNSUPPORTED = "strip";
 const FAMILY_FALLBACK_KEYS = new Set(["provider", "model"]);
-const ROUTE_KEYS = new Set(["default", "background", "opus"]);
+const ROUTE_KEYS = new Set(["default", "background", "opus", "sonnet"]);
 const ROUTE_SELECTOR_PATTERN = /^[a-z0-9][a-z0-9._-]*\/\S+$/i;
 const MODE_PATTERN = /^[a-z0-9][a-z0-9._-]*$/i;
+const BARE_CLAUDE_MODEL_PATTERN = /^claude-[a-z0-9][a-z0-9._-]*$/i;
 
 // One plugin instance serves every launch mode, and CCR discards the caller's
 // API-key identity before the plugin sees the request. The launcher therefore
@@ -78,6 +80,10 @@ export function validateCompatibilityConfig(config) {
 
   if (config.routeLog !== undefined && typeof config.routeLog !== "boolean") {
     throw new Error("routeLog must be a boolean");
+  }
+
+  if (config.launchModel !== undefined && !BARE_CLAUDE_MODEL_PATTERN.test(String(config.launchModel))) {
+    throw new Error("launchModel must be a bare claude-* model id");
   }
 
   if (config.routes !== undefined) validateRouteTable(config.routes, "routes");
@@ -156,17 +162,29 @@ export function requestedMode(headers) {
   return isAirkitModeLabel(mode) ? mode : null;
 }
 
-export function routeBareClaudeModel(body, routes) {
+// `launchModel` is the id the launcher itself starts Claude Code with, and it is
+// matched before the family prefixes. Without it the launch id and a user's
+// in-session pick of the same family are the same string on the wire — Claude
+// Code sends a bare id and carries `[1m]` only as an `anthropic-beta` header —
+// so a mode whose launch id is `claude-sonnet-5` cannot offer real Sonnet 5 as a
+// choice: every request looks like the launcher's. Giving the launcher its own
+// id (any `claude-*` string; Claude Code forwards unknown ids verbatim)
+// separates the two, which is what frees `routes.sonnet`. Profiles that keep a
+// family id as their launch model still work: the exact match wins first and
+// `routes.sonnet ?? routes.default` preserves the old target.
+export function routeBareClaudeModel(body, routes, launchModel = null) {
   if (!isRecord(body) || typeof body.model !== "string") return null;
   if (!isRecord(routes)) return null;
   if (body.model.includes("/") || !body.model.startsWith("claude-")) return null;
-  const target = body.model.startsWith("claude-opus-")
-    ? routes.opus ?? routes.default
-    : body.model.startsWith("claude-haiku-")
-      ? routes.background ?? routes.default
-      : body.model.startsWith("claude-sonnet-")
-        ? routes.default
-        : null;
+  const target = body.model === launchModel
+    ? routes.default
+    : body.model.startsWith("claude-opus-")
+      ? routes.opus ?? routes.default
+      : body.model.startsWith("claude-haiku-")
+        ? routes.background ?? routes.default
+        : body.model.startsWith("claude-sonnet-")
+          ? routes.sonnet ?? routes.default
+          : null;
   if (typeof target !== "string" || target === "" || target === body.model) return null;
   return { ...body, model: target };
 }

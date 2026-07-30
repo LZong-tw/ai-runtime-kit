@@ -451,3 +451,84 @@ test("bare Claude models route to background or default; qualified and foreign m
   assert.equal(original.model, "claude-sonnet-5", "input body is not mutated");
   assert.notEqual(rewritten, original);
 });
+
+test("a dedicated launch id separates the launcher's own traffic from a Sonnet pick", () => {
+  const routes = {
+    default: "demo/glm-coder",
+    background: "demo/glm-mini",
+    opus: "web-litellm/claude-opus-5",
+    sonnet: "web-litellm/claude-sonnet-5",
+  };
+  const body = (model) => ({ model, max_tokens: 8, messages: [] });
+
+  assert.equal(
+    routeBareClaudeModel(body("claude-airkit-mode"), routes, "claude-airkit-mode").model,
+    "demo/glm-coder",
+    "the launcher's own id is the mode's model",
+  );
+  assert.equal(
+    routeBareClaudeModel(body("claude-sonnet-5"), routes, "claude-airkit-mode").model,
+    "web-litellm/claude-sonnet-5",
+    "an in-session Sonnet pick reaches real Sonnet",
+  );
+  assert.equal(
+    routeBareClaudeModel(body("claude-opus-5"), routes, "claude-airkit-mode").model,
+    "web-litellm/claude-opus-5",
+  );
+  assert.equal(
+    routeBareClaudeModel(body("claude-haiku-4-5-20251001"), routes, "claude-airkit-mode").model,
+    "demo/glm-mini",
+  );
+});
+
+test("the launch id is matched before the family prefixes, so old profiles keep their target", () => {
+  const body = (model) => ({ model, max_tokens: 8, messages: [] });
+  const routes = { default: "demo/glm-coder", sonnet: "web-litellm/claude-sonnet-5" };
+
+  assert.equal(
+    routeBareClaudeModel(body("claude-sonnet-5"), routes, "claude-sonnet-5").model,
+    "demo/glm-coder",
+    "a profile still launching on a family id keeps routing that id to default",
+  );
+  assert.equal(
+    routeBareClaudeModel(body("claude-sonnet-5"), { default: "demo/glm-coder" }, null).model,
+    "demo/glm-coder",
+    "no launch id and no sonnet route is the pre-existing behavior",
+  );
+  assert.equal(
+    routeBareClaudeModel(body("claude-opus-5"), { default: "demo/glm-coder" }, "claude-opus-5").model,
+    "demo/glm-coder",
+    "the exact match also outranks the opus prefix",
+  );
+});
+
+test("launchModel must be a bare claude-* id", () => {
+  const withLaunch = (launchModel) => ({ ...VALID_CONFIG, launchModel });
+
+  assert.doesNotThrow(() => validateCompatibilityConfig(withLaunch("claude-airkit-mode")));
+  assert.doesNotThrow(() => validateCompatibilityConfig(withLaunch("claude-sonnet-5")));
+  for (const value of ["", "airkit-mode", "demo/claude-sonnet-5", "claude-sonnet-5[1m]", "claude-", 7]) {
+    assert.throws(
+      () => validateCompatibilityConfig(withLaunch(value)),
+      /launchModel must be a bare claude-\* model id/,
+      `rejects ${JSON.stringify(value)}`,
+    );
+  }
+});
+
+test("sonnet is an accepted route key in both tables", () => {
+  const table = { default: "demo/glm-coder", sonnet: "web-litellm/claude-sonnet-5" };
+
+  assert.doesNotThrow(() => validateCompatibilityConfig({ ...VALID_CONFIG, routes: table }));
+  assert.doesNotThrow(() => validateCompatibilityConfig({
+    ...VALID_CONFIG,
+    modeRoutes: { glm: table },
+  }));
+  assert.throws(
+    () => validateCompatibilityConfig({
+      ...VALID_CONFIG,
+      routes: { default: "demo/glm-coder", sonnet: "claude-sonnet-5" },
+    }),
+    /routes\.sonnet must be a provider-qualified model selector/,
+  );
+});
