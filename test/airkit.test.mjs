@@ -1803,7 +1803,7 @@ test("doctorProfile reports rendered file drift and runtime availability", async
   }
 });
 
-test("doctorProfile fails and names CCR state owned by no installed profile", async () => {
+test("doctorProfile warns and names CCR state owned by no installed profile", async () => {
   const catalog = await loadCatalog();
   const configDir = await mkdtemp(join(tmpdir(), "airkit-oss-doctor-orphans-"));
 
@@ -1823,18 +1823,27 @@ test("doctorProfile fails and names CCR state owned by no installed profile", as
       sourceShellSnippet: async () => ({ ok: true }),
     });
 
-    assert.equal(result.ok, false, "stale state still decides live routes, so doctor must not pass");
-    assert.deepEqual(result.runtime.managedState.orphans, {
+    const managedState = result.runtime.managedState;
+    assert.deepEqual(managedState.orphans, {
       profiles: ["airkit-gone-example-auto"],
       providers: ["airkit-provider-gone-example-demo"],
       rules: ["airkit-gone-example-route-default"],
     });
-    assert.match(result.failures.join("\n"), /airkit-gone-example-route-default/);
-    assert.match(result.failures.join("\n"), /next airclaude launch removes it/);
+    assert.equal(managedState.count, 3);
+    assert.equal(managedState.warn, true, "leftovers are surfaced, not silent");
+    assert.match(managedState.reason, /airkit-gone-example-route-default/);
+    assert.match(managedState.reason, /airkit-provider-gone-example-demo/);
+    assert.match(managedState.reason, /airkit-gone-example-auto/);
     assert.ok(
-      !result.failures.join("\n").includes("unrelated-"),
+      !managedState.reason.includes("unrelated-"),
       "foreign CCR artifacts are never reported as AirKit's to remove",
     );
+
+    // Another profile's residue must not fail the profile being diagnosed: the
+    // installation contract reads a nonzero doctor exit as blocked, and a launch
+    // clears this on its own.
+    assert.equal(result.ok, true, "an unrelated profile's leftovers do not block this profile");
+    assert.deepEqual(result.failures, []);
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }

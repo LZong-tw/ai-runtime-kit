@@ -327,7 +327,7 @@ function orphanManagedIds(ids, ownedPrefixes, namespace) {
 // does, so until one happens those rules keep deciding live traffic. Reporting
 // the same set read-only lets doctor name what is wrong now instead of leaving
 // the user to infer it from a routing symptom.
-export function findOrphanedManagedState(catalog, currentConfig = {}, options = {}) {
+function findOrphanedManagedState(catalog, currentConfig = {}, options = {}) {
   const configDir = resolve(options.configDir ?? defaultConfigDir());
   const owned = catalogManagedPrefixes(catalog, installedProfileNames(configDir));
   return {
@@ -356,8 +356,13 @@ async function inspectOrphanedManagedState(catalog, options = {}) {
     ...orphans.profiles.map((id) => `ccr profile ${id}`),
   ];
   if (ids.length === 0) return { ok: true, orphans, count: 0 };
+  // A warning, not a failure. Doctor's exit code is the installation contract's
+  // blocked/verified gate, and these leftovers belong to a profile that is not
+  // the one being diagnosed and that the next launch clears on its own. Failing
+  // here would report a fresh install as blocked over somebody else's residue.
   return {
-    ok: false,
+    ok: true,
+    warn: true,
     orphans,
     count: ids.length,
     reason: `CCR state owned by no installed profile is still deciding live routes: ${ids.join(", ")}; the next airclaude launch removes it`,
@@ -1822,7 +1827,7 @@ Routes:
 Files:
 ${fileLines.join("\n")}
 - ${result.liveCcrConfig.status} CCR state database: ${result.liveCcrConfig.path}
-${result.managedState ? `- ${statusOf(result.managedState)} orphaned CCR state: ${describeOrphanCount(result.managedState)}\n${result.managedState.ok ? "" : `  ${result.managedState.reason}\n`}` : ""}
+${result.managedState ? `${renderManagedStateLines(result.managedState).map((line, index) => (index === 0 ? `- ${line}` : line)).join("\n")}\n` : ""}
 Runtime:
 ${runtimeLines.join("\n") || "- skipped"}
 Launch:
@@ -2649,7 +2654,7 @@ function renderDoctorResult(result) {
       (file) => `${file.ok ? "ok" : "fail"} ${file.label ?? "managed file"}: ${file.path}`,
     ),
     `${statusOf(result.runtime.ccr)} CCR availability: ${result.runtime.ccr.command}`,
-    `${statusOf(result.runtime.managedState)} orphaned CCR state: ${describeOrphanCount(result.runtime.managedState)}`,
+    ...renderManagedStateLines(result.runtime.managedState),
     `${statusOf(result.runtime.shellSource)} shell source: ${result.runtime.shellSource.path}`,
     renderContextWindow(result.runtime.context),
     renderAutoCompactWindow(result.runtime.context),
@@ -2759,12 +2764,20 @@ function shellFunctionNames(profile) {
 
 function statusOf(check) {
   if (check.skipped) return "skip";
+  if (check.warn) return "warn";
   return check.ok ? "ok" : "fail";
 }
 
 function describeOrphanCount(managedState) {
   if (managedState.skipped) return "not inspected";
   return managedState.count === 0 ? "none" : `${managedState.count} artifact(s) owned by no installed profile`;
+}
+
+// A warning never reaches `result.failures`, so the ids have to be named right
+// here or a count would be all the user ever sees.
+function renderManagedStateLines(managedState) {
+  const head = `${statusOf(managedState)} orphaned CCR state: ${describeOrphanCount(managedState)}`;
+  return managedState.warn ? [head, `  ${managedState.reason}`] : [head];
 }
 
 function profileTemplateVars(profile, configDir = defaultConfigDir()) {
