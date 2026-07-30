@@ -453,40 +453,47 @@ async function routeWholeRequestFallback({ body, headers, config, coreClient, re
       requestFallback(fallbackBody, fallbackHeaders, fallbackSignal),
   });
   const result = await route({ body, headers, signal });
-  reportFallbackRejection(body, result);
-  if (response === undefined) return result;
-  await pipeCoreResponse(result, response, signal);
+  const families = fallbackFamilies(body);
+  reportFallbackRejection(families, result);
+  const annotated = await annotateAdvisorRejection(families, result);
+  if (response === undefined) return annotated;
+  await pipeCoreResponse(annotated, response, signal);
 }
 
-// The fallback response is relayed byte-for-byte on purpose, so a diagnosis can
-// only live beside it, never in it. It is worth writing one because the upstream
-// error can name a model the caller never sent, which reads like a routing bug
-// here: an Anthropic server tool carries its own `model` inside the tool
-// definition, and the gateway resolves that one with a separate request that
-// does not inherit the deployment's credentials or api_base. Observed against a
-// LiteLLM gateway, one missing piece of upstream configuration produced three
-// different errors depending on how that inner model was written — a bare name
-// failed provider lookup, an `anthropic/` prefix asked for an Anthropic key, and
-// an `azure_ai/` prefix asked for an Azure api_base. None of them is fixable
-// from this side, so the only useful thing to do is say where to look.
+function fallbackFamilies(body) {
+  try {
+    return [...new Set([
+      ...inspectPendingServerHistory(body).families,
+      ...inspectServerToolRequest(body).families,
+    ])];
+  } catch {
+    return [];
+  }
+}
+
+// Every fallback response is relayed byte-for-byte except one case, below. The
+// log line is worth writing because the upstream error can name a model the
+// caller never sent, which reads like a routing bug here: an Anthropic server
+// tool carries its own `model` inside the tool definition, and the gateway
+// resolves that one with a separate request that does not inherit the
+// deployment's credentials or api_base. Observed against a LiteLLM gateway, one
+// missing piece of upstream configuration produced three different errors
+// depending on how that inner model was written — a bare name failed provider
+// lookup, an `anthropic/` prefix asked for an Anthropic key, and an `azure_ai/`
+// prefix asked for an Azure api_base. None of them is fixable from this side, so
+// the only useful thing to do is say where to look.
 //
 // Unlike the per-request route log this is not gated behind routeLog: it fires
 // only when the upstream has already rejected the request, and having to enable
-// a setting before the failure you just hit is no help. The body is a stream on
-// its way to the caller and must not be read here, so the status and the
-// request's own tool families are all this can honestly report.
+// a setting before the failure you just hit is no help.
 //
 // The advisor hint is deliberately not written for the other families. Their
 // rejections have their own causes — a workspace that does not carry the
 // entitlement, most commonly — and printing the sub-call explanation for every
 // server tool would just be a new confident guess in place of the old one.
-function reportFallbackRejection(body, result) {
+function reportFallbackRejection(families, result) {
   if (typeof result?.status !== "number" || result.status < 400) return;
   try {
-    const families = [...new Set([
-      ...inspectPendingServerHistory(body).families,
-      ...inspectServerToolRequest(body).families,
-    ])];
     const hint = families.includes("advisor")
       ? "fallback routed the outer request to the configured Anthropic route, but the advisor tool definition carries its own model that the upstream gateway resolves in a separate call — that call needs its own api_base and credentials upstream, and no AirKit setting can supply them"
       : families.length > 0
@@ -501,6 +508,87 @@ function reportFallbackRejection(body, result) {
   } catch {
     // never let logging interfere with the request
   }
+}
+
+const ADVISOR_REJECTION_NOTE = " [AirKit] This error came from the upstream " +
+  "Anthropic fallback route, not from AirKit's routing. The advisor tool " +
+  "definition carries its own model, which the upstream gateway resolves in a " +
+  "separate call that inherits neither that route's api_base nor its " +
+  "credentials, so the model named above may not be the one this request " +
+  "asked for. It has to be configured on the gateway; no AirKit setting can " +
+  "supply it.";
+
+// The one deliberate exception to byte-for-byte relaying. A log line only helps
+// someone who already knows to go read the log, and the raw upstream error is
+// actively misleading here — it names a model the caller never sent, so the
+// obvious reading is that AirKit misrouted the request. The upstream message is
+// kept verbatim and the explanation is appended to it, so nothing is hidden and
+// the error's type, status, and other headers are untouched.
+//
+// Narrow on purpose. Anything that is not a JSON Anthropic error object with a
+// string message is relayed unchanged: an encoded body cannot be edited without
+// re-encoding it, a streamed error has already committed to its framing, and
+// another family's rejection has a different cause. The bytes are read once and
+// replayed either way, so a body that turns out not to qualify is still
+// delivered whole.
+async function annotateAdvisorRejection(families, result) {
+  if (!families.includes("advisor")) return result;
+  if (typeof result?.status !== "number" || result.status < 400) return result;
+  if (!result.body) return result;
+  const contentType = readHeader(result, "content-type");
+  if (!contentType.includes("application/json")) return result;
+  if (readHeader(result, "content-encoding")) return result;
+
+  let raw;
+  try {
+    raw = await collectStream(result.body);
+  } catch {
+    return result;
+  }
+  return replayResult(result, annotateErrorBytes(raw));
+}
+
+function annotateErrorBytes(raw) {
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(raw));
+    if (typeof parsed?.error?.message !== "string") return raw;
+    parsed.error.message += ADVISOR_REJECTION_NOTE;
+    return Buffer.from(JSON.stringify(parsed));
+  } catch {
+    return raw;
+  }
+}
+
+function readHeader(result, name) {
+  const value = typeof result.headers?.get === "function"
+    ? result.headers.get(name)
+    : Object.fromEntries(result.headers ?? [])[name];
+  return typeof value === "string" ? value.toLowerCase() : "";
+}
+
+async function collectStream(body) {
+  const reader = body.getReader();
+  const chunks = [];
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks);
+}
+
+function replayResult(result, bytes) {
+  const headers = new Headers(result.headers);
+  headers.set("content-length", String(bytes.byteLength));
+  return {
+    status: result.status,
+    headers,
+    body: new Blob([bytes]).stream(),
+  };
 }
 
 function defaultCreateId(prefix) {
