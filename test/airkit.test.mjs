@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -1868,6 +1868,117 @@ test("doctor reports a stopped management service as missing information, not a 
     assert.ok(!result.failures.some((reason) => reason?.includes("owned by no installed profile")));
   } finally {
     await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+// The plugin host resolves each module once per process, so a module newer than
+// that process cannot be the one running. These lock in the signal, because the
+// symptom it replaces is a plugin that fails identically after every restart.
+async function pluginFreshnessDoctor(pluginDir, overrides = {}) {
+  const catalog = await loadCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-oss-doctor-freshness-"));
+  try {
+    await installProfile(catalog, profile, { configDir, write: true });
+    const result = await doctorProfile(catalog, profile, {
+      ccrClient: {
+        getConfig: async () => ({
+          plugins: pluginDir ? [{ id: "airkit-compatibility", module: join(pluginDir, "plugin.mjs") }] : [],
+        }),
+      },
+      commandExists: async () => true,
+      configDir,
+      sourceShellSnippet: async () => ({ ok: true }),
+      ...overrides,
+    });
+    return result;
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+}
+
+test("doctor warns when a plugin module is newer than the process that loaded it", async () => {
+  const pluginDir = await mkdtemp(join(tmpdir(), "airkit-oss-plugin-"));
+  try {
+    await writeFile(join(pluginDir, "plugin.mjs"), "export default {};\n");
+
+    const result = await pluginFreshnessDoctor(pluginDir, {
+      pluginHostStartedAt: new Date("2000-01-01T00:00:00Z"),
+    });
+
+    const check = result.runtime.pluginFreshness;
+    assert.equal(check.warn, true, "a module the host cannot have loaded must be surfaced");
+    assert.equal(check.stale.length, 1);
+    assert.match(check.stale[0], /plugin\.mjs/);
+    assert.match(check.reason, /ccr stop && ccr start/, "the fix belongs in the message");
+    // Same reasoning as orphaned state: this is not a verdict on the profile.
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.failures, []);
+  } finally {
+    await rm(pluginDir, { force: true, recursive: true });
+  }
+});
+
+test("a stale sibling import is caught, not only the entry module", async () => {
+  // This is the case that actually happened: plugin.mjs was untouched and a
+  // sibling it imports had moved, so checking the entry's mtime alone would have
+  // reported everything fresh while the plugin failed on every restart.
+  const pluginDir = await mkdtemp(join(tmpdir(), "airkit-oss-plugin-sibling-"));
+  try {
+    const entry = join(pluginDir, "plugin.mjs");
+    await writeFile(entry, "import './config.mjs';\n");
+    await writeFile(join(pluginDir, "config.mjs"), "export const ROUTE_KEYS = new Set();\n");
+    const ancient = new Date("2001-01-01T00:00:00Z");
+    await utimes(entry, ancient, ancient);
+
+    const result = await pluginFreshnessDoctor(pluginDir, {
+      pluginHostStartedAt: new Date("2002-01-01T00:00:00Z"),
+    });
+
+    const check = result.runtime.pluginFreshness;
+    assert.equal(check.warn, true, "the entry is older than the host, but its sibling is not");
+    assert.equal(check.stale.length, 1);
+  } finally {
+    await rm(pluginDir, { force: true, recursive: true });
+  }
+});
+
+test("a plugin host newer than every module is not reported stale", async () => {
+  const pluginDir = await mkdtemp(join(tmpdir(), "airkit-oss-plugin-fresh-"));
+  try {
+    await writeFile(join(pluginDir, "plugin.mjs"), "export default {};\n");
+
+    const result = await pluginFreshnessDoctor(pluginDir, {
+      pluginHostStartedAt: new Date(Date.now() + 60_000),
+    });
+
+    const check = result.runtime.pluginFreshness;
+    assert.equal(check.warn, undefined);
+    assert.deepEqual(check.stale, []);
+  } finally {
+    await rm(pluginDir, { force: true, recursive: true });
+  }
+});
+
+test("freshness reports missing information rather than guessing", async () => {
+  const noPlugins = await pluginFreshnessDoctor(null, {
+    pluginHostStartedAt: new Date("2000-01-01T00:00:00Z"),
+  });
+  assert.equal(noPlugins.runtime.pluginFreshness.skipped, true);
+  assert.match(noPlugins.runtime.pluginFreshness.reason, /no CCR plugins registered/);
+
+  // A host that cannot be located is unknown, never "fresh": claiming fresh here
+  // would be the silent failure this check exists to remove.
+  const pluginDir = await mkdtemp(join(tmpdir(), "airkit-oss-plugin-nohost-"));
+  try {
+    await writeFile(join(pluginDir, "plugin.mjs"), "export default {};\n");
+    const noHost = await pluginFreshnessDoctor(pluginDir, {
+      runCommand: () => ({ ok: false, status: 1, stdout: "", stderr: "" }),
+    });
+    assert.equal(noHost.runtime.pluginFreshness.skipped, true);
+    assert.match(noHost.runtime.pluginFreshness.reason, /not running/);
+    assert.equal(noHost.ok, true);
+  } finally {
+    await rm(pluginDir, { force: true, recursive: true });
   }
 });
 

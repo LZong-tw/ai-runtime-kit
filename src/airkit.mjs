@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { access, chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { readdirSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -339,16 +339,28 @@ function findOrphanedManagedState(catalog, currentConfig = {}, options = {}) {
 
 // Doctor must never change what it inspects: `autoStart: false` reports a
 // stopped management service instead of starting one, and a service it cannot
-// reach is missing information rather than a failed check.
-async function inspectOrphanedManagedState(catalog, options = {}) {
+// reach is missing information rather than a failed check. One getConfig answers
+// every live question, because two checks about one snapshot must not disagree.
+async function inspectLiveCcrState(catalog, options = {}) {
   const createCcrClient = options.createCcrClient ?? createCcr3Client;
   const client = options.ccrClient ?? createCcrClient({ ...options, autoStart: false });
   let currentConfig;
   try {
     currentConfig = await client.getConfig();
   } catch (error) {
-    return { ok: true, skipped: true, reason: `live CCR state not inspected: ${error.message}` };
+    const reason = `live CCR state not inspected: ${error.message}`;
+    return {
+      managedState: { ok: true, skipped: true, reason },
+      pluginFreshness: { ok: true, skipped: true, reason },
+    };
   }
+  return {
+    managedState: inspectOrphanedManagedState(catalog, currentConfig, options),
+    pluginFreshness: await inspectPluginFreshness(currentConfig, options),
+  };
+}
+
+function inspectOrphanedManagedState(catalog, currentConfig, options = {}) {
   const orphans = findOrphanedManagedState(catalog, currentConfig, options);
   const ids = [
     ...orphans.rules.map((id) => `router rule ${id}`),
@@ -366,6 +378,91 @@ async function inspectOrphanedManagedState(catalog, options = {}) {
     orphans,
     count: ids.length,
     reason: `CCR state owned by no installed profile is still deciding live routes: ${ids.join(", ")}; the next airclaude launch removes it`,
+  };
+}
+
+// Attribute the plugin host by parentage. Several `--no-gateway` daemon children
+// can outlive their gateway and match the same command line, so picking by
+// uptime or by listening port names the wrong process — the host is whichever
+// service fathered the running gateway core.
+function readPluginHostStart(runCommand) {
+  const pid = (args) => {
+    const result = runCommand("pgrep", args, { timeoutMs: 5000 });
+    return result.ok ? (result.stdout.split("\n")[0] ?? "").trim() : "";
+  };
+  const corePid = pid(["-f", "ai-gateway/dist/index.js"]);
+  if (corePid === "") return null;
+  const parent = runCommand("ps", ["-o", "ppid=", "-p", corePid], { timeoutMs: 5000 });
+  const hostPid = parent.ok ? parent.stdout.trim() : "";
+  if (hostPid === "") return null;
+  const started = runCommand("ps", ["-o", "lstart=", "-p", hostPid], { timeoutMs: 5000 });
+  if (!started.ok) return null;
+  const at = new Date(started.stdout.trim());
+  return Number.isNaN(at.getTime()) ? null : at;
+}
+
+// The entry module is not enough: today's failure came from a sibling this file
+// imports, not from the entry itself, so a module graph has to be approximated.
+// The containing directory tree is that approximation — node_modules excluded,
+// since a dependency bump is a reinstall rather than the edit-and-relaunch loop
+// this check exists to protect.
+async function newestModuleMtime(entryPath) {
+  let newest = null;
+  const consider = async (path) => {
+    const info = await stat(path).catch(() => null);
+    if (info?.isFile() && (newest === null || info.mtime > newest)) newest = info.mtime;
+    return info;
+  };
+  const entry = await consider(entryPath);
+  if (!entry) return null;
+
+  const walk = (dir, depth) => {
+    if (depth > 6) return [];
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+    return entries.flatMap((item) => {
+      if (item.name.startsWith(".") || item.name === "node_modules") return [];
+      const path = join(dir, item.name);
+      if (item.isDirectory()) return walk(path, depth + 1);
+      return /\.(?:mjs|cjs|js|json)$/.test(item.name) ? [path] : [];
+    });
+  };
+  for (const path of walk(dirname(entryPath), 0)) await consider(path);
+  return newest;
+}
+
+// A module newer than the host process cannot be the one that is loaded. This is
+// the only reliable signal available: `/health` answers `{"status":"ok"}` whether
+// or not a plugin loaded, and a broken plugin re-logs its failure on every
+// gateway-core restart, which reads like a live error against current code.
+async function inspectPluginFreshness(currentConfig = {}, options = {}) {
+  const modules = (currentConfig.plugins ?? [])
+    .map((plugin) => plugin?.module)
+    .filter((module) => typeof module === "string" && module !== "");
+  if (modules.length === 0) return { ok: true, skipped: true, reason: "no CCR plugins registered" };
+
+  const runCommand = options.runCommand ?? runCommandSync;
+  const hostStartedAt = options.pluginHostStartedAt ?? readPluginHostStart(runCommand);
+  if (!hostStartedAt) {
+    return { ok: true, skipped: true, reason: "CCR plugin host is not running, so nothing is loaded to be stale" };
+  }
+
+  const stale = [];
+  for (const module of modules) {
+    const newest = await newestModuleMtime(module);
+    if (newest && newest > hostStartedAt) stale.push(`${module} (changed ${newest.toISOString()})`);
+  }
+  if (stale.length === 0) return { ok: true, hostStartedAt: hostStartedAt.toISOString(), stale: [] };
+  return {
+    ok: true,
+    warn: true,
+    hostStartedAt: hostStartedAt.toISOString(),
+    stale,
+    reason: `the CCR plugin host started ${hostStartedAt.toISOString()} and cannot have loaded ${stale.join(", ")}; a gateway restart re-runs the plugin from the same cached module graph, so run \`ccr stop && ccr start\``,
   };
 }
 
@@ -960,9 +1057,9 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
       liveCcrConfig: { ...plan.liveCcrConfig, status: "would-manage" },
       // A dry run stays free of any RPC so it keeps proving the launch contract
       // offline; --doctor is the diagnostic mode, so it reads live state.
-      managedState: options.doctor
-        ? await inspectOrphanedManagedState(catalog, { ...options, configDir: plan.configDir })
-        : undefined,
+      ...(options.doctor
+        ? await inspectLiveCcrState(catalog, { ...options, configDir: plan.configDir })
+        : {}),
       runtime: await checkLaunchRuntime(plan, options),
     };
   }
@@ -1053,6 +1150,7 @@ export async function doctorProfile(catalog, profileName, options = {}) {
     ),
   };
   const ccrConfig = profile.ccr ? buildCcrConfig(catalog, profileName, { configDir: plan.configDir }) : null;
+  const live = await inspectLiveCcrState(catalog, { ...options, configDir: plan.configDir });
   const runtime = {
     ccr: await checkCcrAvailability(profile, options.commandExists ?? commandExistsOnPath),
     compatibility: compatibilityCapabilityStatus(profile.ccr),
@@ -1066,7 +1164,8 @@ export async function doctorProfile(catalog, profileName, options = {}) {
         usage: options.completionUsage,
       }),
     },
-    managedState: await inspectOrphanedManagedState(catalog, { ...options, configDir: plan.configDir }),
+    managedState: live.managedState,
+    pluginFreshness: live.pluginFreshness,
     shellSource: files.shellSnippet.ok
       ? await checkShellSourceability(plan.files.shellSnippet, profile, options.sourceShellSnippet ?? sourceShellSnippet)
       : { ok: true, skipped: true, path: plan.files.shellSnippet },
@@ -1827,7 +1926,12 @@ Routes:
 Files:
 ${fileLines.join("\n")}
 - ${result.liveCcrConfig.status} CCR state database: ${result.liveCcrConfig.path}
-${result.managedState ? `${renderManagedStateLines(result.managedState).map((line, index) => (index === 0 ? `- ${line}` : line)).join("\n")}\n` : ""}
+${[
+  ...(result.managedState ? renderManagedStateLines(result.managedState) : []),
+  ...(result.pluginFreshness ? renderPluginFreshnessLines(result.pluginFreshness) : []),
+]
+  .map((line) => (line.startsWith("  ") ? line : `- ${line}`))
+  .join("\n")}
 Runtime:
 ${runtimeLines.join("\n") || "- skipped"}
 Launch:
@@ -2655,6 +2759,7 @@ function renderDoctorResult(result) {
     ),
     `${statusOf(result.runtime.ccr)} CCR availability: ${result.runtime.ccr.command}`,
     ...renderManagedStateLines(result.runtime.managedState),
+    ...renderPluginFreshnessLines(result.runtime.pluginFreshness),
     `${statusOf(result.runtime.shellSource)} shell source: ${result.runtime.shellSource.path}`,
     renderContextWindow(result.runtime.context),
     renderAutoCompactWindow(result.runtime.context),
@@ -2768,16 +2873,27 @@ function statusOf(check) {
   return check.ok ? "ok" : "fail";
 }
 
-function describeOrphanCount(managedState) {
-  if (managedState.skipped) return "not inspected";
-  return managedState.count === 0 ? "none" : `${managedState.count} artifact(s) owned by no installed profile`;
+// A warning never reaches `result.failures`, so the detail has to be named right
+// here or a bare count would be all the user ever sees.
+function renderWarnableCheck(label, check, summarize) {
+  const head = `${statusOf(check)} ${label}: ${summarize(check)}`;
+  return check.warn ? [head, `  ${check.reason}`] : [head];
 }
 
-// A warning never reaches `result.failures`, so the ids have to be named right
-// here or a count would be all the user ever sees.
 function renderManagedStateLines(managedState) {
-  const head = `${statusOf(managedState)} orphaned CCR state: ${describeOrphanCount(managedState)}`;
-  return managedState.warn ? [head, `  ${managedState.reason}`] : [head];
+  return renderWarnableCheck("orphaned CCR state", managedState, (check) => {
+    if (check.skipped) return "not inspected";
+    return check.count === 0 ? "none" : `${check.count} artifact(s) owned by no installed profile`;
+  });
+}
+
+function renderPluginFreshnessLines(pluginFreshness) {
+  return renderWarnableCheck("CCR plugin freshness", pluginFreshness, (check) => {
+    if (check.skipped) return check.reason;
+    return check.stale.length === 0
+      ? `host started ${check.hostStartedAt}, no module changed since`
+      : `${check.stale.length} module tree(s) changed after the plugin host started`;
+  });
 }
 
 function profileTemplateVars(profile, configDir = defaultConfigDir()) {
