@@ -4,9 +4,16 @@ export function rewriteClaudeEffortForOpenAI(body) {
     return body;
   }
 
-  const effort = mappedEffort(modelName(body.model), body.output_config.effort);
+  const model = modelName(body.model);
+  if (isDeepSeek(model)) return withoutClaudeEffort(body);
+
+  const effort = mappedEffort(model, body.output_config.effort);
   if (effort === null) return body;
 
+  return { ...withoutClaudeEffort(body), reasoning_effort: effort };
+}
+
+function withoutClaudeEffort(body) {
   const rest = { ...body };
   delete rest.output_config;
   const outputConfig = { ...body.output_config };
@@ -14,18 +21,17 @@ export function rewriteClaudeEffortForOpenAI(body) {
   return {
     ...rest,
     ...(Object.keys(outputConfig).length === 0 ? {} : { output_config: outputConfig }),
-    reasoning_effort: effort,
   };
+}
+
+function isDeepSeek(model) {
+  const normalized = model.toLowerCase();
+  return normalized === "deepseek-v4-flash" || normalized === "deepseek-v4-pro";
 }
 
 function mappedEffort(model, effort) {
   const normalizedModel = model.toLowerCase();
   const normalizedEffort = effort.trim().toLowerCase();
-  if (normalizedModel === "deepseek-v4-flash" || normalizedModel === "deepseek-v4-pro") {
-    if (["low", "medium", "high"].includes(normalizedEffort)) return "high";
-    if (["xhigh", "max"].includes(normalizedEffort)) return "max";
-    return null;
-  }
   if (normalizedModel === "glm-5.2" || normalizedModel === "kimi-k3") {
     return ["low", "medium", "high", "xhigh", "max"].includes(normalizedEffort)
       ? normalizedEffort

@@ -3,13 +3,8 @@ import { test } from "node:test";
 
 import { rewriteClaudeEffortForOpenAI } from "../src/compat/effort.mjs";
 
-test("maps Claude Code effort to each supported OpenAI-compatible model", () => {
+test("maps Claude Code effort only for providers that accept reasoning_effort", () => {
   const cases = [
-    ["oneportal/deepseek-v4-flash", "low", "high"],
-    ["oneportal/deepseek-v4-pro", "medium", "high"],
-    ["oneportal/deepseek-v4-pro", "high", "high"],
-    ["oneportal/deepseek-v4-pro", "xhigh", "max"],
-    ["oneportal/deepseek-v4-pro", "max", "max"],
     ["oneportal/GLM-5.2", "low", "low"],
     ["oneportal/GLM-5.2", "xhigh", "xhigh"],
     ["web_litellm/Kimi-K3", "medium", "medium"],
@@ -32,6 +27,21 @@ test("maps Claude Code effort to each supported OpenAI-compatible model", () => 
   }
 });
 
+test("removes Claude effort for DeepSeek while preserving structured output", () => {
+  assert.deepEqual(
+    rewriteClaudeEffortForOpenAI({
+      model: "oneportal/deepseek-v4-flash",
+      output_config: { effort: "xhigh", format: { type: "json_schema" } },
+      messages: [{ role: "user", content: "hi" }],
+    }),
+    {
+      model: "oneportal/deepseek-v4-flash",
+      output_config: { format: { type: "json_schema" } },
+      messages: [{ role: "user", content: "hi" }],
+    },
+  );
+});
+
 test("preserves unrelated output config and does not rewrite unsupported models or levels", () => {
   assert.deepEqual(
     rewriteClaudeEffortForOpenAI({
@@ -47,7 +57,6 @@ test("preserves unrelated output config and does not rewrite unsupported models 
 
   for (const body of [
     { model: "anthropic/claude-sonnet-5", output_config: { effort: "xhigh" } },
-    { model: "oneportal/deepseek-v4-pro", output_config: { effort: "ultra" } },
     { model: "oneportal/GLM-5.2", output_config: { effort: 3 } },
   ]) {
     assert.equal(rewriteClaudeEffortForOpenAI(body), body);
