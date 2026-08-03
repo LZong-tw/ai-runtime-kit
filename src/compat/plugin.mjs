@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import {
   createCoreClient,
@@ -91,7 +91,7 @@ function requestLifecycleSignal(request, response) {
   };
   if (typeof response?.once === "function") {
     response.once("close", () => {
-      if (response.writableEnded !== true) abort();
+      if (response.writableFinished !== true) abort();
     });
   }
   if (typeof request?.once === "function") request.once("error", abort);
@@ -109,14 +109,17 @@ function containHandlerFailure(response, error) {
     response.end(JSON.stringify({
       error: { message: "compatibility forwarding failed", type: "api_error" },
     }));
-    return;
+    return "forwarding_failed";
   }
   response?.destroy?.(error instanceof Error ? error : new Error(String(error)));
+  return "response_destroyed";
 }
 
 function createMessagesHandler({ config, coreClient, policies }) {
   return async (request, response, helpers) => {
     const signal = requestLifecycleSignal(request, response);
+    const telemetry = beginRequestTelemetry(config.routeLog, request, response);
+    let outcome = "completed";
     try {
       const rawBody = await helpers.readBody(request);
       const body = parseJsonCopy(rawBody);
@@ -143,13 +146,17 @@ function createMessagesHandler({ config, coreClient, policies }) {
         ? rawBody
         : Buffer.from(JSON.stringify(outboundBody), "utf8");
       const compat = isRecord(outboundBody) && isConfiguredCompatibilityRequest(outboundBody, policies);
-      logRouteDecision({
-        enabled: config.routeLog,
+      telemetry.decision = describeRouteDecision({
         body,
         mode,
         outboundBody,
         path: compat ? "compat" : "passthrough",
+      });
+      logRouteDecision({
+        enabled: config.routeLog,
+        decision: telemetry.decision,
         request,
+        requestId: telemetry.requestId,
       });
       if (!compat) {
         await coreClient.forwardRaw({
@@ -174,7 +181,15 @@ function createMessagesHandler({ config, coreClient, policies }) {
         writeAnthropicMessage(response, message, outboundBody.stream === true);
       }
     } catch (error) {
-      containHandlerFailure(response, error);
+      outcome = signal.aborted
+        ? "client_aborted"
+        : containHandlerFailure(response, error);
+    } finally {
+      if (outcome === "completed" && signal.aborted) outcome = "client_aborted";
+      const terminalEvent = await waitForResponseTerminal(telemetry, outcome);
+      if (outcome === "completed" && terminalEvent === "close") outcome = "client_aborted";
+      if (outcome === "completed" && terminalEvent === "error") outcome = "response_destroyed";
+      logRequestTerminal({ outcome, response, telemetry });
     }
   };
 }
@@ -199,31 +214,152 @@ function reportAdvisorStrip() {
   }
 }
 
-// This plugin owns POST /v1/messages, which bypasses CCR's request logger —
-// without its own trace, routing regressions on the main Claude path are
-// invisible. One stderr line per request (daemon.err.log under supervision)
-// records the model rewrite and the caller's credential as a hash prefix.
-// Observability must never break request handling, so failures are swallowed.
-function logRouteDecision({ enabled, body, mode, outboundBody, path, request }) {
+function beginRequestTelemetry(enabled, request, response) {
+  if (enabled !== true) {
+    return {
+      decision: null,
+      enabled: false,
+      finished: false,
+      requestId: null,
+      responseTerminal: null,
+      startedAt: null,
+    };
+  }
+  return {
+    decision: null,
+    enabled: true,
+    finished: false,
+    requestId: safeRequestId(request?.headers),
+    responseTerminal: observeResponseTerminal(response),
+    startedAt: process.hrtime.bigint(),
+  };
+}
+
+function observeResponseTerminal(response) {
+  if (typeof response?.once !== "function") return null;
+  let resolveCompletion;
+  let settled = false;
+  const completion = new Promise((resolve) => {
+    resolveCompletion = resolve;
+  });
+  const cleanup = () => {
+    response.off?.("finish", onFinish);
+    response.off?.("close", onClose);
+    response.off?.("error", onError);
+  };
+  const settle = (event) => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    resolveCompletion(event);
+  };
+  const onFinish = () => settle("finish");
+  const onClose = () => settle("close");
+  const onError = () => settle("error");
+
+  response.once("finish", onFinish);
+  response.once("close", onClose);
+  response.once("error", onError);
+  if (response.writableFinished === true) settle("finish");
+  else if (response.destroyed === true) settle("close");
+
+  return { cancel: () => settle(null), completion };
+}
+
+async function waitForResponseTerminal(telemetry, outcome) {
+  const observer = telemetry.responseTerminal;
+  if (observer === null) return null;
+  if (outcome !== "completed" && outcome !== "forwarding_failed") {
+    observer.cancel();
+    return null;
+  }
+  return observer.completion;
+}
+
+function safeRequestId(headers) {
+  const candidate = isRecord(headers) && typeof headers["x-request-id"] === "string"
+    ? headers["x-request-id"]
+    : "";
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(candidate) ? candidate : randomUUID();
+}
+
+function describeRouteDecision({ body, mode, outboundBody, path }) {
+  const inModel = isRecord(body) && typeof body.model === "string" ? body.model : null;
+  const outModel = isRecord(outboundBody) && typeof outboundBody.model === "string"
+    ? outboundBody.model
+    : null;
+  return {
+    inModel,
+    mode: mode ?? null,
+    outModel,
+    path,
+    rewritten: inModel !== outModel,
+    stream: isRecord(body) && body.stream === true,
+  };
+}
+
+// This plugin owns POST /v1/messages, which bypasses CCR's request logger.
+// Keep the existing routing decision and pair it with one terminal record so
+// daemon.err.log shows both where a request went and how it finished.
+function logRouteDecision({ enabled, decision, request, requestId }) {
   if (enabled !== true) return;
   try {
-    const inModel = isRecord(body) && typeof body.model === "string" ? body.model : null;
-    const outModel = isRecord(outboundBody) && typeof outboundBody.model === "string"
-      ? outboundBody.model
-      : null;
     process.stderr.write(`[airkit-route] ${JSON.stringify({
       at: new Date().toISOString(),
       authId: presentedCredentialId(request?.headers),
-      inModel,
-      mode: mode ?? null,
-      outModel,
-      path,
-      rewritten: inModel !== outModel,
-      stream: isRecord(body) && body.stream === true,
+      ...decision,
+      requestId,
     })}\n`);
   } catch {
     // never let logging interfere with the request
   }
+}
+
+function logRequestTerminal({ outcome, response, telemetry }) {
+  if (telemetry.enabled !== true || telemetry.finished) return;
+  telemetry.finished = true;
+  try {
+    const decision = telemetry.decision ?? {
+      inModel: null,
+      mode: null,
+      outModel: null,
+      path: null,
+      stream: false,
+    };
+    const elapsed = Number(process.hrtime.bigint() - telemetry.startedAt) / 1_000_000;
+    process.stderr.write(`[airkit-request] ${JSON.stringify({
+      at: new Date().toISOString(),
+      requestId: telemetry.requestId,
+      path: decision.path,
+      mode: decision.mode,
+      inModel: decision.inModel,
+      outModel: decision.outModel,
+      provider: selectorProvider(decision.outModel),
+      stream: decision.stream,
+      status: outcome === "client_aborted"
+        ? committedResponseStatus(response)
+        : responseStatus(response),
+      durationMs: Math.max(0, elapsed),
+      outcome,
+    })}\n`);
+  } catch {
+    // never let logging interfere with the request
+  }
+}
+
+function selectorProvider(selector) {
+  if (typeof selector !== "string") return null;
+  const separator = selector.indexOf("/");
+  return separator > 0 ? selector.slice(0, separator) : null;
+}
+
+function responseStatus(response) {
+  const status = response?.statusCode;
+  return Number.isInteger(status) && status >= 100 && status <= 999 ? status : null;
+}
+
+function committedResponseStatus(response) {
+  return response?.headersSent === true ? responseStatus(response) : null;
 }
 
 function presentedCredentialId(headers) {
