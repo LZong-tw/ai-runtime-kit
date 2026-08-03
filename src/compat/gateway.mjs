@@ -22,6 +22,7 @@ const SAFE_HEADER_NAMES = new Set([
   "anthropic-version",
   "b3",
   "baggage",
+  "content-type",
   "request-id",
   "traceparent",
   "tracestate",
@@ -74,6 +75,60 @@ export function createCoreClient({ config, fetchImpl = fetch, readFile = readFil
         body,
         signal,
       });
+      await pipeCoreResponse(result, response, signal);
+    },
+  };
+}
+
+// Compatibility handling must use the public CCR gateway so its normal proxy
+// owns routing and request recording. This client deliberately has no access
+// to CCR's core credential or generated configuration file.
+export function createGatewayClient({ origin, token, fetchImpl = fetch }) {
+  const gatewayOrigin = normalizeGatewayOrigin(origin);
+  if (typeof token !== "string" || token.length === 0) {
+    throw new Error("CCR gateway authentication is missing or invalid");
+  }
+  const gatewayHeaders = (headers = {}) => ({
+    ...copySafeAnthropicHeaders(headers),
+    "x-api-key": token,
+  });
+  const request = async ({ body, headers, method = "POST", path, signal }) => {
+    const options = {
+      method,
+      headers: gatewayHeaders(headers),
+      signal,
+    };
+    if (body !== undefined && method !== "GET" && method !== "HEAD") {
+      options.body = body;
+      if (isReadableBody(body)) options.duplex = "half";
+    }
+    return fetchImpl(new URL(path, gatewayOrigin), options);
+  };
+
+  return {
+    async requestFallback(body, headers, signal) {
+      return request({
+        body: JSON.stringify(body),
+        headers: { ...headers, "content-type": "application/json" },
+        path: "/v1/messages",
+        signal,
+      });
+    },
+    async requestMessage(body, headers, signal) {
+      const result = await request({
+        body: JSON.stringify({ ...body, stream: false }),
+        headers: { ...headers, "content-type": "application/json" },
+        path: "/v1/messages",
+        signal,
+      });
+      return parseCoreMessageResponse(result);
+    },
+    async forwardRaw({ body, headers, method = "POST", response, signal }) {
+      const result = await request({ body, headers, method, path: "/v1/messages", signal });
+      await pipeCoreResponse(result, response, signal);
+    },
+    async forward({ body, headers, method = "GET", path, response, signal }) {
+      const result = await request({ body, headers, method, path, signal });
       await pipeCoreResponse(result, response, signal);
     },
   };
@@ -677,7 +732,7 @@ function coreMessagesEndpoint({ coreHost, corePort }) {
   return `http://${host}:${corePort}/v1/messages`;
 }
 
-function copySafeAnthropicHeaders(headers) {
+export function copySafeAnthropicHeaders(headers) {
   const safeHeaders = {};
   for (const [rawName, value] of new Headers(headers)) {
     const name = rawName.toLowerCase();
@@ -687,6 +742,26 @@ function copySafeAnthropicHeaders(headers) {
     }
   }
   return safeHeaders;
+}
+
+function normalizeGatewayOrigin(origin) {
+  let parsed;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    throw new Error("CCR gateway origin is invalid");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("CCR gateway origin must use HTTP");
+  }
+  parsed.pathname = "/";
+  parsed.search = "";
+  parsed.hash = "";
+  return parsed;
+}
+
+function isReadableBody(body) {
+  return body !== null && typeof body === "object" && typeof body.pipe === "function";
 }
 
 function readGeneratedCoreToken(path, readFile) {
