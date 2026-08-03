@@ -17,7 +17,7 @@ import {
   validateCompatibilityConfig,
   validateCompatibilityProviderBinding,
 } from "../src/compat/config.mjs";
-import compatibilityPlugin from "../src/compat/plugin.mjs";
+import compatibilityPlugin, { createMessagesHandler } from "../src/compat/plugin.mjs";
 
 import {
   buildLaunchPlan,
@@ -620,12 +620,11 @@ test("outer compatibility routing and managed core rules preserve unknown Claude
     {},
     { configDir: "/tmp/airkit-outer-core-routing" },
   );
-  const pluginConfig = merged.config.plugins.find(({ id }) => id === "airkit-compatibility").config;
-  const registeredRoutes = [];
+  const pluginConfig = merged.compatibility;
   const coreModels = [];
 
-  await compatibilityPlugin.setup({
-    config: merged.config,
+  const handler = createMessagesHandler({
+    config: pluginConfig,
     coreClient: {
       async forwardRaw({ body }) {
         const request = JSON.parse(body.toString());
@@ -634,12 +633,8 @@ test("outer compatibility routing and managed core rules preserve unknown Claude
         coreModels.push(matchingRule ? matchingRule.rewrites[0].value : request.model);
       },
     },
-    pluginConfig,
-    registerGatewayRoute(route) {
-      registeredRoutes.push(route);
-    },
+    policies: {},
   });
-  const handler = registeredRoutes.find(({ id }) => id === "airkit-compatibility-messages").handler;
   const invoke = async (model) => {
     const raw = Buffer.from(JSON.stringify({ model, max_tokens: 8, messages: [] }));
     await handler(
@@ -711,28 +706,29 @@ test("CCR compatibility requires a managed Anthropic Messages provider and local
   }
 });
 
-test("CCR compatibility opt-in resolves the installed plugin and preserves unrelated plugins", () => {
+test("CCR compatibility migrates the catalog plugin into adapter metadata and preserves unrelated plugins", () => {
   const catalog = compatibilityCatalog();
   const unrelated = { id: "user-plugin", module: "/user/plugin.mjs", config: { keep: true } };
   const merged = airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {
     Providers: [],
-    plugins: [unrelated],
+    observability: { keep: "this-field" },
+    plugins: [unrelated, { id: "airkit-compatibility", module: "/stale/plugin.mjs" }],
     profile: { profiles: [] },
   }, { configDir: "/tmp/airkit-compatibility" });
 
-  assert.deepEqual(merged.config.plugins[0], unrelated);
-  assert.equal(merged.config.plugins[1].id, "airkit-compatibility");
-  assert.equal(merged.config.plugins[1].enabled, true);
+  assert.deepEqual(merged.config.plugins, [unrelated]);
+  assert.equal(merged.config.plugins.some((plugin) => plugin.id === "airkit-compatibility"), false);
+  assert.deepEqual(merged.config.observability, { keep: "this-field", requestLogs: true });
   assert.deepEqual(
-    merged.config.plugins[1].config.routes,
+    merged.compatibility.routes,
     {
       default: "airkit-provider-launch-example-demo/steady-coder",
       background: "airkit-provider-launch-example-demo/cheap-coder",
     },
-    "plugin receives managed base routes for bare Claude model rewriting",
+    "adapter receives managed base routes for bare Claude model rewriting",
   );
   assert.deepEqual(
-    merged.config.plugins[1].config.modeRoutes,
+    merged.compatibility.modeRoutes,
     {
       auto: {
         default: "airkit-provider-launch-example-demo/steady-coder",
@@ -747,26 +743,24 @@ test("CCR compatibility opt-in resolves the installed plugin and preserves unrel
         background: "airkit-provider-launch-example-demo/cheap-coder",
       },
     },
-    "one plugin instance serves every mode, so each mode ships its own route table",
+    "the adapter receives each mode's route table",
   );
   for (const profile of merged.config.profile.profiles) {
     const mode = profile.id.replace("airkit-launch-example-", "");
     assert.equal(
       profile.env.ANTHROPIC_CUSTOM_HEADERS,
       `x-airkit-mode: ${mode}`,
-      "each launch mode labels its own requests so the plugin can route them",
+      "each launch mode labels its own requests so the adapter can route them",
     );
   }
-  assert.equal(merged.config.plugins[1].module, resolve(import.meta.dirname, "..", "src", "compat", "plugin.mjs"));
   assert.equal(
-    merged.config.plugins[1].config.fallback.provider,
+    merged.compatibility.fallback.provider,
     "airkit-provider-launch-example-anthropic-messages",
   );
   assert.ok(merged.config.Providers.some((provider) =>
     provider.id === "airkit-provider-launch-example-anthropic-messages" &&
     provider.type === "anthropic_messages" &&
     provider.models.includes("claude-sonnet")));
-  assert.doesNotMatch(merged.config.plugins[1].module, /airkit-compatibility\/plugins/);
 
   const repeated = airkitRuntime.buildCcr3ManagedConfig(
     catalog,
@@ -775,6 +769,16 @@ test("CCR compatibility opt-in resolves the installed plugin and preserves unrel
     { configDir: "/tmp/airkit-compatibility" },
   );
   assert.deepEqual(repeated.config, merged.config);
+});
+
+test("a non-compatibility profile removes a stale compatibility gateway route", () => {
+  const unrelated = { id: "user-plugin", module: "/user/plugin.mjs" };
+  const merged = airkitRuntime.buildCcr3ManagedConfig(launchCatalog(), "launch-example", {
+    plugins: [unrelated, { id: "airkit-compatibility", module: "/stale/plugin.mjs" }],
+    profile: { profiles: [] },
+  }, { configDir: "/tmp/airkit-stale-compatibility" });
+
+  assert.deepEqual(merged.config.plugins, [unrelated]);
 });
 
 test("CCR compatibility preserves the managed opus route selector", () => {
@@ -804,9 +808,9 @@ test("CCR compatibility preserves the managed opus route selector", () => {
   const merged = airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {}, {
     configDir: "/tmp/airkit-compatibility-opus",
   });
-  const plugin = merged.config.plugins.find((candidate) => candidate.id === "airkit-compatibility");
+  const compatibility = merged.compatibility;
 
-  assert.deepEqual(plugin.config.routes, {
+  assert.deepEqual(compatibility.routes, {
     default: "airkit-provider-launch-example-oneportal-anthropic/claude-sonnet-5",
     background: "airkit-provider-launch-example-oneportal-anthropic/claude-sonnet-5",
     opus: "airkit-provider-launch-example-web-litellm-anthropic/claude-opus-5",
@@ -833,14 +837,14 @@ test("CCR compatibility binds every family fallback to its managed provider", ()
   const merged = airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {}, {
     configDir: "/tmp/airkit-family-fallback",
   });
-  const plugin = merged.config.plugins.find((candidate) => candidate.id === "airkit-compatibility");
+  const compatibility = merged.compatibility;
 
   assert.equal(
-    plugin.config.advisor.fallback.provider,
+    compatibility.advisor.fallback.provider,
     "airkit-provider-launch-example-advisor-anthropic",
   );
   assert.doesNotThrow(() => validateCompatibilityProviderBinding(
-    plugin.config,
+    compatibility,
     merged.config.Providers,
   ));
 });
@@ -855,9 +859,9 @@ test("a non-lowercase catalog mode renders one canonical label everywhere", () =
     configDir: "/tmp/airkit-canonical-mode",
   });
 
-  const plugin = merged.config.plugins.find((candidate) => candidate.id === "airkit-compatibility");
-  assert.equal(Object.hasOwn(plugin.config.modeRoutes, "glm"), true, "table key is normalized");
-  assert.equal(Object.hasOwn(plugin.config.modeRoutes, "GLM"), false);
+  const compatibility = merged.compatibility;
+  assert.equal(Object.hasOwn(compatibility.modeRoutes, "glm"), true, "table key is normalized");
+  assert.equal(Object.hasOwn(compatibility.modeRoutes, "GLM"), false);
   const profile = merged.config.profile.profiles.find((candidate) => candidate.id.endsWith("-glm"));
   assert.equal(
     profile.env.ANTHROPIC_CUSTOM_HEADERS,
@@ -2381,28 +2385,28 @@ test("a dedicated launch id frees the sonnet route and keeps full output length"
   try {
     const plan = buildLaunchPlan(catalog, "launch-example", { configDir, env: { HOME: configDir } });
     const merged = airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {}, { configDir });
-    const plugin = merged.config.plugins.find((candidate) => candidate.id === "airkit-compatibility");
+    const compatibility = merged.compatibility;
 
-    assert.equal(plugin.config.launchModel, "claude-airkit-mode", "the `[1m]` marker never reaches the wire");
-    assert.doesNotThrow(() => validateCompatibilityConfig(plugin.config));
+    assert.equal(compatibility.launchModel, "claude-airkit-mode", "the `[1m]` marker never reaches the wire");
+    assert.doesNotThrow(() => validateCompatibilityConfig(compatibility));
     assert.equal(
-      plugin.config.routes.sonnet,
+      compatibility.routes.sonnet,
       "airkit-provider-launch-example-anthropic-messages/claude-sonnet",
     );
     assert.equal(
-      plugin.config.modeRoutes.pro.sonnet,
+      compatibility.modeRoutes.pro.sonnet,
       "airkit-provider-launch-example-anthropic-messages/claude-sonnet",
       "modes inherit the base sonnet route, so one key covers every mode",
     );
     assert.equal(
-      plugin.config.modeRoutes.fast.sonnet,
+      compatibility.modeRoutes.fast.sonnet,
       "airkit-provider-launch-example-anthropic-messages/claude-sonnet",
     );
     assert.equal(
       routeBareClaudeModel(
         { model: "claude-airkit-mode", max_tokens: 8, messages: [] },
-        plugin.config.modeRoutes.pro,
-        plugin.config.launchModel,
+        compatibility.modeRoutes.pro,
+        compatibility.launchModel,
       ).model,
       "airkit-provider-launch-example-demo/strong-coder",
       "the launcher's own traffic is the mode's model",
@@ -2410,8 +2414,8 @@ test("a dedicated launch id frees the sonnet route and keeps full output length"
     assert.equal(
       routeBareClaudeModel(
         { model: "claude-sonnet-5", max_tokens: 8, messages: [] },
-        plugin.config.modeRoutes.pro,
-        plugin.config.launchModel,
+        compatibility.modeRoutes.pro,
+        compatibility.launchModel,
       ).model,
       "airkit-provider-launch-example-anthropic-messages/claude-sonnet",
       "an in-session Sonnet pick is no longer swallowed by the mode",
@@ -3535,11 +3539,16 @@ test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves
   }
 });
 
-test("prepareLaunch registers compatibility MCP additively with child-only expanded gateway credentials", async () => {
+test("prepareLaunch starts the adapter, removes legacy routes, and keeps its gateway key out of persisted config and argv", async () => {
   const catalog = legacyCompatibilityCatalog();
+  catalog.profiles[0].ccr.HOST = "127.0.0.1";
+  catalog.profiles[0].ccr.PORT = 9314;
   const configDir = await mkdtemp(join(tmpdir(), "airkit-compatibility-launch-"));
   const saved = [];
   const spawned = [];
+  const adapters = [];
+  const childEvents = new Map();
+  let adapterClosed = 0;
   const unrelated = { id: "user-plugin", module: "/user/plugin.mjs" };
   const currentConfig = {
     APIKEY: "$CCR_GATEWAY_TOKEN",
@@ -3570,37 +3579,91 @@ test("prepareLaunch registers compatibility MCP additively with child-only expan
       },
       runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
       runtimeVersions: passingRuntimeVersions(),
+      startCompatibilityMiddleware: async (options) => {
+        adapters.push(options);
+        return {
+          close: async () => { adapterClosed += 1; },
+          origin: "http://127.0.0.1:4599",
+        };
+      },
       spawnCommand: (command, args, options) => {
         spawned.push({ args, command, env: options.env });
-        return { status: 0 };
+        const child = {
+          once(event, listener) {
+            childEvents.set(event, [...(childEvents.get(event) ?? []), listener]);
+            return this;
+          },
+        };
+        queueMicrotask(() => childEvents.get("exit")?.forEach((listener) => listener(0)));
+        return child;
       },
     });
 
     assert.equal(saved[0].plugins.some((plugin) => plugin.id === unrelated.id), true);
-    assert.equal(saved[0].plugins.find((plugin) => plugin.id === "airkit-compatibility").module,
-      resolve(import.meta.dirname, "..", "src", "compat", "plugin.mjs"));
+    assert.equal(saved[0].plugins.some((plugin) => plugin.id === "airkit-compatibility"), false);
+    assert.equal(saved[0].observability.requestLogs, true);
+    assert.equal(JSON.stringify(saved[0]).includes("fixture-gateway-token"), false);
+    assert.equal(adapters.length, 1);
+    assert.equal(adapters[0].gatewayOrigin, "http://127.0.0.1:9314");
+    assert.equal(adapters[0].gatewayToken, "gateway-key-from-helper");
     const mcpIndex = spawned[0].args.indexOf("--mcp-config");
     assert.notEqual(mcpIndex, -1);
     assert.equal(spawned[0].args.includes("--strict-mcp-config"), false);
     assert.equal(spawned[0].args.includes("--settings"), false);
-    assert.doesNotMatch(spawned[0].args.join(" "), /fixture-gateway-token/);
+    assert.doesNotMatch(spawned[0].args.join(" "), /fixture-gateway-token|gateway-key-from-helper/);
     assert.deepEqual(JSON.parse(spawned[0].args[mcpIndex + 1]), {
       mcpServers: {
         "airkit-compatibility": {
-          headers: { Authorization: "Bearer ${AIRKIT_COMPATIBILITY_MCP_TOKEN}" },
+          headers: { "x-api-key": "${AIRKIT_COMPATIBILITY_MCP_TOKEN}" },
           type: "http",
           url: "${AIRKIT_COMPATIBILITY_MCP_URL}",
         },
       },
     });
     assert.equal(spawned[0].env.AIRKIT_COMPATIBILITY_MCP_URL,
-      "http://127.0.0.1:4567/airkit/compatibility/mcp");
-    assert.equal(spawned[0].env.AIRKIT_COMPATIBILITY_MCP_TOKEN, "fixture-gateway-token");
+      "http://127.0.0.1:4599/airkit/compatibility/mcp");
+    assert.equal(spawned[0].env.AIRKIT_COMPATIBILITY_MCP_TOKEN, "gateway-key-from-helper");
     assert.equal(
       spawned[0].env.ANTHROPIC_BASE_URL,
-      "http://127.0.0.1:4567",
-      "an environment-referenced gateway address is expanded for the child too",
+      "http://127.0.0.1:4599",
+      "the adapter overrides even an environment-referenced CCR gateway address",
     );
+    assert.equal(adapterClosed, 1, "prepareLaunch waits for Claude to exit before returning");
+    childEvents.get("error")?.forEach((listener) => listener(new Error("after exit")));
+    assert.equal(adapterClosed, 1, "the adapter closes exactly once after Claude exits");
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("prepareLaunch uses an asynchronous default child so compatibility middleware can run", async () => {
+  const catalog = compatibilityCatalog();
+  catalog.profiles[0].launch.args = ["-e", "setTimeout(() => {}, 200)"];
+  catalog.profiles[0].launch.binary = process.execPath;
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-compatibility-async-launch-"));
+  let adapterClosed = 0;
+  let adapterWasLiveDuringChild = false;
+
+  try {
+    const result = await prepareLaunch(catalog, "launch-example", {
+      ccrClient: ccrTestClient([]),
+      commandExists: async () => true,
+      configDir,
+      env: { DEMO_API_KEY: "runtime-secret", HOME: configDir },
+      runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
+      runtimeVersions: passingRuntimeVersions(),
+      startCompatibilityMiddleware: async () => {
+        setTimeout(() => { adapterWasLiveDuringChild = adapterClosed === 0; }, 20);
+        return {
+          close: async () => { adapterClosed += 1; },
+          origin: "http://127.0.0.1:4599",
+        };
+      },
+    });
+
+    assert.equal(typeof result.child?.pid, "number");
+    assert.equal(adapterWasLiveDuringChild, true, "the parent event loop advances while the child is running");
+    assert.equal(adapterClosed, 1);
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }

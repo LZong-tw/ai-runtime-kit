@@ -163,9 +163,10 @@ sessions by mode again.
 
 ## Configure Server-Tool Compatibility
 
-Compatibility is opt-in in the source profile's `ccr.plugins` array. Generated
-CCR state is an output, not an editable source. The current six-family contract
-is:
+Compatibility is opt-in in the source profile's `ccr.plugins` array. That
+declaration is migration input: it describes the six-family policy AirKit owns
+at launch, not a public CCR gateway route to retain. Generated CCR state is an
+output, not an editable source. The current six-family contract is:
 
 | Family | Profile mode | Effective behavior |
 | --- | --- | --- |
@@ -215,6 +216,16 @@ managed CCR ID. AirKit requires that provider to use `anthropic_messages` and
 to expose the bare Claude identifier in `fallback.model`. Fallback applies to
 one complete request and incurs that Anthropic route's context, cache, and
 billing. Safe ToolSearch bridge requests stay local and make no model call.
+
+For a compatible launch, AirKit removes the legacy public
+`airkit-compatibility` CCR plugin route and starts a child-only loopback
+adapter. The adapter owns `POST /v1/messages` and the compatibility MCP
+endpoint, applies the declared policy, then sends provider-qualified requests
+through CCR's public gateway. CCR therefore records the request through its
+normal request recorder and its native UI can show it. ToolSearch executors and
+fallback attempts are distinct upstream requests, so one Claude turn can
+legitimately appear as more than one UI row. AirKit does not read or write CCR
+SQLite state and does not use private CCR APIs for this observability.
 
 To migrate an older source profile, remove Advisor `model`, `fallbackModel`,
 and `mode: "bridge"`; put the model in the generic `fallback` block; add every

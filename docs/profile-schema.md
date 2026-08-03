@@ -127,20 +127,17 @@ during the managed merge AirKit translates them three ways:
 1. Into each named profile's pinned `model`/`smallFastModel`.
 2. Into two managed gateway condition rules (`<prefix>route-background`:
    `request.body.model starts-with claude-haiku` → background route;
-   `<prefix>route-default`: `starts-with claude-` → default route). CCR
-   evaluates Router rules only on protocol paths not owned by a plugin
-   gateway route — with the compatibility plugin enabled, that means the
-   rules never see `POST /v1/messages`; they still cover other protocol
-   paths.
-3. Into the compatibility plugin's `routes` config, plus a `launchModel` key
-   holding `launch.claudeModel` with any `[1m]` suffix stripped. The plugin
-   owns `POST /v1/messages`, so it performs the bare-Claude-model rewrite
-   itself before forwarding to the core: an exact match on `launchModel` →
+   `<prefix>route-default`: `starts-with claude-` → default route).
+3. Into the AirKit loopback adapter's `routes` config, plus a `launchModel` key
+   holding `launch.claudeModel` with any `[1m]` suffix stripped. The adapter
+   owns the child-facing `POST /v1/messages` endpoint and performs the
+   bare-Claude-model rewrite before forwarding through CCR's public gateway:
+   an exact match on `launchModel` →
    default route, then `claude-haiku-*` → background, `claude-opus-*` → opus,
    `claude-sonnet-*` → sonnet, each falling back to default. The launch id is
    matched first, so a profile that still launches on a family id keeps its
    old target. Provider-qualified selectors (named profiles, the whole-request
-   Anthropic fallback) pass through untouched, and without `routes` the plugin
+   Anthropic fallback) pass through untouched, and without `routes` the adapter
    forwards byte-identical bytes as before.
 
 Claude Code sends a bare model id on the wire and carries `[1m]` only as an
@@ -165,7 +162,7 @@ through its management layer, while the generated gateway performs adapter
 lookup by provider name; differing values produce `Target adapter is not
 registered` failures.
 
-## Compatibility plugin opt-in
+## Compatibility declaration opt-in
 
 Compatibility is disabled unless a profile declares an `airkit-compatibility`
 entry in `ccr.plugins`:
@@ -223,9 +220,14 @@ native execution is not verified. ToolSearch remains a verified local bridge;
 other Anthropic fallback families remain configured and unprobed. Doctor does
 not claim that an unrun fallback request succeeded.
 
-At render time AirKit replaces the catalog's compatibility `module` marker
-with `src/compat/plugin.mjs` from the installed AirKit package. It replaces only
-the managed plugin ID and preserves unrelated CCR plugins.
+The catalog entry is migration input, not an instruction to expose a plugin
+route in CCR. At launch, AirKit reads and validates the declaration, removes
+the legacy managed `airkit-compatibility` plugin from the CCR configuration,
+and starts a loopback adapter for that Claude child. The adapter owns
+`POST /v1/messages` and the compatibility MCP endpoint, then forwards its
+provider-qualified requests through the public CCR gateway so CCR's native
+recorder and UI see them. It never reads or writes CCR SQLite state or calls a
+private CCR API. Unrelated CCR plugins are preserved.
 
 `native-first` preserves Claude Code's existing client-side WebSearch and
 WebFetch definitions and does not register duplicate MCP tools. Effective
@@ -240,13 +242,12 @@ Claude process and uses the configured managed-provider/model fallback route
 for its Anthropic request. The entry uses
 `${AIRKIT_COMPATIBILITY_MCP_URL}` and
 `Bearer ${AIRKIT_COMPATIBILITY_MCP_TOKEN}` placeholders; their values are
-child-only environment variables derived from the active CCR gateway endpoint
-and `APIKEY`, including exact `$ENV` references. The token is not placed in
-argv, and AirKit does not use `--strict-mcp-config`, replace Claude settings, or
-discard user MCP/plugin configuration. Doctor marks this legacy MCP capability
-`unverified` without a live probe. To leave migration mode, change only
-`webSearch.mode` from `mcp` to `native-first`; no MCP registration is then
-rendered.
+child-only environment variables for the loopback compatibility adapter. The
+token is not placed in argv, and AirKit does not use `--strict-mcp-config`,
+replace Claude settings, or discard user MCP/plugin configuration. Doctor marks
+this legacy MCP capability `unverified` without a live probe. To leave
+migration mode, change only `webSearch.mode` from `mcp` to `native-first`; no
+MCP registration is then rendered.
 
 ## Launch fields
 
@@ -284,7 +285,8 @@ rendered.
   `{{configDir}}`, `{{home}}`, `{{launchMode}}`, `{{claudeModel}}`,
   `{{statuslineLabel}}`, and default/background route variables.
 - `claudeModel`: the model id passed as the launched process's `--model`
-  argument, and the id the compatibility plugin routes to `Router.default`.
+  argument, and the id the loopback compatibility adapter routes to
+  `Router.default`.
   Claude Code accepts any string here. Use a dedicated id such as
   `claude-airkit-mode[1m]` when the profile also wants `Router.sonnet` to serve
   a real in-session Sonnet pick; use a Claude-recognized id when it does not.
@@ -318,10 +320,10 @@ key authenticates that mode's launch — but the profile is no longer used as a
 launcher, so it never redirects the child's `CLAUDE_CONFIG_DIR`. AirKit does not
 sync a live CCR JSON file or invoke CCR 2 start/restart/activate commands.
 
-Because one gateway plugin instance serves every mode, the launch labels its
-requests with an `x-airkit-mode` header (through `ANTHROPIC_CUSTOM_HEADERS`) and
-the compatibility plugin routes on that label. A profile must not set that
-variable itself.
+Because one loopback compatibility adapter instance serves every mode, the
+launch labels its requests with an `x-airkit-mode` header (through
+`ANTHROPIC_CUSTOM_HEADERS`) and the adapter routes on that label. A profile
+must not set that variable itself.
 
 For Claude-backed AirClaude launches, AirKit also renders a session-scoped
 plugin under `{{configDir}}/plugins/airkit-context` and passes it with

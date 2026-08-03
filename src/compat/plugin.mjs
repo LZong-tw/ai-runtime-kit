@@ -64,7 +64,10 @@ function requestLifecycleSignal(request, response) {
       if (response.writableFinished !== true) abort();
     });
   }
-  if (typeof request?.once === "function") request.once("error", abort);
+  if (typeof request?.once === "function") {
+    request.once("aborted", abort);
+    request.once("error", abort);
+  }
   const upstreamSignal = request?.signal;
   if (typeof upstreamSignal?.addEventListener === "function") {
     if (upstreamSignal.aborted) abort();
@@ -357,15 +360,17 @@ function isConfiguredCompatibilityRequest(body, policies) {
 
 export function createMcpHandler({ config, coreClient }) {
   return async (request, response, helpers) => {
+    const signal = requestLifecycleSignal(request, response);
     try {
-      await handleMcpRequest({ config, coreClient, helpers, request, response });
+      await handleMcpRequest({ config, coreClient, helpers, request, response, signal });
     } catch (error) {
+      if (signal.aborted || response?.destroyed === true) return;
       containHandlerFailure(response, error);
     }
   };
 }
 
-export async function handleMcpRequest({ config, coreClient, helpers, request, response }) {
+export async function handleMcpRequest({ config, coreClient, helpers, request, response, signal }) {
     const rawBody = await helpers.readBody(request);
     let requestBody;
     try {
@@ -414,14 +419,21 @@ export async function handleMcpRequest({ config, coreClient, helpers, request, r
     }
 
     try {
-      const result = await callWebSearch({ config, coreClient, headers: request.headers, input });
+      const result = await callWebSearch({
+        config,
+        coreClient,
+        headers: request.headers,
+        input,
+        signal,
+      });
       sendJsonRpcResult(response, requestBody.id, result);
     } catch {
+      if (signal?.aborted || response?.destroyed === true) return;
       sendJsonRpcResult(response, requestBody.id, toolError("Web search is unavailable."));
     }
 }
 
-async function callWebSearch({ config, coreClient, headers, input }) {
+async function callWebSearch({ config, coreClient, headers, input, signal }) {
   const tool = {
     type: "web_search_20250305",
     name: "web_search",
@@ -440,6 +452,7 @@ async function callWebSearch({ config, coreClient, headers, input }) {
       tool_choice: { type: "tool", name: "web_search" },
     },
     headers,
+    signal,
   );
   if (message?.type !== "message" || !Array.isArray(message.content)) {
     throw new Error("Invalid WebSearch response");

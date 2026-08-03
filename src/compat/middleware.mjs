@@ -101,9 +101,14 @@ function isAuthorized(value, expectedToken) {
 
 function requestPath(url) {
   // A leading `//` is a scheme-relative URL when resolved with `new URL()`.
-  // Reject it so the generated gateway key can only ever reach the configured
-  // CCR origin.
-  if (typeof url !== "string" || !url.startsWith("/") || url.startsWith("//")) return null;
+  // Backslashes are normalized to slashes by `new URL()` too. Reject both so
+  // the generated gateway key can only ever reach the configured CCR origin.
+  if (
+    typeof url !== "string" ||
+    !url.startsWith("/") ||
+    url.startsWith("//") ||
+    url.includes("\\")
+  ) return null;
   return url;
 }
 

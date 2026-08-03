@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { access, chmod, copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { readdirSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -22,6 +22,7 @@ import {
   validateCompatibilityConfig,
   validateCompatibilityProviderBinding,
 } from "./compat/config.mjs";
+import { startCompatibilityMiddleware } from "./compat/middleware.mjs";
 import { renderHeartbeatManagedFiles } from "./context-heartbeat.mjs";
 import { buildContextObservability } from "./context-observability.mjs";
 
@@ -139,6 +140,12 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
     modes.map((mode) => [mode, applyLaunchModeOverlay(structuredClone(baseConfig), profile, mode, templateVars)]),
   );
   bindManagedCompatibilityRoutes(baseConfig, managedRouteSelector, modeConfigs, resolveClaudeLaunchModel(profile));
+  const compatibility = configuredCompatibility(baseConfig)
+    ? structuredClone(configuredCompatibility(baseConfig))
+    : null;
+  if (Array.isArray(baseConfig.plugins)) {
+    baseConfig.plugins = baseConfig.plugins.filter((plugin) => plugin?.id !== compatibilityPluginId);
+  }
   const managedProviderNames = new Set(managedProviderEntries.map((entry) => entry.sourceName));
   const managedProviderIdSet = new Set(managedProviders.map((provider) => provider.id));
   for (const provider of currentConfig.Providers ?? []) {
@@ -206,6 +213,9 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
         { ownedPrefixes: ownedPrefixes.profiles, pruned: pruned.rules },
       ),
       ...mergeManagedConfigArrays(currentConfig, baseConfig, managedPrefix),
+      ...(compatibility
+        ? { observability: { ...(currentConfig.observability ?? {}), requestLogs: true } }
+        : {}),
       profile: {
         ...(currentConfig.profile ?? {}),
         enabled: true,
@@ -222,6 +232,7 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
         ],
       },
     },
+    ...(compatibility ? { compatibility } : {}),
     profileIds: Object.fromEntries(modes.map((mode) => [mode, `${managedPrefix}${slug(mode)}`])),
     pruned,
   };
@@ -663,7 +674,12 @@ function assertCcr3Compatible(ccrConfig) {
 function mergeManagedConfigArrays(currentConfig, baseConfig, managedPrefix) {
   const merged = {};
   for (const key of ["plugins", "providerPlugins", "virtualModelProfiles"]) {
-    if (!Array.isArray(baseConfig[key])) continue;
+    if (!Array.isArray(baseConfig[key])) {
+      if (key === "plugins" && Array.isArray(currentConfig.plugins)) {
+        merged.plugins = currentConfig.plugins.filter((entry) => entry?.id !== compatibilityPluginId);
+      }
+      continue;
+    }
     const managed = baseConfig[key].map((entry, index) => ({
       ...entry,
       ...(key === "plugins" && entry.enabled === undefined ? { enabled: true } : {}),
@@ -672,7 +688,10 @@ function mergeManagedConfigArrays(currentConfig, baseConfig, managedPrefix) {
     const ownedIds = new Set(managed.map((entry) => entry.id));
     const ownedPaths = new Set(managed.map((entry) => entry.path).filter(Boolean));
     merged[key] = [
-      ...(currentConfig[key] ?? []).filter((entry) => !ownedIds.has(entry.id) && !ownedPaths.has(entry.path)),
+      ...(currentConfig[key] ?? []).filter((entry) =>
+        (key !== "plugins" || entry?.id !== compatibilityPluginId)
+        && !ownedIds.has(entry.id)
+        && !ownedPaths.has(entry.path)),
       ...managed,
     ];
   }
@@ -771,8 +790,10 @@ export async function exportOssRelease({ outDir }) {
   await copyFile(join(here, "context-observability.mjs"), join(outDir, "src", "context-observability.mjs"));
   for (const module of [
     "config.mjs",
+    "effort.mjs",
     "fallback.mjs",
     "gateway.mjs",
+    "middleware.mjs",
     "plugin.mjs",
     "protocol.mjs",
     "server-history.mjs",
@@ -1185,14 +1206,12 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     configDir: plan.configDir,
     env: options.env,
   });
-  const compatibilityLaunch = options.plainClaude === true
-    ? { args: [], env: {} }
-    : buildCompatibilityLaunch(managed.config, options.env ?? process.env);
   if (!isDeepStrictEqual(managed.config, currentConfig)) {
     reportPrunedManagedState(managed.pruned, options.stderr ?? process.stderr);
     await ccrClient.saveConfig(managed.config, { applyProfile: false });
   }
   let child = null;
+  let childStatus;
   if (options.launch !== false) {
     // Announced here, not in the CLI: a launch prints its own report only after
     // the child exits, and this must reach the user before the session starts.
@@ -1213,25 +1232,49 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
       await ccrClient.applyProfile();
       gatewayToken = await resolveGatewayToken(plan, options);
     }
-    const spawnCommand = options.spawnCommand ?? spawnCommandSync;
+    const gatewayOrigin = resolveLaunchGatewayEndpoint(
+      plan.launch.gatewayPinned ? plan.ccrConfig : managed.config,
+      launchEnv,
+    )
+      .toString()
+      .replace(/\/+$/, "");
+    const middleware = options.plainClaude === true || !managed.compatibility
+      ? null
+      : await (options.startCompatibilityMiddleware ?? startCompatibilityMiddleware)({
+        compatibility: managed.compatibility,
+        gatewayOrigin,
+        gatewayToken,
+      });
+    const compatibilityLaunch = middleware
+      ? buildCompatibilityLaunch(managed.compatibility, middleware.origin, gatewayToken)
+      : { args: [], env: {} };
+    const spawnCommand = options.spawnCommand ?? spawnCommandAsync;
     const inherited = { ...(options.env ?? process.env) };
     for (const key of plan.launch.clearEnv ?? []) delete inherited[key];
-    child = spawnCommand(plan.launch.command, [
-      ...plan.launch.args,
-      ...compatibilityLaunch.args,
-      ...plan.launch.userArgs,
-    ], {
-      env: {
-        ...inherited,
-        ...plan.launch.env,
-        ...compatibilityLaunch.env,
-        ...(plan.launch.gatewayPinned
-          ? {}
-          : gatewayBaseUrlEnv(resolveLaunchGatewayEndpoint(managed.config, launchEnv))),
-        ANTHROPIC_AUTH_TOKEN: gatewayToken,
-      },
-      stdio: "inherit",
-    });
+    try {
+      child = spawnCommand(plan.launch.command, [
+        ...plan.launch.args,
+        ...compatibilityLaunch.args,
+        ...plan.launch.userArgs,
+      ], {
+        env: {
+          ...inherited,
+          ...plan.launch.env,
+          ...compatibilityLaunch.env,
+          ...(middleware
+            ? gatewayBaseUrlEnv(middleware.origin)
+            : plan.launch.gatewayPinned
+              ? {}
+              : gatewayBaseUrlEnv(gatewayOrigin)),
+          ANTHROPIC_AUTH_TOKEN: gatewayToken,
+        },
+        stdio: "inherit",
+      });
+    } catch (error) {
+      await middleware?.close();
+      throw error;
+    }
+    childStatus = await monitorChildLifecycle(middleware, child);
   }
 
   return {
@@ -1241,6 +1284,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     liveCcrConfig: { ...plan.liveCcrConfig, status: "managed" },
     runtime,
     child,
+    ...(childStatus === undefined ? {} : { childStatus }),
   };
 }
 
@@ -1450,21 +1494,12 @@ function resolveConfiguredCompatibility(ccrConfig) {
   return config ? resolveCompatibilityPolicies(config, VERIFIED_NATIVE_COMPATIBILITY) : null;
 }
 
-function buildCompatibilityLaunch(ccrConfig, env) {
-  const config = configuredCompatibility(ccrConfig);
+function buildCompatibilityLaunch(config, adapterOrigin, gatewayToken) {
   if (config?.webSearch?.mode !== "mcp") return { args: [], env: {} };
-
-  const host = expandEnvironmentReference(ccrConfig.gateway?.host ?? ccrConfig.HOST, env, "CCR gateway host");
-  const port = expandEnvironmentReference(ccrConfig.gateway?.port ?? ccrConfig.PORT, env, "CCR gateway port");
-  const token = expandEnvironmentReference(ccrConfig.APIKEY, env, "CCR gateway API key");
-  if (typeof token !== "string" || token.length === 0) {
-    throw new Error("CCR compatibility MCP requires a gateway API key");
-  }
-  const endpoint = resolveCcrGatewayEndpoint({ gateway: { host, port } });
   const mcpConfig = {
     mcpServers: {
       [compatibilityPluginId]: {
-        headers: { Authorization: "Bearer ${AIRKIT_COMPATIBILITY_MCP_TOKEN}" },
+        headers: { "x-api-key": "${AIRKIT_COMPATIBILITY_MCP_TOKEN}" },
         type: "http",
         url: "${AIRKIT_COMPATIBILITY_MCP_URL}",
       },
@@ -1473,8 +1508,8 @@ function buildCompatibilityLaunch(ccrConfig, env) {
   return {
     args: ["--mcp-config", JSON.stringify(mcpConfig)],
     env: {
-      AIRKIT_COMPATIBILITY_MCP_TOKEN: token,
-      AIRKIT_COMPATIBILITY_MCP_URL: new URL("/airkit/compatibility/mcp", endpoint).toString(),
+      AIRKIT_COMPATIBILITY_MCP_TOKEN: gatewayToken,
+      AIRKIT_COMPATIBILITY_MCP_URL: new URL("/airkit/compatibility/mcp", adapterOrigin).toString(),
     },
   };
 }
@@ -1733,7 +1768,7 @@ export async function runAirclaudeCli(argv = process.argv.slice(2), options = {}
     userArgs: parsed.userArgs,
   });
   stdout.write(renderLaunchResult(result, { doctor: parsed.doctor, dryRun: parsed.dryRun }));
-  return result.child?.status ?? 0;
+  return result.childStatus ?? result.child?.status ?? 0;
 }
 
 function isHelpRequest(argv) {
@@ -3138,10 +3173,44 @@ function runCommandSync(command, args = [], options = {}) {
   };
 }
 
+function spawnCommandAsync(command, args = [], options = {}) {
+  return spawn(command, args, {
+    stdio: options.stdio ?? "inherit",
+    env: options.env ?? process.env,
+  });
+}
+
 function spawnCommandSync(command, args = [], options = {}) {
   return spawnSync(command, args, {
     stdio: options.stdio ?? "inherit",
     env: options.env ?? process.env,
+  });
+}
+
+async function monitorChildLifecycle(middleware, child) {
+  let closePromise = null;
+  const close = () => {
+    closePromise ??= Promise.resolve().then(() => middleware?.close());
+    return closePromise;
+  };
+  if (Number.isInteger(child?.status)) {
+    await close();
+    return child.status;
+  }
+  if (typeof child?.once !== "function") {
+    await close();
+    return 0;
+  }
+  return new Promise((resolve, reject) => {
+    child.once("exit", (code, signal) => {
+      void close().then(
+        () => resolve(Number.isInteger(code) ? code : signal ? 1 : 0),
+        reject,
+      );
+    });
+    child.once("error", (error) => {
+      void close().then(() => reject(error), reject);
+    });
   });
 }
 
