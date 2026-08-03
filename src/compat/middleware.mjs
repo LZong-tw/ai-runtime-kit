@@ -1,0 +1,159 @@
+import { timingSafeEqual } from "node:crypto";
+import { createServer } from "node:http";
+
+import { createGatewayClient } from "./gateway.mjs";
+import {
+  createMcpHandler,
+  createMessagesHandler,
+} from "./plugin.mjs";
+import {
+  VERIFIED_NATIVE_COMPATIBILITY,
+  resolveCompatibilityPolicies,
+  validateCompatibilityConfig,
+} from "./config.mjs";
+
+const JSON_ERROR = Buffer.from(JSON.stringify({
+  error: { message: "Compatibility middleware forwarding failed", type: "api_error" },
+}));
+
+export async function startCompatibilityMiddleware({
+  compatibility,
+  gatewayOrigin,
+  gatewayToken,
+}) {
+  validateCompatibilityConfig(compatibility);
+  const coreClient = createGatewayClient({ origin: gatewayOrigin, token: gatewayToken });
+  const { policies } = resolveCompatibilityPolicies(
+    compatibility,
+    VERIFIED_NATIVE_COMPATIBILITY,
+  );
+  const messages = createMessagesHandler({
+    config: compatibility,
+    coreClient,
+    policies,
+  });
+  const mcp = createMcpHandler({ config: compatibility, coreClient });
+  const server = createServer((request, response) => {
+    void handleRequest({
+      coreClient,
+      gatewayToken,
+      mcp,
+      messages,
+      request,
+      response,
+    });
+  });
+
+  await listenLoopback(server);
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    await closeServer(server);
+    throw new Error("Compatibility middleware did not expose a loopback address");
+  }
+  return {
+    close: () => closeServer(server),
+    origin: `http://127.0.0.1:${address.port}`,
+  };
+}
+
+async function handleRequest({ coreClient, gatewayToken, mcp, messages, request, response }) {
+  if (!isAuthorized(request.headers?.["x-api-key"], gatewayToken)) {
+    request.resume();
+    response.writeHead(401, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: { message: "Invalid API key", type: "authentication_error" } }));
+    return;
+  }
+
+  const path = requestPath(request.url);
+  if (path === null) {
+    request.resume();
+    response.writeHead(400, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: { message: "Invalid request path", type: "invalid_request_error" } }));
+    return;
+  }
+  try {
+    if (request.method === "POST" && path === "/v1/messages") {
+      await messages(request, response, { readBody });
+      return;
+    }
+    if (request.method === "POST" && path === "/airkit/compatibility/mcp") {
+      await mcp(request, response, { readBody });
+      return;
+    }
+    await coreClient.forward({
+      body: request.method === "GET" || request.method === "HEAD" ? undefined : request,
+      headers: request.headers,
+      method: request.method,
+      path,
+      response,
+      signal: requestLifecycleSignal(request, response),
+    });
+  } catch (error) {
+    containFailure(response, error);
+  }
+}
+
+function isAuthorized(value, expectedToken) {
+  const received = typeof value === "string" ? Buffer.from(value) : Buffer.alloc(0);
+  const expected = Buffer.from(expectedToken);
+  return received.byteLength === expected.byteLength && timingSafeEqual(received, expected);
+}
+
+function requestPath(url) {
+  // A leading `//` is a scheme-relative URL when resolved with `new URL()`.
+  // Reject it so the generated gateway key can only ever reach the configured
+  // CCR origin.
+  if (typeof url !== "string" || !url.startsWith("/") || url.startsWith("//")) return null;
+  return url;
+}
+
+function requestLifecycleSignal(request, response) {
+  const controller = new AbortController();
+  const abort = () => {
+    if (!controller.signal.aborted) controller.abort();
+  };
+  request.once("aborted", abort);
+  request.once("error", abort);
+  response.once("close", () => {
+    if (response.writableFinished !== true) abort();
+  });
+  return controller.signal;
+}
+
+async function readBody(request) {
+  const chunks = [];
+  for await (const chunk of request) chunks.push(chunk);
+  return Buffer.concat(chunks);
+}
+
+function containFailure(response, error) {
+  if (response.destroyed === true) return;
+  if (response.headersSent !== true) {
+    response.writeHead(502, { "content-type": "application/json", "content-length": String(JSON_ERROR.byteLength) });
+    response.end(JSON_ERROR);
+    return;
+  }
+  response.destroy(error instanceof Error ? error : new Error(String(error)));
+}
+
+function listenLoopback(server) {
+  return new Promise((resolve, reject) => {
+    const onError = (error) => {
+      server.off("listening", onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.off("error", onError);
+      resolve();
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(0, "127.0.0.1");
+  });
+}
+
+function closeServer(server) {
+  return new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+}

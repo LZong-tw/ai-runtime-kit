@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import {
-  createCoreClient,
   handleCompatibilityMessage,
   writeAnthropicMessage,
 } from "./gateway.mjs";
@@ -50,40 +49,11 @@ export default {
     const pluginConfig = isRecord(ctx.pluginConfig) ? ctx.pluginConfig : {};
     validateCompatibilityConfig(pluginConfig);
     validateCompatibilityProviderBinding(pluginConfig, ctx.config?.Providers);
-    const { policies } = resolveCompatibilityPolicies(
-      pluginConfig,
-      VERIFIED_NATIVE_COMPATIBILITY,
-    );
-    const runtimeConfig = {
-      ...(isRecord(ctx.config) ? ctx.config : {}),
-      ...pluginConfig,
-      gateway: isRecord(ctx.config?.gateway) ? ctx.config.gateway : pluginConfig.gateway,
-    };
-    const coreClient = ctx.coreClient ?? createCoreClient({ config: runtimeConfig });
-
-    ctx.registerGatewayRoute({
-      auth: "gateway",
-      handler: createMessagesHandler({ config: pluginConfig, coreClient, policies }),
-      id: "airkit-compatibility-messages",
-      method: "POST",
-      path: "/v1/messages",
-    });
-    ctx.registerGatewayRoute({
-      auth: "gateway",
-      handler: createMcpHandler({ config: pluginConfig, coreClient }),
-      id: "airkit-compatibility-mcp",
-      method: "POST",
-      path: "/airkit/compatibility/mcp",
-    });
   },
 };
 
-// CCR awaits gateway route handlers without catching rejections, and hands
-// them plain Node requests that carry no AbortSignal. A handler that rejects
-// (for example when the client disconnects mid-forward) therefore kills the
-// whole CCR daemon with an unhandled rejection, and without a signal the
-// upstream core fetch is never cancelled after the client goes away. Derive
-// the signal from the response lifecycle and never let the handler reject.
+// The loopback middleware reuses these handlers, while CCR itself retains
+// ownership of public gateway routes and its native request recorder.
 function requestLifecycleSignal(request, response) {
   const controller = new AbortController();
   const abort = () => {
@@ -115,7 +85,7 @@ function containHandlerFailure(response, error) {
   return "response_destroyed";
 }
 
-function createMessagesHandler({ config, coreClient, policies }) {
+export function createMessagesHandler({ config, coreClient, policies }) {
   return async (request, response, helpers) => {
     const signal = requestLifecycleSignal(request, response);
     const telemetry = beginRequestTelemetry(config.routeLog, request, response);
@@ -298,9 +268,8 @@ function describeRouteDecision({ body, mode, outboundBody, path }) {
   };
 }
 
-// This plugin owns POST /v1/messages, which bypasses CCR's request logger.
-// Keep the existing routing decision and pair it with one terminal record so
-// daemon.err.log shows both where a request went and how it finished.
+// The loopback middleware owns compatibility decisions. Its terminal record
+// supplements CCR's native outer-gateway entry without exposing credentials.
 function logRouteDecision({ enabled, decision, request, requestId }) {
   if (enabled !== true) return;
   try {
@@ -386,7 +355,7 @@ function isConfiguredCompatibilityRequest(body, policies) {
   );
 }
 
-function createMcpHandler({ config, coreClient }) {
+export function createMcpHandler({ config, coreClient }) {
   return async (request, response, helpers) => {
     try {
       await handleMcpRequest({ config, coreClient, helpers, request, response });
@@ -396,7 +365,7 @@ function createMcpHandler({ config, coreClient }) {
   };
 }
 
-async function handleMcpRequest({ config, coreClient, helpers, request, response }) {
+export async function handleMcpRequest({ config, coreClient, helpers, request, response }) {
     const rawBody = await helpers.readBody(request);
     let requestBody;
     try {
