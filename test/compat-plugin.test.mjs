@@ -1526,10 +1526,14 @@ function createPluginCoreClient(overrides = {}) {
   };
 }
 
-function createPluginRequest(body, { signal } = {}) {
+function createPluginRequest(body, { headers, signal } = {}) {
   return Object.assign(new EventEmitter(), {
     body,
-    headers: { "content-type": "application/json", "x-request-id": "fixture-request" },
+    headers: {
+      "content-type": "application/json",
+      "x-request-id": "fixture-request",
+      ...headers,
+    },
     method: "POST",
     signal,
   });
@@ -1770,9 +1774,13 @@ function createRecordingResponse({ backpressure = false, endEvent = "finish" } =
     ended: false,
     firstWrite,
     headers: {},
+    headersSent: false,
     statusCode: 200,
+    writableEnded: false,
+    writableFinished: false,
     writeHead(statusCode, headers) {
       this.statusCode = statusCode;
+      this.headersSent = true;
       this.headers = Object.fromEntries(
         Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value]),
       );
@@ -1785,7 +1793,11 @@ function createRecordingResponse({ backpressure = false, endEvent = "finish" } =
     end(chunk) {
       if (chunk !== undefined) chunks.push(Buffer.from(chunk));
       this.ended = true;
-      this.emit(endEvent);
+      this.writableEnded = true;
+      if (endEvent !== null) {
+        if (endEvent === "finish") this.writableFinished = true;
+        this.emit(endEvent);
+      }
     },
     releaseDrain() {
       backpressure = false;
@@ -1936,6 +1948,354 @@ test("routeLog emits one redacted decision line per request and stays silent whe
     offHandler(request, {}, { readBody: async () => raw }));
   assert.equal(silent.length, 0, "no decision lines when routeLog is absent");
 });
+
+test("request lifecycle telemetry records a successful raw response with its actual status", async () => {
+  const fixture = await createPluginFixture({
+    pluginConfig: {
+      routeLog: true,
+      routes: { default: "oneportal/GLM-5.2" },
+    },
+    coreClient: createPluginCoreClient({
+      async forwardRaw({ response }) {
+        response.writeHead(202, { "content-type": "application/json" });
+        response.end("accepted");
+      },
+    }),
+  });
+  const response = createRecordingResponse();
+  const body = Buffer.from(JSON.stringify({
+    model: "claude-sonnet-5",
+    messages: [{ role: "user", content: "body-secret-value" }],
+  }));
+  const logs = await captureAirkitLogs(() => fixture.messages.handler(
+    createPluginRequest(body, {
+      headers: {
+        authorization: "Bearer auth-secret-value",
+        "x-request-id": "request-observe-202",
+      },
+    }),
+    response,
+    fixture.helpers,
+  ));
+
+  assert.equal(logs.routes.length, 1);
+  assert.equal(logs.requests.length, 1, "exactly one terminal record is emitted");
+  assert.equal(logs.routes[0].requestId, "request-observe-202");
+  assert.deepEqual(withoutTiming(logs.requests[0]), {
+    requestId: "request-observe-202",
+    path: "passthrough",
+    mode: null,
+    inModel: "claude-sonnet-5",
+    outModel: "oneportal/GLM-5.2",
+    provider: "oneportal",
+    stream: false,
+    status: 202,
+    outcome: "completed",
+  });
+  assertTerminalTiming(logs.requests[0]);
+  assert.doesNotMatch(logs.raw, /auth-secret-value|body-secret-value/);
+});
+
+test("request lifecycle telemetry records compatibility JSON and SSE completion", async () => {
+  const fixture = await createPluginFixture({
+    pluginConfig: { routeLog: true },
+    coreClient: createPluginCoreClient({
+      async requestMessage() {
+        return message({ content: [{ type: "text", text: "ok" }] });
+      },
+    }),
+  });
+  const requests = [false, true].map((stream) => ({
+    body: Buffer.from(JSON.stringify({
+      ...compatibilityRequestBody(stream),
+      model: "oneportal/executor-model",
+    })),
+    response: createRecordingResponse(),
+    stream,
+  }));
+  const logs = await captureAirkitLogs(async () => {
+    for (const request of requests) {
+      await fixture.messages.handler(
+        createPluginRequest(request.body, {
+          headers: { "x-request-id": `request-compat-${request.stream ? "sse" : "json"}` },
+        }),
+        request.response,
+        fixture.helpers,
+      );
+    }
+  });
+
+  assert.equal(logs.routes.length, 2);
+  assert.equal(logs.requests.length, 2, "one terminal record per compatibility request");
+  assert.deepEqual(logs.requests.map((entry) => withoutTiming(entry)), [
+    {
+      requestId: "request-compat-json",
+      path: "compat",
+      mode: null,
+      inModel: "oneportal/executor-model",
+      outModel: "oneportal/executor-model",
+      provider: "oneportal",
+      stream: false,
+      status: 200,
+      outcome: "completed",
+    },
+    {
+      requestId: "request-compat-sse",
+      path: "compat",
+      mode: null,
+      inModel: "oneportal/executor-model",
+      outModel: "oneportal/executor-model",
+      provider: "oneportal",
+      stream: true,
+      status: 200,
+      outcome: "completed",
+    },
+  ]);
+  logs.requests.forEach(assertTerminalTiming);
+  assert.equal(requests[0].response.headers["content-type"], "application/json");
+  assert.equal(requests[1].response.headers["content-type"], "text/event-stream");
+});
+
+test("request lifecycle telemetry waits for SSE response finish before emitting completion", async () => {
+  const fixture = await createPluginFixture({
+    pluginConfig: { routeLog: true },
+    coreClient: createPluginCoreClient({
+      async requestMessage() {
+        return message({ content: [{ type: "text", text: "streamed" }] });
+      },
+    }),
+  });
+  const response = createRecordingResponse({ endEvent: null });
+  const body = Buffer.from(JSON.stringify({
+    ...compatibilityRequestBody(true),
+    model: "oneportal/executor-model",
+  }));
+  let handlerSettled = false;
+
+  const logs = await captureAirkitLogs(async (snapshot) => {
+    const pending = fixture.messages.handler(
+      createPluginRequest(body, {
+        headers: { "x-request-id": "request-deferred-sse-finish" },
+      }),
+      response,
+      fixture.helpers,
+    ).finally(() => {
+      handlerSettled = true;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(response.ended, true, "the SSE writer has called end");
+    assert.equal(handlerSettled, false, "the route handler still awaits response finish");
+    assert.equal(snapshot().requests.length, 0, "completion is not logged before finish");
+
+    response.emit("finish");
+    await pending;
+  });
+
+  assert.equal(logs.requests.length, 1);
+  assert.equal(logs.requests[0].status, 200);
+  assert.equal(logs.requests[0].outcome, "completed");
+});
+
+test("request lifecycle telemetry preserves a raw upstream 429 as a completed response", async () => {
+  const fixture = await createPluginFixture({
+    pluginConfig: { routeLog: true },
+    coreClient: createPluginCoreClient({
+      async forwardRaw({ response }) {
+        response.writeHead(429, { "content-type": "application/json" });
+        response.end('{"error":"rate_limited"}');
+      },
+    }),
+  });
+  const response = createRecordingResponse();
+  const logs = await captureAirkitLogs(() => fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify({ model: "oneportal/model", messages: [] })), {
+      headers: { "x-request-id": "request-rate-limited" },
+    }),
+    response,
+    fixture.helpers,
+  ));
+
+  assert.equal(response.statusCode, 429);
+  assert.equal(logs.requests.length, 1);
+  assert.equal(logs.requests[0].status, 429);
+  assert.equal(logs.requests[0].outcome, "completed");
+});
+
+test("request lifecycle telemetry records synchronous forwarding failures without secrets", async () => {
+  const fixture = await createPluginFixture({
+    pluginConfig: { routeLog: true },
+    coreClient: createPluginCoreClient({
+      forwardRaw() {
+        throw new Error("upstream-error-secret");
+      },
+    }),
+  });
+  const response = createRecordingResponse();
+  const unsafeRequestId = "private credential value";
+  const logs = await captureAirkitLogs(() => fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify({ model: "oneportal/model", messages: [] })), {
+      headers: {
+        authorization: "Bearer forwarding-auth-secret",
+        "x-request-id": unsafeRequestId,
+      },
+    }),
+    response,
+    fixture.helpers,
+  ));
+
+  assert.equal(response.statusCode, 502);
+  assert.equal(logs.routes.length, 1);
+  assert.equal(logs.requests.length, 1);
+  assert.equal(logs.requests[0].requestId, logs.routes[0].requestId);
+  assert.notEqual(logs.requests[0].requestId, unsafeRequestId);
+  assert.match(logs.requests[0].requestId, /^[A-Za-z0-9._:-]+$/);
+  assert.equal(logs.requests[0].status, 502);
+  assert.equal(logs.requests[0].outcome, "forwarding_failed");
+  assert.doesNotMatch(logs.raw, /upstream-error-secret|forwarding-auth-secret|private credential/);
+});
+
+test("request lifecycle telemetry records an aborted client once with no response status", async () => {
+  let releaseForward;
+  const forwardGate = new Promise((resolve) => {
+    releaseForward = resolve;
+  });
+  const fixture = await createPluginFixture({
+    pluginConfig: { routeLog: true },
+    coreClient: createPluginCoreClient({
+      async forwardRaw({ signal }) {
+        await forwardGate;
+        assert.equal(signal.aborted, true);
+      },
+    }),
+  });
+  const response = createRecordingResponse();
+  const logsPromise = captureAirkitLogs(async () => {
+    const pending = fixture.messages.handler(
+      createPluginRequest(Buffer.from(JSON.stringify({ model: "oneportal/model", messages: [] })), {
+        headers: { "x-request-id": "request-client-abort" },
+      }),
+      response,
+      fixture.helpers,
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    response.emit("close");
+    releaseForward();
+    await pending;
+  });
+  const logs = await logsPromise;
+
+  assert.equal(logs.requests.length, 1, "close and handler settlement share one terminal record");
+  assert.equal(logs.requests[0].status, null);
+  assert.equal(logs.requests[0].outcome, "client_aborted");
+});
+
+test("request lifecycle telemetry retains a committed status when the client aborts", async () => {
+  let releaseForward;
+  const forwardGate = new Promise((resolve) => {
+    releaseForward = resolve;
+  });
+  const fixture = await createPluginFixture({
+    pluginConfig: { routeLog: true },
+    coreClient: createPluginCoreClient({
+      async forwardRaw({ response, signal }) {
+        response.writeHead(206, { "content-type": "application/json" });
+        await forwardGate;
+        assert.equal(signal.aborted, true);
+      },
+    }),
+  });
+  const response = createRecordingResponse({ endEvent: null });
+  const logs = await captureAirkitLogs(async () => {
+    const pending = fixture.messages.handler(
+      createPluginRequest(Buffer.from(JSON.stringify({ model: "oneportal/model", messages: [] })), {
+        headers: { "x-request-id": "request-committed-abort" },
+      }),
+      response,
+      fixture.helpers,
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(response.headersSent, true);
+    response.emit("close");
+    releaseForward();
+    await pending;
+  });
+
+  assert.equal(logs.requests.length, 1);
+  assert.equal(logs.requests[0].status, 206);
+  assert.equal(logs.requests[0].outcome, "client_aborted");
+});
+
+test("request lifecycle telemetry distinguishes a destroyed response from forwarding failure", async () => {
+  let destroyedWith;
+  const fixture = await createPluginFixture({
+    pluginConfig: { routeLog: true },
+    coreClient: createPluginCoreClient({
+      async forwardRaw({ response }) {
+        response.statusCode = 207;
+        response.headersSent = true;
+        throw new Error("destroyed-response-secret");
+      },
+    }),
+  });
+  const response = Object.assign(createRecordingResponse(), {
+    destroy(error) {
+      destroyedWith = error;
+    },
+  });
+  const logs = await captureAirkitLogs(() => fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify({ model: "oneportal/model", messages: [] })), {
+      headers: { "x-request-id": "request-response-destroyed" },
+    }),
+    response,
+    fixture.helpers,
+  ));
+
+  assert.match(destroyedWith.message, /destroyed-response-secret/);
+  assert.equal(logs.requests.length, 1);
+  assert.equal(logs.requests[0].status, 207);
+  assert.equal(logs.requests[0].outcome, "response_destroyed");
+  assert.doesNotMatch(logs.raw, /destroyed-response-secret/);
+});
+
+async function captureAirkitLogs(run) {
+  const chunks = [];
+  const original = process.stderr.write;
+  process.stderr.write = (chunk) => {
+    chunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await run(() => parseCapturedAirkitLogs(chunks));
+  } finally {
+    process.stderr.write = original;
+  }
+  return parseCapturedAirkitLogs(chunks);
+}
+
+function parseCapturedAirkitLogs(chunks) {
+  const raw = chunks.join("");
+  const parse = (prefix) => chunks
+    .filter((line) => line.startsWith(prefix))
+    .map((line) => JSON.parse(line.slice(prefix.length)));
+  return {
+    raw,
+    requests: parse("[airkit-request] "),
+    routes: parse("[airkit-route] "),
+  };
+}
+
+function withoutTiming(entry) {
+  const { at, durationMs, ...stable } = entry;
+  return stable;
+}
+
+function assertTerminalTiming(entry) {
+  assert.equal(Number.isNaN(Date.parse(entry.at)), false);
+  assert.equal(typeof entry.durationMs, "number");
+  assert.equal(Number.isFinite(entry.durationMs), true);
+  assert.ok(entry.durationMs >= 0);
+}
 
 test("the caller's mode label selects its route table for main and background traffic", async () => {
   const forwarded = [];
