@@ -78,6 +78,26 @@ test("middleware accepts the generated gateway key through Bearer authentication
   assert.equal(result.status, 200);
 });
 
+test("middleware routes Messages requests with a beta query through the compatibility handler", async (t) => {
+  const upstream = await startFixture(t, async (request, response) => {
+    assert.equal(request.url, "/v1/messages");
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end('{"type":"message","content":[]}');
+  });
+  const adapter = await startAdapter(t, upstream.origin);
+
+  const result = await fetch(`${adapter.origin}/v1/messages?beta=true`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${GATEWAY_TOKEN}`,
+      "content-type": "application/json",
+    },
+    body: '{"model":"claude-sonnet","messages":[]}',
+  });
+
+  assert.equal(result.status, 200);
+});
+
 test("middleware preserves upstream SSE bytes and 429 responses", async (t) => {
   const sse = Buffer.from("event: message_start\\ndata: {\\\"type\\\":\\\"message_start\\\"}\\n\\nevent: message_stop\\ndata: {\\\"type\\\":\\\"message_stop\\\"}\\n\\n");
   let requestCount = 0;

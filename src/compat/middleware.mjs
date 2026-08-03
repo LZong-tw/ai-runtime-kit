@@ -64,13 +64,14 @@ async function handleRequest({ coreClient, gatewayToken, mcp, messages, request,
     return;
   }
 
-  const path = requestPath(request.url);
-  if (path === null) {
+  const target = requestTarget(request.url);
+  if (target === null) {
     request.resume();
     response.writeHead(400, { "content-type": "application/json" });
     response.end(JSON.stringify({ error: { message: "Invalid request path", type: "invalid_request_error" } }));
     return;
   }
+  const path = new URL(target, "http://airkit.local").pathname;
   try {
     if (request.method === "POST" && path === "/v1/messages") {
       await messages(request, response, { readBody });
@@ -84,7 +85,7 @@ async function handleRequest({ coreClient, gatewayToken, mcp, messages, request,
       body: request.method === "GET" || request.method === "HEAD" ? undefined : request,
       headers: request.headers,
       method: request.method,
-      path,
+      path: target,
       response,
       signal: requestLifecycleSignal(request, response),
     });
@@ -111,7 +112,7 @@ function tokenMatches(value, expectedToken) {
   return received.byteLength === expected.byteLength && timingSafeEqual(received, expected);
 }
 
-function requestPath(url) {
+function requestTarget(url) {
   // A leading `//` is a scheme-relative URL when resolved with `new URL()`.
   // Backslashes are normalized to slashes by `new URL()` too. Reject both so
   // the generated gateway key can only ever reach the configured CCR origin.

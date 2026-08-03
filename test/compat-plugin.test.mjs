@@ -976,7 +976,7 @@ test("advisor.unsupported passthrough leaves the definition in place and diverts
   assert.equal(forwarded.length, 0, "the advisor definition must still divert the request");
 });
 
-test("ordinary Messages requests translate Claude effort before OpenAI-compatible forwarding", async () => {
+test("ordinary DeepSeek Messages requests remove unsupported Claude effort before forwarding", async () => {
   const calls = [];
   const fixture = await createPluginFixture({
     coreClient: createPluginCoreClient({
@@ -1001,7 +1001,6 @@ test("ordinary Messages requests translate Claude effort before OpenAI-compatibl
   assert.deepEqual(calls, [{
     model: "oneportal/deepseek-v4-flash",
     max_tokens: 8,
-    reasoning_effort: "high",
     messages: [{ role: "user", content: "hi" }],
   }]);
 });
