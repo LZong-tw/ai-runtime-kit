@@ -57,7 +57,7 @@ export async function startCompatibilityMiddleware({
 }
 
 async function handleRequest({ coreClient, gatewayToken, mcp, messages, request, response }) {
-  if (!isAuthorized(request.headers?.["x-api-key"], gatewayToken)) {
+  if (!isAuthorized(request.headers, gatewayToken)) {
     request.resume();
     response.writeHead(401, { "content-type": "application/json" });
     response.end(JSON.stringify({ error: { message: "Invalid API key", type: "authentication_error" } }));
@@ -93,7 +93,19 @@ async function handleRequest({ coreClient, gatewayToken, mcp, messages, request,
   }
 }
 
-function isAuthorized(value, expectedToken) {
+function isAuthorized(headers, expectedToken) {
+  const apiKeyMatches = tokenMatches(headers?.["x-api-key"], expectedToken);
+  const bearerMatches = tokenMatches(bearerToken(headers?.authorization), expectedToken);
+  return apiKeyMatches || bearerMatches;
+}
+
+function bearerToken(value) {
+  if (typeof value !== "string") return "";
+  const match = value.match(/^Bearer\s+(.+)$/i);
+  return match?.[1] ?? "";
+}
+
+function tokenMatches(value, expectedToken) {
   const received = typeof value === "string" ? Buffer.from(value) : Buffer.alloc(0);
   const expected = Buffer.from(expectedToken);
   return received.byteLength === expected.byteLength && timingSafeEqual(received, expected);
