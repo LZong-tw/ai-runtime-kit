@@ -133,6 +133,33 @@ test("middleware rejects scheme-relative targets before the gateway key can leav
   assert.equal(forwarded, false);
 });
 
+test("middleware rejects backslash targets before the gateway key can leave the configured origin", async (t) => {
+  let forwarded = false;
+  const upstream = await startFixture(t, async (_request, response) => {
+    forwarded = true;
+    response.writeHead(200).end();
+  });
+  const adapter = await startAdapter(t, upstream.origin);
+  const target = new URL(adapter.origin);
+
+  const status = await new Promise((resolve, reject) => {
+    const request = httpRequest({
+      host: target.hostname,
+      port: target.port,
+      path: "/\\attacker.example/v1/models",
+      headers: { "x-api-key": GATEWAY_TOKEN },
+    }, (response) => {
+      response.resume();
+      response.once("end", () => resolve(response.statusCode));
+    });
+    request.once("error", reject);
+    request.end();
+  });
+
+  assert.equal(status, 400);
+  assert.equal(forwarded, false);
+});
+
 test("middleware aborts the public-gateway request when the caller disconnects", async (t) => {
   let notifyStarted;
   let notifyAborted;
@@ -156,6 +183,48 @@ test("middleware aborts the public-gateway request when the caller disconnects",
     aborted,
     new Promise((_, reject) => setTimeout(() => reject(new Error("upstream was not aborted")), 1_000)),
   ]);
+});
+
+test("middleware aborts a compatibility MCP WebSearch request when the caller disconnects", async (t) => {
+  let notifyStarted;
+  let notifyUpstreamClosed;
+  let upstreamResponse;
+  const started = new Promise((resolve) => { notifyStarted = resolve; });
+  const upstreamClosed = new Promise((resolve) => { notifyUpstreamClosed = resolve; });
+  const upstream = await startFixture(t, async (request, response) => {
+    await readBody(request);
+    upstreamResponse = response;
+    response.once("close", notifyUpstreamClosed);
+    notifyStarted();
+    await once(response, "close");
+  });
+  const adapter = await startAdapter(t, upstream.origin);
+  const target = new URL(adapter.origin);
+  const requestBody = JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/call",
+    params: { name: "web_search", arguments: { query: "abort MCP request" } },
+  });
+  const client = httpRequest({
+    host: target.hostname,
+    method: "POST",
+    port: target.port,
+    path: "/airkit/compatibility/mcp",
+    headers: {
+      "content-length": String(Buffer.byteLength(requestBody)),
+      "content-type": "application/json",
+      "x-api-key": GATEWAY_TOKEN,
+    },
+  });
+  const clientClosed = new Promise((resolve) => client.once("close", resolve));
+  client.once("error", () => {});
+  client.end(requestBody);
+
+  await started;
+  client.destroy();
+  await clientClosed;
+  await awaitWithin(upstreamClosed, "MCP upstream was not aborted", () => upstreamResponse?.destroy());
 });
 
 test("middleware serves compatibility MCP WebSearch through the public gateway", async (t) => {
@@ -234,4 +303,21 @@ async function readBody(request) {
   const chunks = [];
   for await (const chunk of request) chunks.push(chunk);
   return Buffer.concat(chunks).toString("utf8");
+}
+
+async function awaitWithin(promise, message, onTimeout) {
+  let timeout;
+  try {
+    await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => {
+          onTimeout();
+          reject(new Error(message));
+        }, 1_000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
 }

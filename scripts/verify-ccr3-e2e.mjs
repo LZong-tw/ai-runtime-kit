@@ -14,6 +14,58 @@ import { assertNoManagedApiKeyHelperOverride } from "../src/airkit.mjs";
 
 export { assertNoManagedApiKeyHelperOverride as assertNoApiKeyHelperOverride };
 
+export async function awaitNativeRequestLog({
+  expected = {},
+  marker,
+  pollIntervalMs = 100,
+  rpc,
+  timeoutMs = 5_000,
+}) {
+  assert.equal(typeof marker, "string", "native request-log marker must be a string");
+  assert.ok(marker.length > 0, "native request-log marker must not be empty");
+  assert.equal(typeof rpc, "function", "native request-log RPC client is required");
+
+  const deadline = Date.now() + timeoutMs;
+  let lastItems = [];
+  do {
+    const page = await rpc("getRequestLogs", [{ page: 1, pageSize: 100, query: marker }]);
+    const items = Array.isArray(page?.items) ? page.items : [];
+    if (items.length === 1) {
+      assertNativeRequestLog(items[0], expected);
+      return items[0];
+    }
+    lastItems = items;
+    if (Date.now() >= deadline) break;
+    await wait(pollIntervalMs);
+  } while (true);
+
+  assert.fail(
+    `expected exactly one native request log for ${marker}; received ${lastItems.length}: `
+    + JSON.stringify(lastItems.map(({ client, model, provider, requestBody, statusCode }) => ({
+      client,
+      model,
+      provider,
+      requestBody: requestBody?.text?.slice(0, 200),
+      statusCode,
+    }))),
+  );
+}
+
+function assertNativeRequestLog(row, expected) {
+  for (const [field, value] of Object.entries(expected)) {
+    const actual = row[field];
+    if (typeof value === "function") {
+      value(actual, row);
+    } else {
+      assert.deepEqual(actual, value, `native request log field ${field} did not match`);
+    }
+  }
+}
+
+function wait(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 const ISOLATED_PATH_VARIABLES = [
   "HOME",
   "XDG_CONFIG_HOME",
@@ -152,6 +204,7 @@ async function main() {
   env.NPM_CONFIG_CACHE = join(root, "npm-cache");
   env.NPM_CONFIG_USERCONFIG = join(root, "npmrc");
   env.FAKE_PROVIDER_API_KEY = "fixture-key";
+  env.FAKE_NATIVE_LOG_PREFIX = `airkit-e2e-native-${randomUUID()}`;
   assertIsolatedEnvironment(root, env, homedir());
 
   let failed = false;
@@ -279,9 +332,21 @@ async function main() {
       ...prepareOptions,
       launch: true,
     });
-    assert.equal(launched.child?.status, 0, "installed named CCR profile must launch fake claude successfully");
+    assert.ok(launched.child, "installed named CCR profile must spawn fake claude");
+    assert.equal(await waitForExit(launched.child, 10_000), true, "installed fake claude did not exit");
+    assert.equal(
+      launched.child.exitCode ?? launched.child.status,
+      0,
+      "installed named CCR profile must launch fake claude successfully",
+    );
 
     const liveConfig = await rpc("getConfig");
+    assert.equal(
+      liveConfig.plugins?.some((plugin) => plugin.id === "airkit-compatibility"),
+      false,
+      "adapter-managed CCR config must not register the legacy public compatibility route",
+    );
+    assert.equal(liveConfig.observability?.requestLogs, true, "adapter-managed CCR must record native request logs");
     const endpoint = installedRuntime.resolveCcrGatewayEndpoint(liveConfig);
     assert.equal(Number(endpoint.port), gatewayPort);
     const health = await fetch(new URL("/health", endpoint), { signal: AbortSignal.timeout(5_000) });
@@ -289,6 +354,7 @@ async function main() {
     const managedProfile = liveConfig.profile.profiles.find((profile) => profile.id === managedProfileId);
     assert.ok(managedProfile);
     const payload = JSON.parse(await readFile(env.FAKE_CLAUDE_RESULT_FILE, "utf8"));
+    assert.notEqual(payload.gatewayBaseUrl, endpoint.origin, "compatibility launch must use the loopback adapter");
     assert.equal(
       payload.claudeConfigDir,
       env.CLAUDE_CONFIG_DIR,
@@ -301,11 +367,18 @@ async function main() {
     assert.equal(gatewayKeyResult.status, 0, "isolated CCR gateway key helper failed");
     const gatewayApiKey = gatewayKeyResult.stdout.trim();
     assert.ok(gatewayApiKey.length > 0, "isolated CCR gateway key helper returned an empty key");
-    const fallbackFamilies = await runFallbackGatewayScenarios({
-      apiKey: gatewayApiKey,
-      gatewayOrigin: endpoint.origin,
-      loopbackOrigin: `http://127.0.0.1:${providerPort}`,
+    const nativeRequestLogs = await runAdapterRequestLogScenarios({
+      expectedClient: "Profile: AirKit ccr3-e2e auto",
+      expectedModel: "fake-model",
+      expectedProvider: "airkit-provider-ccr3-e2e-fake-openai",
+      markers: {
+        abort: `${env.FAKE_NATIVE_LOG_PREFIX}-abort`,
+        json: `${env.FAKE_NATIVE_LOG_PREFIX}-json`,
+        sse: `${env.FAKE_NATIVE_LOG_PREFIX}-sse`,
+      },
+      rpc,
     });
+    const fallbackFamilies = ["webSearch", "webFetch", "codeExecution", "mcpConnector"];
     const providerRequests = JSON.parse(await readFile(fakeProvider.requestFile, "utf8"));
     const installedCompatRoot = join(runtimeRoot, "node_modules", "@lzong", "ai-runtime-kit", "src", "compat");
     const [{ inspectPendingServerHistory }, { resolveCompatibilityPolicies }] = await Promise.all([
@@ -313,7 +386,7 @@ async function main() {
       import(pathToFileURL(join(installedCompatRoot, "config.mjs"))),
     ]);
     const fallbackEvidence = summarizeFallbackEvidence(providerRequests, { inspectPendingServerHistory });
-    assertFallbackProviderRequests(providerRequests, `http://127.0.0.1:${providerPort}`);
+    assertFallbackProviderRequests(providerRequests, `http://127.0.0.1:${providerPort}`, fallbackFamilies);
     assert.deepEqual(fallbackEvidence.map(({ family }) => family), fallbackFamilies);
     assert.equal(
       JSON.stringify(providerRequests).includes(gatewayApiKey),
@@ -349,6 +422,7 @@ async function main() {
       fallbackEvidence,
       compatibilityMcp: payload.compatibilityMcp.serverInfo.name,
       namedProfile: managedProfileId,
+      nativeRequestLogs,
       realHomeAccessDenied: true,
       realHomeReferenced: false,
       sqliteFiles: sqliteAfterInit.length,
@@ -574,25 +648,77 @@ export async function runFallbackGatewayScenarios({
   return fallbackFamilies;
 }
 
-export function assertFallbackProviderRequests(records, loopbackOrigin) {
+export async function runAdapterRequestLogScenarios({
+  expectedClient,
+  expectedModel,
+  expectedProvider,
+  markers,
+  rpc,
+}) {
+  const expected = {
+    client: expectedClient,
+    durationMs: (durationMs) => assert.ok(Number.isFinite(durationMs) && durationMs >= 0,
+      "native request log must retain a non-negative duration"),
+    model: expectedModel,
+    provider: expectedProvider,
+  };
+  const jsonLog = await awaitNativeRequestLog({
+    expected: { ...expected, isStream: false, statusCode: 200 },
+    marker: markers.json,
+    rpc,
+  });
+
+  const sseLog = await awaitNativeRequestLog({
+    expected: { ...expected, isStream: true, statusCode: 200 },
+    marker: markers.sse,
+    rpc,
+  });
+
+  const abortLog = await awaitNativeRequestLog({
+    expected: { ...expected, isStream: false, statusCode: 499 },
+    marker: markers.abort,
+    rpc,
+  });
+
+  return Object.fromEntries(Object.entries({ abort: abortLog, json: jsonLog, sse: sseLog }).map(([scenario, row]) => [
+    scenario,
+    {
+      client: row.client,
+      durationMs: row.durationMs,
+      isStream: row.isStream,
+      model: row.model,
+      provider: row.provider,
+      statusCode: row.statusCode,
+    },
+  ]));
+}
+
+export function assertFallbackProviderRequests(
+  records,
+  loopbackOrigin,
+  expectedFamilies = ["advisor", "webSearch", "webFetch", "codeExecution", "mcpConnector"],
+) {
   const byFamily = new Map(records.flatMap((record) => {
     const userId = record.body?.metadata?.user_id;
     return typeof userId === "string" && userId.startsWith("airkit-e2e-")
       ? [[userId.slice("airkit-e2e-".length), record]]
       : [];
   }));
-  assert.equal(byFamily.size, 5);
+  assert.equal(byFamily.size, expectedFamilies.length);
+  assert.deepEqual([...byFamily.keys()].sort(), [...expectedFamilies].sort());
   for (const [family, record] of byFamily) {
     assert.equal(record.url, "/v1/messages", `${family} used the wrong provider protocol`);
     assert.equal(record.body.metadata.contract_marker, "preserve-me");
     assert.equal(record.headers["anthropic-version"], "2023-06-01");
   }
-  assert.deepEqual(byFamily.get("advisor").body.tools, [{
-    type: "advisor_20260301",
-    name: "advisor",
-    model: "claude-sonnet",
-    max_uses: 3,
-  }]);
+  if (byFamily.has("advisor")) {
+    assert.deepEqual(byFamily.get("advisor").body.tools, [{
+      type: "advisor_20260301",
+      name: "advisor",
+      model: "claude-sonnet",
+      max_uses: 3,
+    }]);
+  }
   assert.deepEqual(byFamily.get("webSearch").body.tools, [{ type: "web_search_20260318" }]);
   assert.deepEqual(byFamily.get("webFetch").body.tools, [{ type: "web_fetch_20260209" }]);
   assert.match(byFamily.get("webFetch").body.messages[0].content, new RegExp(`${loopbackOrigin}/webFetch-fixture`));
@@ -673,6 +799,38 @@ const server = createServer((request, response) => {
       response.end(JSON.stringify({ error: { message: "unexpected fixture model" } }));
       return;
     }
+    const marker = body.messages?.flatMap((message) => typeof message.content === "string" ? [message.content] : []).join(" ") ?? "";
+    if (marker.endsWith("-abort")) {
+      setTimeout(() => {
+        if (!response.destroyed) response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ type: "message" }));
+      }, 1_000);
+      return;
+    }
+    if (body.stream === true) {
+      const messageStart = JSON.stringify({
+        type: "message_start",
+        message: {
+          id: "fixture-stream",
+          type: "message",
+          role: "assistant",
+          model: body.model,
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      });
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end([
+        "event: message_start",
+        "data: " + messageStart,
+        "",
+        "event: message_stop",
+        "data: " + JSON.stringify({ type: "message_stop" }),
+        "",
+      ].join("\\n"));
+      return;
+    }
     response.writeHead(200, { "content-type": "application/json" });
     const family = body.metadata?.user_id?.slice("airkit-e2e-".length);
     const serverContent = family === "advisor" ? [
@@ -738,7 +896,7 @@ const compatibilityMcp = mcpConfig.mcpServers?.["airkit-compatibility"];
 if (compatibilityMcp?.url !== "\${AIRKIT_COMPATIBILITY_MCP_URL}") {
   throw new Error("compatibility MCP URL must remain an environment placeholder");
 }
-if (compatibilityMcp?.headers?.Authorization !== "Bearer \${AIRKIT_COMPATIBILITY_MCP_TOKEN}") {
+if (compatibilityMcp?.headers?.["x-api-key"] !== "\${AIRKIT_COMPATIBILITY_MCP_TOKEN}") {
   throw new Error("compatibility MCP token must remain an environment placeholder");
 }
 const baseUrl = process.env.ANTHROPIC_BASE_URL;
@@ -777,10 +935,115 @@ const response = await fetch(new URL("/v1/messages", baseUrl), {
 });
 const payload = await response.json();
 if (!response.ok) throw new Error(JSON.stringify(payload));
+const nativePrefix = process.env.FAKE_NATIVE_LOG_PREFIX;
+if (!nativePrefix) throw new Error("native request-log marker prefix was not supplied");
+const nativeMarkers = {
+  abort: nativePrefix + "-abort",
+  json: nativePrefix + "-json",
+  sse: nativePrefix + "-sse",
+};
+const adapterRequest = (marker, options = {}) => fetch(new URL("/v1/messages", baseUrl), {
+  ...options,
+  method: "POST",
+  headers: {
+    "content-type": "application/json",
+    "x-api-key": gatewayToken,
+    ...(options.headers ?? {}),
+  },
+  body: JSON.stringify({
+    max_tokens: 16,
+    messages: [{ role: "user", content: marker }],
+    model,
+    ...(options.body ?? {}),
+  }),
+});
+const nativeJsonResponse = await adapterRequest(nativeMarkers.json, { signal: AbortSignal.timeout(10_000) });
+if (!nativeJsonResponse.ok || (await nativeJsonResponse.json()).type !== "message") {
+  throw new Error("adapter JSON fixture request failed");
+}
+const nativeSseResponse = await adapterRequest(nativeMarkers.sse, {
+  body: { stream: true },
+  headers: { accept: "text/event-stream" },
+  signal: AbortSignal.timeout(10_000),
+});
+if (!nativeSseResponse.ok || !(nativeSseResponse.headers.get("content-type") ?? "").includes("text/event-stream")) {
+  throw new Error("adapter SSE fixture request failed");
+}
+if (!/event: message_start/.test(await nativeSseResponse.text())) {
+  throw new Error("adapter SSE fixture response was not preserved");
+}
+const abortController = new AbortController();
+const nativeAbort = adapterRequest(nativeMarkers.abort, { signal: abortController.signal });
+await new Promise((resolve) => setTimeout(resolve, 100));
+abortController.abort();
+try {
+  await nativeAbort;
+  throw new Error("adapter abort fixture request unexpectedly completed");
+} catch (error) {
+  if (error?.name !== "AbortError") throw error;
+}
+const fallbackFamilies = ["webSearch", "webFetch", "codeExecution", "mcpConnector"];
+const providerOrigin = new URL(process.env.FAKE_PROVIDER_PROBE_URL).origin;
+const fallbackScenarios = {
+  webSearch: { tools: [{ type: "web_search_20260318" }] },
+  webFetch: {
+    messages: [{ role: "user", content: "Fetch " + providerOrigin + "/webFetch-fixture only." }],
+    tools: [{ type: "web_fetch_20260209" }],
+  },
+  codeExecution: {
+    container: { id: "container_fixture" },
+    messages: [{
+      role: "assistant",
+      content: [
+        { type: "server_tool_use", id: "srvtoolu_code", name: "code_execution", input: {} },
+        {
+          type: "code_execution_tool_result",
+          tool_use_id: "srvtoolu_code",
+          content: { type: "code_execution_result", stdout: "fixture" },
+        },
+      ],
+    }],
+    tools: [{ type: "code_execution_20260120" }],
+  },
+  mcpConnector: {
+    container: { id: "container_mcp_fixture" },
+    mcp_servers: [{ type: "url", url: providerOrigin + "/mcp-fixture" }],
+    tools: [{ type: "mcp_toolset" }],
+  },
+};
+for (const family of fallbackFamilies) {
+  const fallbackResponse = await fetch(new URL("/v1/messages", baseUrl), {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": gatewayToken,
+      "anthropic-version": "2023-06-01",
+      "x-request-id": "fixture-" + family,
+    },
+    body: JSON.stringify({
+      metadata: { user_id: "airkit-e2e-" + family, contract_marker: "preserve-me" },
+      model: "fake-model",
+      max_tokens: 32,
+      messages: [{ role: "user", content: "fixture" }],
+      ...fallbackScenarios[family],
+    }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  const fallbackPayload = await fallbackResponse.json();
+  if (!fallbackResponse.ok || fallbackPayload.type !== "message") {
+    throw new Error("adapter fallback fixture failed for " + family);
+  }
+  if (family === "codeExecution") {
+    const types = fallbackPayload.content.map(({ type }) => type);
+    if (JSON.stringify(types) !== JSON.stringify(["server_tool_use", "code_execution_tool_result"])) {
+      throw new Error("adapter code-execution fallback fixture returned the wrong content");
+    }
+  }
+}
 const mcpResponse = await fetch(process.env.AIRKIT_COMPATIBILITY_MCP_URL, {
   method: "POST",
   headers: {
-    authorization: "Bearer " + process.env.AIRKIT_COMPATIBILITY_MCP_TOKEN,
+    "x-api-key": process.env.AIRKIT_COMPATIBILITY_MCP_TOKEN,
     "content-type": "application/json",
   },
   body: JSON.stringify({
@@ -802,7 +1065,9 @@ await writeFile(process.env.FAKE_CLAUDE_RESULT_FILE, JSON.stringify({
   ambientSentinel: process.env.AIRKIT_E2E_AMBIENT_SENTINEL,
   claudeConfigDir: process.env.CLAUDE_CONFIG_DIR,
   compatibilityMcp: mcpPayload.result,
+  gatewayBaseUrl: baseUrl,
   launchModel: model,
+  nativeMarkers,
 }));
 
 async function findSettingsFiles(root) {

@@ -20,13 +20,55 @@ test("repository includes the isolated CCR 3 end-to-end verifier", () => {
   assert.doesNotMatch(verifierSource, /AIRKIT_E2E_CONTROLLER_GUARD/);
 });
 
-test("isolated CCR verifier loads the compatibility plugin and probes its MCP route", () => {
-  assert.match(verifierSource, /id: "airkit-compatibility"/);
+test("isolated CCR verifier launches through the adapter and probes its MCP route", () => {
+  assert.match(verifierSource, /payload\.gatewayBaseUrl/);
+  assert.match(verifierSource, /legacy public compatibility route/);
   assert.match(verifierSource, /AIRKIT_COMPATIBILITY_MCP_URL/);
   assert.match(verifierSource, /AIRKIT_COMPATIBILITY_MCP_TOKEN/);
   assert.match(verifierSource, /method: "initialize"/);
   assert.match(verifierSource, /payload\.compatibilityMcp\?\.serverInfo\?\.name/);
   assert.match(verifierSource, /payload\.content\?\.\[0\]\?\.text, "FAKE_PROVIDER_OK"/);
+});
+
+test("isolated CCR verifier proves adapter traffic through native request-log RPC", async () => {
+  assert.equal(typeof verifier.awaitNativeRequestLog, "function");
+  assert.match(verifierSource, /getRequestLogs/);
+  assert.match(verifierSource, /observability\?\.requestLogs, true/);
+  assert.doesNotMatch(verifierSource, /request-logs\.sqlite/);
+
+  const calls = [];
+  const row = await verifier.awaitNativeRequestLog({
+    marker: "airkit-e2e-native-json",
+    expected: {
+      client: "unknown",
+      durationMs: 1,
+      isStream: false,
+      model: "fake-model",
+      provider: "airkit-provider-ccr3-e2e-fake-openai",
+      statusCode: 200,
+    },
+    rpc: async (method, [args]) => {
+      calls.push({ args, method });
+      return {
+        items: [{
+          client: "unknown",
+          durationMs: 1,
+          isStream: false,
+          model: "fake-model",
+          provider: "airkit-provider-ccr3-e2e-fake-openai",
+          requestBody: { text: "airkit-e2e-native-json" },
+          statusCode: 200,
+        }],
+      };
+    },
+    timeoutMs: 20,
+  });
+
+  assert.equal(row.requestBody.text, "airkit-e2e-native-json");
+  assert.deepEqual(calls, [{
+    args: { page: 1, pageSize: 100, query: "airkit-e2e-native-json" },
+    method: "getRequestLogs",
+  }]);
 });
 
 test("isolated CCR verifier executes and validates every fallback family", async () => {

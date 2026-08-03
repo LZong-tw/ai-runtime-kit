@@ -7,7 +7,14 @@ import {
   handleCompatibilityMessage,
   writeAnthropicMessage,
 } from "../src/compat/gateway.mjs";
-import plugin from "../src/compat/plugin.mjs";
+import {
+  resolveCompatibilityPolicies,
+  VERIFIED_NATIVE_COMPATIBILITY,
+} from "../src/compat/config.mjs";
+import plugin, {
+  createMcpHandler,
+  createMessagesHandler,
+} from "../src/compat/plugin.mjs";
 
 const CORE_TOKEN = "generated-core-token";
 const RAW_RESPONSE_BODY = Buffer.from([0, 1, 2, 255, 10]);
@@ -819,7 +826,7 @@ test("Anthropic SSE serializes thinking, redaction, citations, and unknown compl
   ]);
 });
 
-test("compatibility plugin registers stable authenticated POST routes", async () => {
+test("compatibility plugin validates its configuration without registering public CCR routes", async () => {
   const routes = [];
 
   await plugin.setup({
@@ -831,23 +838,13 @@ test("compatibility plugin registers stable authenticated POST routes", async ()
     },
   });
 
-  assert.deepEqual(
-    routes.map(({ auth, id, method, path }) => ({ auth, id, method, path })),
-    [
-      {
-        auth: "gateway",
-        id: "airkit-compatibility-messages",
-        method: "POST",
-        path: "/v1/messages",
-      },
-      {
-        auth: "gateway",
-        id: "airkit-compatibility-mcp",
-        method: "POST",
-        path: "/airkit/compatibility/mcp",
-      },
-    ],
-  );
+  assert.deepEqual(routes, []);
+  const handlers = await createPluginHandlers({
+    coreClient: createPluginCoreClient(),
+    pluginConfig: structuredClone(COMPLETE_PLUGIN_CONFIG),
+  });
+  assert.equal(typeof handlers.messages.handler, "function");
+  assert.equal(typeof handlers.mcp.handler, "function");
 });
 
 test("compatibility plugin fails closed on an invalid fallback provider binding", async () => {
@@ -1456,7 +1453,6 @@ test("MCP bounds public output and hides provider failures", async () => {
 });
 
 async function createPluginFixture(options = {}) {
-  const routes = [];
   const coreCalls = [];
   let readCount = 0;
   const helpers = {
@@ -1465,29 +1461,25 @@ async function createPluginFixture(options = {}) {
       return request.body;
     },
   };
-  await plugin.setup({
-    config: structuredClone(PLUGIN_RUNTIME_CONFIG),
-    coreClient: options.coreClient ?? createPluginCoreClient({
+  const coreClient = options.coreClient ?? createPluginCoreClient({
       async requestMessage(body, headers) {
         coreCalls.push({ body: structuredClone(body), headers: structuredClone(headers ?? {}) });
         return webSearchMessage();
       },
-    }),
+  });
+  const handlers = await createPluginHandlers({
+    coreClient,
     pluginConfig: {
       ...structuredClone(COMPLETE_PLUGIN_CONFIG),
       ...options.pluginConfig,
     },
-    registerGatewayRoute(route) {
-      routes.push(route);
-    },
   });
-  const mcp = routes.find((route) => route.path === "/airkit/compatibility/mcp");
+  const { mcp } = handlers;
   return {
     coreCalls,
     helpers,
-    messages: routes.find((route) => route.path === "/v1/messages"),
+    messages: handlers.messages,
     mcp,
-    routes,
     get readCount() {
       return readCount;
     },
@@ -1507,6 +1499,28 @@ async function createPluginFixture(options = {}) {
         json: response.body.length === 0 ? undefined : JSON.parse(response.body.toString("utf8")),
         statusCode: response.statusCode,
       };
+    },
+  };
+}
+
+async function createPluginHandlers({
+  config = structuredClone(PLUGIN_RUNTIME_CONFIG),
+  coreClient,
+  pluginConfig,
+}) {
+  await plugin.setup({ config, coreClient, pluginConfig });
+  const { policies } = resolveCompatibilityPolicies(
+    pluginConfig,
+    VERIFIED_NATIVE_COMPATIBILITY,
+  );
+  return {
+    mcp: { handler: createMcpHandler({ config: pluginConfig, coreClient }) },
+    messages: {
+      handler: createMessagesHandler({
+        config: pluginConfig,
+        coreClient,
+        policies,
+      }),
     },
   };
 }
@@ -1828,26 +1842,22 @@ async function observePromptSettlement(pending, response) {
 
 test("known bare Claude families are routed before raw passthrough; unknown and qualified models pass byte-identical", async () => {
   const forwarded = [];
-  const routes = [];
-  await plugin.setup({
-    config: structuredClone(PLUGIN_RUNTIME_CONFIG),
+  const pluginConfig = {
+    ...structuredClone(COMPLETE_PLUGIN_CONFIG),
+    routes: {
+      default: "demo-provider/steady-coder",
+      background: "demo-provider/cheap-coder",
+    },
+  };
+  const handlers = await createPluginHandlers({
     coreClient: {
       async forwardRaw({ body }) {
         forwarded.push(Buffer.from(body));
       },
     },
-    pluginConfig: {
-      ...structuredClone(COMPLETE_PLUGIN_CONFIG),
-      routes: {
-        default: "demo-provider/steady-coder",
-        background: "demo-provider/cheap-coder",
-      },
-    },
-    registerGatewayRoute(route) {
-      routes.push(route);
-    },
+    pluginConfig,
   });
-  const handler = routes.find(({ id }) => id === "airkit-compatibility-messages").handler;
+  const handler = handlers.messages.handler;
   const invoke = async (body) => {
     const raw = Buffer.from(JSON.stringify(body), "utf8");
     await handler(
@@ -1889,16 +1899,11 @@ test("known bare Claude families are routed before raw passthrough; unknown and 
 
 test("routeLog emits one redacted decision line per request and stays silent when off", async () => {
   const setupHandler = async (pluginConfig) => {
-    const routes = [];
-    await plugin.setup({
-      config: structuredClone(PLUGIN_RUNTIME_CONFIG),
+    const handlers = await createPluginHandlers({
       coreClient: { async forwardRaw() {} },
       pluginConfig,
-      registerGatewayRoute(route) {
-        routes.push(route);
-      },
     });
-    return routes.find(({ id }) => id === "airkit-compatibility-messages").handler;
+    return handlers.messages.handler;
   };
   const captureStderr = async (run) => {
     const lines = [];
@@ -2299,27 +2304,23 @@ function assertTerminalTiming(entry) {
 
 test("the caller's mode label selects its route table for main and background traffic", async () => {
   const forwarded = [];
-  const routes = [];
-  await plugin.setup({
-    config: structuredClone(PLUGIN_RUNTIME_CONFIG),
+  const pluginConfig = {
+    ...structuredClone(COMPLETE_PLUGIN_CONFIG),
+    routeLog: true,
+    routes: { default: "demo-provider/steady-coder", background: "demo-provider/cheap-coder" },
+    modeRoutes: {
+      glm: { default: "demo-provider/glm-coder", background: "demo-provider/glm-mini" },
+    },
+  };
+  const handlers = await createPluginHandlers({
     coreClient: {
       async forwardRaw({ body }) {
         forwarded.push(Buffer.from(body));
       },
     },
-    pluginConfig: {
-      ...structuredClone(COMPLETE_PLUGIN_CONFIG),
-      routeLog: true,
-      routes: { default: "demo-provider/steady-coder", background: "demo-provider/cheap-coder" },
-      modeRoutes: {
-        glm: { default: "demo-provider/glm-coder", background: "demo-provider/glm-mini" },
-      },
-    },
-    registerGatewayRoute(route) {
-      routes.push(route);
-    },
+    pluginConfig,
   });
-  const handler = routes.find(({ id }) => id === "airkit-compatibility-messages").handler;
+  const handler = handlers.messages.handler;
   const lines = [];
   const invoke = async (model, headers) => {
     const raw = Buffer.from(JSON.stringify({ model, max_tokens: 8, messages: [] }), "utf8");
@@ -2363,35 +2364,31 @@ test("the caller's mode label selects its route table for main and background tr
 
 test("the launcher's own model id routes separately from an in-session Sonnet pick", async () => {
   const forwarded = [];
-  const routes = [];
-  await plugin.setup({
-    config: structuredClone(PLUGIN_RUNTIME_CONFIG),
+  const pluginConfig = {
+    ...structuredClone(COMPLETE_PLUGIN_CONFIG),
+    launchModel: "claude-airkit-mode",
+    routes: {
+      default: "demo-provider/steady-coder",
+      background: "demo-provider/cheap-coder",
+      sonnet: "demo-provider/real-sonnet",
+    },
+    modeRoutes: {
+      glm: {
+        default: "demo-provider/glm-coder",
+        background: "demo-provider/glm-mini",
+        sonnet: "demo-provider/real-sonnet",
+      },
+    },
+  };
+  const handlers = await createPluginHandlers({
     coreClient: {
       async forwardRaw({ body }) {
         forwarded.push(Buffer.from(body));
       },
     },
-    pluginConfig: {
-      ...structuredClone(COMPLETE_PLUGIN_CONFIG),
-      launchModel: "claude-airkit-mode",
-      routes: {
-        default: "demo-provider/steady-coder",
-        background: "demo-provider/cheap-coder",
-        sonnet: "demo-provider/real-sonnet",
-      },
-      modeRoutes: {
-        glm: {
-          default: "demo-provider/glm-coder",
-          background: "demo-provider/glm-mini",
-          sonnet: "demo-provider/real-sonnet",
-        },
-      },
-    },
-    registerGatewayRoute(route) {
-      routes.push(route);
-    },
+    pluginConfig,
   });
-  const handler = routes.find(({ id }) => id === "airkit-compatibility-messages").handler;
+  const handler = handlers.messages.handler;
   const invoke = async (model, headers) => {
     const raw = Buffer.from(JSON.stringify({ model, max_tokens: 8, messages: [] }), "utf8");
     await handler({ headers, method: "POST", signal: undefined }, {}, { readBody: async () => raw });
@@ -2408,20 +2405,15 @@ test("the launcher's own model id routes separately from an in-session Sonnet pi
 
 test("bare Claude routing without routes config forwards byte-identical bytes", async () => {
   const forwarded = [];
-  const routes = [];
-  await plugin.setup({
-    config: structuredClone(PLUGIN_RUNTIME_CONFIG),
+  const handlers = await createPluginHandlers({
     coreClient: {
       async forwardRaw({ body }) {
         forwarded.push(Buffer.from(body));
       },
     },
     pluginConfig: structuredClone(COMPLETE_PLUGIN_CONFIG),
-    registerGatewayRoute(route) {
-      routes.push(route);
-    },
   });
-  const handler = routes.find(({ id }) => id === "airkit-compatibility-messages").handler;
+  const handler = handlers.messages.handler;
   const raw = Buffer.from(
     JSON.stringify({ model: "claude-haiku-4-5-20251001", max_tokens: 8, messages: [] }),
     "utf8",
