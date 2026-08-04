@@ -1055,6 +1055,30 @@ test("plain Claude launch uses managed CCR without AirClaude argument overlays",
   }
 });
 
+test("mode-specific append prompt applies only to its selected managed mode", () => {
+  const catalog = launchCatalog();
+  catalog.profiles[0].launch.modes.auto.appendSystemPrompt = "DeepSeek-only evidence delta";
+
+  const auto = buildLaunchPlan(catalog, "launch-example", {
+    configDir: "/tmp/airkit-mode-prompt",
+    mode: "auto",
+  });
+  const pro = buildLaunchPlan(catalog, "launch-example", {
+    configDir: "/tmp/airkit-mode-prompt",
+    mode: "pro",
+  });
+  const plain = buildLaunchPlan(catalog, "launch-example", {
+    configDir: "/tmp/airkit-mode-prompt",
+    mode: "auto",
+    plainClaude: true,
+  });
+
+  const autoPrompt = auto.launch.args[auto.launch.args.indexOf("--append-system-prompt") + 1];
+  assert.match(autoPrompt, /DeepSeek-only evidence delta/);
+  assert.doesNotMatch(pro.launch.args.join(" "), /DeepSeek-only evidence delta/);
+  assert.equal(plain.launch.args.includes("--append-system-prompt"), false);
+});
+
 test("launch spawns Claude against the shared home, not an isolated CCR profile", async () => {
   const home = await mkdtemp(join(tmpdir(), "airkit-shared-home-"));
   const configDir = await mkdtemp(join(tmpdir(), "airkit-shared-config-"));
