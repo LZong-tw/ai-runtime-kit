@@ -1620,7 +1620,7 @@ function airkitEnvVar(prefix, profileName) {
 function publicPackage() {
   return {
     name: "@untionglim/ai-runtime-kit",
-    version: "0.2.0",
+    version: "0.2.1",
     publishConfig: { access: "public" },
     repository: {
       type: "git",
