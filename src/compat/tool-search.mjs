@@ -23,12 +23,35 @@ const TOOL_SEARCH_PUBLIC_ERROR_MESSAGES = {
   execution_time_exceeded: "ToolSearch execution timed out",
 };
 
+const AUTO_TOOL_SEARCH_DEFINITION = Object.freeze({
+  type: "tool_search_tool_bm25_20251119",
+  name: "tool_search_tool_bm25_20251119",
+});
+const MAX_TOOL_SEARCH_RESULTS = 5;
+
 export class CompatibilityProtocolError extends Error {
   constructor(code, message) {
     super(message);
     this.name = "CompatibilityProtocolError";
     this.code = code;
   }
+}
+
+// OpenAI-compatible providers often cap the tools array. Preserve the full
+// client catalog by turning only the overflow into Claude's existing deferred
+// ToolSearch protocol. Reserve five slots because a search may activate up to
+// five deferred definitions in the next executor turn.
+export function applyToolSearchBudget(body, limit) {
+  const tools = Array.isArray(body?.tools) ? body.tools : null;
+  if (limit === null || tools === null || tools.length <= limit) return body;
+  if (tools.some((tool) => typeof tool?.type === "string")) return body;
+
+  const initialToolCount = limit - 1 - MAX_TOOL_SEARCH_RESULTS;
+  const budgetedTools = tools.map((tool, index) => index < initialToolCount
+    ? structuredClone(tool)
+    : { ...structuredClone(tool), defer_loading: true });
+  budgetedTools.push(structuredClone(AUTO_TOOL_SEARCH_DEFINITION));
+  return { ...body, tools: budgetedTools };
 }
 
 export function bridgeToolSearch({ body = {}, definition = {}, query, toolUseId } = {}) {

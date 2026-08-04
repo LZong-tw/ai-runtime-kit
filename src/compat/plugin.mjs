@@ -11,6 +11,7 @@ import {
   requestedMode,
   resolveCompatibilityPolicies,
   resolveModeRoutes,
+  resolveToolSearchMaxTools,
   routeBareClaudeModel,
   validateCompatibilityConfig,
   validateCompatibilityProviderBinding,
@@ -18,6 +19,7 @@ import {
 import { rewriteClaudeEffortForOpenAI } from "./effort.mjs";
 import { inspectPendingServerHistory } from "./server-history.mjs";
 import { inspectServerToolRequest, stripServerToolFamily } from "./server-tools.mjs";
+import { applyToolSearchBudget } from "./tool-search.mjs";
 
 const MCP_PROTOCOL_VERSION = "2025-03-26";
 const MAX_QUERY_LENGTH = 1_000;
@@ -114,7 +116,11 @@ export function createMessagesHandler({ config, coreClient, policies }) {
         ? stripServerToolFamily(routedBody, "advisor")
         : routedBody;
       if (scopedBody !== routedBody) reportAdvisorStrip();
-      const outboundBody = rewriteClaudeEffortForOpenAI(scopedBody);
+      const effortAdjustedBody = rewriteClaudeEffortForOpenAI(scopedBody);
+      const outboundBody = applyToolSearchBudget(
+        effortAdjustedBody,
+        resolveToolSearchMaxTools(config, effortAdjustedBody?.model),
+      );
       const outboundRaw = outboundBody === body
         ? rawBody
         : Buffer.from(JSON.stringify(outboundBody), "utf8");

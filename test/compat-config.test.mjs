@@ -8,6 +8,7 @@ import {
   requestedMode,
   resolveCompatibilityPolicies,
   resolveModeRoutes,
+  resolveToolSearchMaxTools,
   routeBareClaudeModel,
   validateCompatibilityConfig,
 } from "../src/compat/config.mjs";
@@ -325,6 +326,27 @@ test("routeLog accepts booleans and rejects everything else", () => {
   assert.throws(
     () => validateCompatibilityConfig({ ...VALID_CONFIG, routeLog: 1 }),
     /routeLog must be a boolean/,
+  );
+});
+
+test("ToolSearch can apply an explicit per-model client-tool limit", () => {
+  const config = {
+    ...VALID_CONFIG,
+    toolSearch: {
+      mode: "bridge",
+      maxToolsByModel: { "gpt-5.6-terra": 128 },
+    },
+  };
+
+  assert.doesNotThrow(() => validateCompatibilityConfig(config));
+  assert.equal(resolveToolSearchMaxTools(config, "provider/gpt-5.6-terra"), 128);
+  assert.equal(resolveToolSearchMaxTools(config, "GLM-5.2"), null);
+  assert.throws(
+    () => validateCompatibilityConfig({
+      ...VALID_CONFIG,
+      toolSearch: { mode: "bridge", maxToolsByModel: { "gpt-5.6-terra": 5 } },
+    }),
+    /maxToolsByModel.*integer.*6.*512/i,
   );
 });
 

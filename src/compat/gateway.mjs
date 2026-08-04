@@ -7,6 +7,7 @@ import { createFallbackRouter } from "./fallback.mjs";
 import {
   VERIFIED_NATIVE_COMPATIBILITY,
   resolveCompatibilityPolicies,
+  resolveToolSearchMaxTools,
 } from "./config.mjs";
 import { inspectPendingServerHistory } from "./server-history.mjs";
 import { inspectServerToolRequest } from "./server-tools.mjs";
@@ -166,7 +167,12 @@ export async function handleCompatibilityMessage({
     const executorBody = {
       ...body,
       messages,
-      tools: createExecutorTools(body.tools, inspection, activeDeferredTools),
+      tools: createExecutorTools(
+        body.tools,
+        inspection,
+        activeDeferredTools,
+        resolveToolSearchMaxTools(config, body.model),
+      ),
       stream: false,
     };
     const executorMessage = await requestCoreMessage(
@@ -278,16 +284,24 @@ export function writeAnthropicMessage(response, message, stream) {
   response.end();
 }
 
-function createExecutorTools(tools = [], inspection, activeDeferredTools) {
-  const executorTools = [];
+function createExecutorTools(tools = [], inspection, activeDeferredTools, maxTools = null) {
+  const ordinaryTools = [];
+  const selectedDeferredTools = [];
   for (const tool of Array.isArray(tools) ? tools : []) {
     if (TOOL_SEARCH_TYPES.has(tool?.type)) continue;
     if (tool?.defer_loading === true) {
-      if (activeDeferredTools.has(tool.name)) executorTools.push(expandDeferredTool(tool));
+      if (activeDeferredTools.has(tool.name)) selectedDeferredTools.push(expandDeferredTool(tool));
       continue;
     }
-    executorTools.push(structuredClone(tool));
+    ordinaryTools.push(structuredClone(tool));
   }
+  const bridgeSlots = inspection.toolSearch !== null ? 1 : 0;
+  const capacity = maxTools === null ? Infinity : Math.max(0, maxTools - bridgeSlots);
+  const selected = selectedDeferredTools.slice(0, capacity);
+  const executorTools = [
+    ...ordinaryTools.slice(0, Math.max(0, capacity - selected.length)),
+    ...selected,
+  ];
   if (inspection.toolSearch !== null) {
     executorTools.push({
       name: TOOL_SEARCH_BRIDGE_NAME,
@@ -509,7 +523,7 @@ async function routeWholeRequestFallback({ body, headers, config, coreClient, re
   });
   const result = await route({ body, headers, signal });
   const families = fallbackFamilies(body);
-  reportFallbackRejection(families, result);
+  reportFallbackRejection(config, families, result);
   const annotated = await annotateAdvisorRejection(families, result);
   if (response === undefined) return annotated;
   await pipeCoreResponse(annotated, response, signal);
@@ -538,15 +552,12 @@ function fallbackFamilies(body) {
 // prefix asked for an Azure api_base. None of them is fixable from this side, so
 // the only useful thing to do is say where to look.
 //
-// Unlike the per-request route log this is not gated behind routeLog: it fires
-// only when the upstream has already rejected the request, and having to enable
-// a setting before the failure you just hit is no help.
-//
 // The advisor hint is deliberately not written for the other families. Their
 // rejections have their own causes — a workspace that does not carry the
 // entitlement, most commonly — and printing the sub-call explanation for every
 // server tool would just be a new confident guess in place of the old one.
-function reportFallbackRejection(families, result) {
+function reportFallbackRejection(config, families, result) {
+  if (config?.routeLog !== true) return;
   if (typeof result?.status !== "number" || result.status < 400) return;
   try {
     const hint = families.includes("advisor")

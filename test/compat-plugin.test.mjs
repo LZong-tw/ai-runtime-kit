@@ -1005,6 +1005,59 @@ test("ordinary DeepSeek Messages requests remove unsupported Claude effort befor
   }]);
 });
 
+test("oversized configured GPT tool catalogs use the local ToolSearch bridge within the upstream limit", async () => {
+  const calls = [];
+  const replies = [
+    message({
+      content: [{
+        type: "tool_use",
+        id: "toolu_search",
+        name: "airkit_tool_search",
+        input: { query: "Client" },
+      }],
+      stop_reason: "tool_use",
+    }),
+    message({ content: [{ type: "text", text: "ok" }] }),
+  ];
+  const fixture = await createPluginFixture({
+    pluginConfig: {
+      toolSearch: {
+        mode: "bridge",
+        maxToolsByModel: { "gpt-5.6-terra": 128 },
+      },
+    },
+    coreClient: createPluginCoreClient({
+      async requestMessage(body) {
+        calls.push(structuredClone(body));
+        return replies.shift();
+      },
+    }),
+  });
+  const body = {
+    model: "oneportal/gpt-5.6-terra",
+    max_tokens: 8,
+    messages: [{ role: "user", content: "hi" }],
+    tools: Array.from({ length: 171 }, (_, index) => ({
+      name: `client_tool_${index}`,
+      description: `Client tool ${index}`,
+      input_schema: { type: "object", properties: {} },
+    })),
+  };
+
+  await fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify(body))),
+    createRecordingResponse(),
+    fixture.helpers,
+  );
+
+  assert.equal(calls.length, 2);
+  assert.ok(calls[0].tools.length <= 128);
+  assert.ok(calls[1].tools.length <= 128);
+  assert.ok(calls[0].tools.some(({ name }) => name === "airkit_tool_search"));
+  assert.equal(calls[0].tools.filter(({ name }) => name.startsWith("client_tool_")).length, 122);
+  assert.equal(calls[1].tools.filter(({ name }) => name.startsWith("client_tool_")).length, 127);
+});
+
 test("Claude Code WebFetch client requests fail closed to the Anthropic route", async () => {
   const calls = [];
   const fixture = await createPluginFixture({
@@ -1036,6 +1089,42 @@ test("Claude Code WebFetch client requests fail closed to the Anthropic route", 
   assert.equal(calls[0].model, "anthropic-messages/claude-sonnet");
   assert.deepEqual(calls[0].tools, body.tools);
   assert.equal(response.statusCode, 200);
+});
+
+test("fallback rejections respect routeLog and do not duplicate terminal API errors", async () => {
+  const captured = [];
+  const originalWrite = process.stderr.write;
+  process.stderr.write = (chunk) => {
+    captured.push(String(chunk));
+    return true;
+  };
+  try {
+    const fixture = await createPluginFixture({
+      coreClient: createPluginCoreClient({
+        async requestFallback() {
+          return new Response(JSON.stringify({ error: { message: "rate limited" } }), {
+            status: 429,
+            headers: { "content-type": "application/json" },
+          });
+        },
+      }),
+    });
+    const response = createRecordingResponse();
+    await fixture.messages.handler(
+      createPluginRequest(Buffer.from(JSON.stringify({
+        model: "executor-model",
+        max_tokens: 8,
+        messages: [{ role: "user", content: "fetch" }],
+        tools: [{ name: "WebFetch", input_schema: { type: "object" } }],
+      }))),
+      response,
+      fixture.helpers,
+    );
+    assert.equal(response.statusCode, 429);
+    assert.equal(captured.some((line) => line.startsWith("[airkit-fallback]")), false);
+  } finally {
+    process.stderr.write = originalWrite;
+  }
 });
 
 test("Claude Code WebSearch stays native when native-first is verified", async () => {
