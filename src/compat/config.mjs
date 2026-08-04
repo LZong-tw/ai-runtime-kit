@@ -116,7 +116,20 @@ export function resolveToolSearchMaxTools(config, model) {
   const limits = config?.toolSearch?.maxToolsByModel;
   if (!isRecord(limits) || typeof model !== "string") return null;
   const bareModel = model.includes("/") ? model.slice(model.lastIndexOf("/") + 1) : model;
-  return limits[model] ?? limits[bareModel] ?? null;
+  const exact = limits[model] ?? limits[bareModel];
+  if (exact !== undefined) return exact;
+
+  let bestMatch = null;
+  let bestPrefixLength = -1;
+  for (const [pattern, limit] of Object.entries(limits)) {
+    if (!pattern.endsWith("*")) continue;
+    const prefix = pattern.slice(0, -1);
+    if (bareModel.startsWith(prefix) && prefix.length > bestPrefixLength) {
+      bestMatch = limit;
+      bestPrefixLength = prefix.length;
+    }
+  }
+  return bestMatch;
 }
 
 function validateRouteTable(routes, label) {
