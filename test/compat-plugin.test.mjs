@@ -715,6 +715,22 @@ test("invalid nonnumeric usage counters are removed from totals and iteration de
   assert.doesNotMatch(JSON.stringify(result.usage), /provider-secret|nested-secret/);
 });
 
+test("zero core usage gets a bounded estimate for Claude Code context tracking", async () => {
+  const fixture = createBridgeFixture([
+    message({
+      content: [{ type: "text", text: "A short answer." }],
+      usage: { input_tokens: 0, output_tokens: 0 },
+    }),
+  ]);
+
+  const result = await handleCompatibilityMessage(fixture.input);
+
+  assert.ok(result.usage.input_tokens > 0);
+  assert.ok(result.usage.output_tokens > 0);
+  assert.equal(result.usage.cache_read_input_tokens, undefined);
+  assert.equal(result.usage.cache_creation_input_tokens, undefined);
+});
+
 test("Anthropic JSON and SSE writers preserve canonical result ordering", async () => {
   const outbound = message({
     id: "msg_serialized",
@@ -779,6 +795,31 @@ test("Anthropic JSON and SSE writers preserve canonical result ordering", async 
     );
   }
   assert.equal(frames.some((frame) => frame.event === "message_delta"), true);
+});
+
+test("Anthropic responses do not expose executor iteration telemetry to Claude Code", async () => {
+  const outbound = message({
+    usage: {
+      input_tokens: 12,
+      output_tokens: 3,
+      iterations: {
+        executor: [{ input_tokens: 7, output_tokens: 1 }],
+      },
+    },
+  });
+  const jsonResponse = createMessageResponse();
+  const streamResponse = createMessageResponse();
+
+  await writeAnthropicMessage(jsonResponse, outbound, false);
+  await writeAnthropicMessage(streamResponse, outbound, true);
+
+  assert.equal(JSON.parse(jsonResponse.body).usage.iterations, undefined);
+  const frames = parseSse(streamResponse.body);
+  assert.equal(frames[0].data.message.usage.iterations, undefined);
+  assert.equal(
+    frames.find((frame) => frame.event === "message_delta").data.usage.iterations,
+    undefined,
+  );
 });
 
 test("Anthropic SSE serializes thinking, redaction, citations, and unknown complete blocks", async () => {
@@ -1058,25 +1099,38 @@ test("oversized configured GPT tool catalogs use the local ToolSearch bridge wit
   assert.equal(calls[1].tools.filter(({ name }) => name.startsWith("client_tool_")).length, 127);
 });
 
-test("Claude Code WebFetch client requests fail closed to the Anthropic route", async () => {
+test("oversized GPT catalogs keep Claude Code WebFetch on the bounded client-tool executor", async () => {
   const calls = [];
   const fixture = await createPluginFixture({
+    pluginConfig: {
+      toolSearch: {
+        mode: "bridge",
+        maxToolsByModel: { "gpt-5.6-terra": 128 },
+      },
+    },
     coreClient: createPluginCoreClient({
-      async requestFallback(body) {
+      async requestMessage(body) {
         calls.push(structuredClone(body));
-        return new Response(JSON.stringify({ type: "message", content: [] }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
+        return message({ content: [{ type: "text", text: "ok" }] });
+      },
+      async requestFallback() {
+        throw new Error("client-side WebFetch must not divert an ordinary GPT turn");
       },
     }),
   });
   const response = createRecordingResponse();
   const body = {
-    model: "executor-model",
+    model: "oneportal/gpt-5.6-terra",
     max_tokens: 512,
     messages: [{ role: "user", content: "Fetch the page." }],
-    tools: [{ name: "WebFetch", input_schema: { type: "object" } }],
+    tools: [
+      { name: "WebFetch", input_schema: { type: "object" } },
+      ...Array.from({ length: 170 }, (_, index) => ({
+        name: `client_tool_${index}`,
+        description: `Client tool ${index}`,
+        input_schema: { type: "object", properties: {} },
+      })),
+    ],
   };
 
   await fixture.messages.handler(
@@ -1086,8 +1140,10 @@ test("Claude Code WebFetch client requests fail closed to the Anthropic route", 
   );
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].model, "anthropic-messages/claude-sonnet");
-  assert.deepEqual(calls[0].tools, body.tools);
+  assert.equal(calls[0].model, body.model);
+  assert.ok(calls[0].tools.length <= 128);
+  assert.ok(calls[0].tools.some(({ name }) => name === "WebFetch"));
+  assert.ok(calls[0].tools.some(({ name }) => name === "airkit_tool_search"));
   assert.equal(response.statusCode, 200);
 });
 

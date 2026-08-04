@@ -190,7 +190,7 @@ export async function handleCompatibilityMessage({
 
     if (bridgeCalls.length === 0) {
       outwardContent.push(...executorMessage.content.map((block) => structuredClone(block)));
-      return finalizeMessage(executorMessage, outwardContent, executorUsage);
+      return finalizeMessage(executorMessage, outwardContent, executorUsage, body);
     }
 
     const resumeResults = [];
@@ -231,7 +231,7 @@ export async function handleCompatibilityMessage({
     }
 
     if (hasNormalToolCall) {
-      return finalizeMessage(executorMessage, outwardContent, executorUsage);
+      return finalizeMessage(executorMessage, outwardContent, executorUsage, body);
     }
 
     messages.push({ role: "assistant", content: structuredClone(executorMessage.content) });
@@ -242,9 +242,13 @@ export async function handleCompatibilityMessage({
 }
 
 export function writeAnthropicMessage(response, message, stream) {
+  const outwardMessage = {
+    ...message,
+    usage: copyUsage(message.usage),
+  };
   if (!stream) {
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify(message));
+    response.end(JSON.stringify(outwardMessage));
     return;
   }
 
@@ -256,15 +260,15 @@ export function writeAnthropicMessage(response, message, stream) {
   writeSse(response, "message_start", {
     type: "message_start",
     message: {
-      ...message,
+      ...outwardMessage,
       content: [],
       stop_reason: null,
       stop_sequence: null,
-      usage: messageStartUsage(message.usage),
+      usage: messageStartUsage(outwardMessage.usage),
     },
   });
 
-  for (const [index, block] of message.content.entries()) {
+  for (const [index, block] of outwardMessage.content.entries()) {
     const completeStart = isCompleteStartBlock(block);
     writeSse(response, "content_block_start", {
       type: "content_block_start",
@@ -277,8 +281,11 @@ export function writeAnthropicMessage(response, message, stream) {
 
   writeSse(response, "message_delta", {
     type: "message_delta",
-    delta: { stop_reason: message.stop_reason, stop_sequence: message.stop_sequence },
-    usage: messageDeltaUsage(message.usage),
+    delta: {
+      stop_reason: outwardMessage.stop_reason,
+      stop_sequence: outwardMessage.stop_sequence,
+    },
+    usage: messageDeltaUsage(outwardMessage.usage),
   });
   writeSse(response, "message_stop", { type: "message_stop" });
   response.end();
@@ -412,12 +419,31 @@ function expandDeferredTool(tool) {
   return expanded;
 }
 
-function finalizeMessage(message, content, executorUsage) {
+function finalizeMessage(message, content, executorUsage, requestBody) {
+  const usage = aggregateExecutorUsage(message.usage, executorUsage);
+  fillMissingUsage(usage, requestBody, content);
   return {
     ...message,
     content,
-    usage: aggregateExecutorUsage(message.usage, executorUsage),
+    usage,
   };
+}
+
+function fillMissingUsage(usage, requestBody, content) {
+  const hasPromptUsage = [
+    usage.input_tokens,
+    usage.cache_read_input_tokens,
+    usage.cache_creation_input_tokens,
+  ].some((value) => typeof value === "number" && value > 0);
+  if (!hasPromptUsage) usage.input_tokens = estimateSerializedTokens(requestBody);
+  if (!(typeof usage.output_tokens === "number" && usage.output_tokens > 0)) {
+    usage.output_tokens = estimateSerializedTokens(content);
+  }
+}
+
+function estimateSerializedTokens(value) {
+  const bytes = Buffer.byteLength(JSON.stringify(value) ?? "", "utf8");
+  return Math.max(1, Math.min(1_000_000, Math.ceil(bytes / 4)));
 }
 
 function aggregateExecutorUsage(finalUsage, executorUsage) {
@@ -500,9 +526,16 @@ function requiresWholeRequestFallback({ body, config, serverHistory, serverTools
   if (serverHistory.containerId !== null || serverHistory.pendingServerCallIds.length > 0) return true;
   if (Array.isArray(body?.mcp_servers) && body.mcp_servers.length > 0) return true;
 
+  const toolLimit = resolveToolSearchMaxTools(config, body?.model);
+  const toolSearchOwnsOverflow =
+    config.toolSearch?.mode === "bridge" &&
+    serverTools.families.has("toolSearch") &&
+    toolLimit !== null &&
+    Array.isArray(body?.tools) &&
+    body.tools.length > toolLimit;
   const { policies } = resolveCompatibilityPolicies(config, VERIFIED_NATIVE_COMPATIBILITY);
   for (const family of serverTools.clientFamilies) {
-    if (policies[family] !== "native") return true;
+    if (policies[family] !== "native" && !toolSearchOwnsOverflow) return true;
   }
 
   const families = new Set([...serverTools.families, ...serverHistory.families]);
@@ -726,9 +759,7 @@ function messageStartUsage(usage) {
 }
 
 function messageDeltaUsage(usage) {
-  const delta = { output_tokens: usage?.output_tokens ?? 0 };
-  if (usage?.iterations !== undefined) delta.iterations = structuredClone(usage.iterations);
-  return delta;
+  return { output_tokens: usage?.output_tokens ?? 0 };
 }
 
 function writeSse(response, event, data) {
