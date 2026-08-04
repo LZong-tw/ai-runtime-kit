@@ -1046,7 +1046,7 @@ test("ordinary DeepSeek Messages requests remove unsupported Claude effort befor
   }]);
 });
 
-test("oversized configured GPT tool catalogs use the local ToolSearch bridge within the upstream limit", async () => {
+test("oversized GPT-family tool catalogs use the local ToolSearch bridge within the upstream limit", async () => {
   const calls = [];
   const replies = [
     message({
@@ -1064,7 +1064,7 @@ test("oversized configured GPT tool catalogs use the local ToolSearch bridge wit
     pluginConfig: {
       toolSearch: {
         mode: "bridge",
-        maxToolsByModel: { "gpt-5.6-terra": 128 },
+        maxToolsByModel: { "gpt-*": 128 },
       },
     },
     coreClient: createPluginCoreClient({
@@ -1075,7 +1075,7 @@ test("oversized configured GPT tool catalogs use the local ToolSearch bridge wit
     }),
   });
   const body = {
-    model: "oneportal/gpt-5.6-terra",
+    model: "oneportal/gpt-5.4",
     max_tokens: 8,
     messages: [{ role: "user", content: "hi" }],
     tools: Array.from({ length: 171 }, (_, index) => ({

@@ -329,17 +329,19 @@ test("routeLog accepts booleans and rejects everything else", () => {
   );
 });
 
-test("ToolSearch can apply an explicit per-model client-tool limit", () => {
+test("ToolSearch can apply exact and family-wide client-tool limits", () => {
   const config = {
     ...VALID_CONFIG,
     toolSearch: {
       mode: "bridge",
-      maxToolsByModel: { "gpt-5.6-terra": 128 },
+      maxToolsByModel: { "gpt-*": 128, "gpt-5.6-terra": 96 },
     },
   };
 
   assert.doesNotThrow(() => validateCompatibilityConfig(config));
-  assert.equal(resolveToolSearchMaxTools(config, "provider/gpt-5.6-terra"), 128);
+  assert.equal(resolveToolSearchMaxTools(config, "provider/gpt-5.6-terra"), 96);
+  assert.equal(resolveToolSearchMaxTools(config, "provider/gpt-5.4"), 128);
+  assert.equal(resolveToolSearchMaxTools(config, "gpt-future"), 128);
   assert.equal(resolveToolSearchMaxTools(config, "GLM-5.2"), null);
   assert.throws(
     () => validateCompatibilityConfig({
