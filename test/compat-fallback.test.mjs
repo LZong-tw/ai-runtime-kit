@@ -540,7 +540,7 @@ test("a rejected advisor fallback is diagnosed on stderr and the response still 
   const logged = await captureFallbackLog(() =>
     handleCompatibilityMessage({
       body: fallbackBody({ tools: [{ type: "advisor_20260301", model: "claude-opus-5" }] }),
-      config: VALID_CONFIG,
+      config: { ...VALID_CONFIG, routeLog: true },
       coreClient: createCoreClient(fixture.options),
       response: downstream,
     })
@@ -595,7 +595,7 @@ test("a rejected non-advisor fallback is reported without the advisor explanatio
   const logged = await captureFallbackLog(() =>
     handleCompatibilityMessage({
       body: fallbackBody(),
-      config: VALID_CONFIG,
+      config: { ...VALID_CONFIG, routeLog: true },
       coreClient: createCoreClient(fixture.options),
       response: downstream,
     })

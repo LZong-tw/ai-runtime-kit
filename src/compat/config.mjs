@@ -24,6 +24,7 @@ const CONFIG_KEYS = new Set([
 ]);
 const FALLBACK_KEYS = new Set(["provider", "model", "maxContinuationTurns"]);
 const FAMILY_KEYS = new Set(["mode", "fallback"]);
+const TOOL_SEARCH_KEYS = new Set(["mode", "fallback", "maxToolsByModel"]);
 // Advisor alone gets this key. A server tool the upstream route cannot resolve
 // does not fail quietly in its own lane: its mere presence in `tools` diverts
 // the entire request to the fallback route, so an unusable advisor takes down
@@ -62,7 +63,11 @@ export function validateCompatibilityConfig(config) {
     const definition = config[family];
     assertRecord(definition, family, true);
     if (family === "advisor") rejectRemovedAdvisorConfig(definition);
-    rejectUnknownKeys(definition, family === "advisor" ? ADVISOR_KEYS : FAMILY_KEYS, family);
+    rejectUnknownKeys(
+      definition,
+      family === "advisor" ? ADVISOR_KEYS : family === "toolSearch" ? TOOL_SEARCH_KEYS : FAMILY_KEYS,
+      family,
+    );
     if (
       family === "advisor" &&
       definition.unsupported !== undefined &&
@@ -72,6 +77,9 @@ export function validateCompatibilityConfig(config) {
     }
     if (definition.fallback !== undefined) {
       validateFallback(definition.fallback, `${family}.fallback`, FAMILY_FALLBACK_KEYS, false);
+    }
+    if (family === "toolSearch" && definition.maxToolsByModel !== undefined) {
+      validateToolSearchLimits(definition.maxToolsByModel);
     }
     if (!modes.includes(definition.mode)) {
       throw new Error(`${family}.mode must be one of: ${modes.join(", ")}`);
@@ -104,6 +112,13 @@ export function validateCompatibilityConfig(config) {
   return config;
 }
 
+export function resolveToolSearchMaxTools(config, model) {
+  const limits = config?.toolSearch?.maxToolsByModel;
+  if (!isRecord(limits) || typeof model !== "string") return null;
+  const bareModel = model.includes("/") ? model.slice(model.lastIndexOf("/") + 1) : model;
+  return limits[model] ?? limits[bareModel] ?? null;
+}
+
 function validateRouteTable(routes, label) {
   assertRecord(routes, label);
   rejectUnknownKeys(routes, ROUTE_KEYS, label);
@@ -115,6 +130,18 @@ function validateRouteTable(routes, label) {
     if (selector === undefined) continue;
     if (typeof selector !== "string" || !ROUTE_SELECTOR_PATTERN.test(selector)) {
       throw new Error(`${label}.${key} must be a provider-qualified model selector`);
+    }
+  }
+}
+
+function validateToolSearchLimits(limits) {
+  assertRecord(limits, "toolSearch.maxToolsByModel");
+  for (const [model, limit] of Object.entries(limits)) {
+    if (model.trim() === "") {
+      throw new Error("toolSearch.maxToolsByModel keys must be model identifiers");
+    }
+    if (!Number.isInteger(limit) || limit < 6 || limit > 512) {
+      throw new Error("toolSearch.maxToolsByModel values must be integers from 6 through 512");
     }
   }
 }
