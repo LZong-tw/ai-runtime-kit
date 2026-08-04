@@ -789,6 +789,7 @@ export async function exportOssRelease({ outDir }) {
   await copyFile(join(here, "context-heartbeat.mjs"), join(outDir, "src", "context-heartbeat.mjs"));
   await copyFile(join(here, "context-observability.mjs"), join(outDir, "src", "context-observability.mjs"));
   for (const module of [
+    "activity.mjs",
     "config.mjs",
     "effort.mjs",
     "fallback.mjs",

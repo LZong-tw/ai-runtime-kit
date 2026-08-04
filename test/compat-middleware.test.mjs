@@ -129,6 +129,34 @@ test("middleware preserves upstream SSE bytes and 429 responses", async (t) => {
   assert.equal(await throttled.text(), '{"error":{"type":"rate_limit_error"}}');
 });
 
+test("middleware adds a factual activity block before streamed GPT tool use without fabricating thinking", async (t) => {
+  const sse = [
+    ["message_start", { type: "message_start", message: { model: "gpt-5.6-terra", content: [] } }],
+    ["content_block_start", { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "call_1", name: "Bash", input: {} } }],
+    ["content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"command":"pwd"}' } }],
+    ["content_block_stop", { type: "content_block_stop", index: 0 }],
+    ["message_stop", { type: "message_stop" }],
+  ].map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join("");
+  const upstream = await startFixture(t, async (_request, response) => {
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write(sse.slice(0, 91));
+    response.end(sse.slice(91));
+  });
+  const adapter = await startAdapter(t, upstream.origin);
+
+  const result = await adapterFetch(adapter.origin, "/v1/messages", {
+    model: "claude-airkit-mode[1m]", messages: [], stream: true,
+  });
+  const body = await result.text();
+
+  assert.match(body, /"index":0,"content_block":\{"type":"text","text":""\}/);
+  assert.match(body, /"text_delta","text":"Running tool: Bash"/);
+  assert.match(body, /"index":1,"content_block":\{"type":"tool_use","id":"call_1","name":"Bash","input":\{\}\}/);
+  assert.match(body, /"index":1,"delta":\{"type":"input_json_delta"/);
+  assert.match(body, /"partial_json":"\{\\"command\\":\\"pwd\\"\}"/);
+  assert.doesNotMatch(body, /thinking_delta|\"type\":\"thinking\"/);
+});
+
 test("middleware proxies non-compatibility gateway paths with the generated gateway token", async (t) => {
   const upstream = await startFixture(t, async (request, response) => {
     assert.equal(request.url, "/v1/models?limit=3");
