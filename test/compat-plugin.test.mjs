@@ -1046,6 +1046,31 @@ test("ordinary DeepSeek Messages requests remove unsupported Claude effort befor
   }]);
 });
 
+test("ordinary GPT Messages requests reserve output space beyond short reasoning budgets", async () => {
+  const calls = [];
+  const fixture = await createPluginFixture({
+    coreClient: createPluginCoreClient({
+      async forwardRaw(input) {
+        calls.push(JSON.parse(input.body.toString("utf8")));
+      },
+    }),
+  });
+  const body = {
+    model: "oneportal/gpt-5.6-terra",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "Summarize the restored session." }],
+  };
+
+  await fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify(body))),
+    createRecordingResponse(),
+    fixture.helpers,
+  );
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].max_tokens, 1024);
+});
+
 test("oversized GPT-family tool catalogs use the local ToolSearch bridge within the upstream limit", async () => {
   const calls = [];
   const replies = [
