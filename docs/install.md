@@ -192,7 +192,7 @@ fallback bound to its source name, and all six modes, for example:
     }],
     "plugins": [{
       "id": "airkit-compatibility",
-      "module": "@lzong/ai-runtime-kit/compatibility-plugin",
+      "module": "@untionglim/ai-runtime-kit/compatibility-plugin",
       "config": {
         "fallback": {
           "provider": "your-anthropic-provider",
