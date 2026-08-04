@@ -13,6 +13,17 @@ export function rewriteClaudeEffortForOpenAI(body) {
   return { ...withoutClaudeEffort(body), reasoning_effort: effort };
 }
 
+// GPT reasoning models can spend a tiny completion allowance entirely on
+// invisible reasoning. Claude Code uses 64-token requests for short internal
+// summaries; give those requests enough room to produce the required text.
+export function ensureGptMinimumOutputTokens(body) {
+  if (!isRecord(body) || typeof body.model !== "string" || !isGpt(modelName(body.model)) || !Number.isInteger(body.max_tokens)) {
+    return body;
+  }
+  if (body.max_tokens >= 1024) return body;
+  return { ...body, max_tokens: 1024 };
+}
+
 function withoutClaudeEffort(body) {
   const rest = { ...body };
   delete rest.output_config;
@@ -27,6 +38,10 @@ function withoutClaudeEffort(body) {
 function isDeepSeek(model) {
   const normalized = model.toLowerCase();
   return normalized === "deepseek-v4-flash" || normalized === "deepseek-v4-pro";
+}
+
+function isGpt(model) {
+  return typeof model === "string" && model.toLowerCase().startsWith("gpt-");
 }
 
 function mappedEffort(model, effort) {

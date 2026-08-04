@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { rewriteClaudeEffortForOpenAI } from "../src/compat/effort.mjs";
+import {
+  ensureGptMinimumOutputTokens,
+  rewriteClaudeEffortForOpenAI,
+} from "../src/compat/effort.mjs";
 
 test("maps Claude Code effort only for providers that accept reasoning_effort", () => {
   const cases = [
@@ -60,5 +63,28 @@ test("preserves unrelated output config and does not rewrite unsupported models 
     { model: "oneportal/GLM-5.2", output_config: { effort: 3 } },
   ]) {
     assert.equal(rewriteClaudeEffortForOpenAI(body), body);
+  }
+});
+
+test("raises GPT short output budgets so reasoning cannot consume the entire completion", () => {
+  assert.deepEqual(
+    ensureGptMinimumOutputTokens({
+      model: "oneportal/gpt-5.6-terra",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "summarize this context" }],
+    }),
+    {
+      model: "oneportal/gpt-5.6-terra",
+      max_tokens: 1024,
+      messages: [{ role: "user", content: "summarize this context" }],
+    },
+  );
+
+  for (const body of [
+    { model: "oneportal/gpt-5.6-terra", max_tokens: 1024 },
+    { model: "oneportal/deepseek-v4-flash", max_tokens: 64 },
+    { model: "oneportal/gpt-5.6-terra", max_tokens: "64" },
+  ]) {
+    assert.equal(ensureGptMinimumOutputTokens(body), body);
   }
 });
