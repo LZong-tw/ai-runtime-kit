@@ -1608,8 +1608,13 @@ function airkitEnvVar(prefix, profileName) {
 
 function publicPackage() {
   return {
-    name: "@lzong/ai-runtime-kit",
+    name: "@untionglim/ai-runtime-kit",
     version: "0.2.0",
+    publishConfig: { access: "public" },
+    repository: {
+      type: "git",
+      url: "git+https://github.com/LZong-tw/ai-runtime-kit.git",
+    },
     description: "Public-safe runtime profile templates for AI client wrappers.",
     type: "module",
     exports: "./src/airkit.mjs",

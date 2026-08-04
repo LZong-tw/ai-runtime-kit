@@ -164,6 +164,15 @@ test("isolated verifier restarts management-only before trusting persisted dange
 });
 
 test("OSS package allowlist excludes tests and migration artifacts", async () => {
+  const expectedIdentity = {
+    name: "@untionglim/ai-runtime-kit",
+    version: "0.2.0",
+    publishConfig: { access: "public" },
+    repository: {
+      type: "git",
+      url: "git+https://github.com/LZong-tw/ai-runtime-kit.git",
+    },
+  };
   const expectedFiles = [
     "CLAUDE.md",
     "README.md",
@@ -186,6 +195,13 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
 
     assert.deepEqual(packageJson.files, expectedFiles);
     assert.deepEqual(exportedPackage.files, expectedFiles);
+    for (const candidate of [packageJson, exportedPackage]) {
+      assert.equal(candidate.name, expectedIdentity.name);
+      assert.equal(candidate.version, expectedIdentity.version);
+      assert.deepEqual(candidate.publishConfig, expectedIdentity.publishConfig);
+      assert.deepEqual(candidate.repository, expectedIdentity.repository);
+      assert.equal(candidate.dependencies, undefined);
+    }
     for (const document of ["README.md", "CLAUDE.md"]) {
       assert.equal(
         await readFile(join(outDir, document), "utf8"),
