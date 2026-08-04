@@ -84,7 +84,7 @@ export function createCoreClient({ config, fetchImpl = fetch, readFile = readFil
 // Compatibility handling must use the public CCR gateway so its normal proxy
 // owns routing and request recording. This client deliberately has no access
 // to CCR's core credential or generated configuration file.
-export function createGatewayClient({ origin, token, fetchImpl = fetch }) {
+export function createGatewayClient({ origin, token, fetchImpl = fetch, responseTransformFactory = null }) {
   const gatewayOrigin = normalizeGatewayOrigin(origin);
   if (typeof token !== "string" || token.length === 0) {
     throw new Error("CCR gateway authentication is missing or invalid");
@@ -126,7 +126,7 @@ export function createGatewayClient({ origin, token, fetchImpl = fetch }) {
     },
     async forwardRaw({ body, headers, method = "POST", response, signal }) {
       const result = await request({ body, headers, method, path: "/v1/messages", signal });
-      await pipeCoreResponse(result, response, signal);
+      await pipeCoreResponse(result, response, signal, responseTransformFactory?.());
     },
     async forward({ body, headers, method = "GET", path, response, signal }) {
       const result = await request({ body, headers, method, path, signal });
@@ -833,7 +833,7 @@ async function parseCoreMessageResponse(response) {
   return response.json();
 }
 
-async function pipeCoreResponse(result, response, signal) {
+async function pipeCoreResponse(result, response, signal, transform = null) {
   const headers = Object.fromEntries(result.headers);
   response.writeHead(result.status, headers);
   if (result.body === null) {
@@ -846,9 +846,14 @@ async function pipeCoreResponse(result, response, signal) {
     while (true) {
       const { done, value } = await waitForPassthrough(reader.read(), response, signal);
       if (done) break;
-      if (!response.write(Buffer.from(value))) {
+      const transformed = transform?.push(value) ?? value;
+      if (transformed.byteLength > 0 && !response.write(Buffer.from(transformed))) {
         await waitForResponseEvent(response, "drain", signal);
       }
+    }
+    const tail = transform?.finish();
+    if (tail?.byteLength > 0 && !response.write(Buffer.from(tail))) {
+      await waitForResponseEvent(response, "drain", signal);
     }
     await endResponse(response, signal);
   } catch (error) {

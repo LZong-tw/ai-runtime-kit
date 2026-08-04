@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 
 import { createGatewayClient } from "./gateway.mjs";
+import { createGptActivitySseTransform } from "./activity.mjs";
 import {
   createMcpHandler,
   createMessagesHandler,
@@ -22,7 +23,11 @@ export async function startCompatibilityMiddleware({
   gatewayToken,
 }) {
   validateCompatibilityConfig(compatibility);
-  const coreClient = createGatewayClient({ origin: gatewayOrigin, token: gatewayToken });
+  const coreClient = createGatewayClient({
+    origin: gatewayOrigin,
+    token: gatewayToken,
+    responseTransformFactory: createGptActivitySseTransform,
+  });
   const { policies } = resolveCompatibilityPolicies(
     compatibility,
     VERIFIED_NATIVE_COMPATIBILITY,
