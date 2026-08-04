@@ -292,7 +292,7 @@ async function main() {
     assert.ok(sqliteAfterInit.length > 0, "CCR must initialize SQLite inside the isolated root");
 
     const installedRuntime = await import(pathToFileURL(
-      join(runtimeRoot, "node_modules", "@lzong", "ai-runtime-kit", "src", "airkit.mjs"),
+      join(runtimeRoot, "node_modules", "@untionglim", "ai-runtime-kit", "src", "airkit.mjs"),
     ));
     const catalog = fakeCatalog(providerPort);
     let managedSaves = 0;
@@ -380,7 +380,7 @@ async function main() {
     });
     const fallbackFamilies = ["webSearch", "webFetch", "codeExecution", "mcpConnector"];
     const providerRequests = JSON.parse(await readFile(fakeProvider.requestFile, "utf8"));
-    const installedCompatRoot = join(runtimeRoot, "node_modules", "@lzong", "ai-runtime-kit", "src", "compat");
+    const installedCompatRoot = join(runtimeRoot, "node_modules", "@untionglim", "ai-runtime-kit", "src", "compat");
     const [{ inspectPendingServerHistory }, { resolveCompatibilityPolicies }] = await Promise.all([
       import(pathToFileURL(join(installedCompatRoot, "server-history.mjs"))),
       import(pathToFileURL(join(installedCompatRoot, "config.mjs"))),
@@ -527,7 +527,7 @@ function fakeCatalog(providerPort) {
         LOG: false,
         plugins: [{
           id: "airkit-compatibility",
-          module: "@lzong/ai-runtime-kit/compatibility-plugin",
+          module: "@untionglim/ai-runtime-kit/compatibility-plugin",
           config: fakeCompatibilityConfig("mcp"),
         }],
         Providers: [{

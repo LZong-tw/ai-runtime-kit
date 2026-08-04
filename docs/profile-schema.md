@@ -170,7 +170,7 @@ entry in `ccr.plugins`:
 ```json
 {
   "id": "airkit-compatibility",
-  "module": "@lzong/ai-runtime-kit/compatibility-plugin",
+  "module": "@untionglim/ai-runtime-kit/compatibility-plugin",
   "config": {
     "fallback": {
       "provider": "your-anthropic-provider",

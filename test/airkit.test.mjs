@@ -187,6 +187,17 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
   const packageJson = JSON.parse(
     await readFile(resolve(import.meta.dirname, "..", "package.json"), "utf8"),
   );
+  const legacyPackage = ["@lzong", "ai-runtime-kit"].join("/");
+  const legacyScope = legacyPackage.split("/")[0];
+  const legacyReference = new RegExp(`${legacyPackage}|node_modules["', )]+${legacyScope}`);
+  for (const relativePath of [
+    "scripts/verify-ccr3-e2e.mjs",
+    "docs/install.md",
+    "docs/profile-schema.md",
+  ]) {
+    const text = await readFile(resolve(import.meta.dirname, "..", relativePath), "utf8");
+    assert.doesNotMatch(text, legacyReference);
+  }
   const outDir = await mkdtemp(join(tmpdir(), "airkit-export-"));
 
   try {
@@ -4583,7 +4594,7 @@ function compatibilityCatalog() {
   });
   catalog.profiles[0].ccr.plugins = [{
     id: "airkit-compatibility",
-    module: "@lzong/ai-runtime-kit/compatibility-plugin",
+    module: "@untionglim/ai-runtime-kit/compatibility-plugin",
     config: {
       fallback: {
         provider: "anthropic-messages",
