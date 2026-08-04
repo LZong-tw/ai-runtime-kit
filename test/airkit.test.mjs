@@ -983,6 +983,26 @@ test("CCR 3 launch rejects passthrough args that set an apiKeyHelper", () => {
   );
 });
 
+test("CCR 3 launch rejects profile and passthrough args that replace the default system prompt", () => {
+  for (const args of [
+    ["--system-prompt", "replacement"],
+    ["--system-prompt=replacement"],
+    ["--system-prompt-file", "/tmp/replacement.md"],
+    ["--system-prompt-file=/tmp/replacement.md"],
+  ]) {
+    const catalog = launchCatalog();
+    catalog.profiles[0].launch.args = args;
+    assert.throws(
+      () => buildLaunchPlan(catalog, "launch-example", { mode: "auto" }),
+      /must not replace Claude Code's default system prompt/,
+    );
+    assert.throws(
+      () => buildLaunchPlan(launchCatalog(), "launch-example", { mode: "auto", userArgs: args }),
+      /must not replace Claude Code's default system prompt/,
+    );
+  }
+});
+
 test("CCR 3 launch rejects a profile env that redirects the Claude home", () => {
   for (const key of ["CLAUDE_CONFIG_DIR", "HOME"]) {
     const catalog = launchCatalog();

@@ -1015,8 +1015,10 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
   const renderedLaunchArgs = (launch.args ?? []).map((arg) => renderTemplateValue(arg, launchVars));
   const plainClaude = options.plainClaude === true;
   // Passthrough arguments reach the same Claude argv as profile args, so both
-  // go through the apiKeyHelper rejection.
-  assertNoManagedApiKeyHelperOverride([...renderedLaunchArgs, ...(options.userArgs ?? [])]);
+  // go through the managed launch-argument rejections.
+  const combinedLaunchArgs = [...renderedLaunchArgs, ...(options.userArgs ?? [])];
+  assertNoManagedApiKeyHelperOverride(combinedLaunchArgs);
+  assertNoDefaultSystemPromptOverride(combinedLaunchArgs);
   const renderedLaunchEnv = renderTemplateValue(launch.env ?? {}, launchVars);
   for (const key of ["CLAUDE_CONFIG_DIR", "HOME"]) {
     if (Object.hasOwn(renderedLaunchEnv, key)) {
@@ -1113,6 +1115,16 @@ export function assertNoManagedApiKeyHelperOverride(args) {
       // environment, so a profile that ships one would silently authenticate
       // the session as somebody else.
       throw new Error("Claude launch args must not set apiKeyHelper; it overrides the AirKit gateway token");
+    }
+  }
+}
+
+export function assertNoDefaultSystemPromptOverride(args) {
+  for (const raw of args) {
+    const arg = String(raw);
+    if (arg === "--system-prompt" || arg.startsWith("--system-prompt=")
+      || arg === "--system-prompt-file" || arg.startsWith("--system-prompt-file=")) {
+      throw new Error("Claude launch args must not replace Claude Code's default system prompt");
     }
   }
 }
