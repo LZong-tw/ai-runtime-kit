@@ -2607,6 +2607,11 @@ test("GPT completion guard blocks one Stop after a tool-bearing turn without ret
       decision: "block",
       reason: "Continue working when safe; do not stop after partial completion.",
     });
+    await processCompletionGuardHook({ hook_event_name: "PostToolUse", session_id: sessionId }, env);
+    assert.equal(await processCompletionGuardHook({
+      hook_event_name: "Stop",
+      session_id: sessionId,
+    }, env), null, "a later tool use cannot restore the consumed block");
     assert.equal(await processCompletionGuardHook({
       hook_event_name: "Stop",
       session_id: sessionId,
@@ -2651,10 +2656,14 @@ test("launch mode exports its completion guard limit only for the selected mode"
   catalog.profiles[0].launch.modes.fast.completionGuard = { maxStopBlocks: 1 };
 
   const guarded = buildLaunchPlan(catalog, "launch-example", { mode: "fast" });
-  const unguarded = buildLaunchPlan(catalog, "launch-example", { mode: "auto" });
+  const unguarded = buildLaunchPlan(catalog, "launch-example", {
+    mode: "auto",
+    env: { AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS: "1" },
+  });
 
   assert.equal(guarded.launch.env.AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS, "1");
   assert.equal(unguarded.launch.env.AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS, undefined);
+  assert.ok(unguarded.launch.clearEnv.includes("AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS"));
 });
 
 test("AirClaude renders an additive session plugin for the heartbeat", async () => {

@@ -110,7 +110,8 @@ export async function processCompletionGuardHook(input, env = process.env) {
   }
 
   if (input?.hook_event_name === "PostToolUse") {
-    await saveCompletionGuardState(statePath, { armed: true, stopBlocks: 0 });
+    const state = await loadCompletionGuardState(statePath);
+    await saveCompletionGuardState(statePath, { armed: true, stopBlocks: state?.stopBlocks ?? 0 });
     return null;
   }
 
