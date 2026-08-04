@@ -682,6 +682,39 @@ test("CCR 3 managed providers can route upstream through a per-launch proxy", ()
   );
 });
 
+test("prepareLaunch uses the process Headroom provider URL when no test env is injected", async () => {
+  const catalog = compatibilityCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-headroom-launch-"));
+  const saved = [];
+  const originalProviderBaseUrl = process.env.AIRCLAUDE_PROVIDER_BASE_URL;
+  const originalDemoApiKey = process.env.DEMO_API_KEY;
+  process.env.AIRCLAUDE_PROVIDER_BASE_URL = "http://127.0.0.1:8804/v1/chat/completions";
+  process.env.DEMO_API_KEY = "resolved-at-runtime";
+
+  try {
+    await prepareLaunch(catalog, "launch-example", {
+      ccrClient: ccrTestClient(saved),
+      configDir,
+      commandExists: async () => true,
+      launch: false,
+      runtimeVersions: passingRuntimeVersions(),
+      runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key", stderr: "" }),
+    });
+
+    assert.equal(saved.length, 1);
+    assert.equal(
+      saved[0].Providers.find((provider) => provider.name === "airkit-provider-launch-example-demo").api_base_url,
+      "http://127.0.0.1:8804/v1/chat/completions",
+    );
+  } finally {
+    if (originalProviderBaseUrl === undefined) delete process.env.AIRCLAUDE_PROVIDER_BASE_URL;
+    else process.env.AIRCLAUDE_PROVIDER_BASE_URL = originalProviderBaseUrl;
+    if (originalDemoApiKey === undefined) delete process.env.DEMO_API_KEY;
+    else process.env.DEMO_API_KEY = originalDemoApiKey;
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
 test("CCR compatibility requires a managed Anthropic Messages provider and local model", () => {
   const cases = [
     ["missing provider", (catalog) => {

@@ -1217,7 +1217,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
   const managed = buildCcr3ManagedConfig(catalog, profileName, currentConfig, {
     apiKeys,
     configDir: plan.configDir,
-    env: options.env,
+    env: launchEnv,
   });
   if (!isDeepStrictEqual(managed.config, currentConfig)) {
     reportPrunedManagedState(managed.pruned, options.stderr ?? process.stderr);
