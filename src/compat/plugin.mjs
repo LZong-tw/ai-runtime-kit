@@ -118,7 +118,6 @@ export function createMessagesHandler({ config, coreClient, policies }) {
       const scopedBody = (config.advisor?.unsupported ?? DEFAULT_ADVISOR_UNSUPPORTED) === "strip"
         ? stripServerToolFamily(routedBody, "advisor")
         : routedBody;
-      if (scopedBody !== routedBody) reportAdvisorStrip();
       const effortAdjustedBody = rewriteClaudeEffortForOpenAI(scopedBody);
       const outputBudgetAdjustedBody = ensureGptMinimumOutputTokens(effortAdjustedBody);
       const outboundBody = applyToolSearchBudget(
@@ -175,26 +174,6 @@ export function createMessagesHandler({ config, coreClient, policies }) {
       logRequestTerminal({ outcome, response, telemetry });
     }
   };
-}
-
-// Once per process, not once per request: this fires on every request Claude
-// Code makes while the advisor tool is registered, and a line each would bury
-// the log it shares with route decisions. The standing state belongs in doctor;
-// this line exists so the change is visible in the daemon log at all. Not gated
-// behind routeLog — a request whose tool set was edited should say so even when
-// per-request tracing is off.
-let advisorStripReported = false;
-function reportAdvisorStrip() {
-  if (advisorStripReported) return;
-  advisorStripReported = true;
-  try {
-    process.stderr.write(`[airkit-advisor-stripped] ${JSON.stringify({
-      at: new Date().toISOString(),
-      note: "advisor tool definitions are being removed from requests so they stay on their normal route instead of diverting to the fallback route, which cannot resolve the advisor sub-call; set advisor.unsupported to \"passthrough\" to re-test once the gateway can. Reported once per daemon start.",
-    })}\n`);
-  } catch {
-    // never let logging interfere with the request
-  }
 }
 
 function beginRequestTelemetry(enabled, request, response) {

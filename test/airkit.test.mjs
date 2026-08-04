@@ -1194,7 +1194,7 @@ test("launch spawns Claude against the shared home, not an isolated CCR profile"
     );
     assert.equal(spawned.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:3456");
     assert.equal(spawned.env.ANTHROPIC_API_BASE_URL, "http://127.0.0.1:3456");
-    assert.equal(spawned.env.CLAUDE_AGENT_API_BASE_URL, "http://127.0.0.1:3456");
+    assert.equal(Object.hasOwn(spawned.env, "CLAUDE_AGENT_API_BASE_URL"), false);
     assert.equal(spawned.env.ANTHROPIC_AUTH_TOKEN, "gateway-key-from-helper");
     assert.equal(spawned.env.ANTHROPIC_CUSTOM_HEADERS, "x-airkit-mode: auto");
     assert.equal(
@@ -1261,7 +1261,7 @@ test("a profile-pinned gateway address survives to the spawned child", async () 
     // must receive what the plan (and any dry run) reported.
     assert.equal(calls[0].env.ANTHROPIC_BASE_URL, "http://127.0.0.1:9314");
     assert.equal(calls[0].env.ANTHROPIC_API_BASE_URL, "http://127.0.0.1:9314");
-    assert.equal(calls[0].env.CLAUDE_AGENT_API_BASE_URL, "http://127.0.0.1:9314");
+    assert.equal(Object.hasOwn(calls[0].env, "CLAUDE_AGENT_API_BASE_URL"), false);
   } finally {
     await rm(home, { force: true, recursive: true });
     await rm(configDir, { force: true, recursive: true });
@@ -3732,7 +3732,6 @@ test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves
       CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
       ANTHROPIC_API_BASE_URL: "http://127.0.0.1:3456",
       ANTHROPIC_BASE_URL: "http://127.0.0.1:3456",
-      CLAUDE_AGENT_API_BASE_URL: "http://127.0.0.1:3456",
       ANTHROPIC_AUTH_TOKEN: "gateway-key-from-helper",
     });
   } finally {
@@ -3813,7 +3812,7 @@ test("prepareLaunch starts the adapter, removes legacy routes, and keeps its gat
       env: {
         ANTHROPIC_API_BASE_URL: "http://127.0.0.1:4599",
         ANTHROPIC_BASE_URL: "http://127.0.0.1:4599",
-        CLAUDE_AGENT_API_BASE_URL: "http://127.0.0.1:4599",
+        CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0",
       },
     });
     const mcpIndex = spawned[0].args.indexOf("--mcp-config");
@@ -3837,6 +3836,11 @@ test("prepareLaunch starts the adapter, removes legacy routes, and keeps its gat
       spawned[0].env.ANTHROPIC_BASE_URL,
       "http://127.0.0.1:4599",
       "the adapter overrides even an environment-referenced CCR gateway address",
+    );
+    assert.equal(
+      spawned[0].env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB,
+      "0",
+      "Claude Agent subprocesses must retain the adapter route",
     );
     assert.equal(adapterClosed, 1, "prepareLaunch waits for Claude to exit before returning");
     childEvents.get("error")?.forEach((listener) => listener(new Error("after exit")));

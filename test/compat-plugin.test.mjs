@@ -965,6 +965,39 @@ test("ordinary Messages requests preserve raw bytes and abort propagation", asyn
 // The whole point of the strip is where it happens: a server-tool definition
 // diverts the request on presence alone, so removing advisor after that
 // decision would be too late. These two assert the decision itself flips.
+test("advisor stripping does not write diagnostics into the interactive terminal", async () => {
+  const fixture = await createPluginFixture({
+    coreClient: createPluginCoreClient({
+      async forwardRaw(input) {
+        input.response.end();
+      },
+    }),
+  });
+  const body = Buffer.from(JSON.stringify({
+    model: "claude-sonnet-5",
+    messages: [{ role: "user", content: "hi" }],
+    tools: [{ name: "Bash" }, { type: "advisor_20260301" }],
+  }), "utf8");
+  const captured = [];
+  const originalWrite = process.stderr.write;
+  process.stderr.write = (chunk) => {
+    captured.push(String(chunk));
+    return true;
+  };
+
+  try {
+    await fixture.messages.handler(
+      createPluginRequest(body),
+      createRecordingResponse(),
+      fixture.helpers,
+    );
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+
+  assert.equal(captured.some((line) => line.startsWith("[airkit-advisor-stripped]")), false);
+});
+
 test("an advisor definition is stripped before the compatibility decision", async () => {
   const forwarded = [];
   const fixture = await createPluginFixture({
