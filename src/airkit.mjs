@@ -933,6 +933,7 @@ const LAUNCH_CLEARED_ENV = Object.freeze([
   "ANTHROPIC_DEFAULT_OPUS_MODEL",
   "CCR_CLAUDE_CODE_MODEL",
   "CODEXL_CLAUDE_CODE_MODEL",
+  "AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS",
   // Cloud-provider selectors reroute Claude Code away from ANTHROPIC_BASE_URL
   // entirely; one inherited from the shell would bypass the CCR gateway.
   "CLAUDE_CODE_USE_BEDROCK",
