@@ -16,7 +16,10 @@ import {
   validateCompatibilityConfig,
   validateCompatibilityProviderBinding,
 } from "./config.mjs";
-import { rewriteClaudeEffortForOpenAI } from "./effort.mjs";
+import {
+  ensureGptMinimumOutputTokens,
+  rewriteClaudeEffortForOpenAI,
+} from "./effort.mjs";
 import { inspectPendingServerHistory } from "./server-history.mjs";
 import { inspectServerToolRequest, stripServerToolFamily } from "./server-tools.mjs";
 import { applyToolSearchBudget } from "./tool-search.mjs";
@@ -117,9 +120,10 @@ export function createMessagesHandler({ config, coreClient, policies }) {
         : routedBody;
       if (scopedBody !== routedBody) reportAdvisorStrip();
       const effortAdjustedBody = rewriteClaudeEffortForOpenAI(scopedBody);
+      const outputBudgetAdjustedBody = ensureGptMinimumOutputTokens(effortAdjustedBody);
       const outboundBody = applyToolSearchBudget(
-        effortAdjustedBody,
-        resolveToolSearchMaxTools(config, effortAdjustedBody?.model),
+        outputBudgetAdjustedBody,
+        resolveToolSearchMaxTools(config, outputBudgetAdjustedBody?.model),
       );
       const outboundRaw = outboundBody === body
         ? rawBody
