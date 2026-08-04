@@ -120,7 +120,12 @@ export async function processCompletionGuardHook(input, env = process.env) {
   if (!state?.armed || state.stopBlocks >= maxStopBlocks) return null;
 
   await saveCompletionGuardState(statePath, { armed: false, stopBlocks: state.stopBlocks + 1 });
-  return { decision: "block", reason: COMPLETION_GUARD_REASON };
+  return {
+    hookSpecificOutput: {
+      hookEventName: "Stop",
+      additionalContext: COMPLETION_GUARD_REASON,
+    },
+  };
 }
 
 export async function runHeartbeatHook({ env = process.env, input = process.stdin, output = process.stdout } = {}) {

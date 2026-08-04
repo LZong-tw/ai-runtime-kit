@@ -2574,7 +2574,7 @@ test("AirClaude heartbeat is child-only, bounded, factual, and excludes hook/pro
   assert.equal(buildHeartbeatResponse({ ...hookInput, hook_event_name: "SessionStart" }, env), null);
 });
 
-test("GPT completion guard blocks one Stop after a tool-bearing turn without retaining request content", async () => {
+test("GPT completion guard continues one Stop after a tool-bearing turn without retaining request content", async () => {
   const pluginData = await mkdtemp(join(tmpdir(), "airkit-completion-guard-"));
   const env = {
     AIRCLAUDE_PROFILE: "example-profile",
@@ -2604,8 +2604,10 @@ test("GPT completion guard blocks one Stop after a tool-bearing turn without ret
       hook_event_name: "Stop",
       session_id: sessionId,
     }, env), {
-      decision: "block",
-      reason: "Continue working when safe; do not stop after partial completion.",
+      hookSpecificOutput: {
+        hookEventName: "Stop",
+        additionalContext: "Continue working when safe; do not stop after partial completion.",
+      },
     });
     await processCompletionGuardHook({ hook_event_name: "PostToolUse", session_id: sessionId }, env);
     assert.equal(await processCompletionGuardHook({
@@ -2628,8 +2630,10 @@ test("GPT completion guard blocks one Stop after a tool-bearing turn without ret
       hook_event_name: "Stop",
       session_id: sessionId,
     }, env), {
-      decision: "block",
-      reason: "Continue working when safe; do not stop after partial completion.",
+      hookSpecificOutput: {
+        hookEventName: "Stop",
+        additionalContext: "Continue working when safe; do not stop after partial completion.",
+      },
     });
 
     const [stateFile] = await readdir(join(pluginData, "completion-guard"));
