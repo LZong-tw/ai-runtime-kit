@@ -167,7 +167,7 @@ test("isolated verifier restarts management-only before trusting persisted dange
 test("OSS package allowlist excludes tests and migration artifacts", async () => {
   const expectedIdentity = {
     name: "@untionglim/ai-runtime-kit",
-    version: "0.2.3",
+    version: "0.2.4",
     publishConfig: { access: "public" },
     repository: {
       type: "git",
@@ -3816,6 +3816,7 @@ test("prepareLaunch starts the adapter, removes legacy routes, and keeps its gat
       env: {
         ANTHROPIC_API_BASE_URL: "http://127.0.0.1:4599",
         ANTHROPIC_BASE_URL: "http://127.0.0.1:4599",
+        CLAUDE_AGENT_API_BASE_URL: "http://127.0.0.1:4599",
         CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0",
       },
     });
@@ -3840,6 +3841,11 @@ test("prepareLaunch starts the adapter, removes legacy routes, and keeps its gat
       spawned[0].env.ANTHROPIC_BASE_URL,
       "http://127.0.0.1:4599",
       "the adapter overrides even an environment-referenced CCR gateway address",
+    );
+    assert.equal(
+      spawned[0].env.CLAUDE_AGENT_API_BASE_URL,
+      "http://127.0.0.1:4599",
+      "named in-process teammates must use the same compatibility adapter",
     );
     assert.equal(
       spawned[0].env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB,

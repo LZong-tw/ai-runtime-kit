@@ -1533,7 +1533,10 @@ function buildCompatibilityLaunch(config, adapterOrigin, gatewayToken) {
   // Claude Code's subprocess scrub removes the loopback route from Agent
   // children. Disable it only for compatibility launches; plain Claude and the
   // user's global setting remain untouched.
-  const env = { CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0" };
+  const env = {
+    CLAUDE_AGENT_API_BASE_URL: adapterOrigin,
+    CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0",
+  };
   const args = ["--settings", JSON.stringify({
     env: { ...gatewayBaseUrlEnv(adapterOrigin), ...env },
   })];
@@ -1626,7 +1629,7 @@ function airkitEnvVar(prefix, profileName) {
 function publicPackage() {
   return {
     name: "@untionglim/ai-runtime-kit",
-    version: "0.2.3",
+    version: "0.2.4",
     publishConfig: { access: "public" },
     repository: {
       type: "git",
