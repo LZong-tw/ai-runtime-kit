@@ -972,7 +972,6 @@ function gatewayBaseUrlEnv(endpoint) {
   return {
     ANTHROPIC_API_BASE_URL: url,
     ANTHROPIC_BASE_URL: url,
-    CLAUDE_AGENT_API_BASE_URL: url,
   };
 }
 
@@ -1531,8 +1530,14 @@ function buildCompatibilityLaunch(config, adapterOrigin, gatewayToken) {
   // environment. Keep this per-launch overlay deliberately narrow so an old
   // CCR profile cannot bypass the loopback adapter, while preserving the
   // user's apiKeyHelper, MCP servers, plugins, and every other setting.
-  const args = ["--settings", JSON.stringify({ env: gatewayBaseUrlEnv(adapterOrigin) })];
-  if (config?.webSearch?.mode !== "mcp") return { args, env: {} };
+  // Claude Code's subprocess scrub removes the loopback route from Agent
+  // children. Disable it only for compatibility launches; plain Claude and the
+  // user's global setting remain untouched.
+  const env = { CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0" };
+  const args = ["--settings", JSON.stringify({
+    env: { ...gatewayBaseUrlEnv(adapterOrigin), ...env },
+  })];
+  if (config?.webSearch?.mode !== "mcp") return { args, env };
   const mcpConfig = {
     mcpServers: {
       [compatibilityPluginId]: {
@@ -1545,6 +1550,7 @@ function buildCompatibilityLaunch(config, adapterOrigin, gatewayToken) {
   return {
     args: [...args, "--mcp-config", JSON.stringify(mcpConfig)],
     env: {
+      ...env,
       AIRKIT_COMPATIBILITY_MCP_TOKEN: gatewayToken,
       AIRKIT_COMPATIBILITY_MCP_URL: new URL("/airkit/compatibility/mcp", adapterOrigin).toString(),
     },
