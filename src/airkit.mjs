@@ -1516,7 +1516,12 @@ function resolveConfiguredCompatibility(ccrConfig) {
 }
 
 function buildCompatibilityLaunch(config, adapterOrigin, gatewayToken) {
-  if (config?.webSearch?.mode !== "mcp") return { args: [], env: {} };
+  // Claude settings can apply their env values after the launcher's process
+  // environment. Keep this per-launch overlay deliberately narrow so an old
+  // CCR profile cannot bypass the loopback adapter, while preserving the
+  // user's apiKeyHelper, MCP servers, plugins, and every other setting.
+  const args = ["--settings", JSON.stringify({ env: gatewayBaseUrlEnv(adapterOrigin) })];
+  if (config?.webSearch?.mode !== "mcp") return { args, env: {} };
   const mcpConfig = {
     mcpServers: {
       [compatibilityPluginId]: {
@@ -1527,7 +1532,7 @@ function buildCompatibilityLaunch(config, adapterOrigin, gatewayToken) {
     },
   };
   return {
-    args: ["--mcp-config", JSON.stringify(mcpConfig)],
+    args: [...args, "--mcp-config", JSON.stringify(mcpConfig)],
     env: {
       AIRKIT_COMPATIBILITY_MCP_TOKEN: gatewayToken,
       AIRKIT_COMPATIBILITY_MCP_URL: new URL("/airkit/compatibility/mcp", adapterOrigin).toString(),

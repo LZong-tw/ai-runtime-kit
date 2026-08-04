@@ -3683,10 +3683,19 @@ test("prepareLaunch starts the adapter, removes legacy routes, and keeps its gat
     assert.equal(adapters.length, 1);
     assert.equal(adapters[0].gatewayOrigin, "http://127.0.0.1:9314");
     assert.equal(adapters[0].gatewayToken, "gateway-key-from-helper");
+    const settingsIndex = spawned[0].args.indexOf("--settings");
+    assert.notEqual(settingsIndex, -1);
+    assert.deepEqual(JSON.parse(spawned[0].args[settingsIndex + 1]), {
+      env: {
+        ANTHROPIC_API_BASE_URL: "http://127.0.0.1:4599",
+        ANTHROPIC_BASE_URL: "http://127.0.0.1:4599",
+        CLAUDE_AGENT_API_BASE_URL: "http://127.0.0.1:4599",
+      },
+    });
     const mcpIndex = spawned[0].args.indexOf("--mcp-config");
     assert.notEqual(mcpIndex, -1);
     assert.equal(spawned[0].args.includes("--strict-mcp-config"), false);
-    assert.equal(spawned[0].args.includes("--settings"), false);
+    assert.equal(spawned[0].args.filter((arg) => arg === "--settings").length, 1);
     assert.doesNotMatch(spawned[0].args.join(" "), /fixture-gateway-token|gateway-key-from-helper/);
     assert.deepEqual(JSON.parse(spawned[0].args[mcpIndex + 1]), {
       mcpServers: {
@@ -3715,7 +3724,7 @@ test("prepareLaunch starts the adapter, removes legacy routes, and keeps its gat
 
 test("prepareLaunch uses an asynchronous default child so compatibility middleware can run", async () => {
   const catalog = compatibilityCatalog();
-  catalog.profiles[0].launch.args = ["-e", "setTimeout(() => {}, 200)"];
+  catalog.profiles[0].launch.args = ["-e", "setTimeout(() => {}, 200)", "--"];
   catalog.profiles[0].launch.binary = process.execPath;
   const configDir = await mkdtemp(join(tmpdir(), "airkit-compatibility-async-launch-"));
   let adapterClosed = 0;
