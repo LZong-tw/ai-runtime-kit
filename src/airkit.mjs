@@ -1407,6 +1407,15 @@ function validateLaunch(profile) {
     if (prompt !== undefined && (typeof prompt !== "string" || prompt.trim() === "")) {
       throw new Error(`profile "${profile.name}" launch.modes.${mode}.appendSystemPrompt must be a non-empty string`);
     }
+    const completionGuard = definition?.completionGuard;
+    if (completionGuard !== undefined) {
+      if (!isPlainObject(completionGuard) || Object.keys(completionGuard).some((key) => key !== "maxStopBlocks")) {
+        throw new Error(`profile "${profile.name}" launch.modes.${mode}.completionGuard must contain only maxStopBlocks`);
+      }
+      if (!Number.isInteger(completionGuard.maxStopBlocks) || completionGuard.maxStopBlocks < 1 || completionGuard.maxStopBlocks > 3) {
+        throw new Error(`profile "${profile.name}" launch.modes.${mode}.completionGuard.maxStopBlocks must be an integer from 1 to 3`);
+      }
+    }
   }
 }
 
@@ -2361,6 +2370,10 @@ function airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, runtimeEnv = proc
   const statuslineInputPrice = routeInputPrice(catalog, profile, ccrConfig.Router?.default);
   if (statuslineInputPrice !== null) {
     env.AIRCLAUDE_STATUSLINE_INPUT_PRICE_PER_MILLION = String(statuslineInputPrice);
+  }
+  const maxStopBlocks = profile.launch?.modes?.[mode]?.completionGuard?.maxStopBlocks;
+  if (maxStopBlocks !== undefined) {
+    env.AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS = String(maxStopBlocks);
   }
 
   for (const [key, route] of managedRouterEntries(ccrConfig.Router)) {
