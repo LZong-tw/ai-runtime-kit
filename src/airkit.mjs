@@ -1040,6 +1040,7 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
         mode,
         ccrConfig,
         claudeModel,
+        modeAppendSystemPrompt(launch, mode),
       ),
       launch.binary,
       configDir,
@@ -1368,36 +1369,44 @@ function validateCatalog(catalog) {
 
 function validateLaunch(profile) {
   const context = profile.launch?.context;
-  if (context === undefined) return;
-  if (!isPlainObject(context)) {
-    throw new Error(`profile "${profile.name}" launch.context must be an object`);
-  }
+  if (context !== undefined) {
+    if (!isPlainObject(context)) {
+      throw new Error(`profile "${profile.name}" launch.context must be an object`);
+    }
 
-  const supportedFields = new Set(["autoCompactPercentage", "autoCompactWindow", "maxOutputTokens"]);
-  for (const field of Object.keys(context)) {
-    if (!supportedFields.has(field)) {
-      throw new Error(`profile "${profile.name}" launch.context contains unsupported field: ${field}`);
+    const supportedFields = new Set(["autoCompactPercentage", "autoCompactWindow", "maxOutputTokens"]);
+    for (const field of Object.keys(context)) {
+      if (!supportedFields.has(field)) {
+        throw new Error(`profile "${profile.name}" launch.context contains unsupported field: ${field}`);
+      }
+    }
+
+    // Claude Code derives max output from the launch model id, and falls back to
+    // 32000 for any id it does not recognize — including the dedicated launch id
+    // a profile needs so an in-session model pick is distinguishable. Setting this
+    // restores the value the routed model can actually produce.
+    const maxOutput = context.maxOutputTokens;
+    if (maxOutput !== undefined && (!Number.isInteger(maxOutput) || maxOutput < 1024 || maxOutput > 512000)) {
+      throw new Error(`profile "${profile.name}" launch.context.maxOutputTokens must be an integer from 1024 to 512000`);
+    }
+
+    const window = context.autoCompactWindow;
+    if (window !== undefined && (!Number.isInteger(window) || window < 100000 || window > 1000000)) {
+      throw new Error(`profile "${profile.name}" launch.context.autoCompactWindow must be an integer from 100000 to 1000000`);
+    }
+
+    const percentage = context.autoCompactPercentage;
+    if (percentage !== undefined && percentage !== "default"
+      && (!Number.isInteger(percentage) || percentage < 1 || percentage > 100)) {
+      throw new Error(`profile "${profile.name}" launch.context.autoCompactPercentage must be "default" or an integer from 1 to 100`);
     }
   }
 
-  // Claude Code derives max output from the launch model id, and falls back to
-  // 32000 for any id it does not recognize — including the dedicated launch id
-  // a profile needs so an in-session model pick is distinguishable. Setting this
-  // restores the value the routed model can actually produce.
-  const maxOutput = context.maxOutputTokens;
-  if (maxOutput !== undefined && (!Number.isInteger(maxOutput) || maxOutput < 1024 || maxOutput > 512000)) {
-    throw new Error(`profile "${profile.name}" launch.context.maxOutputTokens must be an integer from 1024 to 512000`);
-  }
-
-  const window = context.autoCompactWindow;
-  if (window !== undefined && (!Number.isInteger(window) || window < 100000 || window > 1000000)) {
-    throw new Error(`profile "${profile.name}" launch.context.autoCompactWindow must be an integer from 100000 to 1000000`);
-  }
-
-  const percentage = context.autoCompactPercentage;
-  if (percentage !== undefined && percentage !== "default"
-    && (!Number.isInteger(percentage) || percentage < 1 || percentage > 100)) {
-    throw new Error(`profile "${profile.name}" launch.context.autoCompactPercentage must be "default" or an integer from 1 to 100`);
+  for (const [mode, definition] of Object.entries(profile.launch?.modes ?? {})) {
+    const prompt = definition?.appendSystemPrompt;
+    if (prompt !== undefined && (typeof prompt !== "string" || prompt.trim() === "")) {
+      throw new Error(`profile "${profile.name}" launch.modes.${mode}.appendSystemPrompt must be a non-empty string`);
+    }
   }
 }
 
@@ -2252,9 +2261,14 @@ function mergeAppendSystemPrompt(args, prompt) {
   return next;
 }
 
-function appendLaunchRuntimePrompts(args, binary, mode, ccrConfig, claudeModel) {
+function appendLaunchRuntimePrompts(args, binary, mode, ccrConfig, claudeModel, modePrompt = null) {
   if (!shouldAppendReusableRuntimeLessons(binary)) return args;
-  return appendRuntimePrompts(args, [airclaudeRoutingPrompt(mode, ccrConfig, claudeModel)]);
+  return appendRuntimePrompts(args, [airclaudeRoutingPrompt(mode, ccrConfig, claudeModel), modePrompt]);
+}
+
+function modeAppendSystemPrompt(launch, mode) {
+  const prompt = launch.modes?.[mode]?.appendSystemPrompt;
+  return typeof prompt === "string" && prompt.trim() !== "" ? prompt : null;
 }
 
 function withHeartbeatPluginArg(args, binary, configDir) {
