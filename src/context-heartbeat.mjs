@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 export const HEARTBEAT_CONTEXT_LIMIT = 512;
 export const TASK_CAPSULE_CONTEXT_LIMIT = 3072;
@@ -15,6 +15,7 @@ const TASK_CAPSULE_FIELDS = Object.freeze([
   "next_action",
 ]);
 const SESSION_SOURCES = new Set(["startup", "resume", "clear", "compact"]);
+const COMPLETION_GUARD_REASON = "Continue working when safe; do not stop after partial completion.";
 
 function boundedLabel(value, fallback = "unset") {
   if (typeof value !== "string" || value.length === 0) return fallback;
@@ -64,6 +65,8 @@ export function parseTaskCapsule(summary) {
 
 export async function processContextHook(input, env = process.env) {
   if (!env.AIRCLAUDE_PROFILE) return null;
+  const completionGuardResponse = await processCompletionGuardHook(input, env);
+  if (completionGuardResponse) return completionGuardResponse;
   if (input?.hook_event_name === "UserPromptSubmit") return buildHeartbeatResponse(input, env);
 
   if (input?.hook_event_name === "PostCompact") {
@@ -94,6 +97,29 @@ export async function processContextHook(input, env = process.env) {
       additionalContext: context,
     },
   };
+}
+
+export async function processCompletionGuardHook(input, env = process.env) {
+  const maxStopBlocks = completionGuardMaxStopBlocks(env);
+  const statePath = completionGuardStatePath(input, env);
+  if (!maxStopBlocks || !statePath) return null;
+
+  if (input?.hook_event_name === "UserPromptSubmit") {
+    await rm(statePath, { force: true });
+    return null;
+  }
+
+  if (input?.hook_event_name === "PostToolUse") {
+    await saveCompletionGuardState(statePath, { armed: true, stopBlocks: 0 });
+    return null;
+  }
+
+  if (input?.hook_event_name !== "Stop" || input.stop_hook_active === true) return null;
+  const state = await loadCompletionGuardState(statePath);
+  if (!state?.armed || state.stopBlocks >= maxStopBlocks) return null;
+
+  await saveCompletionGuardState(statePath, { armed: false, stopBlocks: state.stopBlocks + 1 });
+  return { decision: "block", reason: COMPLETION_GUARD_REASON };
 }
 
 export async function runHeartbeatHook({ env = process.env, input = process.stdin, output = process.stdout } = {}) {
@@ -132,8 +158,22 @@ export function renderHeartbeatManagedFiles(configDir, runtimeModuleUrl = import
           type: "command",
         }],
       }],
+      PostToolUse: [{
+        hooks: [{
+          args: ["${CLAUDE_PLUGIN_ROOT}/scripts/user-prompt-submit.mjs"],
+          command: "node",
+          type: "command",
+        }],
+      }],
       SessionStart: [{
         matcher: "startup|resume|clear|compact",
+        hooks: [{
+          args: ["${CLAUDE_PLUGIN_ROOT}/scripts/user-prompt-submit.mjs"],
+          command: "node",
+          type: "command",
+        }],
+      }],
+      Stop: [{
         hooks: [{
           args: ["${CLAUDE_PLUGIN_ROOT}/scripts/user-prompt-submit.mjs"],
           command: "node",
@@ -213,6 +253,47 @@ function formatTaskCapsule(capsule) {
 
 function validWorkspace(cwd) {
   return typeof cwd === "string" && cwd.length > 0 && cwd.length <= 4096;
+}
+
+function completionGuardMaxStopBlocks(env) {
+  const value = env.AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS;
+  if (!/^[1-9]\d*$/.test(value ?? "")) return 0;
+  return Number(value);
+}
+
+function completionGuardStatePath(input, env) {
+  if (!env.AIRCLAUDE_PROFILE || !env.CLAUDE_PLUGIN_DATA) return null;
+  const sessionId = input?.session_id;
+  if (typeof sessionId !== "string" || sessionId.length === 0 || sessionId.length > 4096) return null;
+  const key = createHash("sha256").update(sessionId).digest("hex").slice(0, 24);
+  return join(env.CLAUDE_PLUGIN_DATA, "completion-guard", `${key}.json`);
+}
+
+function validCompletionGuardState(value) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    && typeof value.armed === "boolean"
+    && Number.isInteger(value.stopBlocks) && value.stopBlocks >= 0;
+}
+
+async function saveCompletionGuardState(path, state) {
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  await mkdir(dirname(path), { recursive: true });
+  try {
+    await writeFile(temporary, `${JSON.stringify(state)}\n`, { mode: 0o600 });
+    await rename(temporary, path);
+  } finally {
+    await rm(temporary, { force: true });
+  }
+}
+
+async function loadCompletionGuardState(path) {
+  try {
+    const state = JSON.parse(await readFile(path, "utf8"));
+    return validCompletionGuardState(state) ? state : null;
+  } catch (error) {
+    if (error?.code === "ENOENT" || error instanceof SyntaxError) return null;
+    throw error;
+  }
 }
 
 function taskCapsulePath(cwd, pluginData) {

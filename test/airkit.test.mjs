@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -10,6 +10,7 @@ import * as ccrVerifier from "../scripts/verify-ccr3-e2e.mjs";
 import {
   buildHeartbeatResponse,
   parseTaskCapsule,
+  processCompletionGuardHook,
   processContextHook,
 } from "../src/context-heartbeat.mjs";
 import {
@@ -2573,6 +2574,89 @@ test("AirClaude heartbeat is child-only, bounded, factual, and excludes hook/pro
   assert.equal(buildHeartbeatResponse({ ...hookInput, hook_event_name: "SessionStart" }, env), null);
 });
 
+test("GPT completion guard blocks one Stop after a tool-bearing turn without retaining request content", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-completion-guard-"));
+  const env = {
+    AIRCLAUDE_PROFILE: "example-profile",
+    AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS: "1",
+    CLAUDE_PLUGIN_DATA: pluginData,
+  };
+  const sessionId = "private-session-id";
+
+  try {
+    assert.equal(await processCompletionGuardHook({
+      hook_event_name: "UserPromptSubmit",
+      prompt: "private user prompt that must never be stored",
+      session_id: sessionId,
+      transcript_path: "/private/transcript.jsonl",
+    }, env), null);
+    assert.equal(await processCompletionGuardHook({
+      hook_event_name: "Stop",
+      session_id: sessionId,
+    }, env), null, "a tool-free turn is never continued");
+
+    assert.equal(await processCompletionGuardHook({
+      hook_event_name: "PostToolUse",
+      session_id: sessionId,
+      tool_input: { secret: "must not persist" },
+    }, env), null);
+    assert.deepEqual(await processCompletionGuardHook({
+      hook_event_name: "Stop",
+      session_id: sessionId,
+    }, env), {
+      decision: "block",
+      reason: "Continue working when safe; do not stop after partial completion.",
+    });
+    assert.equal(await processCompletionGuardHook({
+      hook_event_name: "Stop",
+      session_id: sessionId,
+    }, env), null, "the one allowed block has been consumed");
+
+    await processCompletionGuardHook({ hook_event_name: "UserPromptSubmit", session_id: sessionId }, env);
+    await processCompletionGuardHook({ hook_event_name: "PostToolUse", session_id: sessionId }, env);
+    assert.equal(await processCompletionGuardHook({
+      hook_event_name: "Stop",
+      session_id: sessionId,
+      stop_hook_active: true,
+    }, env), null, "the recursive Stop invocation is ignored");
+    assert.deepEqual(await processCompletionGuardHook({
+      hook_event_name: "Stop",
+      session_id: sessionId,
+    }, env), {
+      decision: "block",
+      reason: "Continue working when safe; do not stop after partial completion.",
+    });
+
+    const [stateFile] = await readdir(join(pluginData, "completion-guard"));
+    const state = await readFile(join(pluginData, "completion-guard", stateFile), "utf8");
+    assert.doesNotMatch(state, /private user prompt|private-session-id|private\/transcript|must not persist/);
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+test("GPT completion guard is inert when disabled", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-completion-guard-disabled-"));
+  try {
+    const env = { AIRCLAUDE_PROFILE: "example-profile", CLAUDE_PLUGIN_DATA: pluginData };
+    await processCompletionGuardHook({ hook_event_name: "PostToolUse", session_id: "session-id" }, env);
+    assert.equal(await processCompletionGuardHook({ hook_event_name: "Stop", session_id: "session-id" }, env), null);
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+test("launch mode exports its completion guard limit only for the selected mode", () => {
+  const catalog = launchCatalog();
+  catalog.profiles[0].launch.modes.fast.completionGuard = { maxStopBlocks: 1 };
+
+  const guarded = buildLaunchPlan(catalog, "launch-example", { mode: "fast" });
+  const unguarded = buildLaunchPlan(catalog, "launch-example", { mode: "auto" });
+
+  assert.equal(guarded.launch.env.AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS, "1");
+  assert.equal(unguarded.launch.env.AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS, undefined);
+});
+
 test("AirClaude renders an additive session plugin for the heartbeat", async () => {
   const catalog = launchCatalog();
   const configDir = await mkdtemp(join(tmpdir(), "airkit-heartbeat-plugin-"));
@@ -2595,11 +2679,15 @@ test("AirClaude renders an additive session plugin for the heartbeat", async () 
     assert.ok(hooks);
     assert.ok(script);
     await installProfile(catalog, "launch-example", { configDir, force: true, write: true });
-    assert.deepEqual(Object.keys(JSON.parse(await readFile(hooks.path, "utf8")).hooks).sort(), [
+    const renderedHooks = JSON.parse(await readFile(hooks.path, "utf8")).hooks;
+    assert.deepEqual(Object.keys(renderedHooks).sort(), [
       "PostCompact",
+      "PostToolUse",
       "SessionStart",
+      "Stop",
       "UserPromptSubmit",
     ]);
+    assert.equal(renderedHooks.Stop[0].hooks[0].command, "node");
     const hookInput = JSON.stringify({
       hook_event_name: "UserPromptSubmit",
       prompt: "ordinary prompt",
