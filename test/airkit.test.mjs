@@ -168,7 +168,7 @@ test("isolated verifier restarts management-only before trusting persisted dange
 test("OSS package allowlist excludes tests and migration artifacts", async () => {
   const expectedIdentity = {
     name: "@untionglim/ai-runtime-kit",
-    version: "0.2.5",
+    version: "0.2.6",
     publishConfig: { access: "public" },
     repository: {
       type: "git",
@@ -233,7 +233,7 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
       "| WebSearch (`webSearch`) | `native-first` | Native. The complete call/result wire cycle was verified with real Claude Code 2.1.211. |",
       "| WebFetch (`webFetch`) | `native-first` | Anthropic fallback for now. Claude exposes the native client tool, but the zero-public-network loopback execution is blocked by Claude's domain-safety check, so AirKit does not claim the native cycle is verified. |",
       "| Code Execution (`codeExecution`) | `anthropic-fallback` | The complete request uses the configured Anthropic route so container and continuation state stay intact. |",
-      "| Advisor (`advisor`) | `anthropic-fallback` | Stripped by default. The advisor tool definition carries its own model, which the upstream gateway resolves in a separate call that inherits neither that route's api_base nor its credentials, so the call has to be configured there. A server-tool definition diverts the whole request on presence alone, so an advisor the route cannot serve would fail turns that never used it; `advisor.unsupported` therefore defaults to `strip`, removing the definition and leaving the request on its normal route. Set it to `passthrough` to restore fallback routing and re-test after the gateway changes — rejections on that path still get the explanation appended to the relayed error. |",
+      "| Advisor (`advisor`) | `bridge` or `anthropic-fallback` | Bridge mode simulates Claude's Advisor tool with a bounded transcript review through the configured Anthropic route and resumes with a canonical `advisor_tool_result`; fallback mode strips the definition by default. |",
       "| ToolSearch (`toolSearch`) | `bridge` | Safe bounded regex/BM25 requests use the local bridge. Unsafe, oversized, unsupported, or unknown requests fall back as a complete request. |",
       "| MCP Connector (`mcpConnector`) | `anthropic-fallback` | Typed server-side connector requests use the configured Anthropic route; client-side MCP remains native. |",
     ].join("\n");
@@ -253,7 +253,6 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
       }
       assert.match(text, /PROFILE=your-profile/);
       assert.match(text, /--profile "\$PROFILE"/);
-      assert.doesNotMatch(text, /"advisor"\s*:\s*\{[^}]*"mode"\s*:\s*"bridge"/s);
       assert.doesNotMatch(text, /"advisor"\s*:\s*\{[^}]*"(?:model|fallbackModel)"\s*:/s);
       assert.doesNotMatch(text, /"webSearch"\s*:\s*\{[^}]*"mode"\s*:\s*"mcp"/s);
       assert.doesNotMatch(
@@ -987,7 +986,7 @@ test("a catalog mode that cannot round-trip through the header is rejected", () 
   );
 });
 
-test("CCR compatibility rejects removed Advisor bridge before CCR RPC or credentials", async () => {
+test("CCR compatibility rejects removed Advisor model fields before CCR RPC or credentials", async () => {
   const catalog = compatibilityCatalog();
   catalog.profiles[0].ccr.plugins[0].config.advisor = {
     fallbackModel: "anthropic/claude-opus",
@@ -1010,7 +1009,7 @@ test("CCR compatibility rejects removed Advisor bridge before CCR RPC or credent
         return { ok: true, status: 0, stdout: "unused" };
       },
     }),
-    /advisor\.mode.*removed/i,
+    /advisor\.(?:model|fallbackModel).*removed/i,
   );
   assert.equal(ccrClientCreations, 0);
   assert.equal(credentialCalls, 0);

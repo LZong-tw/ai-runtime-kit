@@ -111,11 +111,13 @@ export function createMessagesHandler({ config, coreClient, policies }) {
       const mode = requestedMode(request?.headers);
       const routed = routeBareClaudeModel(body, resolveModeRoutes(config, mode), config.launchModel ?? null);
       const routedBody = routed ?? body;
-      // Before the compatibility decision, not after: an advisor definition the
-      // upstream route cannot resolve would otherwise pull this whole request
-      // onto the fallback route and fail it, even though nothing here called
-      // advisor. Stripping first lets the request take its normal path.
-      const scopedBody = (config.advisor?.unsupported ?? DEFAULT_ADVISOR_UNSUPPORTED) === "strip"
+      // Before the compatibility decision, apply the configured Advisor policy.
+      // Fallback mode strips an unresolved definition before it can divert an
+      // otherwise ordinary request; bridge mode keeps it so the gateway can
+      // expose the synthetic Advisor tool and resume the turn.
+      const advisorBridgeEnabled = policies?.advisor === "bridge";
+      const scopedBody = !advisorBridgeEnabled &&
+        (config.advisor?.unsupported ?? DEFAULT_ADVISOR_UNSUPPORTED) === "strip"
         ? stripServerToolFamily(routedBody, "advisor")
         : routedBody;
       const effortAdjustedBody = rewriteClaudeEffortForOpenAI(scopedBody);

@@ -211,7 +211,10 @@ The supported source modes are:
 
 - `webSearch`: `native-first`, `anthropic-fallback`, or migration-only `mcp`.
 - `webFetch`: `native-first` or `anthropic-fallback`.
-- `codeExecution`, `advisor`, and `mcpConnector`: `anthropic-fallback`.
+- `codeExecution` and `mcpConnector`: `anthropic-fallback`.
+- `advisor`: `bridge` or `anthropic-fallback`. Bridge mode simulates Claude's
+  Advisor tool through a bounded transcript review on the configured Anthropic
+  route and returns a canonical `advisor_tool_result`.
 - `toolSearch`: `bridge` or `anthropic-fallback`.
 
 AirKit resolves these declarations into six effective policies. Doctor reports
