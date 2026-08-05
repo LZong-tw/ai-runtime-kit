@@ -7,7 +7,7 @@ keeps machine state outside git, and verifies the installed launch path.
 ## Quick start
 
 Prerequisites are Node.js 22 or newer, Claude Code 2.1.208 or newer, Claude Code
-Router 3.0.4 through the latest 3.x release, and zsh. The supported public
+Router 3.0.18 through the latest 3.x release, and zsh. The supported public
 onboarding path is a source checkout:
 
 ```bash
@@ -145,7 +145,7 @@ public vendor documentation and include a `lastReviewed` date because model
 catalogs change frequently.
 
 The supported runtime is Node.js 22 or newer, Claude Code 2.1.208 or newer,
-and Claude Code Router 3.0.4 through the latest 3.x release. `runtime update`
+and Claude Code Router 3.0.18 through the latest 3.x release. `runtime update`
 is preview-only; add `--write` to back up CCR state, install the pinned minimum
 versions, and validate them.
 

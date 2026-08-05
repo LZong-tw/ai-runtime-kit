@@ -33,10 +33,10 @@ const compatibilityPluginId = "airkit-compatibility";
 const compatibilityPluginModule = join(here, "compat", "plugin.mjs");
 export const RUNTIME_REQUIREMENTS = Object.freeze({
   claudeCode: ">=2.1.208",
-  claudeCodeRouter: ">=3.0.4 <4",
+  claudeCodeRouter: ">=3.0.18 <4",
   node: ">=22",
 });
-const RUNTIME_TARGETS = Object.freeze({ claudeCode: "2.1.208", claudeCodeRouter: "3.0.4" });
+const RUNTIME_TARGETS = Object.freeze({ claudeCode: "2.1.208", claudeCodeRouter: "3.0.18" });
 const reusableRuntimeLessonsPrompt = [
   "AirKit reusable runtime lessons:",
   "Treat durable lessons, project memory, and user corrections as hard constraints. Before retrying a failed command, check whether the failure matches a known lesson.",
@@ -177,11 +177,15 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
       default: return true;
     }
   });
+  const currentProfiles = currentConfig.profile?.profiles ?? [];
   const managedProfiles = modes.map((mode) => {
     const modeConfig = modeConfigs.get(mode);
     const claudeModel = resolveClaudeLaunchModel(profile);
     const launchVars = launchTemplateVars(profile, configDir, mode, modeConfig, claudeModel);
+    const id = `${managedPrefix}${slug(mode)}`;
+    const currentProfile = currentProfiles.find((candidate) => candidate.id === id);
     return {
+      ...(currentProfile ?? {}),
       agent: "claude-code",
       enabled: true,
       env: {
@@ -191,7 +195,7 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
         ANTHROPIC_CUSTOM_HEADERS: `${AIRKIT_MODE_HEADER}: ${airkitModeLabel(mode)}`,
         CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
       },
-      id: `${managedPrefix}${slug(mode)}`,
+      id,
       model: managedRouteSelector(modeConfig.Router?.default),
       name: `AirKit ${profile.name} ${mode}`,
       scope: "ccr",
@@ -200,7 +204,6 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
       surface: "cli",
     };
   });
-  const currentProfiles = currentConfig.profile?.profiles ?? [];
 
   return {
     config: {
@@ -1629,7 +1632,7 @@ function airkitEnvVar(prefix, profileName) {
 function publicPackage() {
   return {
     name: "@untionglim/ai-runtime-kit",
-    version: "0.2.4",
+    version: "0.2.5",
     publishConfig: { access: "public" },
     repository: {
       type: "git",
@@ -2738,7 +2741,7 @@ function meetsRuntimeRequirement(key, version) {
   if (!parsed) return false;
   if (key === "node") return parsed[0] >= 22;
   if (key === "claudeCode") return compareVersions(parsed, [2, 1, 208]) >= 0;
-  return compareVersions(parsed, [3, 0, 4]) >= 0 && parsed[0] < 4;
+  return compareVersions(parsed, [3, 0, 18]) >= 0 && parsed[0] < 4;
 }
 
 function parseVersion(value) {
