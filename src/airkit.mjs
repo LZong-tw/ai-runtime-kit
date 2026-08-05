@@ -1570,9 +1570,16 @@ function compatibilityCapabilityStatus(ccrConfig) {
     config,
     VERIFIED_NATIVE_COMPATIBILITY,
   );
-  const stripped = advisorUnsupported === "strip";
+  const advisorBridged = policies.advisor === "bridge";
+  const stripped = !advisorBridged && advisorUnsupported === "strip";
   return {
-    notes: stripped
+    notes: advisorBridged
+      ? [
+        "Advisor uses AirKit's simulated bridge: a bounded transcript is sent "
+        + "through the configured Anthropic route and returned as a canonical "
+        + "advisor_tool_result.",
+      ]
+      : stripped
       ? [
         "advisor tool definitions are removed from requests, so a request that "
         + "carries one stays on its normal route instead of diverting to the "
@@ -1584,7 +1591,7 @@ function compatibilityCapabilityStatus(ccrConfig) {
       ]
       : [],
     capabilities: {
-      advisor: stripped ? "stripped" : policyStatus(policies.advisor),
+      advisor: advisorBridged ? "bridged" : stripped ? "stripped" : policyStatus(policies.advisor),
       codeExecution: policyStatus(policies.codeExecution),
       mcpConnector: policyStatus(policies.mcpConnector),
       toolSearch: policyStatus(policies.toolSearch),
@@ -1632,7 +1639,7 @@ function airkitEnvVar(prefix, profileName) {
 function publicPackage() {
   return {
     name: "@untionglim/ai-runtime-kit",
-    version: "0.2.5",
+    version: "0.2.6",
     publishConfig: { access: "public" },
     repository: {
       type: "git",

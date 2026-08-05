@@ -9,7 +9,7 @@ const FAMILY_MODES = Object.freeze({
   webSearch: Object.freeze(["native-first", "anthropic-fallback", "mcp"]),
   webFetch: Object.freeze(["native-first", "anthropic-fallback"]),
   codeExecution: Object.freeze(["anthropic-fallback"]),
-  advisor: Object.freeze(["anthropic-fallback"]),
+  advisor: Object.freeze(["bridge", "anthropic-fallback"]),
   toolSearch: Object.freeze(["bridge", "anthropic-fallback"]),
   mcpConnector: Object.freeze(["anthropic-fallback"]),
 });
@@ -240,7 +240,7 @@ export function resolveCompatibilityPolicies(config, nativeCapabilities = {}) {
     webSearch: resolveNativeFirst(config.webSearch.mode, nativeCapabilities?.webSearch),
     webFetch: resolveNativeFirst(config.webFetch.mode, nativeCapabilities?.webFetch),
     codeExecution: "anthropic-fallback",
-    advisor: "anthropic-fallback",
+    advisor: config.advisor.mode === "bridge" ? "bridge" : "anthropic-fallback",
     toolSearch: config.toolSearch.mode === "bridge" ? "bridge" : "anthropic-fallback",
     mcpConnector: "anthropic-fallback",
   });
@@ -323,11 +323,6 @@ function rejectUnknownKeys(value, allowed, field) {
 }
 
 function rejectRemovedAdvisorConfig(advisor) {
-  if (advisor.mode === "bridge") {
-    throw new Error(
-      'advisor.mode "bridge" was removed; use advisor.mode "anthropic-fallback"',
-    );
-  }
   for (const field of ["model", "fallbackModel"]) {
     if (Object.hasOwn(advisor, field)) {
       throw new Error(`advisor.${field} was removed; configure fallback.model instead`);

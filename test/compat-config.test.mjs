@@ -105,7 +105,7 @@ test("accepts exact supported modes", () => {
     webSearch: ["native-first", "anthropic-fallback", "mcp"],
     webFetch: ["native-first", "anthropic-fallback"],
     codeExecution: ["anthropic-fallback"],
-    advisor: ["anthropic-fallback"],
+    advisor: ["bridge", "anthropic-fallback"],
     toolSearch: ["bridge", "anthropic-fallback"],
     mcpConnector: ["anthropic-fallback"],
   };
@@ -153,7 +153,7 @@ test("legacy MCP requires an explicit webSearch mode and keeps typed requests on
   );
 });
 
-test("rejects non-Anthropic fallback and removed Advisor bridge configuration", () => {
+test("rejects non-Anthropic fallback and removed Advisor model fields", () => {
   assert.throws(
     () =>
       validateCompatibilityConfig({
@@ -162,14 +162,7 @@ test("rejects non-Anthropic fallback and removed Advisor bridge configuration", 
       }),
     /fallback\.model must be an Anthropic-family model/,
   );
-  assert.throws(
-    () =>
-      validateCompatibilityConfig({
-        ...VALID_CONFIG,
-        advisor: { mode: "bridge" },
-      }),
-    /advisor\.mode.*removed/i,
-  );
+  assert.doesNotThrow(() => validateCompatibilityConfig({ ...VALID_CONFIG, advisor: { mode: "bridge" } }));
 
   for (const field of ["model", "fallbackModel"]) {
     assert.throws(

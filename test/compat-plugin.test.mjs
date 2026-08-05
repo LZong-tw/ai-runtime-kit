@@ -449,6 +449,49 @@ test("ToolSearch bridge keeps deferred tools out until a local match", async () 
   ]);
 });
 
+test("Advisor bridge uses the configured Anthropic model and resumes the executor", async () => {
+  const fixture = createBridgeFixture([
+    message({
+      content: [
+        { type: "text", text: "I will consult the advisor." },
+        { type: "tool_use", id: "toolu_advisor", name: "airkit_advisor", input: {} },
+      ],
+    }),
+    message({
+      model: "anthropic-messages/claude-sonnet",
+      content: [{ type: "text", text: "Inspect the failure boundary first." }],
+    }),
+    message({ content: [{ type: "text", text: "The boundary is now clear." }] }),
+  ], {
+    body: {
+      tools: [{
+        type: "advisor_20260301",
+        name: "advisor",
+        model: "claude-opus-5",
+        max_uses: 2,
+      }],
+    },
+    advisorMode: "bridge",
+  });
+
+  const result = await handleCompatibilityMessage(fixture.input);
+
+  assert.deepEqual(result.content.map((block) => block.type), [
+    "text",
+    "server_tool_use",
+    "advisor_tool_result",
+    "text",
+  ]);
+  assert.equal(fixture.calls[0].body.tools.some((tool) => tool.type?.startsWith("advisor_")), false);
+  assert.equal(fixture.calls[0].body.tools.some((tool) => tool.name === "airkit_advisor"), true);
+  assert.equal(fixture.calls[1].body.model, "anthropic-messages/claude-sonnet");
+  assert.equal(fixture.calls[1].body.tools, undefined);
+  assert.match(fixture.calls[1].body.messages[0].content, /<transcript>/);
+  assert.equal(fixture.calls[2].body.model, "executor-model");
+  assert.match(fixture.calls[2].body.messages.at(-1).content[0].content, /failure boundary/);
+  assert.match(result.content[2].content.text, /failure boundary/);
+});
+
 test("prior ToolSearch result blocks become bounded history and reactivate referenced tools", async () => {
   const fixture = createBridgeFixture([
     message({ content: [{ type: "text", text: "History understood." }] }),
@@ -910,7 +953,7 @@ test("compatibility plugin fails closed on an invalid fallback provider binding"
   }
 });
 
-test("compatibility plugin rejects removed Advisor bridge configuration before registering routes", async () => {
+test("compatibility plugin rejects removed Advisor model configuration before registering routes", async () => {
   const routes = [];
 
   await assert.rejects(
@@ -925,7 +968,7 @@ test("compatibility plugin rejects removed Advisor bridge configuration before r
         routes.push(route);
       },
     }),
-    /advisor\.mode "bridge" was removed/,
+    /advisor\.model.*removed/,
   );
   assert.deepEqual(routes, []);
 });
@@ -1022,6 +1065,50 @@ test("an advisor definition is stripped before the compatibility decision", asyn
 
   assert.equal(forwarded.length, 1, "the request must stay on the raw passthrough");
   assert.deepEqual(forwarded[0].tools, [{ name: "Bash" }]);
+});
+
+test("advisor bridge keeps the definition and returns a canonical result", async () => {
+  const calls = [];
+  const queue = [
+    message({ content: [{ type: "tool_use", id: "toolu_advisor", name: "airkit_advisor", input: {} }] }),
+    message({
+      model: "anthropic-messages/claude-sonnet",
+      content: [{ type: "text", text: "Review complete." }],
+    }),
+    message({ content: [{ type: "text", text: "Proceed with the verified fix." }] }),
+  ];
+  const fixture = await createPluginFixture({
+    pluginConfig: {
+      advisor: { mode: "bridge" },
+    },
+    coreClient: {
+      async requestMessage(body, headers) {
+        calls.push({ body: structuredClone(body), headers: structuredClone(headers ?? {}) });
+        return structuredClone(queue.shift());
+      },
+    },
+  });
+  const body = Buffer.from(JSON.stringify({
+    model: "claude-sonnet-5",
+    max_tokens: 512,
+    messages: [{ role: "user", content: "hi" }],
+    tools: [{ type: "advisor_20260301", name: "advisor", max_uses: 1 }],
+  }), "utf8");
+  const response = createRecordingResponse();
+
+  await fixture.messages.handler(createPluginRequest(body), response, fixture.helpers);
+
+  const result = JSON.parse(response.body.toString("utf8"));
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(result.content.map((block) => block.type), [
+    "server_tool_use",
+    "advisor_tool_result",
+    "text",
+  ]);
+  assert.equal(calls[0].body.tools.some((tool) => tool.type === "advisor_20260301"), false);
+  assert.equal(calls[0].body.tools.some((tool) => tool.name === "airkit_advisor"), true);
+  assert.equal(calls[1].body.tools, undefined);
+  assert.equal(result.content[1].content.text, "Review complete.");
 });
 
 test("advisor.unsupported passthrough leaves the definition in place and diverts", async () => {
@@ -1853,7 +1940,7 @@ function createBridgeFixture(script, options = {}) {
         webSearch: { mode: "native-first" },
         webFetch: { mode: "native-first" },
         codeExecution: { mode: "anthropic-fallback" },
-        advisor: { mode: "anthropic-fallback" },
+        advisor: { mode: options.advisorMode ?? "anthropic-fallback" },
         mcpConnector: { mode: "anthropic-fallback" },
       },
       coreClient,
