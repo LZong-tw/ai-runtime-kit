@@ -33,7 +33,7 @@ command -v zsh
 
 Expected repo-owned checks:
 
-- `runtime check` requires Node.js 22+, Claude Code 2.1.208+, and CCR 3.0.4
+- `runtime check` requires Node.js 22+, Claude Code 2.1.208+, and CCR 3.0.18
   through the latest 3.x release.
 - `node src/airkit.mjs list` prints the available profile names.
 - `command -v ccr` finds the CCR command needed by CCR-backed profiles.

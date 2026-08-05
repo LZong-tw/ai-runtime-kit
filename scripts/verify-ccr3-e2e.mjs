@@ -135,7 +135,7 @@ export function isSupportedCcrVersion(version) {
   const match = String(version ?? "").match(/^(\d+)\.(\d+)\.(\d+)$/);
   if (!match) return false;
   const [major, minor, patch] = match.slice(1).map(Number);
-  return major === 3 && (minor > 0 || patch >= 4);
+  return major === 3 && (minor > 0 || patch >= 18);
 }
 
 export async function verifyDangerousCodexPersistence({
@@ -217,8 +217,8 @@ async function main() {
     const packed = run("npm", ["pack", repositoryRoot, "--pack-destination", root], env, 120_000);
     assert.equal(packed.status, 0, `AirKit package build failed: ${packed.stderr}`);
     const packageArchive = join(root, packed.stdout.trim().split("\n").at(-1));
-    const requestedCcrVersion = process.env.AIRKIT_CCR_E2E_VERSION ?? "3.0.4";
-    assert.equal(isSupportedCcrVersion(requestedCcrVersion), true, "requested CCR verifier version is outside >=3.0.4 <4");
+    const requestedCcrVersion = process.env.AIRKIT_CCR_E2E_VERSION ?? "3.0.18";
+    assert.equal(isSupportedCcrVersion(requestedCcrVersion), true, "requested CCR verifier version is outside >=3.0.18 <4");
     const install = run("npm", [
       "install",
       "--prefix",
@@ -244,7 +244,7 @@ async function main() {
     assert.equal(
       isSupportedCcrVersion(ccrPackage.version),
       true,
-      `CCR ${ccrPackage.version} does not satisfy >=3.0.4 <4`,
+      `CCR ${ccrPackage.version} does not satisfy >=3.0.18 <4`,
     );
 
     const providerPort = await reservePort();
@@ -807,6 +807,28 @@ const server = createServer((request, response) => {
       return;
     }
     if (body.stream === true) {
+      if (request.url === "/v1/chat/completions") {
+        const openAiChunks = [
+          {
+            id: "fixture-stream",
+            object: "chat.completion.chunk",
+            created: 1,
+            model: body.model,
+            choices: [{ index: 0, delta: { role: "assistant", content: "FAKE_PROVIDER_OK" }, finish_reason: null }],
+          },
+          {
+            id: "fixture-stream",
+            object: "chat.completion.chunk",
+            created: 1,
+            model: body.model,
+            choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+          },
+        ];
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.end(openAiChunks.map((chunk) => "data: " + JSON.stringify(chunk) + "\\n\\n").join("") + "data: [DONE]\\n\\n");
+        return;
+      }
       const messageStart = JSON.stringify({
         type: "message_start",
         message: {

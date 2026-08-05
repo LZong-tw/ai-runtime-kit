@@ -126,7 +126,7 @@ export function createGatewayClient({ origin, token, fetchImpl = fetch, response
     },
     async forwardRaw({ body, headers, method = "POST", response, signal }) {
       const result = await request({ body, headers, method, path: "/v1/messages", signal });
-      await pipeCoreResponse(result, response, signal, responseTransformFactory?.());
+      await pipeCoreResponse(result, response, signal, responseTransformFactory?.({ body }));
     },
     async forward({ body, headers, method = "GET", path, response, signal }) {
       const result = await request({ body, headers, method, path, signal });

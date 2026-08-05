@@ -157,6 +157,52 @@ test("middleware adds a factual activity block before streamed GPT tool use with
   assert.doesNotMatch(body, /thinking_delta|\"type\":\"thinking\"/);
 });
 
+test("middleware fills zero GPT stream usage so Claude Code can render statusline totals", async (t) => {
+  const sse = [
+    ["message_start", {
+      type: "message_start",
+      message: {
+        model: "gpt-5.6-luna",
+        usage: { input_tokens: 0, output_tokens: 0 },
+        content: [],
+      },
+    }],
+    ["content_block_start", {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "text", text: "" },
+    }],
+    ["content_block_delta", {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "text_delta", text: "hello from luna" },
+    }],
+    ["content_block_stop", { type: "content_block_stop", index: 0 }],
+    ["message_delta", {
+      type: "message_delta",
+      delta: { stop_reason: "end_turn", stop_sequence: null },
+      usage: { output_tokens: 0 },
+    }],
+    ["message_stop", { type: "message_stop" }],
+  ].map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join("");
+  const upstream = await startFixture(t, async (_request, response) => {
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(sse);
+  });
+  const adapter = await startAdapter(t, upstream.origin);
+
+  const result = await adapterFetch(adapter.origin, "/v1/messages", {
+    model: "claude-airkit-mode[1m]",
+    messages: [{ role: "user", content: "show the usage" }],
+    stream: true,
+  });
+  const body = await result.text();
+
+  assert.equal(result.status, 200);
+  assert.match(body, /"input_tokens":[1-9][0-9]*/);
+  assert.match(body, /"output_tokens":[1-9][0-9]*/);
+});
+
 test("middleware proxies non-compatibility gateway paths with the generated gateway token", async (t) => {
   const upstream = await startFixture(t, async (request, response) => {
     assert.equal(request.url, "/v1/models?limit=3");

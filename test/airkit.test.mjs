@@ -35,7 +35,7 @@ import {
 
 const profile = "openai-compatible-example";
 
-test("runtime requirements hard-cut to Node 22, Claude Code 2.1.208, and CCR 3.0.4", async () => {
+test("runtime requirements hard-cut to Node 22, Claude Code 2.1.208, and CCR 3.0.18", async () => {
   const packageJson = JSON.parse(
     await readFile(resolve(import.meta.dirname, "..", "package.json"), "utf8"),
   );
@@ -43,7 +43,7 @@ test("runtime requirements hard-cut to Node 22, Claude Code 2.1.208, and CCR 3.0
   assert.equal(packageJson.engines.node, ">=22");
   assert.deepEqual(airkitRuntime.RUNTIME_REQUIREMENTS, {
     claudeCode: ">=2.1.208",
-    claudeCodeRouter: ">=3.0.4 <4",
+    claudeCodeRouter: ">=3.0.18 <4",
     node: ">=22",
   });
 });
@@ -75,7 +75,8 @@ test("catalog rejects invalid proactive compaction policy", async () => {
 });
 
 test("isolated verifier restarts management-only before trusting persisted dangerous Codex state", async () => {
-  assert.equal(ccrVerifier.isSupportedCcrVersion("3.0.4"), true);
+  assert.equal(ccrVerifier.isSupportedCcrVersion("3.0.18"), true);
+  assert.equal(ccrVerifier.isSupportedCcrVersion("3.0.17"), false);
   assert.equal(ccrVerifier.isSupportedCcrVersion("3.9.99"), true);
   assert.equal(ccrVerifier.isSupportedCcrVersion("3.0.3"), false);
   assert.equal(ccrVerifier.isSupportedCcrVersion("4.0.0"), false);
@@ -167,7 +168,7 @@ test("isolated verifier restarts management-only before trusting persisted dange
 test("OSS package allowlist excludes tests and migration artifacts", async () => {
   const expectedIdentity = {
     name: "@untionglim/ai-runtime-kit",
-    version: "0.2.4",
+    version: "0.2.5",
     publishConfig: { access: "public" },
     repository: {
       type: "git",
@@ -403,6 +404,43 @@ test("CCR 3 merge creates CCR-only mode profiles and preserves unrelated configu
   }
   assert.ok(merged.config.profile.profiles.some((candidate) => candidate.id === "unrelated-profile"));
   assert.ok(merged.config.Router.rules.some((rule) => rule.id === "unrelated-rule"));
+});
+
+test("CCR 3 merge preserves canonical fields added to an owned profile", () => {
+  const currentProfile = {
+    agent: "claude-code",
+    enabled: true,
+    fableModel: "",
+    haikuModel: "",
+    id: "airkit-launch-example-auto",
+    managedCompact: false,
+    model: "stale/model",
+    name: "stale name",
+    opusModel: "",
+    scope: "ccr",
+    settingsFile: "/tmp/stale-settings.json",
+    smallFastModel: "stale/small",
+    sonnetModel: "",
+    surface: "auto",
+  };
+  const merged = airkitRuntime.buildCcr3ManagedConfig(
+    launchCatalog(),
+    "launch-example",
+    { profile: { profiles: [currentProfile] } },
+    { configDir: "/tmp/airkit-profile-canonical-fields" },
+  );
+  const profile = merged.config.profile.profiles.find(({ id }) => id === currentProfile.id);
+
+  assert.deepEqual(
+    Object.fromEntries(["fableModel", "haikuModel", "managedCompact", "opusModel", "sonnetModel"].map((key) => [key, profile[key]])),
+    {
+      fableModel: "",
+      haikuModel: "",
+      managedCompact: false,
+      opusModel: "",
+      sonnetModel: "",
+    },
+  );
 });
 
 test("CCR 3 merge translates base routes into gateway rules for bare Claude models", () => {
@@ -1162,7 +1200,7 @@ test("launch spawns Claude against the shared home, not an isolated CCR profile"
           Router: {},
           profile: { profiles: [] },
         }),
-        getVersion: async () => "3.0.4",
+        getVersion: async () => "3.0.18",
         saveConfig: async () => {},
       },
       commandExists: async () => true,
@@ -1242,7 +1280,7 @@ test("a profile-pinned gateway address survives to the spawned child", async () 
           Router: {},
           profile: { profiles: [] },
         }),
-        getVersion: async () => "3.0.4",
+        getVersion: async () => "3.0.18",
         saveConfig: async () => {},
       },
       commandExists: async () => true,
@@ -1290,7 +1328,7 @@ test("launch refuses when the inherited Claude home sets an apiKeyHelper", async
             Router: {},
             profile: { profiles: [] },
           }),
-          getVersion: async () => "3.0.4",
+          getVersion: async () => "3.0.18",
           saveConfig: async () => {},
         },
         commandExists: async () => true,
@@ -1336,7 +1374,7 @@ test("a missing gateway key helper triggers one profile apply and a retry", asyn
           Router: {},
           profile: { profiles: [] },
         }),
-        getVersion: async () => "3.0.4",
+        getVersion: async () => "3.0.18",
         saveConfig: async () => {},
       },
       commandExists: async () => true,
@@ -1379,7 +1417,7 @@ test("a gateway key helper that still fails after the apply pass blocks the laun
             Router: {},
             profile: { profiles: [] },
           }),
-          getVersion: async () => "3.0.4",
+          getVersion: async () => "3.0.18",
           saveConfig: async () => {},
         },
         commandExists: async () => true,
@@ -1501,7 +1539,7 @@ test("CCR 3 launch path uses the managed profile and never invokes CCR 2 command
       },
       profile: { enabled: true, profiles: [] },
     }),
-    getVersion: async () => "3.0.4",
+    getVersion: async () => "3.0.18",
     saveConfig: async (config) => calls.push({ command: "saveConfig", config }),
   };
 
@@ -1522,7 +1560,7 @@ test("CCR 3 launch path uses the managed profile and never invokes CCR 2 command
           stdout: args[0] === "activate" ? 'export ANTHROPIC_BASE_URL="http://127.0.0.1:3456"\n' : "",
         };
       },
-      runtimeVersions: { claudeCode: "2.1.208", claudeCodeRouter: "3.0.4", node: "24.11.1" },
+      runtimeVersions: { claudeCode: "2.1.208", claudeCodeRouter: "3.0.18", node: "24.11.1" },
     });
 
     assert.equal(result.launch.command, "claude");
@@ -1542,14 +1580,14 @@ test("CCR 3 launch path uses the managed profile and never invokes CCR 2 command
 test("runtime check reports installed versions against the hard-cut requirements", async () => {
   const output = [];
   const exitCode = await runCli(["runtime", "check"], {
-    runtimeVersions: { claudeCode: "2.1.208", claudeCodeRouter: "3.0.4", node: "24.11.1" },
+    runtimeVersions: { claudeCode: "2.1.208", claudeCodeRouter: "3.0.18", node: "24.11.1" },
     stdout: { write: (chunk) => output.push(chunk) },
   });
 
   assert.equal(exitCode, 0);
   assert.match(output.join(""), /Node\.js\s+24\.11\.1\s+required >=22\s+ok/);
   assert.match(output.join(""), /Claude Code\s+2\.1\.208\s+required >=2\.1\.208\s+ok/);
-  assert.match(output.join(""), /Claude Code Router\s+3\.0\.4\s+required >=3\.0\.4 <4\s+ok/);
+  assert.match(output.join(""), /Claude Code Router\s+3\.0\.18\s+required >=3\.0\.18 <4\s+ok/);
 });
 
 test("runtime update previews explicit installs without changing global packages", async () => {
@@ -1567,7 +1605,7 @@ test("runtime update previews explicit installs without changing global packages
   assert.deepEqual(calls, []);
   assert.match(output.join(""), /Preview only/);
   assert.match(output.join(""), /@anthropic-ai\/claude-code@2\.1\.208/);
-  assert.match(output.join(""), /@musistudio\/claude-code-router@3\.0\.4/);
+  assert.match(output.join(""), /@musistudio\/claude-code-router@3\.0\.18/);
   assert.match(output.join(""), /npm install --global/);
   assert.match(output.join(""), /\.claude-code-router/);
   assert.match(output.join(""), /Re-run with --write/);
@@ -1586,7 +1624,7 @@ test("runtime update --write requires the isolated CCR 3 profile probe", async (
       },
       runtimeProbe: async () => {
         calls.push({ command: "runtimeProbe", args: [] });
-        return { profileResolved: true, version: "3.0.4" };
+        return { profileResolved: true, version: "3.0.18" };
       },
       runtimeVersions: passingRuntimeVersions(),
       stdout: { write: () => {} },
@@ -1599,7 +1637,7 @@ test("runtime update --write requires the isolated CCR 3 profile probe", async (
         "install",
         "--global",
         "@anthropic-ai/claude-code@2.1.208",
-        "@musistudio/claude-code-router@3.0.4",
+        "@musistudio/claude-code-router@3.0.18",
       ],
     });
     assert.deepEqual(calls[1], { command: "runtimeProbe", args: [] });
@@ -3007,7 +3045,7 @@ test("Codex takeover in live CCR config blocks before credential resolution or s
   const ccrClient = {
     getVersion: async () => {
       calls.push("getVersion");
-      return "3.0.4";
+      return "3.0.18";
     },
     getConfig: async () => {
       calls.push("getConfig");
@@ -3071,7 +3109,7 @@ test("launch fails closed on noncanonical takeover record shapes after the first
       await assert.rejects(prepareLaunch(launchCatalog(), "launch-example", {
         ccrClient: {
           getConfig: async () => { calls.push("getConfig"); return { profile: { profiles: [] } }; },
-          getVersion: async () => { calls.push("getVersion"); return "3.0.4"; },
+          getVersion: async () => { calls.push("getVersion"); return "3.0.18"; },
         },
         commandExists: async () => true,
         configDir: join(root, "airkit"),
@@ -3096,7 +3134,7 @@ test("Codex takeover safety probe reads config before any other RPC", async () =
     },
     getVersion: async () => {
       calls.push("getVersion");
-      return "3.0.4";
+      return "3.0.18";
     },
     saveConfig: async () => calls.push("saveConfig"),
   };
@@ -3142,7 +3180,7 @@ test("Codex takeover rechecks active config after getVersion changes service sta
     getVersion: async () => {
       calls.push("getVersion");
       hazardous = true;
-      return "3.0.4";
+      return "3.0.18";
     },
     saveConfig: async () => calls.push("saveConfig"),
     ensureGateway: async () => calls.push("ensureGateway"),
@@ -3378,7 +3416,7 @@ test("missing CCR starts management-only before getConfig and launch performs no
           const { args, method } = JSON.parse(request.body);
           calls.push(`rpc:${method}`);
           if (method === "saveConfig") assert.deepEqual(args[1], { applyProfile: false });
-          const value = method === "getAppInfo" ? { version: "3.0.4" } : safeConfig;
+          const value = method === "getAppInfo" ? { version: "3.0.18" } : safeConfig;
           return { ok: true, json: async () => ({ value }) };
         },
         runCommand: async (command, args) => {
@@ -3765,7 +3803,7 @@ test("prepareLaunch starts the adapter, removes legacy routes, and keeps its gat
   const ccrClient = {
     ensureGateway: async () => {},
     getConfig: async () => structuredClone(currentConfig),
-    getVersion: async () => "3.0.4",
+    getVersion: async () => "3.0.18",
     saveConfig: async (config) => saved.push(config),
   };
 
@@ -4438,7 +4476,7 @@ test("plain Claude CLI excludes compatibility MCP launch overlays", async () => 
       Router: { builtInRules: {}, fallback: { mode: "off", models: [], retryCount: 1 }, rules: [] },
       profile: { enabled: true, profiles: [] },
     }),
-    getVersion: async () => "3.0.4",
+    getVersion: async () => "3.0.18",
     saveConfig: async () => {},
   };
 
@@ -4730,7 +4768,7 @@ function legacyCompatibilityCatalog() {
 }
 
 function passingRuntimeVersions() {
-  return { claudeCode: "2.1.208", claudeCodeRouter: "3.0.4", node: "24.11.1" };
+  return { claudeCode: "2.1.208", claudeCodeRouter: "3.0.18", node: "24.11.1" };
 }
 
 function ccrTestClient(saved) {
@@ -4743,7 +4781,7 @@ function ccrTestClient(saved) {
       profile: { enabled: true, profiles: [] },
     }),
     ensureGateway: async () => {},
-    getVersion: async () => "3.0.4",
+    getVersion: async () => "3.0.18",
     saveConfig: async (config) => saved.push(config),
   };
 }

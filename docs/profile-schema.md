@@ -412,7 +412,7 @@ do not add a daemon-control wrapper layer.
 ## Author checklist
 
 - Keep shared behavior and public facts free of company identifiers.
-- Require Node.js 22+, Claude Code 2.1.208+, and CCR 3.0.4 through latest 3.x.
+- Require Node.js 22+, Claude Code 2.1.208+, and CCR 3.0.18 through latest 3.x.
 - Declare an explicit provider `type`.
 - Use only `default`, `background`, `opus`, and `sonnet` in active CCR Router
   config.
