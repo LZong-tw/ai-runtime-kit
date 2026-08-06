@@ -130,6 +130,21 @@ Setting `POWERLEVEL9K_INSTANT_PROMPT=off` for the launched process prevents
 git-aware prompt fragments from polluting tool output without changing the
 user's interactive shell.
 
+## Prefix-cache observability
+
+DeepSeek and GPT routes keep the native-first/fallback boundary intact. AirKit
+does not sort tools, rewrite messages, remove system reminders, or add guessed
+provider cache-hint fields. For requests with a prior message history it emits
+an opaque stable-prefix candidate hash in route/request telemetry; the hash is
+an observation after AirKit's existing compatibility normalization, not a
+provider cache key.
+
+Provider cache counters are copied from compatibility usage or verified gateway
+response headers into request telemetry. Missing counters remain unavailable;
+catalog pricing, `cache_control`, or a prefix hash must not be presented as a
+cache hit. The forwarded request bytes remain unchanged by this observability
+layer, which preserves Claude Code tool behavior and session resume semantics.
+
 ## Verification contract
 
 Before release:

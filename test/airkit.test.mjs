@@ -312,6 +312,7 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
       "config.mjs",
       "fallback.mjs",
       "gateway.mjs",
+      "prefix-observability.mjs",
       "plugin.mjs",
       "protocol.mjs",
       "server-history.mjs",

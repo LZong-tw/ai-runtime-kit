@@ -71,6 +71,10 @@ export function createGptActivitySseTransform({ body } = {}) {
 
 function hasPromptUsage(usage) {
   return [
+    usage?.prompt_tokens,
+    usage?.prompt_tokens_details?.cached_tokens,
+    usage?.prompt_cache_hit_tokens,
+    usage?.prompt_cache_miss_tokens,
     usage?.input_tokens,
     usage?.cache_read_input_tokens,
     usage?.cache_creation_input_tokens,

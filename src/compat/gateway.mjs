@@ -74,13 +74,14 @@ export function createCoreClient({ config, fetchImpl = fetch, readFile = readFil
       });
       return parseCoreMessageResponse(result);
     },
-    async forwardRaw({ body, headers, method = "POST", response, signal }) {
+    async forwardRaw({ body, headers, method = "POST", response, signal, onResponse }) {
       const result = await fetchImpl(endpoint, {
         method,
         headers: coreHeaders(headers),
         body,
         signal,
       });
+      onResponse?.({ headers: result.headers, status: result.status });
       await pipeCoreResponse(result, response, signal);
     },
   };
@@ -129,8 +130,9 @@ export function createGatewayClient({ origin, token, fetchImpl = fetch, response
       });
       return parseCoreMessageResponse(result);
     },
-    async forwardRaw({ body, headers, method = "POST", response, signal }) {
+    async forwardRaw({ body, headers, method = "POST", response, signal, onResponse }) {
       const result = await request({ body, headers, method, path: "/v1/messages", signal });
+      onResponse?.({ headers: result.headers, status: result.status });
       await pipeCoreResponse(result, response, signal, responseTransformFactory?.({ body }));
     },
     async forward({ body, headers, method = "GET", path, response, signal }) {
