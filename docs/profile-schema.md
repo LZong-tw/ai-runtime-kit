@@ -99,6 +99,10 @@ Never commit credential values.
 Provider fields:
 
 - `name`: source name used by catalog Router values.
+- `managedId`: optional AirKit-only CCR identity, matching
+  `^airkit-provider-[a-z0-9][a-z0-9._-]*$`. Use this when the provider identity
+  belongs to an endpoint or credential owner rather than this launch profile;
+  AirKit strips the field before saving the CCR object.
 - `type`: required CCR 3 gateway protocol, for example
   `openai_chat_completions`, `openai_responses`, `anthropic_messages`, or
   `gemini_generate_content`.
@@ -160,7 +164,11 @@ During merge, AirKit creates a stable managed provider identity and intentionall
 sets its CCR `id` and `name` to the same value. CCR 3 resolves profile selectors
 through its management layer, while the generated gateway performs adapter
 lookup by provider name; differing values produce `Target adapter is not
-registered` failures.
+registered` failures. A CCR provider may set the AirKit-only `managedId` field
+to an endpoint-owned value such as `airkit-provider-web-litellm`; AirKit removes
+that field from the generated CCR object and uses the value for routes and
+provider identity. Without it, the default remains
+`airkit-provider-<profile>-<provider>`.
 
 ## Compatibility declaration opt-in
 
@@ -233,10 +241,11 @@ recorder and UI see them. It never reads or writes CCR SQLite state or calls a
 private CCR API. Unrelated CCR plugins are preserved.
 
 `native-first` preserves Claude Code's existing client-side WebSearch and
-WebFetch definitions and does not register duplicate MCP tools. Effective
-routing still follows verified capability evidence: WebSearch remains native,
-while WebFetch falls back as a complete request until its native execution cycle
-is verified.
+WebFetch definitions and does not register duplicate MCP tools. A definition by
+itself does not divert an ordinary turn: WebSearch remains native, and
+WebFetch stays on the selected executor route while its native execution cycle
+is unverified. Explicit `anthropic-fallback` mode still sends the complete
+request to the configured Anthropic route.
 
 `webSearch.mode: "mcp"` is retained only as an explicit migration mode for
 profiles that still require the older compatibility `web_search` tool. In that

@@ -673,7 +673,11 @@ function requiresWholeRequestFallback({ body, config, serverHistory, serverTools
     body.tools.length > toolLimit;
   const { policies } = resolveCompatibilityPolicies(config, VERIFIED_NATIVE_COMPATIBILITY);
   for (const family of serverTools.clientFamilies) {
-    if (policies[family] !== "native" && !toolSearchOwnsOverflow) return true;
+    if (
+      config?.[family]?.mode === "anthropic-fallback" &&
+      policies[family] !== "native" &&
+      !toolSearchOwnsOverflow
+    ) return true;
   }
 
   const families = new Set([...serverTools.families, ...serverHistory.families]);
