@@ -685,24 +685,25 @@ function requiresWholeRequestFallback({ body, config, serverHistory, serverTools
     if (family === "toolSearch" && config.toolSearch?.mode === "bridge") continue;
     if (family === "advisor" && policies.advisor === "bridge") continue;
     // A native-first server-tool definition is only a catalog entry. It does
-    // not prove this turn used the tool. DeepSeek is the route where preserving
-    // the stable prefix is a deliberate cache policy; other models retain the
-    // established whole-request fallback unless their family is bridged.
+    // not prove this turn used the tool. DeepSeek and GPT routes are the
+    // cache-sensitive providers where preserving the stable prefix is a
+    // deliberate policy; other models retain the established fallback.
     if (
-      isDeepSeekModel(body?.model) &&
+      isCacheSensitiveModel(body?.model) &&
       serverTools.families.has(family) &&
-      !serverToolDefinitionRequiresFallback(config, family)
+      !serverToolDefinitionRequiresFallback(config, policies, family)
     ) continue;
     return true;
   }
   return false;
 }
 
-function isDeepSeekModel(model) {
-  return typeof model === "string" && /(?:^|[\/,])deepseek(?:[-\/]|$)/i.test(model);
+function isCacheSensitiveModel(model) {
+  return typeof model === "string" && /(?:^|[\/,])(?:deepseek|gpt)(?:[-\/]|$)/i.test(model);
 }
 
-function serverToolDefinitionRequiresFallback(config, family) {
+function serverToolDefinitionRequiresFallback(config, policies, family) {
+  if (policies?.[family] === "anthropic-fallback") return true;
   const mode = config?.[family]?.mode;
   return mode === "anthropic-fallback" || mode === "mcp";
 }
