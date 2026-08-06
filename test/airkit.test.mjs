@@ -168,7 +168,7 @@ test("isolated verifier restarts management-only before trusting persisted dange
 test("OSS package allowlist excludes tests and migration artifacts", async () => {
   const expectedIdentity = {
     name: "@untionglim/ai-runtime-kit",
-    version: "0.2.6",
+    version: "0.2.7",
     publishConfig: { access: "public" },
     repository: {
       type: "git",
