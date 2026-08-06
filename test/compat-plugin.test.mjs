@@ -1292,6 +1292,39 @@ test("oversized GPT catalogs keep Claude Code WebFetch on the bounded client-too
   assert.equal(response.statusCode, 200);
 });
 
+test("unverified native-first WebFetch definition does not divert an ordinary turn", async () => {
+  const calls = [];
+  const fixture = await createPluginFixture({
+    coreClient: createPluginCoreClient({
+      async forwardRaw(input) {
+        calls.push(input);
+        input.response.writeHead(202, { "content-type": "application/json" });
+        input.response.end(Buffer.from("{}"));
+      },
+      async requestFallback() {
+        throw new Error("a client-side WebFetch definition alone must not fallback");
+      },
+    }),
+  });
+  const response = createRecordingResponse();
+  const body = {
+    model: "oneportal/deepseek-v4-flash",
+    max_tokens: 512,
+    messages: [{ role: "user", content: "Inspect the repository." }],
+    tools: [{ name: "WebFetch", input_schema: { type: "object" } }],
+  };
+
+  await fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify(body))),
+    response,
+    fixture.helpers,
+  );
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(JSON.parse(calls[0].body), body);
+  assert.equal(response.statusCode, 202);
+});
+
 test("fallback rejections respect routeLog and do not duplicate terminal API errors", async () => {
   const captured = [];
   const originalWrite = process.stderr.write;
@@ -1301,6 +1334,7 @@ test("fallback rejections respect routeLog and do not duplicate terminal API err
   };
   try {
     const fixture = await createPluginFixture({
+      pluginConfig: { webFetch: { mode: "anthropic-fallback" } },
       coreClient: createPluginCoreClient({
         async requestFallback() {
           return new Response(JSON.stringify({ error: { message: "rate limited" } }), {

@@ -96,7 +96,7 @@ current contract:
 | Family | Profile mode | Effective behavior |
 | --- | --- | --- |
 | WebSearch (`webSearch`) | `native-first` | Native. The complete call/result wire cycle was verified with real Claude Code 2.1.211. |
-| WebFetch (`webFetch`) | `native-first` | Anthropic fallback for now. Claude exposes the native client tool, but the zero-public-network loopback execution is blocked by Claude's domain-safety check, so AirKit does not claim the native cycle is verified. |
+| WebFetch (`webFetch`) | `native-first` | The client definition stays on the selected executor route; AirKit does not claim native execution is verified. Explicit `anthropic-fallback` mode uses the complete Anthropic route. |
 | Code Execution (`codeExecution`) | `anthropic-fallback` | The complete request uses the configured Anthropic route so container and continuation state stay intact. |
 | Advisor (`advisor`) | `bridge` or `anthropic-fallback` | Bridge mode simulates Claude's Advisor tool with a bounded transcript review through the configured Anthropic route and resumes with a canonical `advisor_tool_result`; fallback mode strips the definition by default. |
 | ToolSearch (`toolSearch`) | `bridge` | Safe bounded regex/BM25 requests use the local bridge. Unsafe, oversized, unsupported, or unknown requests fall back as a complete request. |

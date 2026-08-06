@@ -74,6 +74,10 @@ export async function loadCatalog(path = defaultCatalogPath, options = {}) {
 }
 
 export function buildCcrConfig(catalog, profileName, options = {}) {
+  return stripManagedProviderMetadata(buildSourceCcrConfig(catalog, profileName, options));
+}
+
+function buildSourceCcrConfig(catalog, profileName, options = {}) {
   const profile = findProfile(catalog, profileName);
   if (!profile.ccr) {
     throw new Error(`profile "${profileName}" does not define a CCR config`);
@@ -84,6 +88,12 @@ export function buildCcrConfig(catalog, profileName, options = {}) {
   config.plugins = config.plugins.map((plugin) => plugin?.id === compatibilityPluginId
     ? { ...plugin, module: compatibilityPluginModule }
     : plugin);
+  return config;
+}
+
+function stripManagedProviderMetadata(config) {
+  if (!Array.isArray(config.Providers)) return config;
+  config.Providers = config.Providers.map(({ managedId: _managedId, ...provider }) => provider);
   return config;
 }
 
@@ -111,14 +121,15 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
   const anthropicProviderBaseUrl = String(
     options.anthropicProviderBaseUrl ?? options.env?.AIRCLAUDE_ANTHROPIC_PROVIDER_BASE_URL ?? "",
   ).trim();
-  const baseConfig = buildCcrConfig(catalog, profileName, { configDir });
+  const baseConfig = buildSourceCcrConfig(catalog, profileName, { configDir });
   assertCcr3Compatible(baseConfig);
   const managedProviderEntries = baseConfig.Providers.map((provider) => {
-    const id = `airkit-provider-${slug(profile.name)}-${slug(provider.name)}`;
+    const id = managedProviderId(profile, provider);
+    const { managedId: _managedId, ...providerConfig } = provider;
     return {
       sourceName: provider.name,
       config: {
-        ...provider,
+        ...providerConfig,
         api_base_url: provider.type === "openai_chat_completions" && providerBaseUrl
           ? providerBaseUrl
           : provider.type === "anthropic_messages" && anthropicProviderBaseUrl
@@ -284,6 +295,11 @@ function catalogManagedPrefixes(catalog, installedNames = []) {
   for (const name of names) {
     profiles.push(`airkit-${slug(name)}-`);
     providers.push(`airkit-provider-${slug(name)}-`);
+  }
+  for (const profile of catalog?.profiles ?? []) {
+    for (const provider of profile.ccr?.Providers ?? []) {
+      if (provider?.managedId) providers.push(String(provider.managedId));
+    }
   }
   return { profiles, providers };
 }
@@ -1644,7 +1660,7 @@ function airkitEnvVar(prefix, profileName) {
 function publicPackage() {
   return {
     name: "@untionglim/ai-runtime-kit",
-    version: "0.2.7",
+    version: "0.2.8",
     publishConfig: { access: "public" },
     repository: {
       type: "git",
@@ -2402,7 +2418,7 @@ function airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, runtimeEnv = proc
     env.AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS = String(maxStopBlocks);
   }
 
-  for (const [key, route] of managedRouterEntries(ccrConfig.Router)) {
+  for (const [key, route] of sortedRouterEntries(ccrConfig.Router)) {
     const envKey = `AIRCLAUDE_ROUTE_${toEnvKey(key)}`;
     const { provider, model } = splitRoute(route);
     env[envKey] = route;
@@ -2531,6 +2547,15 @@ function statuslineLabel(mode, ccrConfig) {
   const route = ccrConfig.Router?.default;
   if (typeof route !== "string") return `airclaude ${mode}`;
   return `airclaude ${mode} ${splitRoute(route).model}`;
+}
+
+function managedProviderId(profile, provider) {
+  const explicit = provider?.managedId;
+  if (explicit === undefined) return `airkit-provider-${slug(profile.name)}-${slug(provider.name)}`;
+  if (typeof explicit !== "string" || !/^airkit-provider-[a-z0-9][a-z0-9._-]*$/i.test(explicit)) {
+    throw new Error(`provider "${provider.name}" has invalid managedId: ${explicit}`);
+  }
+  return explicit;
 }
 
 function splitRoute(route) {
