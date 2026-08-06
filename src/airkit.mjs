@@ -2410,9 +2410,17 @@ function airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, runtimeEnv = proc
     // process only; the user's interactive P10k prompt and .zshrc are untouched.
     POWERLEVEL9K_INSTANT_PROMPT: "off",
   };
-  const statuslineInputPrice = routeInputPrice(catalog, profile, ccrConfig.Router?.default);
-  if (statuslineInputPrice !== null) {
-    env.AIRCLAUDE_STATUSLINE_INPUT_PRICE_PER_MILLION = String(statuslineInputPrice);
+  const statuslinePriceMap = profileStatuslinePriceMap(profile);
+  if (statuslinePriceMap) {
+    // Keep every model's verified input price available to the statusline.
+    // Claude Code can switch /model without starting a new AirKit process, so
+    // a single default-route price would make later cost readouts stale.
+    env.AIRCLAUDE_STATUSLINE_PRICE_MAP_JSON = JSON.stringify(statuslinePriceMap);
+  } else {
+    const statuslineInputPrice = routeInputPrice(catalog, profile, ccrConfig.Router?.default);
+    if (statuslineInputPrice !== null) {
+      env.AIRCLAUDE_STATUSLINE_INPUT_PRICE_PER_MILLION = String(statuslineInputPrice);
+    }
   }
   const maxStopBlocks = profile.launch?.modes?.[mode]?.completionGuard?.maxStopBlocks;
   if (maxStopBlocks !== undefined) {
@@ -2460,6 +2468,31 @@ function profileInputPrice(profile, provider, model) {
   if (!pricing || typeof pricing !== "object") return null;
 
   return inputPriceFromValue(pricing[`${provider},${model}`] ?? pricing[model] ?? pricing[`${provider}/${model}`]);
+}
+
+function profileStatuslinePriceMap(profile) {
+  const pricing = profile.statusline?.modelPricingUsdPer1M ?? profile.statusline?.pricingUsdPer1M;
+  if (!pricing || typeof pricing !== "object" || Array.isArray(pricing)) return null;
+
+  const normalized = {};
+  for (const [model, value] of Object.entries(pricing).sort(([left], [right]) => left.localeCompare(right))) {
+    const input = inputPriceFromValue(value);
+    if (input === null) continue;
+
+    if (typeof value === "number") {
+      normalized[model] = { input };
+      continue;
+    }
+
+    const entry = { input };
+    for (const key of ["inputCacheHit", "inputCacheMiss", "output"]) {
+      const number = Number(value?.[key]);
+      if (Number.isFinite(number) && number > 0) entry[key] = number;
+    }
+    normalized[model] = entry;
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : null;
 }
 
 function catalogInputPrice(catalog, provider, model) {

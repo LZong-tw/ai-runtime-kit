@@ -2506,6 +2506,26 @@ test("airclaude exposes family routes to statusline side-channel state", () => {
   assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_SONNET_MODEL, "steady-coder");
 });
 
+test("airclaude exposes a model-aware statusline price map when the profile owns verified pricing", () => {
+  const catalog = launchCatalog();
+  catalog.profiles[0].statusline = {
+    modelPricingUsdPer1M: {
+      "gpt-5.6-luna": { input: 0.2, inputCacheHit: 0.02, output: 1.2 },
+      "gpt-5.6-terra": { input: 2, inputCacheHit: 0.2, output: 12 },
+    },
+  };
+
+  const plan = buildLaunchPlan(catalog, "launch-example", {
+    configDir: "/tmp/airkit-statusline-prices",
+  });
+
+  assert.deepEqual(JSON.parse(plan.launch.env.AIRCLAUDE_STATUSLINE_PRICE_MAP_JSON), {
+    "gpt-5.6-luna": { input: 0.2, inputCacheHit: 0.02, output: 1.2 },
+    "gpt-5.6-terra": { input: 2, inputCacheHit: 0.2, output: 12 },
+  });
+  assert.equal(plan.launch.env.AIRCLAUDE_STATUSLINE_INPUT_PRICE_PER_MILLION, undefined);
+});
+
 test("airclaude launch quiets the Powerlevel10k instant prompt in its command subshells", async () => {
   const catalog = launchCatalog();
   const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-p10k-"));
