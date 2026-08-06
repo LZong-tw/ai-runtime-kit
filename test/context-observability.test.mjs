@@ -20,6 +20,8 @@ test("total-only OpenAI usage remains non-zero without inventing cache detail", 
       cacheDetails: "unavailable",
       cacheReadInputTokens: null,
       cacheCreationInputTokens: null,
+      cacheMissInputTokens: null,
+      cacheHitRate: null,
     },
   );
 });
@@ -39,6 +41,30 @@ test("OpenAI cached prompt detail is reported without double-counting input", ()
       cacheDetails: "available",
       cacheReadInputTokens: 80,
       cacheCreationInputTokens: null,
+      cacheMissInputTokens: null,
+      cacheHitRate: 80 / 120,
+    },
+  );
+});
+
+test("DeepSeek cache hit and miss usage exposes a truthful hit rate", () => {
+  assert.deepEqual(
+    summarizeCompletionUsage({
+      prompt_tokens: 120,
+      completion_tokens: 5,
+      total_tokens: 125,
+      prompt_cache_hit_tokens: 80,
+      prompt_cache_miss_tokens: 40,
+    }),
+    {
+      inputTokens: 120,
+      outputTokens: 5,
+      totalTokens: 125,
+      cacheDetails: "available",
+      cacheReadInputTokens: 80,
+      cacheCreationInputTokens: null,
+      cacheMissInputTokens: 40,
+      cacheHitRate: 80 / 120,
     },
   );
 });
@@ -58,6 +84,8 @@ test("Anthropic cache counters contribute to truthful total input accounting", (
       cacheDetails: "available",
       cacheReadInputTokens: 80,
       cacheCreationInputTokens: 30,
+      cacheMissInputTokens: null,
+      cacheHitRate: 80 / 120,
     },
   );
 });
@@ -70,6 +98,8 @@ test("missing usage is explicitly unavailable instead of synthesizing counters",
     cacheDetails: "unavailable",
     cacheReadInputTokens: null,
     cacheCreationInputTokens: null,
+    cacheMissInputTokens: null,
+    cacheHitRate: null,
   });
 });
 

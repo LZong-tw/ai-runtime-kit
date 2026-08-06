@@ -684,9 +684,27 @@ function requiresWholeRequestFallback({ body, config, serverHistory, serverTools
   for (const family of families) {
     if (family === "toolSearch" && config.toolSearch?.mode === "bridge") continue;
     if (family === "advisor" && policies.advisor === "bridge") continue;
+    // A native-first server-tool definition is only a catalog entry. It does
+    // not prove this turn used the tool. DeepSeek is the route where preserving
+    // the stable prefix is a deliberate cache policy; other models retain the
+    // established whole-request fallback unless their family is bridged.
+    if (
+      isDeepSeekModel(body?.model) &&
+      serverTools.families.has(family) &&
+      !serverToolDefinitionRequiresFallback(config, family)
+    ) continue;
     return true;
   }
   return false;
+}
+
+function isDeepSeekModel(model) {
+  return typeof model === "string" && /(?:^|[\/,])deepseek(?:[-\/]|$)/i.test(model);
+}
+
+function serverToolDefinitionRequiresFallback(config, family) {
+  const mode = config?.[family]?.mode;
+  return mode === "anthropic-fallback" || mode === "mcp";
 }
 
 async function routeWholeRequestFallback({ body, headers, config, coreClient, response, signal }) {
