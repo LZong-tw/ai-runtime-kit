@@ -1225,7 +1225,48 @@ test("unused native-first server-tool definitions keep a DeepSeek request on its
   assert.equal(JSON.parse(response.body).content[0].text, "executor response");
 });
 
-test("unused native-first server-tool definitions still fallback for non-DeepSeek routes", async () => {
+test("unused native-first server-tool definitions keep a GPT request on its executor route", async () => {
+  const executorCalls = [];
+  const fallbackCalls = [];
+  const fixture = await createPluginFixture({
+    coreClient: {
+      async requestMessage(body) {
+        executorCalls.push(structuredClone(body));
+        return message({ content: [{ type: "text", text: "executor response" }] });
+      },
+      async requestFallback(body) {
+        fallbackCalls.push(structuredClone(body));
+        throw new Error("unused native-first definition must not trigger fallback");
+      },
+    },
+  });
+  const body = {
+    model: "oneportal/gpt-5.6-luna",
+    max_tokens: 512,
+    system: "Stable GPT prefix — keep this ordering unchanged.\n  ",
+    messages: [{ role: "user", content: [{ type: "text", text: "answer without searching" }] }],
+    tools: [{ type: "web_search_20260318", name: "web_search" }],
+  };
+  const response = createRecordingResponse();
+
+  await fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify(body))),
+    response,
+    fixture.helpers,
+  );
+
+  assert.equal(fallbackCalls.length, 0);
+  assert.equal(executorCalls.length, 1);
+  assert.equal(executorCalls[0].model, body.model);
+  assert.equal(
+    JSON.stringify({ system: executorCalls[0].system, messages: executorCalls[0].messages, tools: executorCalls[0].tools }),
+    JSON.stringify({ system: body.system, messages: body.messages, tools: body.tools }),
+    "GPT stable prompt prefix fields must remain byte-identical on the executor route",
+  );
+  assert.equal(JSON.parse(response.body).content[0].text, "executor response");
+});
+
+test("unused native-first server-tool definitions still fallback for non-cache-sensitive routes", async () => {
   const executorCalls = [];
   const fallbackCalls = [];
   const fixture = await createPluginFixture({
@@ -1241,7 +1282,7 @@ test("unused native-first server-tool definitions still fallback for non-DeepSee
     },
   });
   const body = {
-    model: "oneportal/gpt-5.6-terra",
+    model: "oneportal/kimi-k2.6",
     max_tokens: 512,
     messages: [{ role: "user", content: "answer without searching" }],
     tools: [{ type: "web_search_20260318", name: "web_search" }],
@@ -1250,6 +1291,38 @@ test("unused native-first server-tool definitions still fallback for non-DeepSee
 
   await fixture.messages.handler(
     createPluginRequest(Buffer.from(JSON.stringify(body))),
+    response,
+    fixture.helpers,
+  );
+
+  assert.equal(fallbackCalls.length, 1);
+  assert.equal(executorCalls.length, 0);
+});
+
+test("cache-sensitive routes still fallback for unverified native-first server tools", async () => {
+  const executorCalls = [];
+  const fallbackCalls = [];
+  const fixture = await createPluginFixture({
+    coreClient: {
+      async requestMessage(body) {
+        executorCalls.push(structuredClone(body));
+        return message({ content: [{ type: "text", text: "unexpected executor response" }] });
+      },
+      async requestFallback(body) {
+        fallbackCalls.push(structuredClone(body));
+        return message({ content: [{ type: "text", text: "fallback response" }] });
+      },
+    },
+  });
+  const response = createRecordingResponse();
+
+  await fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify({
+      model: "oneportal/gpt-5.6-luna",
+      max_tokens: 512,
+      messages: [{ role: "user", content: "answer without fetching" }],
+      tools: [{ type: "web_fetch_20260318", name: "web_fetch" }],
+    }))),
     response,
     fixture.helpers,
   );
