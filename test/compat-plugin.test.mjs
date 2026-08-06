@@ -15,6 +15,7 @@ import plugin, {
   createMcpHandler,
   createMessagesHandler,
 } from "../src/compat/plugin.mjs";
+import { describeStablePrefix } from "../src/compat/prefix-observability.mjs";
 
 const CORE_TOKEN = "generated-core-token";
 const RAW_RESPONSE_BODY = Buffer.from([0, 1, 2, 255, 10]);
@@ -2471,6 +2472,58 @@ test("routeLog emits one redacted decision line per request and stays silent whe
   assert.equal(silent.length, 0, "no decision lines when routeLog is absent");
 });
 
+test("stable prefix observation changes only when the prefix changes", () => {
+  const base = {
+    model: "oneportal/deepseek-v4-flash",
+    system: [{ type: "text", text: "stable system" }],
+    tools: [{ name: "Bash", input_schema: { type: "object" } }],
+    messages: [
+      { role: "user", content: "earlier request" },
+      { role: "assistant", content: "earlier answer" },
+      { role: "user", content: "tail A" },
+    ],
+  };
+  const samePrefix = describeStablePrefix({ ...base, messages: [...base.messages.slice(0, -1), { role: "user", content: "tail B" }] });
+  const changedSystem = describeStablePrefix({ ...base, system: [{ type: "text", text: "changed system" }] });
+  const changedHistory = describeStablePrefix({ ...base, messages: [{ role: "user", content: "changed history" }, ...base.messages.slice(1)] });
+
+  assert.equal(samePrefix.stablePrefixHash, describeStablePrefix(base).stablePrefixHash);
+  assert.notEqual(changedSystem.stablePrefixHash, describeStablePrefix(base).stablePrefixHash);
+  assert.notEqual(changedHistory.stablePrefixHash, describeStablePrefix(base).stablePrefixHash);
+  assert.match(samePrefix.stablePrefixHash, /^[0-9a-f]{64}$/);
+  assert.equal(samePrefix.candidate, true);
+});
+
+test("stable prefix metadata never changes the forwarded request body", async () => {
+  const forwarded = [];
+  const handler = await createPluginHandlers({
+    coreClient: { async forwardRaw({ body }) { forwarded.push(Buffer.from(body)); } },
+    pluginConfig: {
+      ...structuredClone(COMPLETE_PLUGIN_CONFIG),
+      routeLog: true,
+      routes: { default: "oneportal/deepseek-v4-flash" },
+    },
+  });
+  const body = {
+    model: "oneportal/deepseek-v4-flash",
+    system: [{ type: "text", text: "stable system" }],
+    tools: [{ name: "Bash", input_schema: { type: "object" } }],
+    messages: [
+      { role: "user", content: "history" },
+      { role: "user", content: "tail" },
+    ],
+  };
+  const raw = Buffer.from(JSON.stringify(body));
+  const logs = await captureAirkitLogs(() => handler.messages.handler(
+    createPluginRequest(raw, { headers: { "x-request-id": "stable-prefix-body" } }),
+    {},
+    { readBody: async () => raw },
+  ));
+  assert.deepEqual(forwarded, [raw]);
+  assert.match(logs.routes[0].stablePrefix.stablePrefixHash, /^[0-9a-f]{64}$/);
+  assert.equal(logs.requests[0].stablePrefix.stablePrefixMessages, 1);
+});
+
 test("request lifecycle telemetry records a successful raw response with its actual status", async () => {
   const fixture = await createPluginFixture({
     pluginConfig: {
@@ -2609,7 +2662,119 @@ test("request lifecycle telemetry records DeepSeek prompt cache counters", async
   assert.deepEqual(logs.requests[0].promptCache, {
     prompt_cache_hit_tokens: 80,
     prompt_cache_miss_tokens: 40,
+    cache_read_input_tokens: 80,
+    cache_creation_input_tokens: null,
+    cache_miss_input_tokens: 40,
     hit_rate: 80 / 120,
+  });
+});
+
+test("request lifecycle telemetry records GPT nested cache counters", async () => {
+  const fixture = await createPluginFixture({
+    pluginConfig: { routeLog: true },
+    coreClient: createPluginCoreClient({
+      async requestMessage() {
+        return message({
+          content: [{ type: "text", text: "cached GPT response" }],
+          usage: {
+            prompt_tokens: 200,
+            prompt_tokens_details: { cached_tokens: 150 },
+            completion_tokens: 7,
+          },
+        });
+      },
+    }),
+  });
+  const logs = await captureAirkitLogs(() => fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify({
+      model: "oneportal/gpt-5.6-sol",
+      messages: [{ role: "user", content: "reuse the stable prefix" }],
+      tools: [{ type: "web_search_20260318", name: "web_search" }],
+    })), { headers: { "x-request-id": "gpt-cache-log" } }),
+    createRecordingResponse(),
+    fixture.helpers,
+  ));
+
+  assert.deepEqual(logs.requests[0].promptCache, {
+    prompt_cache_hit_tokens: 150,
+    prompt_cache_miss_tokens: 50,
+    cache_read_input_tokens: 150,
+    cache_creation_input_tokens: null,
+    cache_miss_input_tokens: 50,
+    hit_rate: 150 / 200,
+  });
+});
+
+test("request lifecycle telemetry treats GPT Anthropic-shaped input as total prompt tokens", async () => {
+  const fixture = await createPluginFixture({
+    pluginConfig: { routeLog: true },
+    coreClient: createPluginCoreClient({
+      async requestMessage() {
+        return message({
+          content: [{ type: "text", text: "cached GPT response" }],
+          model: "oneportal/gpt-5.6-sol",
+          usage: {
+            input_tokens: 25_102,
+            cache_read_input_tokens: 19_712,
+            output_tokens: 196,
+          },
+        });
+      },
+    }),
+  });
+  const logs = await captureAirkitLogs(() => fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify({
+      model: "oneportal/gpt-5.6-sol",
+      messages: [{ role: "user", content: "reuse the stable prefix" }],
+      tools: [{ type: "web_search_20260318", name: "web_search" }],
+    })), { headers: { "x-request-id": "gpt-anthropic-shaped-cache-log" } }),
+    createRecordingResponse(),
+    fixture.helpers,
+  ));
+
+  assert.equal(logs.requests[0].promptCache.prompt_cache_miss_tokens, 5_390);
+  assert.equal(logs.requests[0].promptCache.hit_rate, 19_712 / 25_102);
+});
+
+test("raw request telemetry records gateway cache counters without changing bytes", async () => {
+  const raw = Buffer.from(JSON.stringify({
+    model: "oneportal/deepseek-v4-flash",
+    messages: [
+      { role: "user", content: "history" },
+      { role: "user", content: "tail" },
+    ],
+  }));
+  const fixture = await createPluginFixture({
+    pluginConfig: { routeLog: true },
+    coreClient: createPluginCoreClient({
+      async forwardRaw({ body, response, onResponse }) {
+        assert.deepEqual(body, raw);
+        onResponse?.({
+          headers: new Headers({
+            "x-gateway-billing-cache-read-tokens": "150",
+            "x-gateway-billing-cache-write-tokens": "0",
+            "x-gateway-billing-input-tokens": "200",
+          }),
+        });
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end("{}");
+      },
+    }),
+  });
+  const logs = await captureAirkitLogs(() => fixture.messages.handler(
+    createPluginRequest(raw, { headers: { "x-request-id": "raw-cache-log" } }),
+    createRecordingResponse(),
+    fixture.helpers,
+  ));
+
+  assert.deepEqual(logs.requests[0].promptCache, {
+    prompt_cache_hit_tokens: 150,
+    prompt_cache_miss_tokens: 50,
+    cache_read_input_tokens: 150,
+    cache_creation_input_tokens: 0,
+    cache_miss_input_tokens: 50,
+    hit_rate: 150 / 200,
+    source: "gateway-response-header",
   });
 });
 

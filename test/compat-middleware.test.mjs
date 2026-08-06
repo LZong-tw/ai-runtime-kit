@@ -203,6 +203,35 @@ test("middleware fills zero GPT stream usage so Claude Code can render statuslin
   assert.match(body, /"output_tokens":[1-9][0-9]*/);
 });
 
+test("middleware preserves GPT nested cache usage instead of estimating a second input counter", async (t) => {
+  const sse = [
+    ["message_start", {
+      type: "message_start",
+      message: {
+        model: "gpt-5.6-sol",
+        usage: { prompt_tokens: 200, prompt_tokens_details: { cached_tokens: 150 } },
+        content: [],
+      },
+    }],
+    ["message_stop", { type: "message_stop" }],
+  ].map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join("");
+  const upstream = await startFixture(t, async (_request, response) => {
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(sse);
+  });
+  const adapter = await startAdapter(t, upstream.origin);
+
+  const result = await adapterFetch(adapter.origin, "/v1/messages", {
+    model: "claude-airkit-mode[1m]", messages: [{ role: "user", content: "show the usage" }], stream: true,
+  });
+  const body = await result.text();
+
+  assert.equal(result.status, 200);
+  assert.match(body, /"prompt_tokens":200/);
+  assert.match(body, /"cached_tokens":150/);
+  assert.doesNotMatch(body, /"input_tokens":\d+/);
+});
+
 test("middleware proxies non-compatibility gateway paths with the generated gateway token", async (t) => {
   const upstream = await startFixture(t, async (request, response) => {
     assert.equal(request.url, "/v1/models?limit=3");

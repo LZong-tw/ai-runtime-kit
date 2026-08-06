@@ -23,6 +23,7 @@ import {
 import { inspectPendingServerHistory } from "./server-history.mjs";
 import { inspectServerToolRequest, stripServerToolFamily } from "./server-tools.mjs";
 import { applyToolSearchBudget } from "./tool-search.mjs";
+import { describeStablePrefix } from "./prefix-observability.mjs";
 
 const MCP_PROTOCOL_VERSION = "2025-03-26";
 const MAX_QUERY_LENGTH = 1_000;
@@ -130,11 +131,13 @@ export function createMessagesHandler({ config, coreClient, policies }) {
         ? rawBody
         : Buffer.from(JSON.stringify(outboundBody), "utf8");
       const compat = isRecord(outboundBody) && isConfiguredCompatibilityRequest(outboundBody, policies, config);
+      const stablePrefix = describeStablePrefix(outboundBody);
       telemetry.decision = describeRouteDecision({
         body,
         mode,
         outboundBody,
         path: compat ? "compat" : "passthrough",
+        stablePrefix,
       });
       logRouteDecision({
         enabled: config.routeLog,
@@ -149,6 +152,9 @@ export function createMessagesHandler({ config, coreClient, policies }) {
           method: request.method,
           response,
           signal,
+          onResponse: ({ headers }) => {
+            telemetry.promptCache = summarizeGatewayResponseHeaders(headers);
+          },
         });
         return;
       }
@@ -162,7 +168,7 @@ export function createMessagesHandler({ config, coreClient, policies }) {
         signal,
       });
       if (message !== undefined) {
-        telemetry.promptCache = summarizePromptCacheUsage(message.usage);
+        telemetry.promptCache = summarizePromptCacheUsage(message.usage, message.model);
         writeAnthropicMessage(response, message, outboundBody.stream === true);
       }
     } catch (error) {
@@ -250,7 +256,7 @@ function safeRequestId(headers) {
   return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(candidate) ? candidate : randomUUID();
 }
 
-function describeRouteDecision({ body, mode, outboundBody, path }) {
+function describeRouteDecision({ body, mode, outboundBody, path, stablePrefix }) {
   const inModel = isRecord(body) && typeof body.model === "string" ? body.model : null;
   const outModel = isRecord(outboundBody) && typeof outboundBody.model === "string"
     ? outboundBody.model
@@ -262,6 +268,7 @@ function describeRouteDecision({ body, mode, outboundBody, path }) {
     path,
     rewritten: inModel !== outModel,
     stream: isRecord(body) && body.stream === true,
+    ...(stablePrefix?.candidate === true ? { stablePrefix } : {}),
   };
 }
 
@@ -307,6 +314,7 @@ function logRequestTerminal({ outcome, response, telemetry }) {
         : responseStatus(response),
       durationMs: Math.max(0, elapsed),
       outcome,
+      ...(decision.stablePrefix ? { stablePrefix: decision.stablePrefix } : {}),
       ...(telemetry.promptCache ? { promptCache: telemetry.promptCache } : {}),
     })}\n`);
   } catch {
@@ -314,18 +322,78 @@ function logRequestTerminal({ outcome, response, telemetry }) {
   }
 }
 
-function summarizePromptCacheUsage(usage) {
+function summarizePromptCacheUsage(usage, model = null) {
   if (!isRecord(usage)) return null;
-  const hit = nonNegativeCounter(usage.prompt_cache_hit_tokens);
-  const miss = nonNegativeCounter(usage.prompt_cache_miss_tokens);
-  if (hit === null && miss === null) return null;
-  const input = nonNegativeCounter(usage.input_tokens);
-  const total = hit !== null && miss !== null ? hit + miss : input;
+  const hit = nonNegativeCounter(usage.prompt_tokens_details?.cached_tokens)
+    ?? nonNegativeCounter(usage.prompt_cache_hit_tokens)
+    ?? nonNegativeCounter(usage.cache_read_input_tokens);
+  const explicitMiss = nonNegativeCounter(usage.prompt_cache_miss_tokens)
+    ?? nonNegativeCounter(usage.cache_miss_input_tokens);
+  const promptTokens = nonNegativeCounter(usage.prompt_tokens);
+  const inputTokens = nonNegativeCounter(usage.input_tokens);
+  const creation = nonNegativeCounter(usage.cache_creation_input_tokens)
+    ?? nonNegativeCounter(usage.cache_write_input_tokens);
+  const gptLike = isGptModel(model);
+  const miss = explicitMiss
+    ?? (promptTokens !== null && hit !== null && promptTokens >= hit
+      ? promptTokens - hit
+      : gptLike && hit !== null && inputTokens !== null && inputTokens >= hit
+        ? inputTokens - hit
+        : hit !== null && inputTokens !== null ? inputTokens : null);
+  if (hit === null && miss === null && creation === null) return null;
+  const total = promptTokens !== null || (gptLike && inputTokens !== null)
+    ? promptTokens ?? inputTokens
+    : hit !== null || miss !== null || creation !== null
+      ? sumKnown(hit, miss, creation)
+      : inputTokens;
   return {
     prompt_cache_hit_tokens: hit,
     prompt_cache_miss_tokens: miss,
+    cache_read_input_tokens: hit,
+    cache_creation_input_tokens: creation,
+    cache_miss_input_tokens: miss,
     hit_rate: hit !== null && total !== null && total > 0 ? hit / total : null,
   };
+}
+
+function isGptModel(model) {
+  return typeof model === "string" && /(?:^|[/:-])gpt-/i.test(model);
+}
+
+function summarizeGatewayResponseHeaders(headers) {
+  const hit = headerCounter(headers, "x-gateway-billing-cache-read-tokens");
+  const creation = headerCounter(headers, "x-gateway-billing-cache-write-tokens");
+  const input = headerCounter(headers, "x-gateway-billing-input-tokens");
+  if (hit === null && creation === null && input === null) return null;
+  const miss = input !== null && hit !== null ? Math.max(0, input - hit) : null;
+  const total = input ?? sumKnown(hit, miss, creation);
+  return {
+    prompt_cache_hit_tokens: hit,
+    prompt_cache_miss_tokens: miss,
+    cache_read_input_tokens: hit,
+    cache_creation_input_tokens: creation,
+    cache_miss_input_tokens: miss,
+    hit_rate: hit !== null && total !== null && total > 0 && (input !== null || miss !== null)
+      ? hit / total
+      : null,
+    source: "gateway-response-header",
+  };
+}
+
+function headerCounter(headers, name) {
+  const raw = typeof headers?.get === "function"
+    ? headers.get(name)
+    : isRecord(headers)
+      ? Object.entries(headers).find(([key]) => key.toLowerCase() === name)?.[1]
+      : null;
+  if (raw === null || raw === undefined || raw === "") return null;
+  const value = typeof raw === "number" ? raw : Number(raw);
+  return nonNegativeCounter(value);
+}
+
+function sumKnown(...values) {
+  const known = values.filter((value) => value !== null);
+  return known.length > 0 ? known.reduce((total, value) => total + value, 0) : null;
 }
 
 function nonNegativeCounter(value) {

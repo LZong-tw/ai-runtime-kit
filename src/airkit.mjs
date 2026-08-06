@@ -819,6 +819,7 @@ export async function exportOssRelease({ outDir }) {
     "fallback.mjs",
     "gateway.mjs",
     "middleware.mjs",
+    "prefix-observability.mjs",
     "plugin.mjs",
     "protocol.mjs",
     "server-history.mjs",
