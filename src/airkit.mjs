@@ -108,6 +108,9 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
   const providerBaseUrl = String(
     options.providerBaseUrl ?? options.env?.AIRCLAUDE_PROVIDER_BASE_URL ?? "",
   ).trim();
+  const anthropicProviderBaseUrl = String(
+    options.anthropicProviderBaseUrl ?? options.env?.AIRCLAUDE_ANTHROPIC_PROVIDER_BASE_URL ?? "",
+  ).trim();
   const baseConfig = buildCcrConfig(catalog, profileName, { configDir });
   assertCcr3Compatible(baseConfig);
   const managedProviderEntries = baseConfig.Providers.map((provider) => {
@@ -116,9 +119,11 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
       sourceName: provider.name,
       config: {
         ...provider,
-        api_base_url: providerBaseUrl && provider.type === "openai_chat_completions"
+        api_base_url: provider.type === "openai_chat_completions" && providerBaseUrl
           ? providerBaseUrl
-          : provider.api_base_url,
+          : provider.type === "anthropic_messages" && anthropicProviderBaseUrl
+            ? anthropicProviderBaseUrl
+            : provider.api_base_url,
         id,
         name: id,
         api_key: options.apiKeys?.[provider.name] ?? provider.api_key,

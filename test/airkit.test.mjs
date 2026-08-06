@@ -733,7 +733,10 @@ test("CCR 3 managed providers can route upstream through a per-launch proxy", ()
     {},
     {
       apiKeys: { demo: "resolved-at-runtime" },
-      env: { AIRCLAUDE_PROVIDER_BASE_URL: "http://127.0.0.1:8804/v1/chat/completions" },
+      env: {
+        AIRCLAUDE_PROVIDER_BASE_URL: "http://127.0.0.1:8804/v1/chat/completions",
+        AIRCLAUDE_ANTHROPIC_PROVIDER_BASE_URL: "http://127.0.0.1:8807/v1/messages",
+      },
     },
   );
 
@@ -743,7 +746,7 @@ test("CCR 3 managed providers can route upstream through a per-launch proxy", ()
   );
   assert.equal(
     merged.config.Providers[1].api_base_url,
-    "https://example.invalid/v1/messages",
+    "http://127.0.0.1:8807/v1/messages",
   );
 });
 
