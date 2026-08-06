@@ -125,6 +125,15 @@ Route and statusline variables are derived from the selected Router and mode.
 Do not duplicate `AIRCLAUDE_ROUTE_*` or `AIRCLAUDE_STATUSLINE_*` values in a
 wrapper; duplicated values drift when routing changes.
 
+When a profile owns verified per-model pricing, AirKit exports the complete
+`AIRCLAUDE_STATUSLINE_PRICE_MAP_JSON` metadata map instead of only the default
+route's input price. The statusline selects the price from the actual
+`message.model`, so an in-session `/model` switch does not keep charging the
+previous route's price. This metadata is display-only: it never changes the
+request model, messages, tools, or provider cache behavior. Profiles without a
+verified map retain the single-route `AIRCLAUDE_STATUSLINE_INPUT_PRICE_PER_MILLION`
+fallback.
+
 Claude Code may source cached zsh state in non-interactive command shells.
 Setting `POWERLEVEL9K_INSTANT_PROMPT=off` for the launched process prevents
 git-aware prompt fragments from polluting tool output without changing the
