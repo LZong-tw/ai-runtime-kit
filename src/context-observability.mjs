@@ -4,18 +4,27 @@ export function summarizeCompletionUsage(usage) {
   const anthropicInput = counter(source.input_tokens);
   const output = counter(source.completion_tokens) ?? counter(source.output_tokens);
   const cacheRead = counter(source.prompt_tokens_details?.cached_tokens)
+    ?? counter(source.prompt_cache_hit_tokens)
     ?? counter(source.cache_read_input_tokens);
   const cacheCreation = counter(source.cache_creation_input_tokens);
-  const input = openAiInput ?? sumKnown(anthropicInput, cacheRead, cacheCreation);
+  const cacheMiss = counter(source.prompt_cache_miss_tokens);
+  const input = openAiInput ?? sumKnown(anthropicInput, cacheRead, cacheCreation, cacheMiss);
   const total = counter(source.total_tokens) ?? sumKnown(input, output);
+  const cacheHitRate = cacheRead === null || input === null || input === 0
+    ? null
+    : cacheRead / input;
 
   return {
     inputTokens: input,
     outputTokens: output,
     totalTokens: total,
-    cacheDetails: cacheRead !== null || cacheCreation !== null ? "available" : "unavailable",
+    cacheDetails: cacheRead !== null || cacheCreation !== null || cacheMiss !== null
+      ? "available"
+      : "unavailable",
     cacheReadInputTokens: cacheRead,
     cacheCreationInputTokens: cacheCreation,
+    cacheMissInputTokens: cacheMiss,
+    cacheHitRate,
   };
 }
 

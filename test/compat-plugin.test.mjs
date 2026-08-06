@@ -758,6 +758,46 @@ test("invalid nonnumeric usage counters are removed from totals and iteration de
   assert.doesNotMatch(JSON.stringify(result.usage), /provider-secret|nested-secret/);
 });
 
+test("gateway aggregates DeepSeek cache hit and miss counters across executor iterations", async () => {
+  const fixture = createBridgeFixture([
+    message({
+      content: [{
+        type: "tool_use",
+        id: "toolu_search",
+        name: "airkit_tool_search",
+        input: { query: "weather" },
+      }],
+      usage: {
+        input_tokens: 10,
+        output_tokens: 2,
+        prompt_cache_hit_tokens: 50,
+        prompt_cache_miss_tokens: 10,
+      },
+    }),
+    message({
+      content: [{ type: "text", text: "Usage is complete." }],
+      usage: {
+        input_tokens: 12,
+        output_tokens: 3,
+        prompt_cache_hit_tokens: 70,
+        prompt_cache_miss_tokens: 30,
+      },
+    }),
+  ]);
+
+  const result = await handleCompatibilityMessage(fixture.input);
+
+  assert.equal(result.usage.prompt_cache_hit_tokens, 120);
+  assert.equal(result.usage.prompt_cache_miss_tokens, 40);
+  assert.deepEqual(result.usage.iterations.executor.map((usage) => ({
+    prompt_cache_hit_tokens: usage.prompt_cache_hit_tokens,
+    prompt_cache_miss_tokens: usage.prompt_cache_miss_tokens,
+  })), [
+    { prompt_cache_hit_tokens: 50, prompt_cache_miss_tokens: 10 },
+    { prompt_cache_hit_tokens: 70, prompt_cache_miss_tokens: 30 },
+  ]);
+});
+
 test("zero core usage gets a bounded estimate for Claude Code context tracking", async () => {
   const fixture = createBridgeFixture([
     message({
@@ -1135,6 +1175,87 @@ test("advisor.unsupported passthrough leaves the definition in place and diverts
   );
 
   assert.equal(forwarded.length, 0, "the advisor definition must still divert the request");
+});
+
+test("unused native-first server-tool definitions keep a DeepSeek request on its executor route", async () => {
+  const executorCalls = [];
+  const fallbackCalls = [];
+  const fixture = await createPluginFixture({
+    coreClient: {
+      async requestMessage(body) {
+        executorCalls.push(structuredClone(body));
+        return message({ content: [{ type: "text", text: "executor response" }] });
+      },
+      async requestFallback(body) {
+        fallbackCalls.push(structuredClone(body));
+        throw new Error("unused native-first definition must not trigger fallback");
+      },
+    },
+  });
+  const body = {
+    model: "oneportal/deepseek-v4-flash",
+    max_tokens: 512,
+    system: "Stable prefix — keep this whitespace and Unicode unchanged.\n  ",
+    messages: [{ role: "user", content: [{ type: "text", text: "answer without searching" }] }],
+    tools: [
+      {
+        name: "ordered_first",
+        description: "Must remain before the native server tool.",
+        input_schema: { type: "object", properties: { value: { type: "string" } } },
+      },
+      { type: "web_search_20260318", name: "web_search" },
+    ],
+  };
+  const response = createRecordingResponse();
+
+  await fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify(body))),
+    response,
+    fixture.helpers,
+  );
+
+  assert.equal(fallbackCalls.length, 0);
+  assert.equal(executorCalls.length, 1);
+  assert.equal(executorCalls[0].model, body.model);
+  assert.equal(
+    JSON.stringify({ system: executorCalls[0].system, messages: executorCalls[0].messages, tools: executorCalls[0].tools }),
+    JSON.stringify({ system: body.system, messages: body.messages, tools: body.tools }),
+    "DeepSeek stable prompt prefix fields must remain byte-identical on the executor route",
+  );
+  assert.equal(JSON.parse(response.body).content[0].text, "executor response");
+});
+
+test("unused native-first server-tool definitions still fallback for non-DeepSeek routes", async () => {
+  const executorCalls = [];
+  const fallbackCalls = [];
+  const fixture = await createPluginFixture({
+    coreClient: {
+      async requestMessage(body) {
+        executorCalls.push(structuredClone(body));
+        return message({ content: [{ type: "text", text: "unexpected executor response" }] });
+      },
+      async requestFallback(body) {
+        fallbackCalls.push(structuredClone(body));
+        return message({ content: [{ type: "text", text: "fallback response" }] });
+      },
+    },
+  });
+  const body = {
+    model: "oneportal/gpt-5.6-terra",
+    max_tokens: 512,
+    messages: [{ role: "user", content: "answer without searching" }],
+    tools: [{ type: "web_search_20260318", name: "web_search" }],
+  };
+  const response = createRecordingResponse();
+
+  await fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify(body))),
+    response,
+    fixture.helpers,
+  );
+
+  assert.equal(fallbackCalls.length, 1);
+  assert.equal(executorCalls.length, 0);
 });
 
 test("ordinary DeepSeek Messages requests remove unsupported Claude effort before forwarding", async () => {
@@ -2382,6 +2503,41 @@ test("request lifecycle telemetry records compatibility JSON and SSE completion"
   logs.requests.forEach(assertTerminalTiming);
   assert.equal(requests[0].response.headers["content-type"], "application/json");
   assert.equal(requests[1].response.headers["content-type"], "text/event-stream");
+});
+
+test("request lifecycle telemetry records DeepSeek prompt cache counters", async () => {
+  const fixture = await createPluginFixture({
+    pluginConfig: { routeLog: true },
+    coreClient: createPluginCoreClient({
+      async requestMessage() {
+        return message({
+          content: [{ type: "text", text: "cached response" }],
+          usage: {
+            input_tokens: 120,
+            output_tokens: 5,
+            prompt_cache_hit_tokens: 80,
+            prompt_cache_miss_tokens: 40,
+          },
+        });
+      },
+    }),
+  });
+  const response = createRecordingResponse();
+  const logs = await captureAirkitLogs(() => fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify({
+      model: "oneportal/deepseek-v4-flash",
+      messages: [{ role: "user", content: "reuse the stable prefix" }],
+      tools: [{ type: "web_search_20260318", name: "web_search" }],
+    })), { headers: { "x-request-id": "deepseek-cache-log" } }),
+    response,
+    fixture.helpers,
+  ));
+
+  assert.deepEqual(logs.requests[0].promptCache, {
+    prompt_cache_hit_tokens: 80,
+    prompt_cache_miss_tokens: 40,
+    hit_rate: 80 / 120,
+  });
 });
 
 test("request lifecycle telemetry waits for SSE response finish before emitting completion", async () => {

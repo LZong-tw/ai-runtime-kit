@@ -162,6 +162,7 @@ export function createMessagesHandler({ config, coreClient, policies }) {
         signal,
       });
       if (message !== undefined) {
+        telemetry.promptCache = summarizePromptCacheUsage(message.usage);
         writeAnthropicMessage(response, message, outboundBody.stream === true);
       }
     } catch (error) {
@@ -185,6 +186,7 @@ function beginRequestTelemetry(enabled, request, response) {
       enabled: false,
       finished: false,
       requestId: null,
+      promptCache: null,
       responseTerminal: null,
       startedAt: null,
     };
@@ -194,6 +196,7 @@ function beginRequestTelemetry(enabled, request, response) {
     enabled: true,
     finished: false,
     requestId: safeRequestId(request?.headers),
+    promptCache: null,
     responseTerminal: observeResponseTerminal(response),
     startedAt: process.hrtime.bigint(),
   };
@@ -304,10 +307,29 @@ function logRequestTerminal({ outcome, response, telemetry }) {
         : responseStatus(response),
       durationMs: Math.max(0, elapsed),
       outcome,
+      ...(telemetry.promptCache ? { promptCache: telemetry.promptCache } : {}),
     })}\n`);
   } catch {
     // never let logging interfere with the request
   }
+}
+
+function summarizePromptCacheUsage(usage) {
+  if (!isRecord(usage)) return null;
+  const hit = nonNegativeCounter(usage.prompt_cache_hit_tokens);
+  const miss = nonNegativeCounter(usage.prompt_cache_miss_tokens);
+  if (hit === null && miss === null) return null;
+  const input = nonNegativeCounter(usage.input_tokens);
+  const total = hit !== null && miss !== null ? hit + miss : input;
+  return {
+    prompt_cache_hit_tokens: hit,
+    prompt_cache_miss_tokens: miss,
+    hit_rate: hit !== null && total !== null && total > 0 ? hit / total : null,
+  };
+}
+
+function nonNegativeCounter(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 function selectorProvider(selector) {
