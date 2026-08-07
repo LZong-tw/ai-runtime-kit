@@ -70,14 +70,21 @@ export function createGptActivitySseTransform({ body } = {}) {
 }
 
 function hasPromptUsage(usage) {
+  const metadata = usage?.usageMetadata;
   return [
     usage?.prompt_tokens,
     usage?.prompt_tokens_details?.cached_tokens,
+    usage?.input_tokens_details?.cached_tokens,
     usage?.prompt_cache_hit_tokens,
     usage?.prompt_cache_miss_tokens,
+    usage?.cache_read_tokens,
+    usage?.cache_write_tokens,
+    usage?.cache_miss_tokens,
     usage?.input_tokens,
     usage?.cache_read_input_tokens,
     usage?.cache_creation_input_tokens,
+    metadata?.promptTokenCount,
+    metadata?.cachedContentTokenCount,
   ].some((value) => hasPositiveCounter(value));
 }
 
