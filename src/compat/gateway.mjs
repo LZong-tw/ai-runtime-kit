@@ -571,10 +571,21 @@ function finalizeMessage(message, content, executorUsage, requestBody, advisorUs
 }
 
 function fillMissingUsage(usage, requestBody, content) {
+  const metadata = usage.usageMetadata;
   const hasPromptUsage = [
     usage.input_tokens,
     usage.cache_read_input_tokens,
     usage.cache_creation_input_tokens,
+    usage.prompt_tokens,
+    usage.prompt_tokens_details?.cached_tokens,
+    usage.input_tokens_details?.cached_tokens,
+    usage.prompt_cache_hit_tokens,
+    usage.prompt_cache_miss_tokens,
+    usage.cache_read_tokens,
+    usage.cache_write_tokens,
+    usage.cache_miss_tokens,
+    metadata?.promptTokenCount,
+    metadata?.cachedContentTokenCount,
   ].some((value) => typeof value === "number" && value > 0);
   if (!hasPromptUsage) usage.input_tokens = estimateSerializedTokens(requestBody);
   if (!(typeof usage.output_tokens === "number" && usage.output_tokens > 0)) {

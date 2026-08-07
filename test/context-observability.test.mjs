@@ -47,6 +47,26 @@ test("OpenAI cached prompt detail is reported without double-counting input", ()
   );
 });
 
+test("OpenAI Responses input cache detail is recognized", () => {
+  assert.deepEqual(
+    summarizeCompletionUsage({
+      input_tokens: 200,
+      output_tokens: 5,
+      input_tokens_details: { cached_tokens: 80 },
+    }),
+    {
+      inputTokens: 200,
+      outputTokens: 5,
+      totalTokens: 205,
+      cacheDetails: "available",
+      cacheReadInputTokens: 80,
+      cacheCreationInputTokens: null,
+      cacheMissInputTokens: null,
+      cacheHitRate: 80 / 200,
+    },
+  );
+});
+
 test("DeepSeek cache hit and miss usage exposes a truthful hit rate", () => {
   assert.deepEqual(
     summarizeCompletionUsage({
@@ -55,6 +75,51 @@ test("DeepSeek cache hit and miss usage exposes a truthful hit rate", () => {
       total_tokens: 125,
       prompt_cache_hit_tokens: 80,
       prompt_cache_miss_tokens: 40,
+    }),
+    {
+      inputTokens: 120,
+      outputTokens: 5,
+      totalTokens: 125,
+      cacheDetails: "available",
+      cacheReadInputTokens: 80,
+      cacheCreationInputTokens: null,
+      cacheMissInputTokens: 40,
+      cacheHitRate: 80 / 120,
+    },
+  );
+});
+
+test("generic cache read/write/miss aliases remain observable", () => {
+  assert.deepEqual(
+    summarizeCompletionUsage({
+      prompt_tokens: 120,
+      completion_tokens: 5,
+      cache_read_tokens: 80,
+      cache_write_tokens: 10,
+      cache_miss_tokens: 40,
+    }),
+    {
+      inputTokens: 120,
+      outputTokens: 5,
+      totalTokens: 125,
+      cacheDetails: "available",
+      cacheReadInputTokens: 80,
+      cacheCreationInputTokens: 10,
+      cacheMissInputTokens: 40,
+      cacheHitRate: 80 / 120,
+    },
+  );
+});
+
+test("Gemini usageMetadata cache counters remain truthful", () => {
+  assert.deepEqual(
+    summarizeCompletionUsage({
+      usageMetadata: {
+        promptTokenCount: 120,
+        cachedContentTokenCount: 80,
+        candidatesTokenCount: 5,
+        totalTokenCount: 125,
+      },
     }),
     {
       inputTokens: 120,

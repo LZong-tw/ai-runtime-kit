@@ -1,15 +1,28 @@
 export function summarizeCompletionUsage(usage) {
   const source = isRecord(usage) ? usage : {};
-  const openAiInput = counter(source.prompt_tokens);
+  const metadata = isRecord(source.usageMetadata) ? source.usageMetadata : {};
+  const openAiInput = counter(source.prompt_tokens)
+    ?? (isRecord(source.input_tokens_details) ? counter(source.input_tokens) : null)
+    ?? counter(metadata.promptTokenCount);
   const anthropicInput = counter(source.input_tokens);
-  const output = counter(source.completion_tokens) ?? counter(source.output_tokens);
+  const output = counter(source.completion_tokens) ?? counter(source.output_tokens)
+    ?? counter(metadata.candidatesTokenCount);
   const cacheRead = counter(source.prompt_tokens_details?.cached_tokens)
+    ?? counter(source.input_tokens_details?.cached_tokens)
     ?? counter(source.prompt_cache_hit_tokens)
-    ?? counter(source.cache_read_input_tokens);
-  const cacheCreation = counter(source.cache_creation_input_tokens);
-  const cacheMiss = counter(source.prompt_cache_miss_tokens);
+    ?? counter(source.cache_read_input_tokens)
+    ?? counter(source.cache_read_tokens)
+    ?? counter(metadata.cachedContentTokenCount);
+  const cacheCreation = counter(source.cache_creation_input_tokens)
+    ?? counter(source.cache_write_input_tokens)
+    ?? counter(source.cache_write_tokens);
+  const explicitCacheMiss = counter(source.prompt_cache_miss_tokens)
+    ?? counter(source.cache_miss_input_tokens)
+    ?? counter(source.cache_miss_tokens);
+  const cacheMiss = explicitCacheMiss ?? (counter(metadata.promptTokenCount) !== null
+    && cacheRead !== null ? Math.max(0, metadata.promptTokenCount - cacheRead) : null);
   const input = openAiInput ?? sumKnown(anthropicInput, cacheRead, cacheCreation, cacheMiss);
-  const total = counter(source.total_tokens) ?? sumKnown(input, output);
+  const total = counter(source.total_tokens) ?? counter(metadata.totalTokenCount) ?? sumKnown(input, output);
   const cacheHitRate = cacheRead === null || input === null || input === 0
     ? null
     : cacheRead / input;

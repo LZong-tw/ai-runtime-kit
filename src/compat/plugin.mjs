@@ -324,17 +324,27 @@ function logRequestTerminal({ outcome, response, telemetry }) {
 
 function summarizePromptCacheUsage(usage, model = null) {
   if (!isRecord(usage)) return null;
+  const metadata = isRecord(usage.usageMetadata) ? usage.usageMetadata : {};
   const hit = nonNegativeCounter(usage.prompt_tokens_details?.cached_tokens)
+    ?? nonNegativeCounter(usage.input_tokens_details?.cached_tokens)
     ?? nonNegativeCounter(usage.prompt_cache_hit_tokens)
-    ?? nonNegativeCounter(usage.cache_read_input_tokens);
+    ?? nonNegativeCounter(usage.cache_read_input_tokens)
+    ?? nonNegativeCounter(usage.cache_read_tokens)
+    ?? nonNegativeCounter(metadata.cachedContentTokenCount);
   const explicitMiss = nonNegativeCounter(usage.prompt_cache_miss_tokens)
-    ?? nonNegativeCounter(usage.cache_miss_input_tokens);
-  const promptTokens = nonNegativeCounter(usage.prompt_tokens);
+    ?? nonNegativeCounter(usage.cache_miss_input_tokens)
+    ?? nonNegativeCounter(usage.cache_miss_tokens);
+  const promptTokens = nonNegativeCounter(usage.prompt_tokens)
+    ?? nonNegativeCounter(metadata.promptTokenCount);
   const inputTokens = nonNegativeCounter(usage.input_tokens);
   const creation = nonNegativeCounter(usage.cache_creation_input_tokens)
-    ?? nonNegativeCounter(usage.cache_write_input_tokens);
+    ?? nonNegativeCounter(usage.cache_write_input_tokens)
+    ?? nonNegativeCounter(usage.cache_write_tokens);
   const gptLike = isGptModel(model);
   const miss = explicitMiss
+    ?? (nonNegativeCounter(metadata.promptTokenCount) !== null && hit !== null
+      ? Math.max(0, metadata.promptTokenCount - hit)
+      : null)
     ?? (promptTokens !== null && hit !== null && promptTokens >= hit
       ? promptTokens - hit
       : gptLike && hit !== null && inputTokens !== null && inputTokens >= hit
