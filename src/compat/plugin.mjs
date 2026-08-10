@@ -10,6 +10,7 @@ import {
   compatibilityFallbackSelector,
   requestedMode,
   resolveCompatibilityPolicies,
+  resolveModeEffort,
   resolveModeRoutes,
   resolveToolSearchMaxTools,
   routeBareClaudeModel,
@@ -121,7 +122,10 @@ export function createMessagesHandler({ config, coreClient, policies }) {
         (config.advisor?.unsupported ?? DEFAULT_ADVISOR_UNSUPPORTED) === "strip"
         ? stripServerToolFamily(routedBody, "advisor")
         : routedBody;
-      const effortAdjustedBody = rewriteClaudeEffortForOpenAI(scopedBody);
+      const modeEffort = typeof body?.model === "string" && body.model.startsWith("claude-sonnet-")
+        ? resolveModeEffort(config, mode)
+        : null;
+      const effortAdjustedBody = rewriteClaudeEffortForOpenAI(scopedBody, modeEffort);
       const outputBudgetAdjustedBody = ensureGptMinimumOutputTokens(effortAdjustedBody);
       const outboundBody = applyToolSearchBudget(
         outputBudgetAdjustedBody,

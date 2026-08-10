@@ -3079,6 +3079,49 @@ test("the caller's mode label selects its route table for main and background tr
   );
 });
 
+test("mode effort applies to the Sonnet lane while explicit effort wins", async () => {
+  const forwarded = [];
+  const handlers = await createPluginHandlers({
+    coreClient: {
+      async forwardRaw({ body }) {
+        forwarded.push(JSON.parse(body.toString("utf8")));
+      },
+    },
+    pluginConfig: {
+      ...structuredClone(COMPLETE_PLUGIN_CONFIG),
+      launchModel: "claude-airkit-mode",
+      routes: { default: "demo-provider/default", sonnet: "oneportal/gpt-5.6-luna" },
+      modeRoutes: {
+        glm: { default: "oneportal/GLM-5.2", sonnet: "oneportal/gpt-5.6-luna" },
+      },
+      modeEffort: { glm: "xhigh" },
+    },
+  });
+  const handler = handlers.messages.handler;
+  const invoke = async (body) => {
+    await handler(
+      createPluginRequest(Buffer.from(JSON.stringify(body)), { headers: { "x-airkit-mode": "glm" } }),
+      createRecordingResponse(),
+      { readBody: async (request) => request.body },
+    );
+    return forwarded.at(-1);
+  };
+
+  assert.deepEqual(
+    await invoke({ model: "claude-sonnet-5", messages: [] }),
+    { model: "oneportal/gpt-5.6-luna", reasoning_effort: "xhigh", messages: [] },
+  );
+  assert.deepEqual(
+    await invoke({ model: "claude-sonnet-5", output_config: { effort: "max" }, messages: [] }),
+    { model: "oneportal/gpt-5.6-luna", reasoning_effort: "max", messages: [] },
+  );
+  assert.deepEqual(
+    await invoke({ model: "claude-airkit-mode", messages: [] }),
+    { model: "oneportal/GLM-5.2", messages: [] },
+    "the mode default is lane-specific and does not alter the default route",
+  );
+});
+
 test("the launcher's own model id routes separately from an in-session Sonnet pick", async () => {
   const forwarded = [];
   const pluginConfig = {
