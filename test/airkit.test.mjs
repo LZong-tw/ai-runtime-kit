@@ -168,7 +168,7 @@ test("isolated verifier restarts management-only before trusting persisted dange
 test("OSS package allowlist excludes tests and migration artifacts", async () => {
   const expectedIdentity = {
     name: "@untionglim/ai-runtime-kit",
-    version: "0.2.13",
+    version: "0.2.14",
     publishConfig: { access: "public" },
     repository: {
       type: "git",
@@ -2703,7 +2703,7 @@ test("GPT completion guard continues one Stop after a tool-bearing turn without 
     }, env), {
       hookSpecificOutput: {
         hookEventName: "Stop",
-        additionalContext: "Continue working when safe; do not stop after partial completion.",
+        additionalContext: "Continue working when safe. Finish every requested deliverable, verify each result, and do not stop after partial completion.",
       },
     });
     await processCompletionGuardHook({ hook_event_name: "PostToolUse", session_id: sessionId }, env);
@@ -2729,13 +2729,42 @@ test("GPT completion guard continues one Stop after a tool-bearing turn without 
     }, env), {
       hookSpecificOutput: {
         hookEventName: "Stop",
-        additionalContext: "Continue working when safe; do not stop after partial completion.",
+        additionalContext: "Continue working when safe. Finish every requested deliverable, verify each result, and do not stop after partial completion.",
       },
     });
 
     const [stateFile] = await readdir(join(pluginData, "completion-guard"));
     const state = await readFile(join(pluginData, "completion-guard", stateFile), "utf8");
     assert.doesNotMatch(state, /private user prompt|private-session-id|private\/transcript|must not persist/);
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+test("DeepSeek completion guard continues the full deliverable instead of stopping early", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-deepseek-completion-guard-"));
+  const env = {
+    AIRCLAUDE_MODE: "auto",
+    AIRCLAUDE_PROFILE: "example-profile",
+    AIRCLAUDE_ROUTE_DEFAULT_MODEL: "deepseek-v4-flash",
+    AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS: "1",
+    CLAUDE_PLUGIN_DATA: pluginData,
+  };
+
+  try {
+    await processCompletionGuardHook({
+      hook_event_name: "PostToolUse",
+      session_id: "deepseek-session-id",
+    }, env);
+    assert.deepEqual(await processCompletionGuardHook({
+      hook_event_name: "Stop",
+      session_id: "deepseek-session-id",
+    }, env), {
+      hookSpecificOutput: {
+        hookEventName: "Stop",
+        additionalContext: "Continue working when safe. Finish every requested deliverable, verify each result, and do not stop after partial completion.",
+      },
+    });
   } finally {
     await rm(pluginData, { force: true, recursive: true });
   }
