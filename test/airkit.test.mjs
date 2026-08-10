@@ -172,7 +172,6 @@ test("isolated verifier restarts management-only before trusting persisted dange
 test("OSS package allowlist excludes tests and migration artifacts", async () => {
   const expectedIdentity = {
     name: "@untionglim/ai-runtime-kit",
-    version: "0.2.17",
     publishConfig: { access: "public" },
     repository: {
       type: "git",
@@ -216,11 +215,11 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
     assert.equal((await readFile(join(outDir, "src", "airoc.mjs"), "utf8")).includes("runExternalClientCli(\"opencode\")"), true);
     for (const candidate of [packageJson, exportedPackage]) {
       assert.equal(candidate.name, expectedIdentity.name);
-      assert.equal(candidate.version, expectedIdentity.version);
       assert.deepEqual(candidate.publishConfig, expectedIdentity.publishConfig);
       assert.deepEqual(candidate.repository, expectedIdentity.repository);
       assert.equal(candidate.dependencies, undefined);
     }
+    assert.equal(exportedPackage.version, packageJson.version);
     for (const document of ["README.md", "CLAUDE.md"]) {
       assert.equal(
         await readFile(join(outDir, document), "utf8"),
@@ -2845,7 +2844,8 @@ test("GPT completion guard is inert when disabled", async () => {
   }
 });
 
-test("subagent output guard bounds transcript-like Agent results without touching ordinary output", () => {
+test("subagent output guard persists a transcript artifact while bounding parent context", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-transcript-"));
   const transcript = [
     { type: "system", subtype: "init" },
     ...Array.from({ length: 120 }, (_, index) => ({
@@ -2856,6 +2856,7 @@ test("subagent output guard bounds transcript-like Agent results without touchin
   ].map((record) => JSON.stringify(record)).join("\n");
   const input = {
     hook_event_name: "PostToolUse",
+    session_id: "safe-subagent-session",
     tool_name: "Agent",
     tool_response: {
       result: transcript,
@@ -2865,24 +2866,32 @@ test("subagent output guard bounds transcript-like Agent results without touchin
     },
   };
 
-  const guarded = processSubagentOutputHook(input);
-  assert.equal(guarded.hookSpecificOutput.hookEventName, "PostToolUse");
-  assert.equal(guarded.hookSpecificOutput.updatedToolOutput.usage.output_tokens, 456);
-  assert.match(guarded.hookSpecificOutput.updatedToolOutput.result, /Final summary: inspected the repository/);
-  assert.ok(guarded.hookSpecificOutput.updatedToolOutput.result.length <= 12_000);
-  assert.doesNotMatch(guarded.hookSpecificOutput.updatedToolOutput.result, /progress 119/);
+  try {
+    const guarded = await processSubagentOutputHook(input, { CLAUDE_PLUGIN_DATA: pluginData });
+    assert.equal(guarded.hookSpecificOutput.hookEventName, "PostToolUse");
+    assert.equal(guarded.hookSpecificOutput.updatedToolOutput.usage.output_tokens, 456);
+    assert.match(guarded.hookSpecificOutput.updatedToolOutput.result, /Final summary: inspected the repository/);
+    assert.ok(guarded.hookSpecificOutput.updatedToolOutput.result.length <= 12_000);
+    assert.doesNotMatch(guarded.hookSpecificOutput.updatedToolOutput.result, /progress 119/);
+    const artifactPath = guarded.hookSpecificOutput.updatedToolOutput.result.match(/Full transcript artifact: (.+)$/m)?.[1];
+    assert.ok(artifactPath, "bounded result points to the persisted full transcript");
+    assert.equal(await readFile(artifactPath, "utf8"), transcript);
 
-  const taskOutput = processSubagentOutputHook({
-    hook_event_name: "PostToolUse",
-    tool_name: "TaskOutput",
-    tool_response: { retrieval_status: "success", task: { output: transcript, status: "completed" } },
-  });
-  assert.match(taskOutput.hookSpecificOutput.updatedToolOutput.task.output, /Final summary: inspected the repository/);
-  assert.equal(taskOutput.hookSpecificOutput.updatedToolOutput.task.status, "completed");
+    const taskOutput = await processSubagentOutputHook({
+      hook_event_name: "PostToolUse",
+      session_id: "safe-task-output-session",
+      tool_name: "TaskOutput",
+      tool_response: { retrieval_status: "success", task: { output: transcript, status: "completed" } },
+    }, { CLAUDE_PLUGIN_DATA: pluginData });
+    assert.match(taskOutput.hookSpecificOutput.updatedToolOutput.task.output, /Final summary: inspected the repository/);
+    assert.equal(taskOutput.hookSpecificOutput.updatedToolOutput.task.status, "completed");
 
-  const ordinary = { ...input, tool_response: { ...input.tool_response, result: "A normal long result\n".repeat(20_000) } };
-  assert.equal(processSubagentOutputHook(ordinary), null);
-  assert.equal(processSubagentOutputHook({ ...input, tool_name: "Read" }), null);
+    const ordinary = { ...input, tool_response: { ...input.tool_response, result: "A normal long result\n".repeat(20_000) } };
+    assert.equal(await processSubagentOutputHook(ordinary, { CLAUDE_PLUGIN_DATA: pluginData }), null);
+    assert.equal(await processSubagentOutputHook({ ...input, tool_name: "Read" }, { CLAUDE_PLUGIN_DATA: pluginData }), null);
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
 });
 
 test("launch mode exports its completion guard limit only for the selected mode", () => {

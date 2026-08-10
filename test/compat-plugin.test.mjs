@@ -15,7 +15,7 @@ import plugin, {
   createMcpHandler,
   createMessagesHandler,
 } from "../src/compat/plugin.mjs";
-import { describeStablePrefix } from "../src/compat/prefix-observability.mjs";
+import { classifyCacheCohort, describeStablePrefix } from "../src/compat/prefix-observability.mjs";
 
 const CORE_TOKEN = "generated-core-token";
 const RAW_RESPONSE_BODY = Buffer.from([0, 1, 2, 255, 10]);
@@ -2498,6 +2498,43 @@ test("stable prefix observation changes only when the prefix changes", () => {
   assert.equal(samePrefix.candidate, true);
 });
 
+test("cache cohort classifies every model from request shape and provider counters", () => {
+  const coldStart = describeStablePrefix({
+    model: "oneportal/Kimi-K3",
+    messages: [{ role: "user", content: "first request" }],
+  });
+  const reusablePrefix = describeStablePrefix({
+    model: "oneportal/deepseek-v4-flash",
+    messages: [
+      { role: "user", content: "history" },
+      { role: "user", content: "tail" },
+    ],
+  });
+
+  assert.deepEqual(classifyCacheCohort(coldStart, null), {
+    state: "cold_start",
+    stablePrefixMessages: 0,
+  });
+  assert.deepEqual(classifyCacheCohort(reusablePrefix, {
+    prompt_cache_hit_tokens: 80,
+    prompt_cache_miss_tokens: 20,
+  }), {
+    state: "reusable_prefix_hit",
+    stablePrefixMessages: 1,
+  });
+  assert.deepEqual(classifyCacheCohort(reusablePrefix, {
+    prompt_cache_hit_tokens: 0,
+    prompt_cache_miss_tokens: 100,
+  }), {
+    state: "reusable_prefix_miss",
+    stablePrefixMessages: 1,
+  });
+  assert.deepEqual(classifyCacheCohort(reusablePrefix, null), {
+    state: "usage_unavailable",
+    stablePrefixMessages: 1,
+  });
+});
+
 test("stable prefix metadata never changes the forwarded request body", async () => {
   const forwarded = [];
   const handler = await createPluginHandlers({
@@ -2570,6 +2607,7 @@ test("request lifecycle telemetry records a successful raw response with its act
     stream: false,
     status: 202,
     outcome: "completed",
+    cacheCohort: { state: "cold_start", stablePrefixMessages: 0 },
   });
   assertTerminalTiming(logs.requests[0]);
   assert.doesNotMatch(logs.raw, /auth-secret-value|body-secret-value/);
@@ -2617,6 +2655,7 @@ test("request lifecycle telemetry records compatibility JSON and SSE completion"
       stream: false,
       status: 200,
       outcome: "completed",
+      cacheCohort: { state: "cold_start", stablePrefixMessages: 0 },
     },
     {
       requestId: "request-compat-sse",
@@ -2628,6 +2667,7 @@ test("request lifecycle telemetry records compatibility JSON and SSE completion"
       stream: true,
       status: 200,
       outcome: "completed",
+      cacheCohort: { state: "cold_start", stablePrefixMessages: 0 },
     },
   ]);
   logs.requests.forEach(assertTerminalTiming);
@@ -2779,6 +2819,10 @@ test("raw request telemetry records gateway cache counters without changing byte
     cache_miss_input_tokens: 50,
     hit_rate: 150 / 200,
     source: "gateway-response-header",
+  });
+  assert.deepEqual(logs.requests[0].cacheCohort, {
+    state: "reusable_prefix_hit",
+    stablePrefixMessages: 1,
   });
 });
 

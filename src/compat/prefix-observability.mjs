@@ -41,6 +41,34 @@ export function describeStablePrefix(body) {
   };
 }
 
+// This classification is deliberately model-agnostic. It separates a request
+// with no reusable prefix from a reusable-prefix hit or miss without claiming
+// that the local fingerprint is the provider's cache key.
+export function classifyCacheCohort(stablePrefix, promptCache) {
+  const stablePrefixMessages = Number.isInteger(stablePrefix?.stablePrefixMessages)
+    ? stablePrefix.stablePrefixMessages
+    : null;
+  if (stablePrefix?.candidate !== true) {
+    return { state: "cold_start", stablePrefixMessages };
+  }
+  if (!isRecord(promptCache)) {
+    return { state: "usage_unavailable", stablePrefixMessages };
+  }
+  const hit = nonNegativeCounter(promptCache.prompt_cache_hit_tokens);
+  const miss = nonNegativeCounter(promptCache.prompt_cache_miss_tokens);
+  if (hit === null && miss === null) {
+    return { state: "usage_unavailable", stablePrefixMessages };
+  }
+  return {
+    state: hit !== null && hit > 0 ? "reusable_prefix_hit" : "reusable_prefix_miss",
+    stablePrefixMessages,
+  };
+}
+
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function nonNegativeCounter(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }

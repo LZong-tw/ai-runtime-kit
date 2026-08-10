@@ -24,7 +24,7 @@ import {
 import { inspectPendingServerHistory } from "./server-history.mjs";
 import { inspectServerToolRequest, stripServerToolFamily } from "./server-tools.mjs";
 import { applyToolSearchBudget } from "./tool-search.mjs";
-import { describeStablePrefix } from "./prefix-observability.mjs";
+import { classifyCacheCohort, describeStablePrefix } from "./prefix-observability.mjs";
 
 const MCP_PROTOCOL_VERSION = "2025-03-26";
 const MAX_QUERY_LENGTH = 1_000;
@@ -136,6 +136,7 @@ export function createMessagesHandler({ config, coreClient, policies }) {
         : Buffer.from(JSON.stringify(outboundBody), "utf8");
       const compat = isRecord(outboundBody) && isConfiguredCompatibilityRequest(outboundBody, policies, config);
       const stablePrefix = describeStablePrefix(outboundBody);
+      telemetry.stablePrefix = stablePrefix;
       telemetry.decision = describeRouteDecision({
         body,
         mode,
@@ -199,6 +200,7 @@ function beginRequestTelemetry(enabled, request, response) {
       promptCache: null,
       responseTerminal: null,
       startedAt: null,
+      stablePrefix: null,
     };
   }
   return {
@@ -319,6 +321,7 @@ function logRequestTerminal({ outcome, response, telemetry }) {
       durationMs: Math.max(0, elapsed),
       outcome,
       ...(decision.stablePrefix ? { stablePrefix: decision.stablePrefix } : {}),
+      cacheCohort: classifyCacheCohort(telemetry.stablePrefix, telemetry.promptCache),
       ...(telemetry.promptCache ? { promptCache: telemetry.promptCache } : {}),
     })}\n`);
   } catch {
