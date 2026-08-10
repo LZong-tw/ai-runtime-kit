@@ -15,7 +15,7 @@ const TASK_CAPSULE_FIELDS = Object.freeze([
   "next_action",
 ]);
 const SESSION_SOURCES = new Set(["startup", "resume", "clear", "compact"]);
-const COMPLETION_GUARD_REASON = "Continue working when safe; do not stop after partial completion.";
+const COMPLETION_GUARD_REASON = "Continue working when safe. Finish every requested deliverable, verify each result, and do not stop after partial completion.";
 
 function boundedLabel(value, fallback = "unset") {
   if (typeof value !== "string" || value.length === 0) return fallback;
