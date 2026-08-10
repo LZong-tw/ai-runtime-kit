@@ -367,7 +367,10 @@ function createExecutorTools(tools = [], inspection, activeDeferredTools, maxToo
   if (inspection.advisor !== null) {
     executorTools.push({
       name: ADVISOR_BRIDGE_NAME,
-      description: "Consult the configured advisor for this request.",
+      description: "Get an independent second opinion from the configured Advisor. "
+        + "Use this when the user asks to find, ask, consult, or discuss with Advisor "
+        + "(for example, \"找 Advisor\"). Wait for advisor_tool_result before continuing, "
+        + "and never claim Advisor was consulted without a returned result.",
       input_schema: { type: "object", properties: {}, additionalProperties: false },
     });
   }

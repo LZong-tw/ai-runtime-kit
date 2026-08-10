@@ -1147,7 +1147,11 @@ test("advisor bridge keeps the definition and returns a canonical result", async
     "text",
   ]);
   assert.equal(calls[0].body.tools.some((tool) => tool.type === "advisor_20260301"), false);
-  assert.equal(calls[0].body.tools.some((tool) => tool.name === "airkit_advisor"), true);
+  const advisorTool = calls[0].body.tools.find((tool) => tool.name === "airkit_advisor");
+  assert.ok(advisorTool);
+  assert.match(advisorTool.description, /independent second opinion/i);
+  assert.match(advisorTool.description, /找 Advisor/);
+  assert.match(advisorTool.description, /advisor_tool_result/);
   assert.equal(calls[1].body.tools, undefined);
   assert.equal(result.content[1].content.text, "Review complete.");
 });
