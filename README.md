@@ -78,6 +78,34 @@ do not claim onboarding is complete merely because `init --write` succeeded.
 See [`docs/install.md`](docs/install.md) for updates, takeover recovery,
 troubleshooting, and the complete fresh-machine workflow.
 
+## Pi and OpenCode
+
+Use the external-client adapter when Pi or OpenCode should use the same managed
+CCR profile, compatibility middleware, and fallback routes as `airclaude`:
+
+```bash
+airkit connect --profile openai-compatible-example --mode auto --port 3460
+```
+
+The command stays in the foreground and prints a loopback endpoint, a local
+client token, and provider fragments for both clients. Keep it running while
+Pi or OpenCode is in use, export the printed `AIRKIT_CLIENT_TOKEN` in the
+client shell, and stop it with Ctrl-C. The adapter token is separate from the
+CCR gateway credential; never point a client directly at CCR's core port.
+
+For one-command launches, use the client wrappers. They start and close the
+same adapter around the client process, keep the CCR credential private, and
+stamp the selected AirKit mode on every Messages request:
+
+```bash
+airpi --profile openai-compatible-example --mode auto
+airoc --profile openai-compatible-example --mode auto
+```
+
+`airpi` uses Pi's Anthropic provider with the local adapter. `airoc` uses the
+Anthropic provider and enables OpenCode's fullscreen TUI by default; pass an
+explicit `--tui-mode regular` if a split/non-fullscreen TUI is desired.
+
 ## Daily use
 
 ```bash
@@ -245,3 +273,10 @@ with `airkit repair codex-takeover`. Apply only after review with
 `airkit repair codex-takeover --write`; write mode creates rollback snapshots,
 scopes hazardous Codex profiles to CCR, removes only exact CCR-managed Codex
 blocks, and preserves unrelated CCR profiles and user-owned configuration.
+
+If an `airclaude` launch finds the reviewed OpenAI Codex Companion version that
+writes high-frequency dynamic tool progress to stderr, it stops before launch
+to prevent that progress from becoming a large Claude transcript record. Preview
+the narrowly scoped repair with `airkit repair codex-transcript`, then apply it
+with `airkit repair codex-transcript --write`. AirKit backs up both plugin source
+files, preserves the job log, and refuses to modify unrecognized plugin source.

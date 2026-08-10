@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { randomBytes } from "node:crypto";
 import { access, chmod, copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { spawn, spawnSync } from "node:child_process";
 import { readdirSync, realpathSync } from "node:fs";
@@ -13,6 +14,7 @@ import {
   inspectCodexTakeover,
   repairCodexTakeover,
 } from "./codex-takeover-guard.mjs";
+import { repairCodexTranscriptGuard } from "./codex-transcript-guard.mjs";
 import {
   VERIFIED_NATIVE_COMPATIBILITY,
   AIRKIT_MODE_HEADER,
@@ -830,7 +832,13 @@ export async function exportOssRelease({ outDir }) {
   const binPath = join(outDir, "src", "airkit.mjs");
   await writeFile(binPath, await readFile(fileURLToPath(import.meta.url), "utf8"));
   await chmod(binPath, 0o755);
+  for (const entrypoint of ["airpi.mjs", "airoc.mjs"]) {
+    const target = join(outDir, "src", entrypoint);
+    await copyFile(join(here, entrypoint), target);
+    await chmod(target, 0o755);
+  }
   await copyFile(join(here, "codex-takeover-guard.mjs"), join(outDir, "src", "codex-takeover-guard.mjs"));
+  await copyFile(join(here, "codex-transcript-guard.mjs"), join(outDir, "src", "codex-transcript-guard.mjs"));
   await copyFile(join(here, "context-heartbeat.mjs"), join(outDir, "src", "context-heartbeat.mjs"));
   await copyFile(join(here, "context-observability.mjs"), join(outDir, "src", "context-observability.mjs"));
   for (const module of [
@@ -1223,6 +1231,29 @@ async function resolveGatewayToken(plan, options = {}) {
   return token;
 }
 
+async function prepareManagedGateway({ plan, managed, currentConfig, ccrClient, launchEnv, options }) {
+  await announcePluginFreshness(currentConfig, options);
+  await ccrClient.ensureGateway();
+  let gatewayToken;
+  try {
+    gatewayToken = await resolveGatewayToken(plan, options);
+  } catch {
+    // CCR mints the per-profile key helper only while applying profiles, and
+    // the managed save above deliberately passes applyProfile:false. A fresh
+    // CCR home therefore reaches its first launch with no helper: apply once
+    // — the safety guards have already vetted this config — and retry.
+    await ccrClient.applyProfile();
+    gatewayToken = await resolveGatewayToken(plan, options);
+  }
+  const gatewayOrigin = resolveLaunchGatewayEndpoint(
+    plan.launch.gatewayPinned ? plan.ccrConfig : managed.config,
+    launchEnv,
+  )
+    .toString()
+    .replace(/\/+$/, "");
+  return { gatewayOrigin, gatewayToken };
+}
+
 export async function prepareLaunch(catalog, profileName, options = {}) {
   const plan = buildLaunchPlan(catalog, profileName, options);
   const rendered = renderProfile(catalog, profileName, {
@@ -1259,6 +1290,20 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
   assertNoCodexTakeover(inspectCodexTakeover({ ccrConfig: currentConfig }));
   const verifiedPreflight = await inspectCodexTakeoverFiles(launchEnv);
   assertNoCodexTakeover(verifiedPreflight.inspection);
+  let codexTranscriptGuard;
+  if (options.launch !== false) {
+    const guard = options.repairCodexTranscriptGuard ?? repairCodexTranscriptGuard;
+    codexTranscriptGuard = await guard({
+      env: launchEnv,
+      write: false,
+      ...(options.codexTranscriptIo ? { io: options.codexTranscriptIo } : {}),
+    });
+    if (codexTranscriptGuard.state === "repairable") {
+      throw new Error(
+        "Codex Companion can leak dynamic tool progress into the Claude transcript. Run airkit repair codex-transcript --write before launching.",
+      );
+    }
+  }
   await writeLaunchFiles(plan, rendered);
   const apiKeys = await resolveProviderApiKeys(catalog, profileName, plan, options);
   const managed = buildCcr3ManagedConfig(catalog, profileName, currentConfig, {
@@ -1272,32 +1317,17 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
   }
   let child = null;
   let childStatus;
+  let externalClient;
   if (options.launch !== false) {
-    // Announced here, not in the CLI: a launch prints its own report only after
-    // the child exits, and this must reach the user before the session starts.
-    // Sequenced after saveConfig so a restart brings up a service holding both
-    // the new plugin code and the config just written.
-    await announcePluginFreshness(currentConfig, options);
-    await ccrClient.ensureGateway();
     await assertNoInheritedApiKeyHelper(launchEnv);
-    let gatewayToken;
-    try {
-      gatewayToken = await resolveGatewayToken(plan, options);
-    } catch {
-      // CCR mints the per-profile key helper only while applying profiles, and
-      // the managed save above deliberately passes applyProfile:false. A fresh
-      // CCR home therefore reaches its first launch with no helper: apply once
-      // — the Codex takeover guards above have already vetted this config —
-      // and retry.
-      await ccrClient.applyProfile();
-      gatewayToken = await resolveGatewayToken(plan, options);
-    }
-    const gatewayOrigin = resolveLaunchGatewayEndpoint(
-      plan.launch.gatewayPinned ? plan.ccrConfig : managed.config,
+    const { gatewayOrigin, gatewayToken } = await prepareManagedGateway({
+      ccrClient,
+      currentConfig,
       launchEnv,
-    )
-      .toString()
-      .replace(/\/+$/, "");
+      managed,
+      options,
+      plan,
+    });
     const middleware = options.plainClaude === true || !managed.compatibility
       ? null
       : await (options.startCompatibilityMiddleware ?? startCompatibilityMiddleware)({
@@ -1337,6 +1367,37 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     childStatus = await monitorChildLifecycle(middleware, child);
   }
 
+  if (options.externalClient === true) {
+    if (!managed.compatibility) {
+      throw new Error(`profile "${profileName}" does not define CCR compatibility for external clients`);
+    }
+    // External clients need the same managed gateway and compatibility plugin
+    // as Claude, but must not inherit the gateway credential themselves.
+    const { gatewayOrigin, gatewayToken } = await prepareManagedGateway({
+      ccrClient,
+      currentConfig,
+      launchEnv,
+      managed,
+      options,
+      plan,
+    });
+    const clientToken = options.clientToken ?? randomBytes(24).toString("base64url");
+    const middleware = await (options.startCompatibilityMiddleware ?? startCompatibilityMiddleware)({
+      compatibility: managed.compatibility,
+      gatewayOrigin,
+      gatewayToken,
+      clientToken,
+      port: options.adapterPort ?? 0,
+    });
+    externalClient = {
+      close: middleware.close,
+      mode: plan.mode,
+      origin: middleware.origin,
+      profile: profileName,
+      token: clientToken,
+    };
+  }
+
   return {
     ...plan,
     write: true,
@@ -1344,8 +1405,74 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     liveCcrConfig: { ...plan.liveCcrConfig, status: "managed" },
     runtime,
     child,
+    ...(codexTranscriptGuard === undefined ? {} : { codexTranscriptGuard }),
     ...(childStatus === undefined ? {} : { childStatus }),
+    ...(externalClient === undefined ? {} : { externalClient }),
   };
+}
+
+export async function prepareExternalClient(catalog, profileName, options = {}) {
+  return prepareLaunch(catalog, profileName, {
+    ...options,
+    externalClient: true,
+    launch: false,
+  });
+}
+
+const EXTERNAL_CLIENT_SPECS = Object.freeze({
+  pi: Object.freeze({ binary: "pi" }),
+  opencode: Object.freeze({ binary: "opencode" }),
+});
+
+export async function runExternalClientCli(client, argv = process.argv.slice(2), options = {}) {
+  const spec = EXTERNAL_CLIENT_SPECS[client];
+  if (!spec) throw new Error(`unsupported external client: ${client}`);
+
+  const parsed = parseExternalClientArgs(argv);
+  const catalog = options.catalog ?? await loadCatalog(options.catalogPath ?? defaultCatalogPath);
+  const profile = parsed.profile ?? defaultLaunchProfile(catalog);
+  const prepare = options.prepareExternalClient ?? prepareExternalClient;
+  const result = await prepare(catalog, profile, {
+    ...options,
+    adapterPort: parsed.port === undefined ? options.adapterPort ?? 0 : parseAdapterPort(parsed.port),
+    configDir: parsed.configDir ?? options.configDir,
+    mode: parsed.mode ?? options.mode ?? "auto",
+    stderr: options.stderr ?? process.stderr,
+  });
+  const adapter = result.externalClient;
+  const adapterOrigin = String(adapter.origin).replace(/\/+$/, "");
+  const endpoint = adapterOrigin.endsWith("/v1") ? adapterOrigin : `${adapterOrigin}/v1`;
+  const childEnv = { ...(options.env ?? process.env) };
+  delete childEnv.ANTHROPIC_AUTH_TOKEN;
+  delete childEnv.ANTHROPIC_AUTH_TOKEN_JBRIDGE;
+  childEnv.AIRKIT_CLIENT_BASE_URL = endpoint;
+  childEnv.AIRKIT_CLIENT_TOKEN = adapter.token;
+  childEnv.ANTHROPIC_BASE_URL = endpoint;
+  childEnv.ANTHROPIC_API_KEY = adapter.token;
+
+  const clientArgs = [];
+  if (client === "pi") {
+    if (!hasExternalOption(parsed.userArgs, "--provider")) clientArgs.push("--provider", "anthropic");
+    if (!hasExternalOption(parsed.userArgs, "--model")) clientArgs.push("--model", "claude-sonnet-5");
+    clientArgs.push(...parsed.userArgs);
+  } else {
+    if (!hasExternalOption(parsed.userArgs, "--model")) clientArgs.push("--model", "anthropic/claude-sonnet-5");
+    clientArgs.push(...parsed.userArgs);
+    if (!hasExternalOption(parsed.userArgs, "--tui-mode")) clientArgs.push("--tui-mode", "fullscreen");
+  }
+
+  const spawnCommand = options.spawnCommand ?? spawnCommandAsync;
+  let child;
+  try {
+    child = spawnCommand(spec.binary, clientArgs, {
+      env: childEnv,
+      stdio: "inherit",
+    });
+  } catch (error) {
+    await adapter.close();
+    throw error;
+  }
+  return monitorChildLifecycle(adapter, child);
 }
 
 export async function doctorProfile(catalog, profileName, options = {}) {
@@ -1696,7 +1823,12 @@ function publicPackage() {
     description: "Public-safe runtime profile templates for AI client wrappers.",
     type: "module",
     exports: "./src/airkit.mjs",
-    bin: { airkit: "src/airkit.mjs", airclaude: "src/airkit.mjs" },
+    bin: {
+      airkit: "src/airkit.mjs",
+      airclaude: "src/airkit.mjs",
+      airpi: "src/airpi.mjs",
+      airoc: "src/airoc.mjs",
+    },
     files: [
       "CLAUDE.md",
       "README.md",
@@ -1774,7 +1906,40 @@ export async function runCli(argv = process.argv.slice(2), options = {}) {
     return 0;
   }
 
+  if (command === "repair" && subcommand === "codex-transcript") {
+    const write = hasFlag(rest, "--write");
+    const repair = options.repairCodexTranscriptGuard ?? repairCodexTranscriptGuard;
+    const result = await repair({
+      env: options.env ?? process.env,
+      write,
+      ...(options.codexTranscriptIo ? { io: options.codexTranscriptIo } : {}),
+      ...(options.codexTranscriptNow ? { now: options.codexTranscriptNow } : {}),
+    });
+    stdout.write(renderCodexTranscriptGuard(result));
+    return result.state === "unsupported" ? 1 : 0;
+  }
+
   const catalog = command === "export-oss" ? null : await loadCatalog(options.catalogPath ?? defaultCatalogPath);
+
+  if (command === "connect") {
+    const args = subcommand ? [subcommand, ...rest] : rest;
+    const profile = readFlag(args, "--profile") ?? defaultLaunchProfile(catalog);
+    const mode = readFlag(args, "--mode") ?? "auto";
+    const port = parseAdapterPort(readFlag(args, "--port"));
+    const result = await prepareExternalClient(catalog, profile, {
+      ...options,
+      adapterPort: port,
+      configDir: readFlag(args, "--config-dir") ?? options.configDir ?? defaultConfigDir(),
+      mode,
+      stderr: options.stderr ?? process.stderr,
+    });
+    stdout.write(renderExternalClientResult(result));
+    if (options.holdClient === false) {
+      await result.externalClient.close();
+      return 0;
+    }
+    return holdExternalClient(result.externalClient);
+  }
 
   if (command === "init") {
     const profile = requireFlag([subcommand, ...rest], "--profile");
@@ -1863,6 +2028,9 @@ export async function runAirclaudeCli(argv = process.argv.slice(2), options = {}
   const preProfile = catalog.profiles.find((candidate) => candidate.name === preProfileName);
   const validModes = new Set(["auto", "pro", ...Object.keys(preProfile?.launch?.modes ?? {})]);
   const parsed = parseAirclaudeArgs(argv, validModes);
+  if (options.spawnCommand === undefined && !parsed.dryRun && !parsed.doctor) {
+    assertInteractiveResumeLaunch(parsed.userArgs);
+  }
   const profile = parsed.profile ?? process.env.AIRCLAUDE_PROFILE ?? defaultLaunchProfile(catalog);
   const result = await prepareLaunch(catalog, profile, {
     ...options,
@@ -1878,6 +2046,27 @@ export async function runAirclaudeCli(argv = process.argv.slice(2), options = {}
   });
   stdout.write(renderLaunchResult(result, { doctor: parsed.doctor, dryRun: parsed.dryRun }));
   return result.childStatus ?? result.child?.status ?? 0;
+}
+
+export function assertInteractiveResumeLaunch(userArgs = [], options = {}) {
+  const resume = userArgs.some((arg) => {
+    const value = String(arg);
+    return value === "-r"
+      || value === "-c"
+      || value === "--continue"
+      || value === "--fork-session"
+      || value === "--resume"
+      || value.startsWith("--resume=");
+  });
+  if (!resume) return;
+
+  const stdinIsTTY = options.stdinIsTTY ?? process.stdin.isTTY === true;
+  const stdoutIsTTY = options.stdoutIsTTY ?? process.stdout.isTTY === true;
+  if (stdinIsTTY && stdoutIsTTY) return;
+
+  throw new Error(
+    "airclaude resume requires an interactive terminal; run it from the terminal that should own the Claude UI instead of a detached/background shell",
+  );
 }
 
 function isHelpRequest(argv) {
@@ -2011,6 +2200,67 @@ function hasFlag(args, name) {
   return args.includes(name);
 }
 
+function parseAdapterPort(value) {
+  if (value === null || value === undefined || value === "") return 0;
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 0 || port > 65_535) {
+    throw new Error("--port must be an integer from 0 through 65535");
+  }
+  return port;
+}
+
+function parseExternalClientArgs(argv) {
+  const parsed = { userArgs: [] };
+  const passthroughIndex = argv.indexOf("--");
+  const ownArgs = passthroughIndex === -1 ? argv : argv.slice(0, passthroughIndex);
+  if (passthroughIndex !== -1) parsed.userArgs.push(...argv.slice(passthroughIndex + 1));
+
+  for (let index = 0; index < ownArgs.length; index += 1) {
+    const arg = ownArgs[index];
+    if (["--profile", "--mode", "--port", "--config-dir"].includes(arg)) {
+      const value = ownArgs[++index];
+      if (!value || value.startsWith("--")) throw new Error(`${arg} requires a value`);
+      const key = arg.slice(2).replaceAll(/-([a-z])/g, (_match, letter) => letter.toUpperCase());
+      parsed[key] = value;
+    } else if (arg.startsWith("--profile=") || arg.startsWith("--mode=") || arg.startsWith("--port=") || arg.startsWith("--config-dir=")) {
+      const separator = arg.indexOf("=");
+      const key = arg.slice(2, separator).replaceAll(/-([a-z])/g, (_match, letter) => letter.toUpperCase());
+      const value = arg.slice(separator + 1);
+      if (!value) throw new Error(`${arg.slice(0, separator)} requires a value`);
+      parsed[key] = value;
+    } else {
+      parsed.userArgs.push(arg);
+    }
+  }
+  return parsed;
+}
+
+function hasExternalOption(args, name) {
+  return args.some((arg) => arg === name || arg.startsWith(`${name}=`));
+}
+
+function holdExternalClient(client) {
+  return new Promise((resolve, reject) => {
+    let stopping = false;
+    const stop = async (code) => {
+      if (stopping) return;
+      stopping = true;
+      process.removeListener("SIGINT", onInterrupt);
+      process.removeListener("SIGTERM", onTerminate);
+      try {
+        await client.close();
+        resolve(code);
+      } catch (error) {
+        reject(error);
+      }
+    };
+    const onInterrupt = () => void stop(130);
+    const onTerminate = () => void stop(143);
+    process.once("SIGINT", onInterrupt);
+    process.once("SIGTERM", onTerminate);
+  });
+}
+
 function defaultConfigDir() {
   return process.env.AIRKIT_CONFIG_DIR ?? join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "ai-runtime-kit");
 }
@@ -2105,13 +2355,50 @@ async function readCcrConfigSafely(ccrClient) {
   }
 }
 
+function renderExternalClientResult(result) {
+  const client = result.externalClient;
+  const baseUrl = `${client.origin}/v1`;
+  return `Started AirKit external-client adapter
+profile: ${client.profile}
+mode: ${client.mode}
+endpoint: ${baseUrl}
+
+In the client shell:
+export AIRKIT_CLIENT_BASE_URL='${baseUrl}'
+export AIRKIT_CLIENT_TOKEN='${client.token}'
+
+OpenCode provider fragment:
+{
+  "npm": "@ai-sdk/anthropic",
+  "options": {
+    "baseURL": "${baseUrl}",
+    "apiKey": "{env:AIRKIT_CLIENT_TOKEN}",
+    "headers": { "x-airkit-mode": "${client.mode}" }
+  }
+}
+
+Pi ~/.pi/agent/models.json provider fragment:
+{
+  "baseUrl": "${baseUrl}",
+  "api": "anthropic-messages",
+  "apiKey": "$AIRKIT_CLIENT_TOKEN",
+  "headers": { "x-airkit-mode": "${client.mode}" },
+  "models": [{ "id": "claude-sonnet-5", "contextWindow": 1000000, "maxTokens": 64000 }]
+}
+
+Keep this process running; press Ctrl-C here to stop the adapter.
+`;
+}
+
 function renderAirkitHelp() {
   return `Usage: airkit <command> [options]
 
 Commands:
+  connect [--profile <name>] [--mode <mode>] [--port <port>]
   runtime check
   runtime update [--write]
   repair codex-takeover [--write]
+  repair codex-transcript [--write]
   list [--visibility all|public|internal]
   init --profile <name> [--write] [--force] [--config-dir <dir>]
   update --profile <name> [--write] [--config-dir <dir>] [--preview-dir <dir>]
@@ -2141,6 +2428,26 @@ function renderRuntimeUpdate(result) {
   const paths = result.statePaths.map((path) => `- ${path}`).join("\n");
   if (!result.write) return `Preview only\nCommand: npm install --global ${result.packages.join(" ")}\nCCR state to back up:\n${paths}\nPackages:\n${packages}\nRe-run with --write to update global packages.\n`;
   return `Updated runtime packages\n${packages}\nBackup: ${result.backupDir}\n${renderRuntimeReport(result.report)}`;
+}
+
+function renderCodexTranscriptGuard(result) {
+  const pathLines = result.affectedPaths.length > 0
+    ? result.affectedPaths.map((path) => `- ${path}`).join("\n")
+    : "- none";
+  if (result.state === "absent") {
+    return "Codex transcript guard\nNo installed OpenAI Codex plugin found.\n";
+  }
+  if (result.state === "unsupported") {
+    return `Codex transcript guard could not safely patch this plugin\nReason: ${result.reason ?? "unrecognized source"}\nNo changes written.\n`;
+  }
+  if (result.state === "protected") {
+    return "Codex transcript guard\nInstalled OpenAI Codex plugin is already protected.\n";
+  }
+  if (!result.write) {
+    return `Preview Codex transcript guard\nAffected paths:\n${pathLines}\nNo changes written.\nRe-run with airkit repair codex-transcript --write to apply.\n`;
+  }
+  const backups = result.backupPaths.length > 0 ? result.backupPaths.map((path) => `- ${path}`).join("\n") : "- none";
+  return `Protected Codex transcript progress\nBackups:\n${backups}\nAffected paths:\n${pathLines}\n`;
 }
 
 function renderCodexTakeoverRepair(result) {

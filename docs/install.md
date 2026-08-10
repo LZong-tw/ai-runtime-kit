@@ -313,6 +313,29 @@ CCR-managed Codex blocks. It preserves unrelated profiles and the latest
 user-owned bytes. If a concurrent writer wins a repair race, AirKit does not
 overwrite it and reports the retained conflict snapshot.
 
+## Repair Codex Companion Transcript Progress
+
+Some Codex Companion versions write every dynamic tool start/completion event to
+stderr. Claude Code can retain that foreground progress in its JSONL transcript,
+which makes long sessions expensive to resume. `airclaude` blocks only the
+reviewed, known-vulnerable implementation and tells you to preview the repair:
+
+```bash
+node src/airkit.mjs repair codex-transcript
+```
+
+Apply it only after reviewing the affected paths:
+
+```bash
+node src/airkit.mjs repair codex-transcript --write
+```
+
+The repair accepts only the installed `codex@openai-codex` cache layout and the
+exact reviewed source signatures. It creates exclusive backups under Claude's
+plugin recovery directory, atomically suppresses dynamic tool progress from
+foreground stderr, and leaves the full progress stream in each Codex job log.
+Unknown or updated plugin source is reported but never rewritten.
+
 ## Update Managed Runtime Files
 
 Use `update` when managed files already exist and may be stale:
