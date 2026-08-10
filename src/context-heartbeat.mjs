@@ -18,6 +18,10 @@ const SESSION_SOURCES = new Set(["startup", "resume", "clear", "compact"]);
 const COMPLETION_GUARD_REASON = "Continue working when safe. Finish every requested deliverable, verify each result, and do not stop after partial completion.";
 const COMPLETION_GUARD_MODEL_PATTERNS = Object.freeze([/^gpt(?:-|$)/i, /^deepseek-/i]);
 const TRANSCRIPT_TAIL_LIMIT = 256 * 1024;
+const SUBAGENT_TOOL_NAMES = new Set(["Agent", "Task", "TaskOutput"]);
+const SUBAGENT_RESULT_SCAN_LIMIT = 256 * 1024;
+const SUBAGENT_RESULT_MAX_CHARS = 32 * 1024;
+const SUBAGENT_RESULT_OUTPUT_LIMIT = 12 * 1024;
 
 function boundedLabel(value, fallback = "unset") {
   if (typeof value !== "string" || value.length === 0) return fallback;
@@ -69,6 +73,8 @@ export async function processContextHook(input, env = process.env) {
   if (!env.AIRCLAUDE_PROFILE) return null;
   const completionGuardResponse = await processCompletionGuardHook(input, env);
   if (completionGuardResponse) return completionGuardResponse;
+  const subagentOutputResponse = processSubagentOutputHook(input);
+  if (subagentOutputResponse) return subagentOutputResponse;
   if (input?.hook_event_name === "UserPromptSubmit") return buildHeartbeatResponse(input, env);
 
   if (input?.hook_event_name === "PostCompact") {
@@ -99,6 +105,81 @@ export async function processContextHook(input, env = process.env) {
       additionalContext: context,
     },
   };
+}
+
+export function processSubagentOutputHook(input) {
+  if (input?.hook_event_name !== "PostToolUse" || !SUBAGENT_TOOL_NAMES.has(input.tool_name)) return null;
+  const toolResponse = input.tool_response;
+  const resultPath = input.tool_name === "TaskOutput" ? ["task", "output"] : ["result"];
+  const result = resultPath.reduce((value, key) => value?.[key], toolResponse);
+  if (typeof result !== "string" || result.length <= SUBAGENT_RESULT_MAX_CHARS || !looksLikeSubagentTranscript(result)) {
+    return null;
+  }
+
+  const updatedToolOutput = structuredClone(toolResponse);
+  let target = updatedToolOutput;
+  for (const key of resultPath.slice(0, -1)) target = target[key];
+  target[resultPath.at(-1)] = boundedSubagentResult(result);
+  return {
+    hookSpecificOutput: {
+      hookEventName: "PostToolUse",
+      updatedToolOutput,
+    },
+  };
+}
+
+function looksLikeSubagentTranscript(result) {
+  const tail = result.length > SUBAGENT_RESULT_SCAN_LIMIT ? result.slice(-SUBAGENT_RESULT_SCAN_LIMIT) : result;
+  let structuredRecords = 0;
+  let transcriptRecords = 0;
+  for (const line of tail.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let record;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!record || typeof record !== "object" || Array.isArray(record)) continue;
+    structuredRecords += 1;
+    if (["assistant", "system", "progress", "user"].includes(record.type)) transcriptRecords += 1;
+    if (structuredRecords >= 4) break;
+  }
+  return structuredRecords >= 2 && transcriptRecords >= 1;
+}
+
+function boundedSubagentResult(result) {
+  const tail = result.length > SUBAGENT_RESULT_SCAN_LIMIT ? result.slice(-SUBAGENT_RESULT_SCAN_LIMIT) : result;
+  for (const line of tail.split(/\r?\n/).reverse()) {
+    if (!line.trim()) continue;
+    let record;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (record?.type !== "assistant") continue;
+    const text = assistantText(record.message?.content);
+    if (text) return truncateSubagentResult(text);
+  }
+  return "[AirKit] Bounded a transcript-like subagent result; the full transcript remains on disk for inspection.";
+}
+
+function assistantText(content) {
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((block) => block && block.type === "text" && typeof block.text === "string")
+    .map((block) => block.text.trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+function truncateSubagentResult(text) {
+  if (text.length <= SUBAGENT_RESULT_OUTPUT_LIMIT) return text;
+  const suffix = "\n[AirKit] Result truncated; full subagent transcript remains on disk.";
+  return `${text.slice(0, SUBAGENT_RESULT_OUTPUT_LIMIT - suffix.length)}${suffix}`;
 }
 
 export async function processCompletionGuardHook(input, env = process.env) {
