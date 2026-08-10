@@ -819,6 +819,7 @@ export async function exportOssRelease({ outDir }) {
   if (!outDir) throw new Error("exportOssRelease requires outDir");
 
   const catalog = await loadCatalog();
+  const packageVersion = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8")).version;
   const publicCatalog = {
     schema: catalog.schema,
     ...(catalog.modelCatalog ? { modelCatalog: catalog.modelCatalog } : {}),
@@ -866,7 +867,7 @@ export async function exportOssRelease({ outDir }) {
     join(outDir, "scripts", "capture-claude-tool-contract.mjs"),
     await readFile(join(repoRoot, "scripts", "capture-claude-tool-contract.mjs"), "utf8"),
   );
-  await writeFile(join(outDir, "package.json"), `${JSON.stringify(publicPackage(), null, 2)}\n`);
+  await writeFile(join(outDir, "package.json"), `${JSON.stringify(publicPackage(packageVersion), null, 2)}\n`);
   await copyFile(join(repoRoot, "CLAUDE.md"), join(outDir, "CLAUDE.md"));
   await copyFile(join(repoRoot, "README.md"), join(outDir, "README.md"));
 }
@@ -1811,10 +1812,10 @@ function airkitEnvVar(prefix, profileName) {
   return `${prefix}_${profileName.toUpperCase().replaceAll(/[^A-Z0-9]+/g, "_")}`;
 }
 
-function publicPackage() {
+function publicPackage(version) {
   return {
     name: "@untionglim/ai-runtime-kit",
-    version: "0.2.17",
+    version,
     publishConfig: { access: "public" },
     repository: {
       type: "git",

@@ -73,7 +73,7 @@ export async function processContextHook(input, env = process.env) {
   if (!env.AIRCLAUDE_PROFILE) return null;
   const completionGuardResponse = await processCompletionGuardHook(input, env);
   if (completionGuardResponse) return completionGuardResponse;
-  const subagentOutputResponse = processSubagentOutputHook(input);
+  const subagentOutputResponse = await processSubagentOutputHook(input, env);
   if (subagentOutputResponse) return subagentOutputResponse;
   if (input?.hook_event_name === "UserPromptSubmit") return buildHeartbeatResponse(input, env);
 
@@ -107,7 +107,7 @@ export async function processContextHook(input, env = process.env) {
   };
 }
 
-export function processSubagentOutputHook(input) {
+export async function processSubagentOutputHook(input, env = process.env) {
   if (input?.hook_event_name !== "PostToolUse" || !SUBAGENT_TOOL_NAMES.has(input.tool_name)) return null;
   const toolResponse = input.tool_response;
   const resultPath = input.tool_name === "TaskOutput" ? ["task", "output"] : ["result"];
@@ -119,7 +119,8 @@ export function processSubagentOutputHook(input) {
   const updatedToolOutput = structuredClone(toolResponse);
   let target = updatedToolOutput;
   for (const key of resultPath.slice(0, -1)) target = target[key];
-  target[resultPath.at(-1)] = boundedSubagentResult(result);
+  const artifactPath = await persistSubagentTranscript(input, env, result);
+  target[resultPath.at(-1)] = boundedSubagentResult(result, artifactPath);
   return {
     hookSpecificOutput: {
       hookEventName: "PostToolUse",
@@ -148,7 +149,25 @@ function looksLikeSubagentTranscript(result) {
   return structuredRecords >= 2 && transcriptRecords >= 1;
 }
 
-function boundedSubagentResult(result) {
+async function persistSubagentTranscript(input, env, result) {
+  if (typeof env?.CLAUDE_PLUGIN_DATA !== "string" || env.CLAUDE_PLUGIN_DATA.length === 0) return null;
+  const sessionId = boundedLabel(input?.session_id, "unknown-session");
+  const digest = createHash("sha256").update(result).digest("hex").slice(0, 24);
+  const artifactDirectory = join(env.CLAUDE_PLUGIN_DATA, "subagent-transcripts", sessionId);
+  const artifactPath = join(artifactDirectory, `${digest}.jsonl`);
+  const temporaryPath = join(artifactDirectory, `.${digest}-${randomUUID()}.tmp`);
+  try {
+    await mkdir(artifactDirectory, { recursive: true });
+    await writeFile(temporaryPath, result, { mode: 0o600 });
+    await rename(temporaryPath, artifactPath);
+    return artifactPath;
+  } catch {
+    await rm(temporaryPath, { force: true });
+    return null;
+  }
+}
+
+function boundedSubagentResult(result, artifactPath) {
   const tail = result.length > SUBAGENT_RESULT_SCAN_LIMIT ? result.slice(-SUBAGENT_RESULT_SCAN_LIMIT) : result;
   for (const line of tail.split(/\r?\n/).reverse()) {
     if (!line.trim()) continue;
@@ -160,9 +179,9 @@ function boundedSubagentResult(result) {
     }
     if (record?.type !== "assistant") continue;
     const text = assistantText(record.message?.content);
-    if (text) return truncateSubagentResult(text);
+    if (text) return truncateSubagentResult(text, artifactPath);
   }
-  return "[AirKit] Bounded a transcript-like subagent result; the full transcript remains on disk for inspection.";
+  return truncateSubagentResult("[AirKit] Bounded a transcript-like subagent result.", artifactPath);
 }
 
 function assistantText(content) {
@@ -176,9 +195,12 @@ function assistantText(content) {
     .trim();
 }
 
-function truncateSubagentResult(text) {
-  if (text.length <= SUBAGENT_RESULT_OUTPUT_LIMIT) return text;
-  const suffix = "\n[AirKit] Result truncated; full subagent transcript remains on disk.";
+function truncateSubagentResult(text, artifactPath) {
+  const artifact = artifactPath
+    ? `\n[AirKit] Full transcript artifact: ${artifactPath}`
+    : "\n[AirKit] Full transcript remains in the host session storage.";
+  if (text.length + artifact.length <= SUBAGENT_RESULT_OUTPUT_LIMIT) return `${text}${artifact}`;
+  const suffix = `\n[AirKit] Result truncated.${artifact}`;
   return `${text.slice(0, SUBAGENT_RESULT_OUTPUT_LIMIT - suffix.length)}${suffix}`;
 }
 
