@@ -168,7 +168,7 @@ test("isolated verifier restarts management-only before trusting persisted dange
 test("OSS package allowlist excludes tests and migration artifacts", async () => {
   const expectedIdentity = {
     name: "@untionglim/ai-runtime-kit",
-    version: "0.2.15",
+    version: "0.2.16",
     publishConfig: { access: "public" },
     repository: {
       type: "git",
@@ -2687,6 +2687,7 @@ test("GPT completion guard continues one Stop after a tool-bearing turn without 
   const pluginData = await mkdtemp(join(tmpdir(), "airkit-completion-guard-"));
   const env = {
     AIRCLAUDE_PROFILE: "example-profile",
+    AIRCLAUDE_ROUTE_DEFAULT_MODEL: "gpt-5.6-terra",
     AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS: "1",
     CLAUDE_PLUGIN_DATA: pluginData,
   };
@@ -2777,6 +2778,51 @@ test("DeepSeek completion guard continues the full deliverable instead of stoppi
         additionalContext: "Continue working when safe. Finish every requested deliverable, verify each result, and do not stop after partial completion.",
       },
     });
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+test("completion guard ignores Claude and unlisted Chinese models after a route switch", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-completion-guard-models-"));
+  const transcriptPath = join(pluginData, "session.jsonl");
+  const env = {
+    AIRCLAUDE_MODE: "auto",
+    AIRCLAUDE_PROFILE: "example-profile",
+    AIRCLAUDE_ROUTE_DEFAULT_MODEL: "deepseek-v4-flash",
+    AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS: "1",
+    CLAUDE_PLUGIN_DATA: pluginData,
+  };
+  const writeAssistantModel = async (model) => {
+    await writeFile(transcriptPath, `${JSON.stringify({ type: "assistant", message: { model } })}\n`);
+  };
+  const postToolUse = () => processCompletionGuardHook({
+    hook_event_name: "PostToolUse",
+    session_id: "model-switch-session",
+    transcript_path: transcriptPath,
+  }, env);
+  const stop = () => processCompletionGuardHook({
+    hook_event_name: "Stop",
+    session_id: "model-switch-session",
+    transcript_path: transcriptPath,
+  }, env);
+
+  try {
+    await writeAssistantModel("claude-opus-5");
+    await postToolUse();
+    assert.equal(await stop(), null);
+
+    await writeAssistantModel("gpt-5.6-luna");
+    await postToolUse();
+    assert.equal((await stop()).hookSpecificOutput.hookEventName, "Stop");
+
+    await writeAssistantModel("Kimi-K3");
+    await postToolUse();
+    assert.equal(await stop(), null);
+
+    await writeAssistantModel("GLM-5.2");
+    await postToolUse();
+    assert.equal(await stop(), null);
   } finally {
     await rm(pluginData, { force: true, recursive: true });
   }
