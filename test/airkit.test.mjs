@@ -12,6 +12,7 @@ import {
   parseTaskCapsule,
   processCompletionGuardHook,
   processContextHook,
+  processSubagentOutputHook,
 } from "../src/context-heartbeat.mjs";
 import {
   routeBareClaudeModel,
@@ -168,7 +169,7 @@ test("isolated verifier restarts management-only before trusting persisted dange
 test("OSS package allowlist excludes tests and migration artifacts", async () => {
   const expectedIdentity = {
     name: "@untionglim/ai-runtime-kit",
-    version: "0.2.16",
+    version: "0.2.17",
     publishConfig: { access: "public" },
     repository: {
       type: "git",
@@ -2837,6 +2838,46 @@ test("GPT completion guard is inert when disabled", async () => {
   } finally {
     await rm(pluginData, { force: true, recursive: true });
   }
+});
+
+test("subagent output guard bounds transcript-like Agent results without touching ordinary output", () => {
+  const transcript = [
+    { type: "system", subtype: "init" },
+    ...Array.from({ length: 120 }, (_, index) => ({
+      type: "progress",
+      message: { text: `progress ${index} ${"x".repeat(320)}` },
+    })),
+    { type: "assistant", message: { content: [{ type: "text", text: "Final summary: inspected the repository and found no blocker." }] } },
+  ].map((record) => JSON.stringify(record)).join("\n");
+  const input = {
+    hook_event_name: "PostToolUse",
+    tool_name: "Agent",
+    tool_response: {
+      result: transcript,
+      usage: { input_tokens: 123, output_tokens: 456 },
+      total_cost_usd: 0.12,
+      duration_ms: 789,
+    },
+  };
+
+  const guarded = processSubagentOutputHook(input);
+  assert.equal(guarded.hookSpecificOutput.hookEventName, "PostToolUse");
+  assert.equal(guarded.hookSpecificOutput.updatedToolOutput.usage.output_tokens, 456);
+  assert.match(guarded.hookSpecificOutput.updatedToolOutput.result, /Final summary: inspected the repository/);
+  assert.ok(guarded.hookSpecificOutput.updatedToolOutput.result.length <= 12_000);
+  assert.doesNotMatch(guarded.hookSpecificOutput.updatedToolOutput.result, /progress 119/);
+
+  const taskOutput = processSubagentOutputHook({
+    hook_event_name: "PostToolUse",
+    tool_name: "TaskOutput",
+    tool_response: { retrieval_status: "success", task: { output: transcript, status: "completed" } },
+  });
+  assert.match(taskOutput.hookSpecificOutput.updatedToolOutput.task.output, /Final summary: inspected the repository/);
+  assert.equal(taskOutput.hookSpecificOutput.updatedToolOutput.task.status, "completed");
+
+  const ordinary = { ...input, tool_response: { ...input.tool_response, result: "A normal long result\n".repeat(20_000) } };
+  assert.equal(processSubagentOutputHook(ordinary), null);
+  assert.equal(processSubagentOutputHook({ ...input, tool_name: "Read" }), null);
 });
 
 test("launch mode exports its completion guard limit only for the selected mode", () => {
