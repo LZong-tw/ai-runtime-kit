@@ -16,6 +16,8 @@ const TASK_CAPSULE_FIELDS = Object.freeze([
 ]);
 const SESSION_SOURCES = new Set(["startup", "resume", "clear", "compact"]);
 const COMPLETION_GUARD_REASON = "Continue working when safe. Finish every requested deliverable, verify each result, and do not stop after partial completion.";
+const COMPLETION_GUARD_MODEL_PATTERNS = Object.freeze([/^gpt(?:-|$)/i, /^deepseek-/i]);
+const TRANSCRIPT_TAIL_LIMIT = 256 * 1024;
 
 function boundedLabel(value, fallback = "unset") {
   if (typeof value !== "string" || value.length === 0) return fallback;
@@ -119,6 +121,12 @@ export async function processCompletionGuardHook(input, env = process.env) {
   const state = await loadCompletionGuardState(statePath);
   if (!state?.armed || state.stopBlocks >= maxStopBlocks) return null;
 
+  const model = await completionGuardModel(input, env);
+  if (!isCompletionGuardModel(model)) {
+    await saveCompletionGuardState(statePath, { armed: false, stopBlocks: state.stopBlocks });
+    return null;
+  }
+
   await saveCompletionGuardState(statePath, { armed: false, stopBlocks: state.stopBlocks + 1 });
   return {
     hookSpecificOutput: {
@@ -126,6 +134,39 @@ export async function processCompletionGuardHook(input, env = process.env) {
       additionalContext: COMPLETION_GUARD_REASON,
     },
   };
+}
+
+async function completionGuardModel(input, env) {
+  const transcriptPath = input?.transcript_path;
+  if (typeof transcriptPath === "string" && transcriptPath.length > 0) {
+    return readTranscriptModel(transcriptPath);
+  }
+  return env.AIRCLAUDE_ACTIVE_MODEL ?? env.AIRCLAUDE_ROUTE_DEFAULT_MODEL ?? null;
+}
+
+function isCompletionGuardModel(model) {
+  const normalized = String(model ?? "")
+    .trim()
+    .split(/[\/,]/)
+    .at(-1)
+    ?.replace(/\[1m\]$/i, "");
+  return COMPLETION_GUARD_MODEL_PATTERNS.some((pattern) => pattern.test(normalized ?? ""));
+}
+
+async function readTranscriptModel(transcriptPath) {
+  try {
+    const raw = await readFile(transcriptPath, "utf8");
+    const tail = raw.length > TRANSCRIPT_TAIL_LIMIT ? raw.slice(-TRANSCRIPT_TAIL_LIMIT) : raw;
+    for (const line of tail.split(/\r?\n/).reverse()) {
+      if (!line.trim()) continue;
+      const record = JSON.parse(line);
+      const model = record?.type === "assistant" ? record.message?.model : null;
+      if (typeof model === "string" && model.trim() !== "") return model;
+    }
+  } catch {
+    // A missing or malformed transcript is not enough evidence to continue a turn.
+  }
+  return null;
 }
 
 export async function runHeartbeatHook({ env = process.env, input = process.stdin, output = process.stdout } = {}) {
