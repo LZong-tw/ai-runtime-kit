@@ -155,7 +155,13 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
   const modeConfigs = new Map(
     modes.map((mode) => [mode, applyLaunchModeOverlay(structuredClone(baseConfig), profile, mode, templateVars)]),
   );
-  bindManagedCompatibilityRoutes(baseConfig, managedRouteSelector, modeConfigs, resolveClaudeLaunchModel(profile));
+  bindManagedCompatibilityRoutes(
+    baseConfig,
+    managedRouteSelector,
+    modeConfigs,
+    resolveClaudeLaunchModel(profile),
+    profile.launch?.modes ?? {},
+  );
   const compatibility = configuredCompatibility(baseConfig)
     ? structuredClone(configuredCompatibility(baseConfig))
     : null;
@@ -658,7 +664,13 @@ function bindManagedCompatibilityProvider(ccrConfig, managedProviderIds) {
 // plugin instance serves every mode, so each mode's overlaid routes ship too,
 // keyed by the mode label the launcher stamps on its requests; the flat table
 // stays as the fallback for unlabelled callers.
-function bindManagedCompatibilityRoutes(ccrConfig, managedRouteSelector, modeConfigs = new Map(), launchModel = null) {
+function bindManagedCompatibilityRoutes(
+  ccrConfig,
+  managedRouteSelector,
+  modeConfigs = new Map(),
+  launchModel = null,
+  modeDefinitions = {},
+) {
   const compatibility = configuredCompatibility(ccrConfig);
   if (!compatibility) return;
   const routeTable = (router) => (router?.default
@@ -685,6 +697,14 @@ function bindManagedCompatibilityRoutes(ccrConfig, managedRouteSelector, modeCon
     if (table) modeRoutes[airkitModeLabel(mode)] = table;
   }
   if (Object.keys(modeRoutes).length > 0) compatibility.modeRoutes = modeRoutes;
+  const modeEffort = {};
+  for (const [mode] of modeConfigs) {
+    const effort = modeDefinitions?.[mode]?.effort;
+    if (typeof effort === "string") {
+      modeEffort[airkitModeLabel(mode)] = effort.trim().toLowerCase();
+    }
+  }
+  if (Object.keys(modeEffort).length > 0) compatibility.modeEffort = modeEffort;
 }
 
 function assertCcr3Compatible(ccrConfig) {
@@ -1429,6 +1449,11 @@ function validateLaunch(profile) {
   }
 
   for (const [mode, definition] of Object.entries(profile.launch?.modes ?? {})) {
+    const effort = definition?.effort;
+    if (effort !== undefined && (typeof effort !== "string"
+      || !["low", "medium", "high", "xhigh", "max"].includes(effort.trim().toLowerCase()))) {
+      throw new Error(`profile "${profile.name}" launch.modes.${mode}.effort must be one of: low, medium, high, xhigh, max`);
+    }
     const prompt = definition?.appendSystemPrompt;
     if (prompt !== undefined && (typeof prompt !== "string" || prompt.trim() === "")) {
       throw new Error(`profile "${profile.name}" launch.modes.${mode}.appendSystemPrompt must be a non-empty string`);
@@ -1661,7 +1686,7 @@ function airkitEnvVar(prefix, profileName) {
 function publicPackage() {
   return {
     name: "@untionglim/ai-runtime-kit",
-    version: "0.2.11",
+    version: "0.2.12",
     publishConfig: { access: "public" },
     repository: {
       type: "git",

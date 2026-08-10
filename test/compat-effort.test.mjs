@@ -30,6 +30,21 @@ test("maps Claude Code effort only for providers that accept reasoning_effort", 
   }
 });
 
+test("maps Luna lane defaults and explicit effort to reasoning_effort", () => {
+  assert.deepEqual(
+    rewriteClaudeEffortForOpenAI({ model: "oneportal/gpt-5.6-luna", messages: [] }, "xhigh"),
+    { model: "oneportal/gpt-5.6-luna", reasoning_effort: "xhigh", messages: [] },
+  );
+  assert.deepEqual(
+    rewriteClaudeEffortForOpenAI({
+      model: "web_litellm/gpt-5.6-luna",
+      output_config: { effort: "max" },
+      messages: [],
+    }, "xhigh"),
+    { model: "web_litellm/gpt-5.6-luna", reasoning_effort: "max", messages: [] },
+  );
+});
+
 test("removes Claude effort for DeepSeek while preserving structured output", () => {
   assert.deepEqual(
     rewriteClaudeEffortForOpenAI({

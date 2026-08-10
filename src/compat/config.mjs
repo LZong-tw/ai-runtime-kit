@@ -17,6 +17,7 @@ const FAMILY_MODES = Object.freeze({
 const CONFIG_KEYS = new Set([
   "fallback",
   "launchModel",
+  "modeEffort",
   "modeRoutes",
   "routeLog",
   "routes",
@@ -39,6 +40,7 @@ const ROUTE_KEYS = new Set(["default", "background", "opus", "sonnet"]);
 const ROUTE_SELECTOR_PATTERN = /^[a-z0-9][a-z0-9._-]*\/\S+$/i;
 const MODE_PATTERN = /^[a-z0-9][a-z0-9._-]*$/i;
 const BARE_CLAUDE_MODEL_PATTERN = /^claude-[a-z0-9][a-z0-9._-]*$/i;
+const EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
 
 // One plugin instance serves every launch mode, and CCR discards the caller's
 // API-key identity before the plugin sees the request. The launcher therefore
@@ -94,6 +96,18 @@ export function validateCompatibilityConfig(config) {
     throw new Error("launchModel must be a bare claude-* model id");
   }
 
+  if (config.modeEffort !== undefined) {
+    assertRecord(config.modeEffort, "modeEffort");
+    for (const [mode, effort] of Object.entries(config.modeEffort)) {
+      if (!isAirkitModeLabel(mode)) {
+        throw new Error(`modeEffort key must be a canonical launch mode label: ${mode}`);
+      }
+      if (typeof effort !== "string" || !EFFORT_LEVELS.has(effort.trim().toLowerCase())) {
+        throw new Error(`modeEffort.${mode} must be one of: ${[...EFFORT_LEVELS].join(", ")}`);
+      }
+    }
+  }
+
   if (config.routes !== undefined) validateRouteTable(config.routes, "routes");
 
   if (config.modeRoutes !== undefined) {
@@ -110,6 +124,13 @@ export function validateCompatibilityConfig(config) {
   }
 
   return config;
+}
+
+export function resolveModeEffort(config, mode) {
+  const effort = isRecord(config?.modeEffort) && typeof mode === "string"
+    ? config.modeEffort[mode]
+    : null;
+  return typeof effort === "string" ? effort.trim().toLowerCase() : null;
 }
 
 export function resolveToolSearchMaxTools(config, model) {
