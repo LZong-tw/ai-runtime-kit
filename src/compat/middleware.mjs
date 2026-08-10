@@ -8,6 +8,7 @@ import {
   createMessagesHandler,
 } from "./plugin.mjs";
 import {
+  AIRKIT_MODE_HEADER,
   VERIFIED_NATIVE_COMPATIBILITY,
   resolveCompatibilityPolicies,
   validateCompatibilityConfig,
@@ -21,8 +22,20 @@ export async function startCompatibilityMiddleware({
   compatibility,
   gatewayOrigin,
   gatewayToken,
+  clientToken = gatewayToken,
+  mode,
+  port = 0,
 }) {
   validateCompatibilityConfig(compatibility);
+  if (typeof clientToken !== "string" || clientToken.length === 0) {
+    throw new Error("compatibility client authentication is missing or invalid");
+  }
+  if (!Number.isInteger(port) || port < 0 || port > 65_535) {
+    throw new Error("compatibility middleware port must be an integer from 0 through 65535");
+  }
+  if (mode !== undefined && (typeof mode !== "string" || mode.trim() === "")) {
+    throw new Error("compatibility middleware mode must be a non-empty string when provided");
+  }
   const coreClient = createGatewayClient({
     origin: gatewayOrigin,
     token: gatewayToken,
@@ -41,15 +54,16 @@ export async function startCompatibilityMiddleware({
   const server = createServer((request, response) => {
     void handleRequest({
       coreClient,
-      gatewayToken,
+      gatewayToken: clientToken,
       mcp,
       messages,
+      mode,
       request,
       response,
     });
   });
 
-  await listenLoopback(server);
+  await listenLoopback(server, port);
   const address = server.address();
   if (address === null || typeof address === "string") {
     await closeServer(server);
@@ -61,7 +75,7 @@ export async function startCompatibilityMiddleware({
   };
 }
 
-async function handleRequest({ coreClient, gatewayToken, mcp, messages, request, response }) {
+async function handleRequest({ coreClient, gatewayToken, mcp, messages, mode, request, response }) {
   if (!isAuthorized(request.headers, gatewayToken)) {
     request.resume();
     response.writeHead(401, { "content-type": "application/json" });
@@ -77,6 +91,12 @@ async function handleRequest({ coreClient, gatewayToken, mcp, messages, request,
     return;
   }
   const path = new URL(target, "http://airkit.local").pathname;
+  if (mode !== undefined && request.headers[AIRKIT_MODE_HEADER] === undefined) {
+    // External clients do not know AirKit's private mode header. Stamp it only
+    // for the compatibility handlers; the gateway's safe-header allowlist
+    // keeps this internal routing label out of the upstream request.
+    request.headers = { ...request.headers, [AIRKIT_MODE_HEADER]: mode };
+  }
   try {
     if (request.method === "POST" && path === "/v1/messages") {
       await messages(request, response, { readBody });
@@ -159,7 +179,7 @@ function containFailure(response, error) {
   response.destroy(error instanceof Error ? error : new Error(String(error)));
 }
 
-function listenLoopback(server) {
+function listenLoopback(server, port = 0) {
   return new Promise((resolve, reject) => {
     const onError = (error) => {
       server.off("listening", onListening);
@@ -171,7 +191,7 @@ function listenLoopback(server) {
     };
     server.once("error", onError);
     server.once("listening", onListening);
-    server.listen(0, "127.0.0.1");
+    server.listen(port, "127.0.0.1");
   });
 }
 

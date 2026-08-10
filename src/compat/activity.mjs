@@ -4,7 +4,6 @@ const encoder = new TextEncoder();
 export function createGptActivitySseTransform({ body } = {}) {
   let remainder = "";
   let gptResponse = false;
-  let indexShift = 0;
   let outputBytes = 0;
   const inputTokens = estimateInputTokens(body);
 
@@ -46,26 +45,7 @@ export function createGptActivitySseTransform({ body } = {}) {
       if (!hasPositiveCounter(usage.output_tokens)) usage.output_tokens = tokensFromBytes(outputBytes);
       return eventBytes(event, data);
     }
-    if (!Number.isInteger(data?.index)) return eventBytes(event, data);
-
-    const originalIndex = data.index;
-    if (event === "content_block_start" && isToolUse(data.content_block)) {
-      const activity = eventBytes("content_block_start", {
-        type: "content_block_start",
-        index: originalIndex + indexShift,
-        content_block: { type: "text", text: "" },
-      }) + eventBytes("content_block_delta", {
-        type: "content_block_delta",
-        index: originalIndex + indexShift,
-        delta: { type: "text_delta", text: `Running tool: ${data.content_block.name}` },
-      }) + eventBytes("content_block_stop", {
-        type: "content_block_stop",
-        index: originalIndex + indexShift,
-      });
-      indexShift += 1;
-      return activity + eventBytes(event, { ...data, index: originalIndex + indexShift });
-    }
-    return eventBytes(event, { ...data, index: originalIndex + indexShift });
+    return eventBytes(event, data);
   }
 }
 
@@ -131,8 +111,4 @@ function parseEvent(raw) {
 
 function eventBytes(event, data) {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-}
-
-function isToolUse(block) {
-  return block?.type === "tool_use" && typeof block.name === "string" && block.name.length > 0;
 }

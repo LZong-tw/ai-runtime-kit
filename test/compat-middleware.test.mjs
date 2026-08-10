@@ -4,6 +4,7 @@ import { once } from "node:events";
 import { test } from "node:test";
 
 import { startCompatibilityMiddleware } from "../src/compat/middleware.mjs";
+import { createGptActivitySseTransform } from "../src/compat/activity.mjs";
 
 const GATEWAY_TOKEN = "adapter-gateway-token";
 const COMPATIBILITY = {
@@ -78,6 +79,85 @@ test("middleware accepts the generated gateway key through Bearer authentication
   assert.equal(result.status, 200);
 });
 
+test("middleware separates the local client token from the CCR gateway token", async (t) => {
+  const upstream = await startFixture(t, async (request, response) => {
+    assert.equal(request.headers["x-api-key"], GATEWAY_TOKEN);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end('{"type":"message","content":[]}');
+  });
+  const adapter = await startCompatibilityMiddleware({
+    compatibility: COMPATIBILITY,
+    gatewayOrigin: upstream.origin,
+    gatewayToken: GATEWAY_TOKEN,
+    clientToken: "local-client-token",
+    port: 0,
+  });
+  t.after(() => adapter.close());
+
+  const denied = await fetch(`${adapter.origin}/v1/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": GATEWAY_TOKEN },
+    body: '{"model":"claude-sonnet","messages":[]}',
+  });
+  assert.equal(denied.status, 401);
+
+  const result = await fetch(`${adapter.origin}/v1/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": "local-client-token" },
+    body: '{"model":"claude-sonnet","messages":[]}',
+  });
+  assert.equal(result.status, 200);
+});
+
+test("middleware can bind a stable loopback port for external clients", async (t) => {
+  const upstream = await startFixture(t, async (_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end('{"type":"message","content":[]}');
+  });
+  const adapter = await startCompatibilityMiddleware({
+    compatibility: COMPATIBILITY,
+    gatewayOrigin: upstream.origin,
+    gatewayToken: GATEWAY_TOKEN,
+    port: 0,
+  });
+  t.after(() => adapter.close());
+
+  assert.match(adapter.origin, /^http:\/\/127\.0\.0\.1:\d+$/);
+});
+
+test("middleware supplies the managed mode to external clients without replacing an explicit header", async (t) => {
+  const observed = [];
+  const upstream = await startFixture(t, async (request, response) => {
+    observed.push(JSON.parse(await readBody(request)).model);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end('{"type":"message","content":[]}');
+  });
+  const adapter = await startCompatibilityMiddleware({
+    compatibility: {
+      ...COMPATIBILITY,
+      modeRoutes: {
+        pro: { default: "anthropic/claude-pro" },
+        background: { default: "anthropic/claude-background" },
+      },
+    },
+    gatewayOrigin: upstream.origin,
+    gatewayToken: GATEWAY_TOKEN,
+    clientToken: "local-client-token",
+    mode: "pro",
+    port: 0,
+  });
+  t.after(() => adapter.close());
+
+  const request = (headers = {}) => fetch(`${adapter.origin}/v1/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": "local-client-token", ...headers },
+    body: '{"model":"claude-sonnet-5","messages":[]}',
+  });
+  assert.equal((await request()).status, 200);
+  assert.equal((await request({ "x-airkit-mode": "background" })).status, 200);
+  assert.deepEqual(observed, ["anthropic/claude-pro", "anthropic/claude-background"]);
+});
+
 test("middleware routes Messages requests with a beta query through the compatibility handler", async (t) => {
   const upstream = await startFixture(t, async (request, response) => {
     assert.equal(request.url, "/v1/messages");
@@ -129,7 +209,7 @@ test("middleware preserves upstream SSE bytes and 429 responses", async (t) => {
   assert.equal(await throttled.text(), '{"error":{"type":"rate_limit_error"}}');
 });
 
-test("middleware adds a factual activity block before streamed GPT tool use without fabricating thinking", async (t) => {
+test("middleware forwards streamed GPT tool use without fabricating transcript activity", async (t) => {
   const sse = [
     ["message_start", { type: "message_start", message: { model: "gpt-5.6-terra", content: [] } }],
     ["content_block_start", { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "call_1", name: "Bash", input: {} } }],
@@ -149,12 +229,38 @@ test("middleware adds a factual activity block before streamed GPT tool use with
   });
   const body = await result.text();
 
-  assert.match(body, /"index":0,"content_block":\{"type":"text","text":""\}/);
-  assert.match(body, /"text_delta","text":"Running tool: Bash"/);
-  assert.match(body, /"index":1,"content_block":\{"type":"tool_use","id":"call_1","name":"Bash","input":\{\}\}/);
-  assert.match(body, /"index":1,"delta":\{"type":"input_json_delta"/);
+  assert.match(body, /"index":0,"content_block":\{"type":"tool_use","id":"call_1","name":"Bash","input":\{\}\}/);
+  assert.match(body, /"index":0,"delta":\{"type":"input_json_delta"/);
   assert.match(body, /"partial_json":"\{\\"command\\":\\"pwd\\"\}"/);
+  assert.doesNotMatch(body, /Running tool:|Additional tool activity hidden/);
   assert.doesNotMatch(body, /thinking_delta|\"type\":\"thinking\"/);
+});
+
+test("GPT activity transform does not add text blocks or alter tool indexes", () => {
+  const tools = ["Read", "Read", "Read", "Bash", ...Array.from({ length: 12 }, (_, index) => `Tool${index}`)];
+  const sse = [
+    ["message_start", { type: "message_start", message: { model: "gpt-5.6-terra", content: [] } }],
+    ...tools.flatMap((name, index) => [
+      ["content_block_start", {
+        type: "content_block_start",
+        index,
+        content_block: { type: "tool_use", id: `call_${index}`, name, input: {} },
+      }],
+      ["content_block_stop", { type: "content_block_stop", index }],
+    ]),
+    ["message_stop", { type: "message_stop" }],
+  ].map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join("");
+
+  const transform = createGptActivitySseTransform();
+  const body = new TextDecoder().decode(transform.push(Buffer.from(sse)));
+  const complete = body + new TextDecoder().decode(transform.finish());
+
+  const starts = [...complete.matchAll(/event: content_block_start\ndata: (.+)\n\n/g)]
+    .map((match) => JSON.parse(match[1]));
+  assert.deepEqual(starts.map((event) => event.index), tools.map((_, index) => index));
+  assert.deepEqual(starts.map((event) => event.content_block.name), tools);
+  assert.equal((complete.match(/\"type\":\"tool_use\"/g) ?? []).length, tools.length);
+  assert.doesNotMatch(complete, /Running tool:|Additional tool activity hidden/);
 });
 
 test("middleware fills zero GPT stream usage so Claude Code can render statusline totals", async (t) => {

@@ -1,6 +1,6 @@
 {
   "name": "@untionglim/ai-runtime-kit",
-  "version": "0.2.17",
+  "version": "0.2.18",
   "publishConfig": {
     "access": "public"
   },
@@ -13,7 +13,9 @@
   "exports": "./src/airkit.mjs",
   "bin": {
     "airkit": "src/airkit.mjs",
-    "airclaude": "src/airkit.mjs"
+    "airclaude": "src/airkit.mjs",
+    "airpi": "src/airpi.mjs",
+    "airoc": "src/airoc.mjs"
   },
   "files": [
     "CLAUDE.md",

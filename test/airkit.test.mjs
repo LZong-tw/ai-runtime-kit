@@ -28,7 +28,10 @@ import {
   exportOssRelease,
   installProfile,
   loadCatalog,
+  prepareExternalClient,
   prepareLaunch,
+  assertInteractiveResumeLaunch,
+  runExternalClientCli,
   runAirclaudeCli,
   runCli,
   updateProfile,
@@ -209,6 +212,8 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
 
     assert.deepEqual(packageJson.files, expectedFiles);
     assert.deepEqual(exportedPackage.files, expectedFiles);
+    assert.equal((await readFile(join(outDir, "src", "airpi.mjs"), "utf8")).includes("runExternalClientCli(\"pi\")"), true);
+    assert.equal((await readFile(join(outDir, "src", "airoc.mjs"), "utf8")).includes("runExternalClientCli(\"opencode\")"), true);
     for (const candidate of [packageJson, exportedPackage]) {
       assert.equal(candidate.name, expectedIdentity.name);
       assert.equal(candidate.version, expectedIdentity.version);
@@ -4448,6 +4453,21 @@ test("runAirclaudeCli dry run supports positional pro mode and avoids launching"
   }
 });
 
+test("resume launches fail clearly when no interactive terminal is attached", () => {
+  assert.throws(
+    () => assertInteractiveResumeLaunch(["-r", "session-id"], { stdinIsTTY: false, stdoutIsTTY: false }),
+    /interactive terminal/,
+  );
+  assert.doesNotThrow(() => assertInteractiveResumeLaunch(["--resume", "session-id"], {
+    stdinIsTTY: true,
+    stdoutIsTTY: true,
+  }));
+  assert.doesNotThrow(() => assertInteractiveResumeLaunch(["-p", "status"], {
+    stdinIsTTY: false,
+    stdoutIsTTY: false,
+  }));
+});
+
 // A stale plugin host must be announced before the child starts, because a
 // launch renders its own report only after the session ends.
 async function staleHostLaunch(extraArgv, { ccrResult, launchctlResult, restartStale, supervised = false }) {
@@ -4918,6 +4938,112 @@ function launchCatalog() {
     ],
   };
 }
+
+test("prepareExternalClient exposes a separate local credential and stable adapter port", async () => {
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-external-client-"));
+  const saved = [];
+  const adapters = [];
+  try {
+    const result = await prepareExternalClient(compatibilityCatalog(), "launch-example", {
+      adapterPort: 4568,
+      clientToken: "local-client-token",
+      ccrClient: ccrTestClient(saved),
+      commandExists: async () => true,
+      configDir,
+      env: { DEMO_API_KEY: "runtime-secret", HOME: configDir },
+      runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
+      runtimeVersions: passingRuntimeVersions(),
+      startCompatibilityMiddleware: async (options) => {
+        adapters.push(options);
+        return { close: async () => {}, origin: "http://127.0.0.1:4568" };
+      },
+      stdout: { write() {} },
+    });
+
+    assert.equal(result.externalClient.origin, "http://127.0.0.1:4568");
+    assert.equal(result.externalClient.token, "local-client-token");
+    assert.equal(result.externalClient.mode, "auto");
+    assert.equal(adapters.length, 1);
+    assert.equal(adapters[0].clientToken, "local-client-token");
+    assert.equal(adapters[0].gatewayToken, "gateway-key-from-helper");
+    assert.equal(adapters[0].port, 4568);
+    assert.doesNotMatch(JSON.stringify(saved), /gateway-key-from-helper|local-client-token/);
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("airkit connect renders client configuration without exposing the CCR credential", async () => {
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-connect-cli-"));
+  const catalogPath = await writeLaunchCatalog(compatibilityCatalog());
+  const output = [];
+  try {
+    await runCli(["connect", "--profile", "launch-example", "--mode", "auto", "--port", "4568"], {
+      catalogPath,
+      ccrClient: ccrTestClient([]),
+      configDir,
+      env: { DEMO_API_KEY: "runtime-secret", HOME: configDir },
+      holdClient: false,
+      runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
+      runtimeVersions: passingRuntimeVersions(),
+      startCompatibilityMiddleware: async (options) => ({
+        close: async () => {},
+        origin: `http://127.0.0.1:${options.port}`,
+      }),
+      stdout: { write: (value) => output.push(String(value)) },
+    });
+
+    const rendered = output.join("");
+    assert.match(rendered, /Started AirKit external-client adapter/);
+    assert.match(rendered, /AIRKIT_CLIENT_TOKEN='[A-Za-z0-9_-]+'/);
+    assert.match(rendered, /anthropic-messages/);
+    assert.doesNotMatch(rendered, /gateway-key-from-helper/);
+  } finally {
+    await rm(catalogPath, { force: true });
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("airpi launches Pi through the local adapter with Anthropic credentials and the selected mode", async () => {
+  const calls = [];
+  const exitCode = await runExternalClientCli("pi", ["--profile", "launch-example", "--mode", "glm", "hello"], {
+    catalog: { profiles: [{ name: "launch-example" }] },
+    env: { ANTHROPIC_AUTH_TOKEN: "inherited-token", PATH: "/usr/bin" },
+    prepareExternalClient: async (_catalog, profileName, options) => {
+      calls.push({ profileName, options });
+      return { externalClient: { origin: "http://127.0.0.1:4312/v1", token: "local-token", close: async () => {} } };
+    },
+    spawnCommand: (command, args, options) => {
+      calls.push({ command, args, spawnOptions: options });
+      return { status: 0 };
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(calls[0].profileName, "launch-example");
+  assert.equal(calls[0].options.mode, "glm");
+  assert.deepEqual(calls[1].args, ["--provider", "anthropic", "--model", "claude-sonnet-5", "hello"]);
+  assert.equal(calls[1].spawnOptions.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:4312/v1");
+  assert.equal(calls[1].spawnOptions.env.ANTHROPIC_API_KEY, "local-token");
+  assert.equal(calls[1].spawnOptions.env.ANTHROPIC_AUTH_TOKEN, undefined);
+});
+
+test("airoc launches OpenCode in fullscreen TUI mode without overriding explicit client flags", async () => {
+  const calls = [];
+  await runExternalClientCli("opencode", ["--profile", "launch-example", "--model", "anthropic/custom", "hello"], {
+    catalog: { profiles: [{ name: "launch-example" }] },
+    prepareExternalClient: async () => ({
+      externalClient: { origin: "http://127.0.0.1:4313", token: "local-token", close: async () => {} },
+    }),
+    spawnCommand: (command, args, options) => {
+      calls.push({ command, args, spawnOptions: options });
+      return { status: 0 };
+    },
+  });
+
+  assert.equal(calls[0].command, "opencode");
+  assert.deepEqual(calls[0].args, ["--model", "anthropic/custom", "hello", "--tui-mode", "fullscreen"]);
+});
 
 function compatibilityCatalog() {
   const catalog = launchCatalog();
