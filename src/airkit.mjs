@@ -43,6 +43,7 @@ const reusableRuntimeLessonsPrompt = [
   "When a user correction or repeated tool failure reveals a durable lesson, record it in the workspace's durable notes when available, using Symptom/Cause/Rule/Action/Verify. Do not record secrets, private endpoints, credential values, or company-only identifiers in shared notes.",
   "For Athena and similar query services, never assume the database, catalog, region, workgroup, or result output location. Discover or verify them first, pass explicit query context and result configuration, and inspect get-query-execution StateChangeReason before calling get-query-results after a failure.",
   "When a command fails inside a shell wrapper, first verify whether the command is a shell wrapper or the real binary with type, command -v, or whence. Rule out local shell wrapper/helper leakage before diagnosing the remote service.",
+  "Advisor capability: when Advisor is available, treat '找 Advisor', '問 Advisor', '和 Advisor 討論', 'ask Advisor', or 'get a second opinion' as a request to invoke the Advisor tool. Send a concise question with relevant context, wait for advisor_tool_result, and never claim Advisor was consulted without a returned result. Do not invoke Advisor for trivial work unless explicitly requested.",
 ].join(" ");
 
 export async function loadCatalog(path = defaultCatalogPath, options = {}) {
@@ -1686,7 +1687,7 @@ function airkitEnvVar(prefix, profileName) {
 function publicPackage() {
   return {
     name: "@untionglim/ai-runtime-kit",
-    version: "0.2.14",
+    version: "0.2.15",
     publishConfig: { access: "public" },
     repository: {
       type: "git",
@@ -2447,6 +2448,11 @@ function airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, runtimeEnv = proc
       env.AIRCLAUDE_STATUSLINE_INPUT_PRICE_PER_MILLION = String(statuslineInputPrice);
     }
   }
+  const defaultRoute = splitRoute(ccrConfig.Router?.default);
+  const contextWindow = catalogContextWindow(catalog, defaultRoute.provider, defaultRoute.model);
+  if (contextWindow !== null) {
+    env.AIRCLAUDE_STATUSLINE_CONTEXT_WINDOW = String(contextWindow);
+  }
   const maxStopBlocks = profile.launch?.modes?.[mode]?.completionGuard?.maxStopBlocks;
   if (maxStopBlocks !== undefined) {
     env.AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS = String(maxStopBlocks);
@@ -2529,6 +2535,22 @@ function catalogInputPrice(catalog, provider, model) {
       if (!modelMatches(provider, model, providerEntry, modelEntry)) continue;
       const price = inputPriceFromValue(modelEntry.pricingUsdPer1M);
       if (price !== null) return price;
+    }
+  }
+
+  return null;
+}
+
+function catalogContextWindow(catalog, provider, model) {
+  const providers = catalog.modelCatalog?.providers;
+  if (!Array.isArray(providers)) return null;
+
+  for (const providerEntry of providers) {
+    for (const modelEntry of providerEntry.models ?? []) {
+      if (!modelMatches(provider, model, providerEntry, modelEntry)) continue;
+      return Number.isInteger(modelEntry.contextWindow) && modelEntry.contextWindow > 0
+        ? modelEntry.contextWindow
+        : null;
     }
   }
 

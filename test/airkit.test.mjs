@@ -168,7 +168,7 @@ test("isolated verifier restarts management-only before trusting persisted dange
 test("OSS package allowlist excludes tests and migration artifacts", async () => {
   const expectedIdentity = {
     name: "@untionglim/ai-runtime-kit",
-    version: "0.2.14",
+    version: "0.2.15",
     publishConfig: { access: "public" },
     repository: {
       type: "git",
@@ -1684,6 +1684,10 @@ test("airclaude launch injects reusable runtime lessons", async () => {
   assert.match(prompt, /StateChangeReason/);
   assert.match(prompt, /shell wrapper/);
   assert.match(prompt, /command -v/);
+  assert.match(prompt, /Advisor capability/);
+  assert.match(prompt, /找 Advisor/);
+  assert.match(prompt, /advisor_tool_result/);
+  assert.match(prompt, /never claim Advisor was consulted without a returned result/i);
   assert.match(prompt, /AirClaude active routing/);
   assert.match(prompt, /mode: auto/);
   assert.match(prompt, /default: openai-compatible,steady-coder \(model steady-coder\)/);
@@ -2504,6 +2508,14 @@ test("airclaude exposes family routes to statusline side-channel state", () => {
   assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_OPUS_MODEL, "strong-coder");
   assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_SONNET, "demo,steady-coder");
   assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_SONNET_MODEL, "steady-coder");
+});
+
+test("airclaude exposes the selected route context window to statusline", () => {
+  const plan = buildLaunchPlan(launchCatalog(), "launch-example", {
+    configDir: "/tmp/airkit-statusline-context-window",
+  });
+
+  assert.equal(plan.launch.env.AIRCLAUDE_STATUSLINE_CONTEXT_WINDOW, "256000");
 });
 
 test("airclaude exposes a model-aware statusline price map when the profile owns verified pricing", () => {
