@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { processSubagentObservabilityHook } from "./subagent-observability.mjs";
 
 export const HEARTBEAT_CONTEXT_LIMIT = 512;
 export const TASK_CAPSULE_CONTEXT_LIMIT = 3072;
@@ -71,6 +72,13 @@ export function parseTaskCapsule(summary) {
 
 export async function processContextHook(input, env = process.env) {
   if (!env.AIRCLAUDE_PROFILE) return null;
+  if (["SubagentStart", "PostToolUse", "SubagentStop"].includes(input?.hook_event_name)) {
+    try {
+      await processSubagentObservabilityHook(input, env);
+    } catch {
+      // Observability is additive; existing hook behavior must continue.
+    }
+  }
   const completionGuardResponse = await processCompletionGuardHook(input, env);
   if (completionGuardResponse) return completionGuardResponse;
   const subagentOutputResponse = await processSubagentOutputHook(input, env);
@@ -292,6 +300,7 @@ export async function runHeartbeatHook({ env = process.env, input = process.stdi
 
 export function renderHeartbeatManagedFiles(configDir, runtimeModuleUrl = import.meta.url) {
   const root = join(configDir, "plugins", "airkit-context");
+  const statuslinePath = join(root, "scripts", "subagent-statusline.mjs");
   const manifest = {
     name: "airkit-context",
     version: "1.0.0",
@@ -330,6 +339,20 @@ export function renderHeartbeatManagedFiles(configDir, runtimeModuleUrl = import
           type: "command",
         }],
       }],
+      SubagentStart: [{
+        hooks: [{
+          args: ["${CLAUDE_PLUGIN_ROOT}/scripts/user-prompt-submit.mjs"],
+          command: "node",
+          type: "command",
+        }],
+      }],
+      SubagentStop: [{
+        hooks: [{
+          args: ["${CLAUDE_PLUGIN_ROOT}/scripts/user-prompt-submit.mjs"],
+          command: "node",
+          type: "command",
+        }],
+      }],
       UserPromptSubmit: [{
         hooks: [{
           args: ["${CLAUDE_PLUGIN_ROOT}/scripts/user-prompt-submit.mjs"],
@@ -340,6 +363,14 @@ export function renderHeartbeatManagedFiles(configDir, runtimeModuleUrl = import
     },
   };
   const script = `import { runHeartbeatHook } from ${JSON.stringify(runtimeModuleUrl)};\nawait runHeartbeatHook();\n`;
+  const statuslineScript = `import { runSubagentStatusLine } from ${JSON.stringify(new URL("./subagent-observability.mjs", runtimeModuleUrl).href)};\nawait runSubagentStatusLine();\n`;
+  const settings = {
+    subagentStatusLine: {
+      type: "command",
+      command: `node ${JSON.stringify(statuslinePath)}`,
+      refreshInterval: 1,
+    },
+  };
 
   return [
     {
@@ -347,6 +378,12 @@ export function renderHeartbeatManagedFiles(configDir, runtimeModuleUrl = import
       label: "AirClaude context plugin manifest",
       path: join(root, ".claude-plugin", "plugin.json"),
       relativePath: "plugins/airkit-context/.claude-plugin/plugin.json",
+    },
+    {
+      content: `${JSON.stringify(settings, null, 2)}\n`,
+      label: "AirClaude subagent statusline settings",
+      path: join(root, "settings.json"),
+      relativePath: "plugins/airkit-context/settings.json",
     },
     {
       content: `${JSON.stringify(hooks, null, 2)}\n`,
@@ -359,6 +396,12 @@ export function renderHeartbeatManagedFiles(configDir, runtimeModuleUrl = import
       label: "AirClaude context heartbeat hook",
       path: join(root, "scripts", "user-prompt-submit.mjs"),
       relativePath: "plugins/airkit-context/scripts/user-prompt-submit.mjs",
+    },
+    {
+      content: statuslineScript,
+      label: "AirClaude subagent statusline",
+      path: statuslinePath,
+      relativePath: "plugins/airkit-context/scripts/subagent-statusline.mjs",
     },
   ];
 }

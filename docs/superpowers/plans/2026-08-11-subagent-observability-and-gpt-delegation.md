@@ -117,6 +117,7 @@
 
 **Files:**
 - Modify: `src/context-heartbeat.mjs:1-20, 72-108, 293-360`
+- Modify: `src/airkit.mjs:833-850`
 - Modify: `test/airkit.test.mjs:3070-3150`
 
 **Interfaces:**
@@ -147,7 +148,7 @@
 
 - [ ] **Step 3: Wire the observer without context injection**
 
-  Import `processSubagentObservabilityHook` into `context-heartbeat.mjs` and call it inside `processContextHook` for `SubagentStart`, `PostToolUse`, and `SubagentStop`; ignore its return value and continue existing behavior. In `renderHeartbeatManagedFiles`, add `SubagentStart` and `SubagentStop` entries using the existing heartbeat script, plus generated `settings.json` and `scripts/subagent-statusline.mjs` that import from the runtime module by absolute serialized URL.
+  Import `processSubagentObservabilityHook` into `context-heartbeat.mjs` and call it inside `processContextHook` for `SubagentStart`, `PostToolUse`, and `SubagentStop`; ignore its return value and continue existing behavior. In `renderHeartbeatManagedFiles`, add `SubagentStart` and `SubagentStop` entries using the existing heartbeat script, plus generated `settings.json` and `scripts/subagent-statusline.mjs` that import from the runtime module by absolute serialized URL. In `exportOssRelease`, copy `subagent-observability.mjs` alongside `context-heartbeat.mjs`; otherwise the exported runtime fails its ESM import at startup.
 
   The generated settings must be structurally:
 
@@ -168,7 +169,7 @@
   Expected: PASS. Confirm `statusLine` is not emitted by the generated plugin.
 
   ```bash
-  git add src/context-heartbeat.mjs test/airkit.test.mjs
+  git add src/context-heartbeat.mjs src/airkit.mjs test/airkit.test.mjs
   git commit -m "Render additive subagent statusline plugin"
   ```
 
