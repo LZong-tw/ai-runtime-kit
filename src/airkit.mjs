@@ -842,6 +842,7 @@ export async function exportOssRelease({ outDir }) {
   await copyFile(join(here, "codex-transcript-guard.mjs"), join(outDir, "src", "codex-transcript-guard.mjs"));
   await copyFile(join(here, "context-heartbeat.mjs"), join(outDir, "src", "context-heartbeat.mjs"));
   await copyFile(join(here, "context-observability.mjs"), join(outDir, "src", "context-observability.mjs"));
+  await copyFile(join(here, "subagent-observability.mjs"), join(outDir, "src", "subagent-observability.mjs"));
   for (const module of [
     "activity.mjs",
     "config.mjs",
