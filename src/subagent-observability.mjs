@@ -335,6 +335,7 @@ function redactSensitive(value) {
       /\b((?:[A-Z][A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD))|api[_-]?key|token|password|secret|endpoint|api[_-]?base[_-]?url)(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s;,]+)/gi,
       "$1$2[redacted]",
     )
+    .replaceAll(/\bAuthorization\s*[:=]\s*[^\s;,]+(?:\s+[^\s;,]+)?/gi, "Authorization: [redacted]")
     .replaceAll(/\bBearer\s+[^\s;,]+/gi, "Bearer [redacted]")
     .replaceAll(/\b(?:sk-|ghp_|xox[baprs]-)[A-Za-z0-9_-]{8,}/gi, "[redacted]")
     .replaceAll(/https?:\/\/[^\s;,]+/gi, "[redacted-url]")
