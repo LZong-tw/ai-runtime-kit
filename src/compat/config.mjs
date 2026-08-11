@@ -21,6 +21,7 @@ const CONFIG_KEYS = new Set([
   "modeRoutes",
   "routeLog",
   "routes",
+  "transportFallbacks",
   ...Object.keys(FAMILY_MODES),
 ]);
 const FALLBACK_KEYS = new Set(["provider", "model", "maxContinuationTurns"]);
@@ -38,6 +39,8 @@ export const DEFAULT_ADVISOR_UNSUPPORTED = "strip";
 const FAMILY_FALLBACK_KEYS = new Set(["provider", "model"]);
 const ROUTE_KEYS = new Set(["default", "background", "opus", "sonnet"]);
 const ROUTE_SELECTOR_PATTERN = /^[a-z0-9][a-z0-9._-]*\/\S+$/i;
+const TRANSPORT_FALLBACK_KEYS = new Set(["from", "to", "statuses"]);
+const TRANSPORT_FALLBACK_TARGET_KEYS = new Set(["provider", "model"]);
 const MODE_PATTERN = /^[a-z0-9][a-z0-9._-]*$/i;
 const BARE_CLAUDE_MODEL_PATTERN = /^claude-[a-z0-9][a-z0-9._-]*$/i;
 const EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
@@ -123,7 +126,24 @@ export function validateCompatibilityConfig(config) {
     }
   }
 
+  if (config.transportFallbacks !== undefined) {
+    if (!Array.isArray(config.transportFallbacks)) {
+      throw new Error("transportFallbacks must be an array");
+    }
+    for (const [index, fallback] of config.transportFallbacks.entries()) {
+      validateTransportFallback(fallback, `transportFallbacks[${index}]`);
+    }
+  }
+
   return config;
+}
+
+export function resolveTransportFallback(config, model, status) {
+  validateCompatibilityConfig(config);
+  if (typeof model !== "string" || !Number.isInteger(status)) return null;
+  const fallback = config.transportFallbacks?.find((entry) =>
+    `${entry.from.provider}/${entry.from.model}` === model && entry.statuses.includes(status));
+  return fallback === undefined ? null : `${fallback.to.provider}/${fallback.to.model}`;
 }
 
 export function resolveModeEffort(config, mode) {
@@ -165,6 +185,25 @@ function validateRouteTable(routes, label) {
     if (typeof selector !== "string" || !ROUTE_SELECTOR_PATTERN.test(selector)) {
       throw new Error(`${label}.${key} must be a provider-qualified model selector`);
     }
+  }
+}
+
+function validateTransportFallback(fallback, label) {
+  assertRecord(fallback, label);
+  rejectUnknownKeys(fallback, TRANSPORT_FALLBACK_KEYS, label);
+  for (const field of ["from", "to"]) {
+    const target = fallback[field];
+    assertRecord(target, `${label}.${field}`);
+    rejectUnknownKeys(target, TRANSPORT_FALLBACK_TARGET_KEYS, `${label}.${field}`);
+    for (const key of ["provider", "model"]) {
+      if (typeof target[key] !== "string" || target[key].trim() === "" || target[key].includes("/")) {
+        throw new Error(`${label}.${field}.${key} must be a provider-local identifier`);
+      }
+    }
+  }
+  if (!Array.isArray(fallback.statuses) || fallback.statuses.length === 0 ||
+    fallback.statuses.some((status) => status !== 401)) {
+    throw new Error(`${label}.statuses must contain only 401`);
   }
 }
 

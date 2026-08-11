@@ -8,6 +8,7 @@ import {
   requestedMode,
   resolveCompatibilityPolicies,
   resolveModeRoutes,
+  resolveTransportFallback,
   resolveToolSearchMaxTools,
   routeBareClaudeModel,
   validateCompatibilityConfig,
@@ -46,6 +47,31 @@ test("resolves all six policies and verified native web capabilities", () => {
       mcpConnector: "anthropic-fallback",
     },
   });
+});
+
+test("resolves only an explicitly configured 401 transport fallback", () => {
+  const config = {
+    ...VALID_CONFIG,
+    transportFallbacks: [{
+      from: { provider: "web-litellm", model: "gpt-5.6-terra" },
+      to: { provider: "oneportal", model: "gpt-5.6-terra" },
+      statuses: [401],
+    }],
+  };
+
+  assert.deepEqual(
+    resolveTransportFallback(config, "web-litellm/gpt-5.6-terra", 401),
+    "oneportal/gpt-5.6-terra",
+  );
+  assert.equal(resolveTransportFallback(config, "web-litellm/gpt-5.6-terra", 429), null);
+  assert.equal(resolveTransportFallback(config, "web-litellm/claude-opus-5", 401), null);
+  assert.throws(
+    () => validateCompatibilityConfig({
+      ...config,
+      transportFallbacks: [{ ...config.transportFallbacks[0], statuses: [429] }],
+    }),
+    /transportFallbacks\[0\]\.statuses.*401/,
+  );
 });
 
 test("advisor.unsupported defaults to strip, accepts passthrough, rejects anything else", () => {
