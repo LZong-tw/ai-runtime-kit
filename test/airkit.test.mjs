@@ -218,6 +218,7 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
     assert.deepEqual(exportedPackage.files, expectedFiles);
     assert.equal((await readFile(join(outDir, "src", "airpi.mjs"), "utf8")).includes("runExternalClientCli(\"pi\")"), true);
     assert.equal((await readFile(join(outDir, "src", "airoc.mjs"), "utf8")).includes("runExternalClientCli(\"opencode\")"), true);
+    assert.equal((await readFile(join(outDir, "src", "subagent-observability.mjs"), "utf8")).includes("runSubagentStatusLine"), true);
     for (const candidate of [packageJson, exportedPackage]) {
       assert.equal(candidate.name, expectedIdentity.name);
       assert.deepEqual(candidate.publishConfig, expectedIdentity.publishConfig);
@@ -3007,16 +3008,27 @@ test("AirClaude renders an additive session plugin for the heartbeat", async () 
     const manifest = managed.find((file) => file.path.endsWith("/.claude-plugin/plugin.json"));
     const hooks = managed.find((file) => file.path.endsWith("/hooks/hooks.json"));
     const script = managed.find((file) => file.path.endsWith("/scripts/user-prompt-submit.mjs"));
+    const settings = managed.find((file) => file.path.endsWith("/settings.json"));
+    const statusline = managed.find((file) => file.path.endsWith("/scripts/subagent-statusline.mjs"));
     assert.ok(manifest);
     assert.ok(hooks);
     assert.ok(script);
+    assert.ok(settings);
+    assert.ok(statusline);
     await installProfile(catalog, "launch-example", { configDir, force: true, write: true });
     const renderedHooks = JSON.parse(await readFile(hooks.path, "utf8")).hooks;
+    const renderedSettings = JSON.parse(await readFile(settings.path, "utf8"));
+    assert.equal(renderedSettings.subagentStatusLine.command.includes("subagent-statusline.mjs"), true);
+    assert.ok(renderedHooks.SubagentStart);
+    assert.ok(renderedHooks.SubagentStop);
+    assert.equal(renderedSettings.statusLine, undefined);
     assert.deepEqual(Object.keys(renderedHooks).sort(), [
       "PostCompact",
       "PostToolUse",
       "SessionStart",
       "Stop",
+      "SubagentStart",
+      "SubagentStop",
       "UserPromptSubmit",
     ]);
     assert.equal(renderedHooks.Stop[0].hooks[0].command, "node");
