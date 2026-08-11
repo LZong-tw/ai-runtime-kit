@@ -12,6 +12,7 @@ import {
   resolveCompatibilityPolicies,
   resolveModeEffort,
   resolveModeRoutes,
+  resolveTransportFallback,
   resolveToolSearchMaxTools,
   routeBareClaudeModel,
   validateCompatibilityConfig,
@@ -151,8 +152,16 @@ export function createMessagesHandler({ config, coreClient, policies }) {
         requestId: telemetry.requestId,
       });
       if (!compat) {
+        const fallbackSelector = isRecord(outboundBody)
+          ? resolveTransportFallback(config, outboundBody.model, 401)
+          : null;
+        const fallback = fallbackSelector === null ? undefined : {
+          body: Buffer.from(JSON.stringify({ ...outboundBody, model: fallbackSelector }), "utf8"),
+          statuses: [401],
+        };
         await coreClient.forwardRaw({
           body: outboundRaw,
+          fallback,
           headers: request.headers,
           method: request.method,
           response,

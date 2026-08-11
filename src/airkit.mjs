@@ -659,6 +659,10 @@ function bindManagedCompatibilityProvider(ccrConfig, managedProviderIds) {
   for (const [family, fallback] of Object.entries(familyFallbacks)) {
     compatibility[family].fallback.provider = managedProviderIds.get(fallback.provider);
   }
+  for (const fallback of compatibility.transportFallbacks ?? []) {
+    fallback.from.provider = managedProviderIds.get(fallback.from.provider);
+    fallback.to.provider = managedProviderIds.get(fallback.to.provider);
+  }
 }
 
 // The compatibility plugin owns POST /v1/messages, so bare Claude model names

@@ -74,14 +74,24 @@ export function createCoreClient({ config, fetchImpl = fetch, readFile = readFil
       });
       return parseCoreMessageResponse(result);
     },
-    async forwardRaw({ body, headers, method = "POST", response, signal, onResponse }) {
-      const result = await fetchImpl(endpoint, {
+    async forwardRaw({ body, fallback, headers, method = "POST", response, signal, onResponse }) {
+      let result = await fetchImpl(endpoint, {
         method,
         headers: coreHeaders(headers),
         body,
         signal,
       });
-      onResponse?.({ headers: result.headers, status: result.status });
+      const fallbackUsed = shouldRetryRawFallback(result, fallback);
+      if (fallbackUsed) {
+        await result.body?.cancel().catch(() => {});
+        result = await fetchImpl(endpoint, {
+          method,
+          headers: coreHeaders(headers),
+          body: fallback.body,
+          signal,
+        });
+      }
+      onResponse?.({ fallbackUsed, headers: result.headers, status: result.status });
       await pipeCoreResponse(result, response, signal);
     },
   };
@@ -130,9 +140,20 @@ export function createGatewayClient({ origin, token, fetchImpl = fetch, response
       });
       return parseCoreMessageResponse(result);
     },
-    async forwardRaw({ body, headers, method = "POST", response, signal, onResponse }) {
-      const result = await request({ body, headers, method, path: "/v1/messages", signal });
-      onResponse?.({ headers: result.headers, status: result.status });
+    async forwardRaw({ body, fallback, headers, method = "POST", response, signal, onResponse }) {
+      let result = await request({ body, headers, method, path: "/v1/messages", signal });
+      const fallbackUsed = shouldRetryRawFallback(result, fallback);
+      if (fallbackUsed) {
+        await result.body?.cancel().catch(() => {});
+        result = await request({
+          body: fallback.body,
+          headers,
+          method,
+          path: "/v1/messages",
+          signal,
+        });
+      }
+      onResponse?.({ fallbackUsed, headers: result.headers, status: result.status });
       await pipeCoreResponse(result, response, signal, responseTransformFactory?.({ body }));
     },
     async forward({ body, headers, method = "GET", path, response, signal }) {
@@ -140,6 +161,12 @@ export function createGatewayClient({ origin, token, fetchImpl = fetch, response
       await pipeCoreResponse(result, response, signal);
     },
   };
+}
+
+function shouldRetryRawFallback(result, fallback) {
+  return fallback?.body !== undefined &&
+    Array.isArray(fallback.statuses) &&
+    fallback.statuses.includes(result.status);
 }
 
 export async function handleCompatibilityMessage({

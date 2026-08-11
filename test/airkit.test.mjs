@@ -953,6 +953,22 @@ test("CCR compatibility preserves the managed opus route selector", () => {
 
 test("CCR compatibility binds every family fallback to its managed provider", () => {
   const catalog = compatibilityCatalog();
+  catalog.profiles[0].ccr.Providers.push(
+    {
+      name: "web-litellm",
+      type: "openai_chat_completions",
+      api_base_url: "https://web.example.invalid/v1/chat/completions",
+      api_key: "$DEMO_API_KEY",
+      models: ["gpt-5.6-terra"],
+    },
+    {
+      name: "oneportal",
+      type: "openai_chat_completions",
+      api_base_url: "https://oneportal.example.invalid/v1/chat/completions",
+      api_key: "$DEMO_API_KEY",
+      models: ["gpt-5.6-terra"],
+    },
+  );
   catalog.profiles[0].ccr.Providers.push({
     name: "advisor-anthropic",
     type: "anthropic_messages",
@@ -967,6 +983,11 @@ test("CCR compatibility binds every family fallback to its managed provider", ()
       model: "claude-opus-5",
     },
   };
+  catalog.profiles[0].ccr.plugins[0].config.transportFallbacks = [{
+    from: { provider: "web-litellm", model: "gpt-5.6-terra" },
+    to: { provider: "oneportal", model: "gpt-5.6-terra" },
+    statuses: [401],
+  }];
 
   const merged = airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {}, {
     configDir: "/tmp/airkit-family-fallback",
@@ -977,6 +998,11 @@ test("CCR compatibility binds every family fallback to its managed provider", ()
     compatibility.advisor.fallback.provider,
     "airkit-provider-launch-example-advisor-anthropic",
   );
+  assert.deepEqual(compatibility.transportFallbacks, [{
+    from: { provider: "airkit-provider-launch-example-web-litellm", model: "gpt-5.6-terra" },
+    to: { provider: "airkit-provider-launch-example-oneportal", model: "gpt-5.6-terra" },
+    statuses: [401],
+  }]);
   assert.doesNotThrow(() => validateCompatibilityProviderBinding(
     compatibility,
     merged.config.Providers,

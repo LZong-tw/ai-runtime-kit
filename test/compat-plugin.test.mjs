@@ -115,6 +115,46 @@ test("raw passthrough preserves ordinary request and response bytes", async (t) 
   assert.equal(response.headers["content-type"], "application/octet-stream");
 });
 
+test("raw passthrough retries an explicit 401 fallback once with only its model changed", async () => {
+  const seenBodies = [];
+  const client = createCoreClient({
+    config: {
+      gateway: {
+        coreHost: "127.0.0.1",
+        corePort: 43991,
+        generatedConfigFile: "/fixture/generated.json",
+      },
+    },
+    async fetchImpl(_endpoint, options) {
+      seenBodies.push(Buffer.from(options.body));
+      return seenBodies.length === 1
+        ? new Response("web route rejected", { status: 401 })
+        : new Response("oneportal response", { status: 200 });
+    },
+    readFile: () => generatedConfig(CORE_TOKEN),
+  });
+  const primary = Buffer.from(JSON.stringify({
+    model: "web-litellm/gpt-5.6-terra",
+    messages: [{ role: "user", content: "same request" }],
+  }));
+  const fallback = Buffer.from(JSON.stringify({
+    model: "oneportal/gpt-5.6-terra",
+    messages: [{ role: "user", content: "same request" }],
+  }));
+  const response = createRecordingResponse();
+
+  await client.forwardRaw({
+    body: primary,
+    fallback: { body: fallback, statuses: [401] },
+    headers: {},
+    response,
+  });
+
+  assert.deepEqual(seenBodies, [primary, fallback]);
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.body, Buffer.from("oneportal response"));
+});
+
 test("raw passthrough streams before upstream completion and waits for downstream drain", async () => {
   const firstChunk = Buffer.from("first-");
   const secondChunk = Buffer.from("second");
@@ -2563,6 +2603,42 @@ test("stable prefix metadata never changes the forwarded request body", async ()
   assert.deepEqual(forwarded, [raw]);
   assert.match(logs.routes[0].stablePrefix.stablePrefixHash, /^[0-9a-f]{64}$/);
   assert.equal(logs.requests[0].stablePrefix.stablePrefixMessages, 1);
+});
+
+test("raw Web GPT requests carry their explicit OnePortal 401 fallback", async () => {
+  let forwarded;
+  const handler = await createPluginHandlers({
+    coreClient: {
+      async forwardRaw(request) {
+        forwarded = request;
+      },
+    },
+    pluginConfig: {
+      ...structuredClone(COMPLETE_PLUGIN_CONFIG),
+      transportFallbacks: [{
+        from: { provider: "web-litellm", model: "gpt-5.6-terra" },
+        to: { provider: "oneportal", model: "gpt-5.6-terra" },
+        statuses: [401],
+      }],
+    },
+  });
+  const raw = Buffer.from(JSON.stringify({
+    model: "web-litellm/gpt-5.6-terra",
+    messages: [{ role: "user", content: "keep the Web route when healthy" }],
+  }));
+
+  await handler.messages.handler(
+    createPluginRequest(raw),
+    createRecordingResponse(),
+    { readBody: async () => raw },
+  );
+
+  assert.deepEqual(forwarded.body, raw);
+  assert.deepEqual(JSON.parse(forwarded.fallback.body.toString()), {
+    model: "oneportal/gpt-5.6-terra",
+    messages: [{ role: "user", content: "keep the Web route when healthy" }],
+  });
+  assert.deepEqual(forwarded.fallback.statuses, [401]);
 });
 
 test("request lifecycle telemetry records a successful raw response with its actual status", async () => {
