@@ -2927,8 +2927,10 @@ test("subagent observability projects child transcript progress without raw tool
     };
     assert.equal(await processSubagentObservabilityHook(input, env), null);
 
-    const timelinePath = join(pluginData, "subagent-timelines", "parent-1", "child-1", "timeline.md");
-    const statePath = join(pluginData, "subagent-timelines", "parent-1", "child-1", ".state.json");
+    const [parentKey] = await readdir(join(pluginData, "subagent-timelines"));
+    const [childKey] = await readdir(join(pluginData, "subagent-timelines", parentKey));
+    const timelinePath = join(pluginData, "subagent-timelines", parentKey, childKey, "timeline.md");
+    const statePath = join(pluginData, "subagent-timelines", parentKey, childKey, ".state.json");
     const timeline = await readFile(timelinePath, "utf8");
     assert.match(timeline, /first child update/);
     assert.match(timeline, /tool: Bash/);
@@ -2975,10 +2977,190 @@ test("subagent observability projects child transcript progress without raw tool
   }
 });
 
+test("subagent observability bounds incremental transcript work and retained projection state", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-bounded-"));
+  const childTranscript = join(pluginData, "child.jsonl");
+  const records = Array.from({ length: 400 }, (_, index) => ({
+    type: "assistant",
+    message: { content: [{ type: "text", text: `update-${index}-${"x".repeat(2_000)}` }] },
+  }));
+  const contents = `${records.map((record) => JSON.stringify(record)).join("\n")}\n`;
+  const input = {
+    hook_event_name: "PostToolUse",
+    session_id: "parent-bounded",
+    agent_id: "child-bounded",
+    transcript_path: childTranscript,
+  };
+
+  try {
+    await writeFile(childTranscript, contents);
+    await processSubagentObservabilityHook(input, { CLAUDE_PLUGIN_DATA: pluginData });
+    const [parentKey] = await readdir(join(pluginData, "subagent-timelines"));
+    const [childKey] = await readdir(join(pluginData, "subagent-timelines", parentKey));
+    const statePath = join(pluginData, "subagent-timelines", parentKey, childKey, ".state.json");
+    const timelinePath = join(pluginData, "subagent-timelines", parentKey, childKey, "timeline.md");
+    let state = JSON.parse(await readFile(statePath, "utf8"));
+    assert.ok(state.offset > 0);
+    assert.ok(state.offset < Buffer.byteLength(contents), "one hook must not consume an arbitrarily large transcript");
+
+    for (let attempt = 0; state.offset < Buffer.byteLength(contents) && attempt < 10; attempt += 1) {
+      await processSubagentObservabilityHook(input, { CLAUDE_PLUGIN_DATA: pluginData });
+      state = JSON.parse(await readFile(statePath, "utf8"));
+    }
+    assert.equal(state.offset, Buffer.byteLength(contents));
+    assert.ok(state.entries.length <= 200);
+    assert.ok((await stat(statePath)).size < 500_000);
+    assert.ok((await stat(timelinePath)).size < 500_000);
+    assert.match(await readFile(timelinePath, "utf8"), /update-399-/);
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+test("subagent observability redacts credential-like assistant prose before persistence and display", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-redaction-"));
+  const childTranscript = join(pluginData, "child.jsonl");
+  const secretText = "working token=private-token-value Bearer opaque-bearer-value sk-privatecredential endpoint=https://private.example/v1";
+  const input = {
+    hook_event_name: "PostToolUse",
+    session_id: "parent-redaction",
+    agent_id: "child-redaction",
+    transcript_path: childTranscript,
+  };
+
+  try {
+    await writeFile(childTranscript, `${JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: secretText }] },
+    })}\n`);
+    const env = { CLAUDE_PLUGIN_DATA: pluginData };
+    await processSubagentObservabilityHook(input, env);
+    const [parentKey] = await readdir(join(pluginData, "subagent-timelines"));
+    const [childKey] = await readdir(join(pluginData, "subagent-timelines", parentKey));
+    const directory = join(pluginData, "subagent-timelines", parentKey, childKey);
+    const state = await readFile(join(directory, ".state.json"), "utf8");
+    const timeline = await readFile(join(directory, "timeline.md"), "utf8");
+    const [row] = await renderSubagentStatusLine({
+      parent_id: "parent-redaction",
+      tasks: [{ id: "task-redaction", agent_id: "child-redaction" }],
+    }, env);
+    const projected = `${state}\n${timeline}\n${row}`;
+    assert.match(projected, /\[redacted\]/);
+    assert.doesNotMatch(projected, /private-token-value|opaque-bearer-value|privatecredential|private\.example/);
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+test("subagent observability keeps colliding sanitized parent and child identities isolated", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-identities-"));
+  const env = { CLAUDE_PLUGIN_DATA: pluginData };
+  const fixtures = [
+    { parent: "parent/a", child: "child/a", prose: "slash identity progress" },
+    { parent: "parent a", child: "child a", prose: "space identity progress" },
+  ];
+
+  try {
+    for (const [index, fixture] of fixtures.entries()) {
+      const transcriptPath = join(pluginData, `child-${index}.jsonl`);
+      await writeFile(transcriptPath, `${JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "text", text: fixture.prose }] },
+      })}\n`);
+      await processSubagentObservabilityHook({
+        hook_event_name: "PostToolUse",
+        session_id: fixture.parent,
+        agent_id: fixture.child,
+        transcript_path: transcriptPath,
+      }, env);
+    }
+
+    const parentKeys = await readdir(join(pluginData, "subagent-timelines"));
+    assert.equal(parentKeys.length, 2);
+    const stateHashes = [];
+    for (const parentKey of parentKeys) {
+      const childKeys = await readdir(join(pluginData, "subagent-timelines", parentKey));
+      assert.equal(childKeys.length, 1);
+      const state = JSON.parse(await readFile(join(
+        pluginData, "subagent-timelines", parentKey, childKeys[0], ".state.json",
+      ), "utf8"));
+      stateHashes.push(`${state.parentHash}:${state.childHash}`);
+    }
+    assert.equal(new Set(stateHashes).size, 2);
+
+    for (const fixture of fixtures) {
+      const [row] = await renderSubagentStatusLine({
+        parent_id: fixture.parent,
+        tasks: [{ id: fixture.child, agent_id: fixture.child }],
+      }, env);
+      assert.match(row, new RegExp(fixture.prose));
+      assert.doesNotMatch(row, new RegExp(fixtures.find((candidate) => candidate !== fixture).prose));
+    }
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+test("subagent observability preserves row metadata after bounding long prose", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-statusline-"));
+  const childTranscript = join(pluginData, "child.jsonl");
+  const longProse = `long progress ${"x".repeat(500)}`;
+  const env = { CLAUDE_PLUGIN_DATA: pluginData };
+
+  try {
+    await writeFile(childTranscript, `${JSON.stringify({ type: "assistant", message: { content: [
+      { type: "text", text: longProse },
+      { type: "tool_use", name: "Bash" },
+    ] } })}\n`);
+    await processSubagentObservabilityHook({
+      hook_event_name: "PostToolUse",
+      session_id: "parent-statusline",
+      agent_id: "child-statusline",
+      transcript_path: childTranscript,
+    }, env);
+    const [row] = await renderSubagentStatusLine({
+      parent_id: "parent-statusline",
+      tasks: [{ id: "task-statusline", agent_id: "child-statusline", elapsed_ms: 1234, output_tokens: 7 }],
+    }, env);
+    assert.match(row, /… \| tool: Bash \| 1234ms \| 7 tokens$/);
+    assert.ok(row.length > 160, "the prose cap must not consume trailing metadata");
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+test("subagent observability projects every tool result block without persisting output", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-results-"));
+  const childTranscript = join(pluginData, "child.jsonl");
+
+  try {
+    await writeFile(childTranscript, `${JSON.stringify({ type: "user", message: { content: [
+      { type: "tool_result", content: "first-private-result" },
+      { type: "text", text: "ignored user prose" },
+      { type: "tool_result", content: [{ type: "text", text: "second-private-result" }] },
+    ] } })}\n`);
+    await processSubagentObservabilityHook({
+      hook_event_name: "PostToolUse",
+      session_id: "parent-results",
+      agent_id: "child-results",
+      transcript_path: childTranscript,
+    }, { CLAUDE_PLUGIN_DATA: pluginData });
+    const [parentKey] = await readdir(join(pluginData, "subagent-timelines"));
+    const [childKey] = await readdir(join(pluginData, "subagent-timelines", parentKey));
+    const timeline = await readFile(join(
+      pluginData, "subagent-timelines", parentKey, childKey, "timeline.md",
+    ), "utf8");
+    assert.equal((timeline.match(/tool result: \d+ bytes/g) ?? []).length, 2);
+    assert.doesNotMatch(timeline, /first-private-result|second-private-result|ignored user prose/);
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
 test("observer write failures do not prevent existing PostToolUse completion-guard behavior", async () => {
   const pluginData = await mkdtemp(join(tmpdir(), "airkit-observer-failure-"));
   const sessionId = "parent-1";
-  const blockedTimeline = join(pluginData, "subagent-timelines", sessionId, "child-1");
+  const blockedTimeline = join(pluginData, "subagent-timelines");
   const env = {
     AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS: "1",
     AIRCLAUDE_PROFILE: "launch-example",
