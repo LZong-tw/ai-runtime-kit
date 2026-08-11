@@ -6,3 +6,8 @@
 - A full subagent transcript may remain on disk for resume and audit, but the
   parent model context must receive only a bounded final result when an Agent,
   Task, or TaskOutput response is transcript-like.
+- Missing text inside Claude Code's live subagent viewer is not evidence that
+  the parent-result guard removed it. Check the child JSONL, the parent
+  PostToolUse event, and whether a transcript artifact was created separately;
+  the viewer can collapse earlier child text into a tool-count summary before
+  the Agent has returned anything to the parent.
