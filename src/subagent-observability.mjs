@@ -45,7 +45,8 @@ function validPluginData(env) {
 
 async function observeChildTranscript(input, env) {
   const parentId = safeId(input.session_id, "unknown-parent");
-  const childId = safeId(input.agent_id, safeId(input.tool_name, "unknown-child"));
+  const childId = safeId(input.agent_id, "");
+  if (!childId) return;
   const directory = join(env.CLAUDE_PLUGIN_DATA, "subagent-timelines", parentId, childId);
   const timelinePath = join(directory, "timeline.md");
   const statePath = join(directory, ".state.json");
@@ -82,8 +83,8 @@ async function observeChildTranscript(input, env) {
     const fingerprint = createHash("sha256").update(line).digest("hex");
     if (next.seen.includes(fingerprint)) continue;
     next.seen = [...next.seen, fingerprint].slice(-500);
-    const projection = projectRecord(record);
-    if (projection) next.entries.push(projection);
+    const projections = projectRecord(record);
+    if (projections.length > 0) next.entries.push(...projections);
   }
   await saveProjection(directory, timelinePath, statePath, next);
 }
@@ -101,14 +102,16 @@ function projectRecord(record) {
       ? content.filter((block) => block?.type === "tool_use" && typeof block.name === "string")
         .map((block) => block.name.trim()).filter(Boolean)
       : [];
-    if (text) return { kind: "assistant", text: text.slice(0, MAX_TEXT) };
-    if (tools.length > 0) return { kind: "tool", name: tools.join(", ").slice(0, 200) };
+    const projections = [];
+    if (text) projections.push({ kind: "assistant", text: text.slice(0, MAX_TEXT) });
+    if (tools.length > 0) projections.push({ kind: "tool", name: tools.join(", ").slice(0, 200) });
+    return projections;
   }
   if (record.type === "user") {
     const result = toolResult(record.message?.content ?? record.content);
-    if (result !== null) return { kind: "tool-result", bytes: Buffer.byteLength(result, "utf8") };
+    if (result !== null) return [{ kind: "tool-result", bytes: Buffer.byteLength(result, "utf8") }];
   }
-  return null;
+  return [];
 }
 
 function assistantText(content) {
@@ -194,10 +197,10 @@ async function renderTaskRow(task, input, env) {
 }
 
 function taskIdentity(task) {
-  for (const key of ["agent_id", "child_id", "child_name", "name"]) {
-    if (typeof task?.[key] === "string" && task[key].trim()) return task[key].trim();
-  }
-  return null;
+  const candidates = ["agent_id", "child_id", "child_name", "name"]
+    .map((key) => typeof task?.[key] === "string" ? task[key].trim() : "")
+    .filter(Boolean);
+  return candidates.length > 0 && new Set(candidates).size === 1 ? candidates[0] : null;
 }
 
 function taskLabel(task) { return typeof task?.name === "string" ? task.name : "task"; }

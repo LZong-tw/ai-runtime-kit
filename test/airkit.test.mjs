@@ -2903,8 +2903,14 @@ test("subagent observability projects child transcript progress without raw tool
   const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-observability-"));
   const childTranscript = join(pluginData, "child.jsonl");
   const records = [
-    { type: "assistant", message: { content: [{ type: "text", text: "first child update" }] } },
-    { type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "pwd" } }] } },
+    { type: "assistant", message: { content: [
+      { type: "text", text: "first child update" },
+      { type: "tool_use", name: "Bash", input: { command: "pwd" } },
+    ] } },
+    { type: "assistant", message: { content: [
+      { type: "text", text: "first child update" },
+      { type: "tool_use", name: "Bash", input: { command: "pwd" } },
+    ] } },
     { type: "user", message: { content: [{ type: "tool_result", content: "very-large-tool-result".repeat(500) }] } },
     { type: "assistant", message: { content: [{ type: "text", text: "second child update" }] } },
   ];
@@ -2926,6 +2932,8 @@ test("subagent observability projects child transcript progress without raw tool
     assert.match(timeline, /first child update/);
     assert.match(timeline, /tool: Bash/);
     assert.match(timeline, /second child update/);
+    assert.equal((timeline.match(/first child update/g) ?? []).length, 1);
+    assert.equal((timeline.match(/tool: Bash/g) ?? []).length, 1);
     assert.doesNotMatch(timeline, /very-large-tool-result/);
     assert.equal((await stat(timelinePath)).mode & 0o777, 0o600);
     assert.equal((await stat(statePath)).mode & 0o777, 0o600);
@@ -2945,7 +2953,7 @@ test("subagent observability projects child transcript progress without raw tool
 
     const ambiguous = await renderSubagentStatusLine({
       parent_id: "parent-1",
-      tasks: [{ id: "task-2", name: "unknown" }],
+      tasks: [{ id: "task-2", agent_id: "child-1", child_id: "other-child" }],
     }, env);
     assert.equal(ambiguous.length, 1);
     assert.match(ambiguous[0], /waiting for first event|ambiguous child transcript/);
