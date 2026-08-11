@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -14,6 +14,11 @@ import {
   processContextHook,
   processSubagentOutputHook,
 } from "../src/context-heartbeat.mjs";
+import {
+  processSubagentObservabilityHook,
+  renderSubagentStatusLine,
+  runSubagentStatusLine,
+} from "../src/subagent-observability.mjs";
 import {
   routeBareClaudeModel,
   validateCompatibilityConfig,
@@ -2889,6 +2894,73 @@ test("subagent output guard persists a transcript artifact while bounding parent
     const ordinary = { ...input, tool_response: { ...input.tool_response, result: "A normal long result\n".repeat(20_000) } };
     assert.equal(await processSubagentOutputHook(ordinary, { CLAUDE_PLUGIN_DATA: pluginData }), null);
     assert.equal(await processSubagentOutputHook({ ...input, tool_name: "Read" }, { CLAUDE_PLUGIN_DATA: pluginData }), null);
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+test("subagent observability projects child transcript progress without raw tool output", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-observability-"));
+  const childTranscript = join(pluginData, "child.jsonl");
+  const records = [
+    { type: "assistant", message: { content: [{ type: "text", text: "first child update" }] } },
+    { type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "pwd" } }] } },
+    { type: "user", message: { content: [{ type: "tool_result", content: "very-large-tool-result".repeat(500) }] } },
+    { type: "assistant", message: { content: [{ type: "text", text: "second child update" }] } },
+  ];
+
+  try {
+    await writeFile(childTranscript, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`);
+    const env = { CLAUDE_PLUGIN_DATA: pluginData };
+    const input = {
+      hook_event_name: "PostToolUse",
+      session_id: "parent-1",
+      agent_id: "child-1",
+      transcript_path: childTranscript,
+    };
+    assert.equal(await processSubagentObservabilityHook(input, env), null);
+
+    const timelinePath = join(pluginData, "subagent-timelines", "parent-1", "child-1", "timeline.md");
+    const statePath = join(pluginData, "subagent-timelines", "parent-1", "child-1", ".state.json");
+    const timeline = await readFile(timelinePath, "utf8");
+    assert.match(timeline, /first child update/);
+    assert.match(timeline, /tool: Bash/);
+    assert.match(timeline, /second child update/);
+    assert.doesNotMatch(timeline, /very-large-tool-result/);
+    assert.equal((await stat(timelinePath)).mode & 0o777, 0o600);
+    assert.equal((await stat(statePath)).mode & 0o777, 0o600);
+    const before = timeline;
+    await processSubagentObservabilityHook(input, env);
+    assert.equal(await readFile(timelinePath, "utf8"), before);
+
+    const rows = await renderSubagentStatusLine({
+      parent_id: "parent-1",
+      tasks: [{ id: "task-1", agent_id: "child-1", name: "child-1", elapsed_ms: 1234, output_tokens: 7 }],
+    }, env);
+    assert.equal(rows.length, 1);
+    assert.match(rows[0], /second child update/);
+    assert.match(rows[0], /Bash/);
+    assert.match(rows[0], /1234ms/);
+    assert.match(rows[0], /7 tokens/);
+
+    const ambiguous = await renderSubagentStatusLine({
+      parent_id: "parent-1",
+      tasks: [{ id: "task-2", name: "unknown" }],
+    }, env);
+    assert.equal(ambiguous.length, 1);
+    assert.match(ambiguous[0], /waiting for first event|ambiguous child transcript/);
+    assert.doesNotMatch(ambiguous[0], /second child update/);
+
+    let output = "";
+    await runSubagentStatusLine({
+      env,
+      input: (async function* () { yield JSON.stringify({
+        parent_id: "parent-1",
+        tasks: [{ id: "task-1", agent_id: "child-1", elapsed_ms: 1234, output_tokens: 7 }],
+      }); })(),
+      output: { write(value) { output += value; } },
+    });
+    assert.deepEqual(JSON.parse(output), { id: "task-1", content: rows[0] });
   } finally {
     await rm(pluginData, { force: true, recursive: true });
   }
