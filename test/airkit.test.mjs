@@ -3020,7 +3020,7 @@ test("subagent observability bounds incremental transcript work and retained pro
 test("subagent observability redacts credential-like assistant prose before persistence and display", async () => {
   const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-redaction-"));
   const childTranscript = join(pluginData, "child.jsonl");
-  const secretText = "working token=private-token-value Bearer opaque-bearer-value sk-privatecredential endpoint=https://private.example/v1";
+  const secretText = "working token=private-token-value Bearer opaque-bearer-value Authorization: Basic c2VjcmV0OnBhc3M= sk-privatecredential endpoint=https://private.example/v1";
   const input = {
     hook_event_name: "PostToolUse",
     session_id: "parent-redaction",
@@ -3046,7 +3046,7 @@ test("subagent observability redacts credential-like assistant prose before pers
     }, env);
     const projected = `${state}\n${timeline}\n${row}`;
     assert.match(projected, /\[redacted\]/);
-    assert.doesNotMatch(projected, /private-token-value|opaque-bearer-value|privatecredential|private\.example/);
+    assert.doesNotMatch(projected, /private-token-value|opaque-bearer-value|c2VjcmV0OnBhc3M=|privatecredential|private\.example/);
   } finally {
     await rm(pluginData, { force: true, recursive: true });
   }
