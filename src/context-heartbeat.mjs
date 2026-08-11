@@ -73,7 +73,11 @@ export function parseTaskCapsule(summary) {
 export async function processContextHook(input, env = process.env) {
   if (!env.AIRCLAUDE_PROFILE) return null;
   if (["SubagentStart", "PostToolUse", "SubagentStop"].includes(input?.hook_event_name)) {
-    await processSubagentObservabilityHook(input, env);
+    try {
+      await processSubagentObservabilityHook(input, env);
+    } catch {
+      // Observability is additive; existing hook behavior must continue.
+    }
   }
   const completionGuardResponse = await processCompletionGuardHook(input, env);
   if (completionGuardResponse) return completionGuardResponse;
