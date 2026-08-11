@@ -1,7 +1,7 @@
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -2970,6 +2970,38 @@ test("subagent observability projects child transcript progress without raw tool
       output: { write(value) { output += value; } },
     });
     assert.deepEqual(JSON.parse(output), { id: "task-1", content: rows[0] });
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+test("observer write failures do not prevent existing PostToolUse completion-guard behavior", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-observer-failure-"));
+  const sessionId = "parent-1";
+  const blockedTimeline = join(pluginData, "subagent-timelines", sessionId, "child-1");
+  const env = {
+    AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS: "1",
+    AIRCLAUDE_PROFILE: "launch-example",
+    CLAUDE_PLUGIN_DATA: pluginData,
+  };
+
+  try {
+    await mkdir(dirname(blockedTimeline), { recursive: true });
+    await writeFile(blockedTimeline, "blocks observer directory creation");
+
+    await assert.doesNotReject(processContextHook({
+      agent_id: "child-1",
+      hook_event_name: "PostToolUse",
+      session_id: sessionId,
+      transcript_path: join(pluginData, "missing-child.jsonl"),
+    }, env));
+
+    const completionGuardFiles = await readdir(join(pluginData, "completion-guard"));
+    assert.equal(completionGuardFiles.length, 1);
+    assert.deepEqual(JSON.parse(await readFile(join(pluginData, "completion-guard", completionGuardFiles[0]), "utf8")), {
+      armed: true,
+      stopBlocks: 0,
+    });
   } finally {
     await rm(pluginData, { force: true, recursive: true });
   }
