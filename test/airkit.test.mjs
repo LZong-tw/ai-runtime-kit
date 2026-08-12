@@ -991,6 +991,7 @@ test("CCR compatibility binds every family fallback to its managed provider", ()
   catalog.profiles[0].ccr.plugins[0].config.webSearch = {
     mode: "native-first",
     nativeProviderExclusions: ["web-litellm"],
+    clientToolExclusions: ["web-litellm"],
   };
 
   const merged = airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {}, {
@@ -1008,6 +1009,9 @@ test("CCR compatibility binds every family fallback to its managed provider", ()
     statuses: [401],
   }]);
   assert.deepEqual(compatibility.webSearch.nativeProviderExclusions, [
+    "airkit-provider-launch-example-web-litellm",
+  ]);
+  assert.deepEqual(compatibility.webSearch.clientToolExclusions, [
     "airkit-provider-launch-example-web-litellm",
   ]);
   assert.doesNotThrow(() => validateCompatibilityProviderBinding(

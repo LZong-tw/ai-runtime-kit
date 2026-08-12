@@ -664,9 +664,11 @@ function bindManagedCompatibilityProvider(ccrConfig, managedProviderIds) {
     fallback.to.provider = managedProviderIds.get(fallback.to.provider);
   }
   for (const family of ["webSearch", "webFetch"]) {
-    const exclusions = compatibility[family]?.nativeProviderExclusions;
-    if (Array.isArray(exclusions)) {
-      compatibility[family].nativeProviderExclusions = exclusions.map((provider) => managedProviderIds.get(provider));
+    for (const key of ["nativeProviderExclusions", "clientToolExclusions"]) {
+      const exclusions = compatibility[family]?.[key];
+      if (Array.isArray(exclusions)) {
+        compatibility[family][key] = exclusions.map((provider) => managedProviderIds.get(provider));
+      }
     }
   }
 }

@@ -16,6 +16,7 @@ import {
   resolveToolSearchMaxTools,
   requiresClientToolFallback,
   routeBareClaudeModel,
+  shouldStripClientTool,
   validateCompatibilityConfig,
   validateCompatibilityProviderBinding,
 } from "./config.mjs";
@@ -24,7 +25,11 @@ import {
   rewriteClaudeEffortForOpenAI,
 } from "./effort.mjs";
 import { inspectPendingServerHistory } from "./server-history.mjs";
-import { inspectServerToolRequest, stripServerToolFamily } from "./server-tools.mjs";
+import {
+  inspectServerToolRequest,
+  stripClientToolFamily,
+  stripServerToolFamily,
+} from "./server-tools.mjs";
 import { applyToolSearchBudget } from "./tool-search.mjs";
 import { classifyCacheCohort, describeStablePrefix } from "./prefix-observability.mjs";
 
@@ -124,10 +129,11 @@ export function createMessagesHandler({ config, coreClient, policies }) {
         (config.advisor?.unsupported ?? DEFAULT_ADVISOR_UNSUPPORTED) === "strip"
         ? stripServerToolFamily(routedBody, "advisor")
         : routedBody;
+      const clientToolScopedBody = stripExcludedClientTools(scopedBody, config, policies);
       const modeEffort = typeof body?.model === "string" && body.model.startsWith("claude-sonnet-")
         ? resolveModeEffort(config, mode)
         : null;
-      const effortAdjustedBody = rewriteClaudeEffortForOpenAI(scopedBody, modeEffort);
+      const effortAdjustedBody = rewriteClaudeEffortForOpenAI(clientToolScopedBody, modeEffort);
       const outputBudgetAdjustedBody = ensureGptMinimumOutputTokens(effortAdjustedBody);
       const outboundBody = applyToolSearchBudget(
         outputBudgetAdjustedBody,
@@ -198,6 +204,17 @@ export function createMessagesHandler({ config, coreClient, policies }) {
       logRequestTerminal({ outcome, response, telemetry });
     }
   };
+}
+
+function stripExcludedClientTools(body, config, policies) {
+  let scoped = body;
+  const tools = inspectServerToolRequest(body);
+  for (const family of tools.clientFamilies) {
+    if (shouldStripClientTool(config, policies, family, scoped?.model)) {
+      scoped = stripClientToolFamily(scoped, family);
+    }
+  }
+  return scoped;
 }
 
 function beginRequestTelemetry(enabled, request, response) {
