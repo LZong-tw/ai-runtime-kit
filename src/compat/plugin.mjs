@@ -14,6 +14,7 @@ import {
   resolveModeRoutes,
   resolveTransportFallback,
   resolveToolSearchMaxTools,
+  requiresClientToolFallback,
   routeBareClaudeModel,
   validateCompatibilityConfig,
   validateCompatibilityProviderBinding,
@@ -458,20 +459,12 @@ function isConfiguredCompatibilityRequest(body, policies, config) {
   const history = inspectPendingServerHistory(body);
   return (
     tools.serverTools.length > 0 ||
-    [...tools.clientFamilies].some((family) => clientToolDefinitionRequiresFallback(family, policies, config)) ||
+    [...tools.clientFamilies].some((family) =>
+      requiresClientToolFallback(config, policies, family, body.model)) ||
     history.requiresFallback ||
     history.containerId !== null ||
     (Array.isArray(body.mcp_servers) && body.mcp_servers.length > 0)
   );
-}
-
-function clientToolDefinitionRequiresFallback(family, policies, config) {
-  // A native-first declaration keeps Claude Code's ordinary client tool on
-  // the selected executor route. Its effective fallback policy records that
-  // the native execution cycle is unverified, but definition presence alone
-  // is not evidence that this turn used the tool. Explicit fallback mode is
-  // still honored for profiles that deliberately request it.
-  return config?.[family]?.mode === "anthropic-fallback" && policies[family] !== "native";
 }
 
 export function createMcpHandler({ config, coreClient }) {

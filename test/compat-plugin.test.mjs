@@ -1662,6 +1662,47 @@ test("explicit WebSearch fallback overrides the verified native route", async ()
   assert.deepEqual(calls[0].tools, body.tools);
 });
 
+test("Web LiteLLM WebSearch falls back while verified providers stay native", async () => {
+  const fallbackCalls = [];
+  const rawCalls = [];
+  const fixture = await createPluginFixture({
+    pluginConfig: {
+      webSearch: {
+        mode: "native-first",
+        nativeProviderExclusions: ["web-litellm-anthropic"],
+      },
+    },
+    coreClient: createPluginCoreClient({
+      async forwardRaw(input) {
+        rawCalls.push(input);
+        input.response.writeHead(202, { "content-type": "application/json" });
+        input.response.end(Buffer.from("{}"));
+      },
+      async requestFallback(body) {
+        fallbackCalls.push(structuredClone(body));
+        return new Response(JSON.stringify({ type: "message", content: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    }),
+  });
+  const tools = [{ name: "WebSearch", input_schema: { type: "object" } }];
+  const invoke = async (model) => fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify({ model, messages: [], tools }))),
+    createRecordingResponse(),
+    fixture.helpers,
+  );
+
+  await invoke("web-litellm-anthropic/claude-opus-5");
+  await invoke("oneportal-anthropic/claude-sonnet-5");
+
+  assert.equal(fallbackCalls.length, 1);
+  assert.equal(fallbackCalls[0].model, "anthropic-messages/claude-sonnet");
+  assert.equal(rawCalls.length, 1);
+  assert.equal(JSON.parse(rawCalls[0].body).model, "oneportal-anthropic/claude-sonnet-5");
+});
+
 test("compatibility Messages requests bridge JSON and preserve the stream flag", async () => {
   const calls = [];
   const fixture = await createPluginFixture({
