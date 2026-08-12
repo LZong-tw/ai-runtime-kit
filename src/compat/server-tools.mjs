@@ -31,6 +31,9 @@ const CLIENT_TOOL_FAMILIES = Object.freeze({
   WebFetch: "webFetch",
   WebSearch: "webSearch",
 });
+const CLIENT_TOOL_NAMES = Object.freeze(Object.fromEntries(
+  Object.entries(CLIENT_TOOL_FAMILIES).map(([name, family]) => [family, name]),
+));
 
 export function isFutureServerToolType(type) {
   return (
@@ -60,6 +63,13 @@ export function stripServerToolFamily(body, family) {
   const types = SERVER_TOOL_TYPES[family];
   if (types === undefined || !Array.isArray(body?.tools)) return body;
   const tools = body.tools.filter((tool) => !types.includes(tool?.type));
+  return tools.length === body.tools.length ? body : { ...body, tools };
+}
+
+export function stripClientToolFamily(body, family) {
+  const name = CLIENT_TOOL_NAMES[family];
+  if (name === undefined || !Array.isArray(body?.tools)) return body;
+  const tools = body.tools.filter((tool) => tool?.name !== name);
   return tools.length === body.tools.length ? body : { ...body, tools };
 }
 
