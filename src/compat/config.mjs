@@ -25,7 +25,7 @@ const CONFIG_KEYS = new Set([
   ...Object.keys(FAMILY_MODES),
 ]);
 const FALLBACK_KEYS = new Set(["provider", "model", "maxContinuationTurns"]);
-const FAMILY_KEYS = new Set(["mode", "fallback"]);
+const FAMILY_KEYS = new Set(["mode", "fallback", "nativeProviderExclusions"]);
 const TOOL_SEARCH_KEYS = new Set(["mode", "fallback", "maxToolsByModel"]);
 // Advisor alone gets this key. A server tool the upstream route cannot resolve
 // does not fail quietly in its own lane: its mere presence in `tools` diverts
@@ -82,6 +82,13 @@ export function validateCompatibilityConfig(config) {
     }
     if (definition.fallback !== undefined) {
       validateFallback(definition.fallback, `${family}.fallback`, FAMILY_FALLBACK_KEYS, false);
+    }
+    if (definition.nativeProviderExclusions !== undefined) {
+      if (!Array.isArray(definition.nativeProviderExclusions) || definition.nativeProviderExclusions.some(
+        (provider) => typeof provider !== "string" || !/^[a-z0-9][a-z0-9._-]*$/i.test(provider),
+      )) {
+        throw new Error(`${family}.nativeProviderExclusions must be provider identifiers`);
+      }
     }
     if (family === "toolSearch" && definition.maxToolsByModel !== undefined) {
       validateToolSearchLimits(definition.maxToolsByModel);
@@ -144,6 +151,14 @@ export function resolveTransportFallback(config, model, status) {
   const fallback = config.transportFallbacks?.find((entry) =>
     `${entry.from.provider}/${entry.from.model}` === model && entry.statuses.includes(status));
   return fallback === undefined ? null : `${fallback.to.provider}/${fallback.to.model}`;
+}
+
+export function requiresClientToolFallback(config, policies, family, model) {
+  if (config?.[family]?.mode === "anthropic-fallback" && policies?.[family] !== "native") return true;
+  if (policies?.[family] !== "native" || typeof model !== "string") return false;
+  const separator = model.indexOf("/");
+  if (separator <= 0) return false;
+  return config?.[family]?.nativeProviderExclusions?.includes(model.slice(0, separator)) === true;
 }
 
 export function resolveModeEffort(config, mode) {

@@ -988,6 +988,10 @@ test("CCR compatibility binds every family fallback to its managed provider", ()
     to: { provider: "oneportal", model: "gpt-5.6-terra" },
     statuses: [401],
   }];
+  catalog.profiles[0].ccr.plugins[0].config.webSearch = {
+    mode: "native-first",
+    nativeProviderExclusions: ["web-litellm"],
+  };
 
   const merged = airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {}, {
     configDir: "/tmp/airkit-family-fallback",
@@ -1003,6 +1007,9 @@ test("CCR compatibility binds every family fallback to its managed provider", ()
     to: { provider: "airkit-provider-launch-example-oneportal", model: "gpt-5.6-terra" },
     statuses: [401],
   }]);
+  assert.deepEqual(compatibility.webSearch.nativeProviderExclusions, [
+    "airkit-provider-launch-example-web-litellm",
+  ]);
   assert.doesNotThrow(() => validateCompatibilityProviderBinding(
     compatibility,
     merged.config.Providers,

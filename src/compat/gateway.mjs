@@ -9,6 +9,7 @@ import { createFallbackRouter } from "./fallback.mjs";
 import {
   VERIFIED_NATIVE_COMPATIBILITY,
   compatibilityFallbackSelector,
+  requiresClientToolFallback,
   resolveCompatibilityPolicies,
   resolveToolSearchMaxTools,
 } from "./config.mjs";
@@ -716,11 +717,7 @@ function requiresWholeRequestFallback({ body, config, serverHistory, serverTools
     body.tools.length > toolLimit;
   const { policies } = resolveCompatibilityPolicies(config, VERIFIED_NATIVE_COMPATIBILITY);
   for (const family of serverTools.clientFamilies) {
-    if (
-      config?.[family]?.mode === "anthropic-fallback" &&
-      policies[family] !== "native" &&
-      !toolSearchOwnsOverflow
-    ) return true;
+    if (requiresClientToolFallback(config, policies, family, body?.model) && !toolSearchOwnsOverflow) return true;
   }
 
   const families = new Set([...serverTools.families, ...serverHistory.families]);

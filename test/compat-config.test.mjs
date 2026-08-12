@@ -9,6 +9,7 @@ import {
   resolveCompatibilityPolicies,
   resolveModeRoutes,
   resolveTransportFallback,
+  requiresClientToolFallback,
   resolveToolSearchMaxTools,
   routeBareClaudeModel,
   validateCompatibilityConfig,
@@ -71,6 +72,26 @@ test("resolves only an explicitly configured 401 transport fallback", () => {
       transportFallbacks: [{ ...config.transportFallbacks[0], statuses: [429] }],
     }),
     /transportFallbacks\[0\]\.statuses.*401/,
+  );
+});
+
+test("native-first client tools fall back only for excluded providers", () => {
+  const config = {
+    ...VALID_CONFIG,
+    webSearch: {
+      mode: "native-first",
+      nativeProviderExclusions: ["web-litellm-anthropic"],
+    },
+  };
+  const { policies } = resolveCompatibilityPolicies(config, { webSearch: true });
+
+  assert.equal(
+    requiresClientToolFallback(config, policies, "webSearch", "web-litellm-anthropic/claude-opus-5"),
+    true,
+  );
+  assert.equal(
+    requiresClientToolFallback(config, policies, "webSearch", "oneportal-anthropic/claude-sonnet-5"),
+    false,
   );
 });
 

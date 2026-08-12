@@ -663,6 +663,12 @@ function bindManagedCompatibilityProvider(ccrConfig, managedProviderIds) {
     fallback.from.provider = managedProviderIds.get(fallback.from.provider);
     fallback.to.provider = managedProviderIds.get(fallback.to.provider);
   }
+  for (const family of ["webSearch", "webFetch"]) {
+    const exclusions = compatibility[family]?.nativeProviderExclusions;
+    if (Array.isArray(exclusions)) {
+      compatibility[family].nativeProviderExclusions = exclusions.map((provider) => managedProviderIds.get(provider));
+    }
+  }
 }
 
 // The compatibility plugin owns POST /v1/messages, so bare Claude model names
