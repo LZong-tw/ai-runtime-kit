@@ -11,3 +11,7 @@
   PostToolUse event, and whether a transcript artifact was created separately;
   the viewer can collapse earlier child text into a tool-count summary before
   the Agent has returned anything to the parent.
+- A per-process Headroom base URL must apply only to the provider selected by
+  that launch mode. Writing one OpenAI override onto every managed OpenAI
+  provider leaks a OnePortal proxy into Web LiteLLM routes and turns valid Web
+  credentials into misleading 401 responses.

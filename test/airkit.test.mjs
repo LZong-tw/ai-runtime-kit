@@ -759,9 +759,21 @@ test("outer compatibility routing and managed core rules preserve unknown Claude
   );
 });
 
-test("CCR 3 managed providers can route upstream through a per-launch proxy", () => {
+test("CCR 3 managed providers scope a per-launch proxy to the active mode provider", () => {
+  const catalog = compatibilityCatalog();
+  catalog.profiles[0].ccr.Providers.push({
+    name: "web-openai",
+    type: "openai_chat_completions",
+    api_base_url: "https://web.example.invalid/v1/chat/completions",
+    api_key: "$DEMO_API_KEY",
+    models: ["web-coder"],
+  });
+  catalog.profiles[0].launch.modes.web = {
+    ccr: { Router: { default: "anthropic-messages,claude-sonnet" } },
+  };
+
   const merged = airkitRuntime.buildCcr3ManagedConfig(
-    compatibilityCatalog(),
+    catalog,
     "launch-example",
     {},
     {
@@ -770,16 +782,21 @@ test("CCR 3 managed providers can route upstream through a per-launch proxy", ()
         AIRCLAUDE_PROVIDER_BASE_URL: "http://127.0.0.1:8804/v1/chat/completions",
         AIRCLAUDE_ANTHROPIC_PROVIDER_BASE_URL: "http://127.0.0.1:8807/v1/messages",
       },
+      mode: "auto",
     },
   );
 
   assert.equal(
-    merged.config.Providers[0].api_base_url,
+    merged.config.Providers.find((provider) => provider.name.endsWith("-demo")).api_base_url,
     "http://127.0.0.1:8804/v1/chat/completions",
   );
   assert.equal(
-    merged.config.Providers[1].api_base_url,
-    "http://127.0.0.1:8807/v1/messages",
+    merged.config.Providers.find((provider) => provider.name.endsWith("-web-openai")).api_base_url,
+    "https://web.example.invalid/v1/chat/completions",
+  );
+  assert.equal(
+    merged.config.Providers.find((provider) => provider.name.endsWith("-anthropic-messages")).api_base_url,
+    "https://example.invalid/v1/messages",
   );
 });
 
