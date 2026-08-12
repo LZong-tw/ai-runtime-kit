@@ -100,6 +100,48 @@ function stripManagedProviderMetadata(config) {
   return config;
 }
 
+function resolveProviderBaseUrls(value, providers) {
+  if (value === undefined || value === null || value === "") return {};
+  let parsed = value;
+  if (typeof value === "string") {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      throw new Error("provider base URLs must be valid JSON");
+    }
+  }
+  if (!isPlainObject(parsed)) throw new Error("provider base URLs must be an object");
+
+  const providerByName = new Map((providers ?? []).map((provider) => [provider.name, provider]));
+  const resolved = {};
+  for (const [providerName, baseUrl] of Object.entries(parsed)) {
+    const provider = providerByName.get(providerName);
+    if (!provider) throw new Error(`provider base URLs references unknown provider: ${providerName}`);
+    if (typeof baseUrl !== "string" || baseUrl.trim() === "") {
+      throw new Error(`provider base URL for ${providerName} must be a non-empty string`);
+    }
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(baseUrl);
+    } catch {
+      throw new Error(`provider base URL for ${providerName} must be a valid URL`);
+    }
+    if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+      throw new Error(`provider base URL for ${providerName} must use http or https`);
+    }
+    const expectedPath = provider.type === "anthropic_messages"
+      ? "/v1/messages"
+      : provider.type === "openai_chat_completions"
+        ? "/v1/chat/completions"
+        : null;
+    if (expectedPath && parsedUrl.pathname !== expectedPath) {
+      throw new Error(`provider base URL for ${providerName} must end with ${expectedPath}`);
+    }
+    resolved[providerName] = parsedUrl.toString().replace(/\/$/, "");
+  }
+  return resolved;
+}
+
 export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {}, options = {}) {
   const profile = findProfile(catalog, profileName);
   const configDir = resolve(options.configDir ?? defaultConfigDir());
@@ -126,6 +168,10 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
   ).trim();
   const baseConfig = buildSourceCcrConfig(catalog, profileName, { configDir });
   assertCcr3Compatible(baseConfig);
+  const providerBaseUrls = resolveProviderBaseUrls(
+    options.providerBaseUrls ?? options.env?.AIRCLAUDE_PROVIDER_BASE_URLS,
+    baseConfig.Providers,
+  );
   const modeConfigs = new Map(
     modes.map((mode) => [mode, applyLaunchModeOverlay(structuredClone(baseConfig), profile, mode, templateVars)]),
   );
@@ -135,15 +181,16 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
     const id = managedProviderId(profile, provider);
     const { managedId: _managedId, ...providerConfig } = provider;
     const isActiveProvider = provider.name === activeProviderName;
+    const scalarProviderBaseUrl = isActiveProvider && provider.type === "openai_chat_completions"
+      ? providerBaseUrl
+      : isActiveProvider && provider.type === "anthropic_messages"
+        ? anthropicProviderBaseUrl
+        : "";
     return {
       sourceName: provider.name,
       config: {
         ...providerConfig,
-        api_base_url: isActiveProvider && provider.type === "openai_chat_completions" && providerBaseUrl
-          ? providerBaseUrl
-          : isActiveProvider && provider.type === "anthropic_messages" && anthropicProviderBaseUrl
-            ? anthropicProviderBaseUrl
-            : provider.api_base_url,
+        api_base_url: providerBaseUrls[provider.name] || scalarProviderBaseUrl || provider.api_base_url,
         id,
         name: id,
         api_key: options.apiKeys?.[provider.name] ?? provider.api_key,
