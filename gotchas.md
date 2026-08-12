@@ -15,3 +15,7 @@
   that launch mode. Writing one OpenAI override onto every managed OpenAI
   provider leaks a OnePortal proxy into Web LiteLLM routes and turns valid Web
   credentials into misleading 401 responses.
+- A successful qualified-route probe proves only that exact provider and model.
+  Before declaring an existing multi-model session repaired, verify each failed
+  `/model` route from its request log, including provider, model, tool count,
+  upstream stage, and the adapter process start time.
