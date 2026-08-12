@@ -126,16 +126,22 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
   ).trim();
   const baseConfig = buildSourceCcrConfig(catalog, profileName, { configDir });
   assertCcr3Compatible(baseConfig);
+  const modeConfigs = new Map(
+    modes.map((mode) => [mode, applyLaunchModeOverlay(structuredClone(baseConfig), profile, mode, templateVars)]),
+  );
+  const activeMode = resolveLaunchMode(profile, launch, options.mode);
+  const activeProviderName = splitRoute(modeConfigs.get(activeMode)?.Router?.default ?? "").provider;
   const managedProviderEntries = baseConfig.Providers.map((provider) => {
     const id = managedProviderId(profile, provider);
     const { managedId: _managedId, ...providerConfig } = provider;
+    const isActiveProvider = provider.name === activeProviderName;
     return {
       sourceName: provider.name,
       config: {
         ...providerConfig,
-        api_base_url: provider.type === "openai_chat_completions" && providerBaseUrl
+        api_base_url: isActiveProvider && provider.type === "openai_chat_completions" && providerBaseUrl
           ? providerBaseUrl
-          : provider.type === "anthropic_messages" && anthropicProviderBaseUrl
+          : isActiveProvider && provider.type === "anthropic_messages" && anthropicProviderBaseUrl
             ? anthropicProviderBaseUrl
             : provider.api_base_url,
         id,
@@ -155,9 +161,6 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
     if (!providerId) throw new Error(`CCR route references unmanaged provider: ${providerName}`);
     return `${providerId}/${selector.slice(separator + 1)}`;
   };
-  const modeConfigs = new Map(
-    modes.map((mode) => [mode, applyLaunchModeOverlay(structuredClone(baseConfig), profile, mode, templateVars)]),
-  );
   bindManagedCompatibilityRoutes(
     baseConfig,
     managedRouteSelector,
@@ -1324,6 +1327,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     apiKeys,
     configDir: plan.configDir,
     env: launchEnv,
+    mode: plan.mode,
   });
   if (!isDeepStrictEqual(managed.config, currentConfig)) {
     reportPrunedManagedState(managed.pruned, options.stderr ?? process.stderr);
