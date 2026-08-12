@@ -800,6 +800,48 @@ test("CCR 3 managed providers scope a per-launch proxy to the active mode provid
   );
 });
 
+test("provider-specific Headroom URLs override scalar launch URLs for every protocol", () => {
+  const merged = airkitRuntime.buildCcr3ManagedConfig(
+    compatibilityCatalog(),
+    "launch-example",
+    {},
+    {
+      providerBaseUrl: "http://127.0.0.1:8804/v1/chat/completions",
+      anthropicProviderBaseUrl: "http://127.0.0.1:8804/v1/messages",
+      providerBaseUrls: {
+        demo: "http://127.0.0.1:8807/v1/chat/completions",
+        "anthropic-messages": "http://127.0.0.1:8807/v1/messages",
+      },
+    },
+  );
+
+  assert.equal(
+    merged.config.Providers.find(({ name }) => name.endsWith("-demo")).api_base_url,
+    "http://127.0.0.1:8807/v1/chat/completions",
+  );
+  assert.equal(
+    merged.config.Providers.find(({ name }) => name.endsWith("-anthropic-messages")).api_base_url,
+    "http://127.0.0.1:8807/v1/messages",
+  );
+});
+
+test("provider-specific Headroom URLs fail closed before CCR state changes", () => {
+  const invalidCases = [
+    ["malformed JSON", "{", /provider base URLs must be valid JSON/],
+    ["unknown provider", { missing: "http://127.0.0.1:8804/v1/messages" }, /unknown provider/],
+    ["non-HTTP URL", { demo: "file:///tmp/messages" }, /must use http or https/],
+    ["protocol mismatch", { demo: "http://127.0.0.1:8804/v1/messages" }, /must end with \/v1\/chat\/completions/],
+  ];
+
+  for (const [label, providerBaseUrls, expected] of invalidCases) {
+    assert.throws(
+      () => airkitRuntime.buildCcr3ManagedConfig(compatibilityCatalog(), "launch-example", {}, { providerBaseUrls }),
+      expected,
+      label,
+    );
+  }
+});
+
 test("prepareLaunch uses the process Headroom provider URL when no test env is injected", async () => {
   const catalog = compatibilityCatalog();
   const configDir = await mkdtemp(join(tmpdir(), "airkit-headroom-launch-"));
