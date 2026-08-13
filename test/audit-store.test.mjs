@@ -95,6 +95,180 @@ function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+const APPROVED_SCHEMA_COLUMNS = Object.freeze({
+  requests: [
+    "request_id",
+    "logical_request_id",
+    "attempt_id",
+    "attempt_number",
+    "session_id",
+    "session_record_id",
+    "client",
+    "repository_id",
+    "repository_classification",
+    "worktree_path_encrypted",
+    "branch",
+    "head_sha",
+    "selected_route",
+    "selected_provider",
+    "selected_account_id",
+    "selected_model",
+    "actual_provider",
+    "actual_account_id",
+    "actual_model",
+    "effort",
+    "started_at",
+    "completed_at",
+    "status_code",
+    "failure_kind",
+    "duration_ms",
+    "request_payload_id",
+    "response_hash",
+    "response_bytes",
+    "capture_completeness",
+    "correlation_confidence",
+  ],
+  payload_blobs: [
+    "id",
+    "request_id",
+    "algorithm",
+    "key_id",
+    "nonce",
+    "ciphertext",
+    "auth_tag",
+    "wire_hash",
+    "evidence_hash",
+    "plaintext_bytes",
+    "redaction_count",
+    "created_at",
+    "expires_at",
+    "pruned_at",
+    "preserved_at",
+  ],
+  usage_observations: [
+    "id",
+    "request_id",
+    "source",
+    "source_event_id",
+    "observed_at",
+    "uncached_input_tokens",
+    "output_tokens",
+    "reasoning_tokens",
+    "cache_read_tokens",
+    "cache_creation_tokens",
+    "cache_creation_5m_tokens",
+    "cache_creation_1h_tokens",
+    "cache_miss_tokens",
+    "total_tokens",
+    "raw_usage_json",
+  ],
+  request_usage: [
+    "request_id",
+    "uncached_input_tokens",
+    "output_tokens",
+    "reasoning_tokens",
+    "cache_read_tokens",
+    "cache_creation_tokens",
+    "cache_creation_5m_tokens",
+    "cache_creation_1h_tokens",
+    "cache_miss_tokens",
+    "provider_total_tokens",
+    "effective_context_tokens",
+    "cache_read_rate",
+    "cache_write_rate",
+    "uncached_rate",
+    "cache_reuse_ratio",
+    "uncached_input_cost",
+    "cache_read_cost",
+    "cache_creation_5m_cost",
+    "cache_creation_1h_cost",
+    "reasoning_cost",
+    "output_cost",
+    "derived_total_cost",
+    "pricing_version_id",
+    "normalization_state",
+  ],
+  usage_value_provenance: [
+    "request_id",
+    "metric",
+    "value",
+    "provenance",
+    "confidence",
+    "source_event_id",
+    "conflict_group",
+  ],
+  repositories: [
+    "id",
+    "identity_hash",
+    "root_path_encrypted",
+    "remote_hash",
+    "remote_display",
+    "classification",
+    "classification_source",
+    "first_seen_at",
+    "last_seen_at",
+  ],
+  provider_accounts: [
+    "id",
+    "provider",
+    "account_hmac",
+    "logical_group",
+    "credential_kind",
+    "display_label",
+    "identity_source",
+    "first_seen_at",
+    "last_seen_at",
+  ],
+  sessions: [
+    "id",
+    "client",
+    "client_session_id_hmac",
+    "started_at",
+    "last_seen_at",
+    "initial_repository_id",
+    "launcher_mode",
+    "capture_started_at",
+    "capture_ended_at",
+  ],
+  evidence_gaps: [
+    "id",
+    "source",
+    "started_at",
+    "ended_at",
+    "reason",
+    "detected_by",
+    "affected_client",
+    "affected_session",
+    "resolution",
+  ],
+  pricing_versions: [
+    "id",
+    "provider",
+    "billing_model",
+    "model",
+    "effective_from",
+    "effective_until",
+    "currency",
+    "input_price",
+    "output_price",
+    "reasoning_price",
+    "cache_read_price",
+    "cache_creation_5m_price",
+    "cache_creation_1h_price",
+    "source_reference",
+    "verified_at",
+  ],
+  quota_observations: [
+    "id",
+    "provider_account_id",
+    "quota_window",
+    "quota_utilization",
+    "quota_remaining",
+    "observed_at",
+    "source",
+  ],
+});
+
 test("clean create installs the approved schema, pragmas, and searchable indexes", async () => {
   await withRoot(async (paths) => {
     const store = openTestStore(paths);
@@ -156,6 +330,22 @@ test("clean create installs the approved schema, pragmas, and searchable indexes
       assert.equal(store.query("PRAGMA foreign_keys")[0].foreign_keys, 1);
       assert.equal(store.query("PRAGMA journal_mode")[0].journal_mode, "wal");
       assert.deepEqual(store.verify(), { ok: true });
+    } finally {
+      store.close();
+    }
+  });
+});
+
+test("approved design tables expose every approved column", async () => {
+  await withRoot(async (paths) => {
+    const store = openTestStore(paths);
+    try {
+      for (const [table, expectedColumns] of Object.entries(APPROVED_SCHEMA_COLUMNS)) {
+        const actualColumns = new Set(store.query(`PRAGMA table_info(${table})`).map((row) => row.name));
+        for (const column of expectedColumns) {
+          assert.ok(actualColumns.has(column), `${table} is missing approved column ${column}`);
+        }
+      }
     } finally {
       store.close();
     }
@@ -390,8 +580,9 @@ test("read-only stores can query but reject writes", async () => {
 
 test("audit migrations never mutate the CCR fixture bytes", async () => {
   await withRoot(async (paths) => {
-    const fixturePath = join(paths.root, "request-logs-fixture.sqlite");
-    const fixture = new DatabaseSync(fixturePath);
+    const sourceFixturePath = join(paths.root, "request-logs-source.sqlite");
+    const auditCopyPath = paths.databasePath;
+    const fixture = new DatabaseSync(sourceFixturePath);
     fixture.exec(`
       CREATE TABLE request_logs (
         id INTEGER PRIMARY KEY,
@@ -405,12 +596,32 @@ test("audit migrations never mutate the CCR fixture bytes", async () => {
     `);
     fixture.close();
 
-    const before = sha256(await readFile(fixturePath));
-    await copyFile(fixturePath, paths.databasePath);
+    const sourceBefore = sha256(await readFile(sourceFixturePath));
+    await copyFile(sourceFixturePath, auditCopyPath);
+    assert.equal(sha256(await readFile(auditCopyPath)), sourceBefore);
 
     const store = openTestStore(paths);
-    store.close();
+    try {
+      assert.equal(sha256(await readFile(sourceFixturePath)), sourceBefore);
+      assert.equal(store.query("SELECT count(*) AS n FROM request_logs")[0].n, 1);
+      assert.equal(store.query("SELECT count(*) AS n FROM audit_migrations")[0].n, AUDIT_MIGRATIONS.length);
+      assert.ok(
+        new Set(store.query("PRAGMA table_info(requests)").map((row) => row.name))
+          .has("capture_completeness"),
+      );
+    } finally {
+      store.close();
+    }
 
-    assert.equal(sha256(await readFile(fixturePath)), before);
+    const sourceReadOnly = new DatabaseSync(sourceFixturePath, { readOnly: true });
+    try {
+      assert.deepEqual(
+        sourceReadOnly.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name").all()
+          .map((row) => row.name),
+        ["request_logs"],
+      );
+    } finally {
+      sourceReadOnly.close();
+    }
   });
 });

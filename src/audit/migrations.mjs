@@ -268,6 +268,221 @@ const APPROVED_AUDIT_DESIGN_STATEMENTS = Object.freeze([
     VALUES ('audit_schema_version', '2')`,
 ]);
 
+const COMPLETE_APPROVED_AUDIT_DESIGN_COLUMNS = Object.freeze([
+  `ALTER TABLE requests ADD COLUMN attempt_id TEXT`,
+  `ALTER TABLE requests ADD COLUMN attempt_number INTEGER CHECK (attempt_number IS NULL OR attempt_number >= 1)`,
+  `ALTER TABLE requests ADD COLUMN session_record_id TEXT`,
+  `ALTER TABLE requests ADD COLUMN repository_classification TEXT`,
+  `ALTER TABLE requests ADD COLUMN worktree_path_encrypted TEXT CHECK (
+    worktree_path_encrypted IS NULL OR (
+      json_valid(worktree_path_encrypted)
+      AND json_type(worktree_path_encrypted, '$.v') = 'integer'
+      AND json_type(worktree_path_encrypted, '$.k') = 'text'
+      AND json_type(worktree_path_encrypted, '$.n') = 'text'
+      AND json_type(worktree_path_encrypted, '$.c') = 'text'
+      AND json_type(worktree_path_encrypted, '$.t') = 'text'
+    )
+  )`,
+  `ALTER TABLE requests ADD COLUMN branch TEXT`,
+  `ALTER TABLE requests ADD COLUMN head_sha TEXT`,
+  `ALTER TABLE requests ADD COLUMN selected_route TEXT`,
+  `ALTER TABLE requests ADD COLUMN selected_provider TEXT`,
+  `ALTER TABLE requests ADD COLUMN selected_account_id TEXT`,
+  `ALTER TABLE requests ADD COLUMN selected_model TEXT`,
+  `ALTER TABLE requests ADD COLUMN actual_provider TEXT`,
+  `ALTER TABLE requests ADD COLUMN actual_account_id TEXT`,
+  `ALTER TABLE requests ADD COLUMN actual_model TEXT`,
+  `ALTER TABLE requests ADD COLUMN effort TEXT`,
+  `ALTER TABLE requests ADD COLUMN completed_at TEXT`,
+  `ALTER TABLE requests ADD COLUMN status_code INTEGER CHECK (status_code IS NULL OR status_code BETWEEN 100 AND 599)`,
+  `ALTER TABLE requests ADD COLUMN failure_kind TEXT`,
+  `ALTER TABLE requests ADD COLUMN duration_ms INTEGER CHECK (duration_ms IS NULL OR duration_ms >= 0)`,
+  `ALTER TABLE requests ADD COLUMN request_payload_id TEXT`,
+  `ALTER TABLE requests ADD COLUMN response_hash TEXT`,
+  `ALTER TABLE requests ADD COLUMN response_bytes INTEGER CHECK (response_bytes IS NULL OR response_bytes >= 0)`,
+  `ALTER TABLE requests ADD COLUMN capture_completeness TEXT CHECK (
+    capture_completeness IS NULL OR capture_completeness IN (
+      'complete',
+      'metadata_only',
+      'usage_only',
+      'partial',
+      'gap'
+    )
+  )`,
+  `ALTER TABLE requests ADD COLUMN correlation_confidence REAL CHECK (
+    correlation_confidence IS NULL OR (correlation_confidence >= 0 AND correlation_confidence <= 1)
+  )`,
+  `ALTER TABLE payload_blobs ADD COLUMN id TEXT`,
+  `ALTER TABLE payload_blobs ADD COLUMN algorithm TEXT`,
+  `ALTER TABLE payload_blobs ADD COLUMN key_id TEXT`,
+  `ALTER TABLE payload_blobs ADD COLUMN nonce TEXT`,
+  `ALTER TABLE payload_blobs ADD COLUMN ciphertext TEXT`,
+  `ALTER TABLE payload_blobs ADD COLUMN auth_tag TEXT`,
+  `ALTER TABLE payload_blobs ADD COLUMN wire_hash TEXT`,
+  `ALTER TABLE payload_blobs ADD COLUMN evidence_hash TEXT`,
+  `ALTER TABLE payload_blobs ADD COLUMN plaintext_bytes INTEGER CHECK (plaintext_bytes IS NULL OR plaintext_bytes >= 0)`,
+  `ALTER TABLE payload_blobs ADD COLUMN redaction_count INTEGER CHECK (redaction_count IS NULL OR redaction_count >= 0)`,
+  `ALTER TABLE payload_blobs ADD COLUMN expires_at TEXT`,
+  `ALTER TABLE payload_blobs ADD COLUMN pruned_at TEXT`,
+  `ALTER TABLE payload_blobs ADD COLUMN preserved_at TEXT`,
+  `ALTER TABLE usage_observations ADD COLUMN id TEXT`,
+  `ALTER TABLE usage_observations ADD COLUMN source TEXT`,
+  `ALTER TABLE usage_observations ADD COLUMN uncached_input_tokens INTEGER CHECK (uncached_input_tokens IS NULL OR uncached_input_tokens >= 0)`,
+  `ALTER TABLE usage_observations ADD COLUMN output_tokens INTEGER CHECK (output_tokens IS NULL OR output_tokens >= 0)`,
+  `ALTER TABLE usage_observations ADD COLUMN reasoning_tokens INTEGER CHECK (reasoning_tokens IS NULL OR reasoning_tokens >= 0)`,
+  `ALTER TABLE usage_observations ADD COLUMN cache_read_tokens INTEGER CHECK (cache_read_tokens IS NULL OR cache_read_tokens >= 0)`,
+  `ALTER TABLE usage_observations ADD COLUMN cache_creation_tokens INTEGER CHECK (cache_creation_tokens IS NULL OR cache_creation_tokens >= 0)`,
+  `ALTER TABLE usage_observations ADD COLUMN cache_creation_5m_tokens INTEGER CHECK (cache_creation_5m_tokens IS NULL OR cache_creation_5m_tokens >= 0)`,
+  `ALTER TABLE usage_observations ADD COLUMN cache_creation_1h_tokens INTEGER CHECK (cache_creation_1h_tokens IS NULL OR cache_creation_1h_tokens >= 0)`,
+  `ALTER TABLE usage_observations ADD COLUMN cache_miss_tokens INTEGER CHECK (cache_miss_tokens IS NULL OR cache_miss_tokens >= 0)`,
+  `ALTER TABLE usage_observations ADD COLUMN total_tokens INTEGER CHECK (total_tokens IS NULL OR total_tokens >= 0)`,
+  `ALTER TABLE usage_observations ADD COLUMN raw_usage_json TEXT CHECK (raw_usage_json IS NULL OR json_valid(raw_usage_json))`,
+  `ALTER TABLE request_usage ADD COLUMN uncached_input_tokens INTEGER CHECK (uncached_input_tokens IS NULL OR uncached_input_tokens >= 0)`,
+  `ALTER TABLE request_usage ADD COLUMN output_tokens INTEGER CHECK (output_tokens IS NULL OR output_tokens >= 0)`,
+  `ALTER TABLE request_usage ADD COLUMN reasoning_tokens INTEGER CHECK (reasoning_tokens IS NULL OR reasoning_tokens >= 0)`,
+  `ALTER TABLE request_usage ADD COLUMN cache_read_tokens INTEGER CHECK (cache_read_tokens IS NULL OR cache_read_tokens >= 0)`,
+  `ALTER TABLE request_usage ADD COLUMN cache_creation_tokens INTEGER CHECK (cache_creation_tokens IS NULL OR cache_creation_tokens >= 0)`,
+  `ALTER TABLE request_usage ADD COLUMN cache_creation_5m_tokens INTEGER CHECK (cache_creation_5m_tokens IS NULL OR cache_creation_5m_tokens >= 0)`,
+  `ALTER TABLE request_usage ADD COLUMN cache_creation_1h_tokens INTEGER CHECK (cache_creation_1h_tokens IS NULL OR cache_creation_1h_tokens >= 0)`,
+  `ALTER TABLE request_usage ADD COLUMN cache_miss_tokens INTEGER CHECK (cache_miss_tokens IS NULL OR cache_miss_tokens >= 0)`,
+  `ALTER TABLE request_usage ADD COLUMN provider_total_tokens INTEGER CHECK (provider_total_tokens IS NULL OR provider_total_tokens >= 0)`,
+  `ALTER TABLE request_usage ADD COLUMN effective_context_tokens INTEGER CHECK (effective_context_tokens IS NULL OR effective_context_tokens >= 0)`,
+  `ALTER TABLE request_usage ADD COLUMN cache_read_rate REAL CHECK (cache_read_rate IS NULL OR cache_read_rate >= 0)`,
+  `ALTER TABLE request_usage ADD COLUMN cache_write_rate REAL CHECK (cache_write_rate IS NULL OR cache_write_rate >= 0)`,
+  `ALTER TABLE request_usage ADD COLUMN uncached_rate REAL CHECK (uncached_rate IS NULL OR uncached_rate >= 0)`,
+  `ALTER TABLE request_usage ADD COLUMN cache_reuse_ratio REAL CHECK (cache_reuse_ratio IS NULL OR (cache_reuse_ratio >= 0 AND cache_reuse_ratio <= 1))`,
+  `ALTER TABLE request_usage ADD COLUMN uncached_input_cost REAL CHECK (uncached_input_cost IS NULL OR uncached_input_cost >= 0)`,
+  `ALTER TABLE request_usage ADD COLUMN cache_read_cost REAL CHECK (cache_read_cost IS NULL OR cache_read_cost >= 0)`,
+  `ALTER TABLE request_usage ADD COLUMN cache_creation_5m_cost REAL CHECK (cache_creation_5m_cost IS NULL OR cache_creation_5m_cost >= 0)`,
+  `ALTER TABLE request_usage ADD COLUMN cache_creation_1h_cost REAL CHECK (cache_creation_1h_cost IS NULL OR cache_creation_1h_cost >= 0)`,
+  `ALTER TABLE request_usage ADD COLUMN reasoning_cost REAL CHECK (reasoning_cost IS NULL OR reasoning_cost >= 0)`,
+  `ALTER TABLE request_usage ADD COLUMN output_cost REAL CHECK (output_cost IS NULL OR output_cost >= 0)`,
+  `ALTER TABLE request_usage ADD COLUMN derived_total_cost REAL CHECK (derived_total_cost IS NULL OR derived_total_cost >= 0)`,
+  `ALTER TABLE request_usage ADD COLUMN pricing_version_id INTEGER REFERENCES pricing_versions(pricing_version_id) DEFERRABLE INITIALLY DEFERRED`,
+  `ALTER TABLE request_usage ADD COLUMN normalization_state TEXT`,
+  `ALTER TABLE usage_value_provenance ADD COLUMN request_id TEXT REFERENCES requests(request_id) DEFERRABLE INITIALLY DEFERRED`,
+  `ALTER TABLE usage_value_provenance ADD COLUMN metric TEXT`,
+  `ALTER TABLE usage_value_provenance ADD COLUMN value REAL`,
+  `ALTER TABLE usage_value_provenance ADD COLUMN provenance TEXT`,
+  `ALTER TABLE usage_value_provenance ADD COLUMN confidence REAL CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1))`,
+  `ALTER TABLE usage_value_provenance ADD COLUMN conflict_group TEXT`,
+  `ALTER TABLE repositories ADD COLUMN id TEXT`,
+  `ALTER TABLE repositories ADD COLUMN identity_hash TEXT`,
+  `ALTER TABLE repositories ADD COLUMN root_path_encrypted TEXT CHECK (
+    root_path_encrypted IS NULL OR (
+      json_valid(root_path_encrypted)
+      AND json_type(root_path_encrypted, '$.v') = 'integer'
+      AND json_type(root_path_encrypted, '$.k') = 'text'
+      AND json_type(root_path_encrypted, '$.n') = 'text'
+      AND json_type(root_path_encrypted, '$.c') = 'text'
+      AND json_type(root_path_encrypted, '$.t') = 'text'
+    )
+  )`,
+  `ALTER TABLE repositories ADD COLUMN remote_hash TEXT`,
+  `ALTER TABLE repositories ADD COLUMN remote_display TEXT`,
+  `ALTER TABLE repositories ADD COLUMN classification TEXT`,
+  `ALTER TABLE repositories ADD COLUMN classification_source TEXT`,
+  `ALTER TABLE repositories ADD COLUMN first_seen_at TEXT`,
+  `ALTER TABLE repositories ADD COLUMN last_seen_at TEXT`,
+  `ALTER TABLE provider_accounts ADD COLUMN id TEXT`,
+  `ALTER TABLE provider_accounts ADD COLUMN account_hmac TEXT`,
+  `ALTER TABLE provider_accounts ADD COLUMN logical_group TEXT`,
+  `ALTER TABLE provider_accounts ADD COLUMN credential_kind TEXT`,
+  `ALTER TABLE provider_accounts ADD COLUMN display_label TEXT`,
+  `ALTER TABLE provider_accounts ADD COLUMN identity_source TEXT`,
+  `ALTER TABLE provider_accounts ADD COLUMN first_seen_at TEXT`,
+  `ALTER TABLE provider_accounts ADD COLUMN last_seen_at TEXT`,
+  `ALTER TABLE sessions ADD COLUMN id TEXT`,
+  `ALTER TABLE sessions ADD COLUMN client_session_id_hmac TEXT`,
+  `ALTER TABLE sessions ADD COLUMN started_at TEXT`,
+  `ALTER TABLE sessions ADD COLUMN last_seen_at TEXT`,
+  `ALTER TABLE sessions ADD COLUMN initial_repository_id TEXT REFERENCES repositories(repository_id) DEFERRABLE INITIALLY DEFERRED`,
+  `ALTER TABLE sessions ADD COLUMN launcher_mode TEXT`,
+  `ALTER TABLE sessions ADD COLUMN capture_started_at TEXT`,
+  `ALTER TABLE sessions ADD COLUMN capture_ended_at TEXT`,
+  `ALTER TABLE evidence_gaps ADD COLUMN id TEXT`,
+  `ALTER TABLE evidence_gaps ADD COLUMN started_at TEXT`,
+  `ALTER TABLE evidence_gaps ADD COLUMN ended_at TEXT`,
+  `ALTER TABLE evidence_gaps ADD COLUMN detected_by TEXT`,
+  `ALTER TABLE evidence_gaps ADD COLUMN affected_client TEXT`,
+  `ALTER TABLE evidence_gaps ADD COLUMN affected_session TEXT`,
+  `ALTER TABLE evidence_gaps ADD COLUMN resolution TEXT`,
+  `ALTER TABLE pricing_versions ADD COLUMN id TEXT`,
+  `ALTER TABLE pricing_versions ADD COLUMN billing_model TEXT`,
+  `ALTER TABLE pricing_versions ADD COLUMN effective_until TEXT`,
+  `ALTER TABLE pricing_versions ADD COLUMN input_price REAL CHECK (input_price IS NULL OR input_price >= 0)`,
+  `ALTER TABLE pricing_versions ADD COLUMN output_price REAL CHECK (output_price IS NULL OR output_price >= 0)`,
+  `ALTER TABLE pricing_versions ADD COLUMN reasoning_price REAL CHECK (reasoning_price IS NULL OR reasoning_price >= 0)`,
+  `ALTER TABLE pricing_versions ADD COLUMN cache_read_price REAL CHECK (cache_read_price IS NULL OR cache_read_price >= 0)`,
+  `ALTER TABLE pricing_versions ADD COLUMN cache_creation_5m_price REAL CHECK (cache_creation_5m_price IS NULL OR cache_creation_5m_price >= 0)`,
+  `ALTER TABLE pricing_versions ADD COLUMN cache_creation_1h_price REAL CHECK (cache_creation_1h_price IS NULL OR cache_creation_1h_price >= 0)`,
+  `ALTER TABLE pricing_versions ADD COLUMN source_reference TEXT`,
+  `ALTER TABLE pricing_versions ADD COLUMN verified_at TEXT`,
+  `ALTER TABLE quota_observations ADD COLUMN id TEXT`,
+  `ALTER TABLE quota_observations ADD COLUMN quota_window TEXT`,
+  `ALTER TABLE quota_observations ADD COLUMN quota_utilization REAL CHECK (quota_utilization IS NULL OR quota_utilization >= 0)`,
+  `ALTER TABLE quota_observations ADD COLUMN quota_remaining REAL CHECK (quota_remaining IS NULL OR quota_remaining >= 0)`,
+  `ALTER TABLE quota_observations ADD COLUMN source TEXT`,
+  `CREATE INDEX IF NOT EXISTS idx_requests_attempt_id
+    ON requests(attempt_id)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_requests_attempt_id_unique
+    ON requests(attempt_id)
+    WHERE attempt_id IS NOT NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_requests_selected_provider_model
+    ON requests(selected_provider, selected_model)`,
+  `CREATE INDEX IF NOT EXISTS idx_requests_actual_provider_model
+    ON requests(actual_provider, actual_model)`,
+  `CREATE INDEX IF NOT EXISTS idx_payload_blobs_expires_pruned
+    ON payload_blobs(expires_at, pruned_at)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_payload_blobs_id_unique
+    ON payload_blobs(id)
+    WHERE id IS NOT NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_usage_observations_source_event
+    ON usage_observations(source, source_event_id)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_observations_id_unique
+    ON usage_observations(id)
+    WHERE id IS NOT NULL`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_request_usage_unique_request
+    ON request_usage(request_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_usage_value_provenance_request_metric
+    ON usage_value_provenance(request_id, metric)`,
+  `CREATE INDEX IF NOT EXISTS idx_repositories_identity_hash
+    ON repositories(identity_hash)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_repositories_id_unique
+    ON repositories(id)
+    WHERE id IS NOT NULL`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_repositories_identity_hash_unique
+    ON repositories(identity_hash)
+    WHERE identity_hash IS NOT NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_provider_accounts_provider_group
+    ON provider_accounts(provider, logical_group)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_accounts_id_unique
+    ON provider_accounts(id)
+    WHERE id IS NOT NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_sessions_client_session
+    ON sessions(client, client_session_id_hmac)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_id_unique
+    ON sessions(id)
+    WHERE id IS NOT NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_evidence_gaps_window
+    ON evidence_gaps(started_at, ended_at)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_evidence_gaps_id_unique
+    ON evidence_gaps(id)
+    WHERE id IS NOT NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_pricing_versions_effective_until
+    ON pricing_versions(provider, billing_model, model, effective_until)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_pricing_versions_id_unique
+    ON pricing_versions(id)
+    WHERE id IS NOT NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_quota_observations_window
+    ON quota_observations(provider_account_id, quota_window, observed_at)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_quota_observations_id_unique
+    ON quota_observations(id)
+    WHERE id IS NOT NULL`,
+  `INSERT OR REPLACE INTO schema_meta (key, value)
+    VALUES ('audit_schema_version', '3')`,
+]);
+
 export const AUDIT_MIGRATIONS = Object.freeze([
   Object.freeze({
     id: "001_initial_audit_store",
@@ -278,6 +493,11 @@ export const AUDIT_MIGRATIONS = Object.freeze([
     id: "002_approved_audit_design_tables",
     statements: APPROVED_AUDIT_DESIGN_STATEMENTS,
     checksum: checksumStatements(APPROVED_AUDIT_DESIGN_STATEMENTS),
+  }),
+  Object.freeze({
+    id: "003_complete_approved_audit_design_columns",
+    statements: COMPLETE_APPROVED_AUDIT_DESIGN_COLUMNS,
+    checksum: checksumStatements(COMPLETE_APPROVED_AUDIT_DESIGN_COLUMNS),
   }),
 ]);
 
