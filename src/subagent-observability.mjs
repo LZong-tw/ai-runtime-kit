@@ -229,23 +229,35 @@ async function renderTaskRow(task, input, env) {
   if (!parent || !child || !validPluginData(env)) return `ambiguous child transcript: ${taskLabel(task)}`;
   const path = join(env.CLAUDE_PLUGIN_DATA, "subagent-timelines", parent.key, child.key, ".state.json");
   const state = await loadState(path, parent, child);
-  if (state.entries.length === 0) return `${child.label}: waiting for first event`;
+  if (state.entries.length === 0) {
+    return [child.label, "waiting for first event", ...taskMetadata(task)].join(" | ");
+  }
   const latestText = [...state.entries].reverse().find((entry) => entry.kind === "assistant")?.text;
   const latestTool = [...state.entries].reverse().find((entry) => entry.kind === "tool")?.name;
   const parts = [child.label, oneLine(redactSensitive(latestText || "waiting for first event"))];
   if (latestTool) parts.push(`tool: ${latestTool}`);
+  return [...parts, ...taskMetadata(task)].join(" | ");
+}
+
+function taskMetadata(task) {
+  const parts = [];
   if (task.elapsed_ms !== undefined) parts.push(`${boundedMetadata(task.elapsed_ms)}ms`);
   if (task.elapsed !== undefined) parts.push(boundedMetadata(task.elapsed));
-  if (task.output_tokens !== undefined) parts.push(`${boundedMetadata(task.output_tokens)} tokens`);
+  const tokenCount = task.tokenCount ?? task.output_tokens;
+  if (tokenCount !== undefined) parts.push(`${boundedMetadata(tokenCount)} tokens`);
   if (task.input_tokens !== undefined) parts.push(`${boundedMetadata(task.input_tokens)} input tokens`);
-  return parts.join(" | ");
+  return parts;
 }
 
 function taskIdentity(task) {
-  const candidates = ["agent_id", "child_id", "child_name", "name"]
+  const explicit = ["agent_id", "child_id", "child_name"]
     .map((key) => typeof task?.[key] === "string" ? task[key] : "")
     .filter((value) => value.trim().length > 0);
-  return candidates.length > 0 && new Set(candidates).size === 1 ? candidates[0] : null;
+  if (explicit.length > 0) return new Set(explicit).size === 1 ? explicit[0] : null;
+  const nativeId = ["id", "task_id", "taskId"]
+    .map((key) => typeof task?.[key] === "string" ? task[key] : "")
+    .find((value) => value.trim().length > 0);
+  return nativeId || null;
 }
 
 function taskLabel(task) { return boundedMetadata(typeof task?.name === "string" ? task.name : "task", 80); }

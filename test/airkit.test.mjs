@@ -3225,6 +3225,53 @@ test("subagent observability preserves row metadata after bounding long prose", 
   }
 });
 
+test("subagent status line accepts Claude Code native task ids and token counts", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-native-task-"));
+  const childTranscript = join(pluginData, "child.jsonl");
+  const env = { CLAUDE_PLUGIN_DATA: pluginData };
+
+  try {
+    await writeFile(childTranscript, `${JSON.stringify({
+      type: "assistant",
+      message: { content: [
+        { type: "text", text: "native child progress" },
+        { type: "tool_use", name: "Read", input: { file_path: "/private/path" } },
+      ] },
+    })}\n`);
+    await processSubagentObservabilityHook({
+      hook_event_name: "PostToolUse",
+      session_id: "native-parent",
+      agent_id: "native-child",
+      transcript_path: childTranscript,
+    }, env);
+
+    const [row] = await renderSubagentStatusLine({
+      session_id: "native-parent",
+      tasks: [{
+        id: "native-child",
+        name: "native child task",
+        type: "agent",
+        status: "running",
+        tokenCount: 321,
+        tokenSamples: [321],
+      }],
+    }, env);
+    assert.match(row, /native child progress/);
+    assert.match(row, /Read/);
+    assert.match(row, /321 tokens/);
+    assert.doesNotMatch(row, /ambiguous child transcript/);
+
+    const [waiting] = await renderSubagentStatusLine({
+      session_id: "native-parent",
+      tasks: [{ id: "native-not-started", name: "not started", tokenCount: 99 }],
+    }, env);
+    assert.match(waiting, /waiting for first event/);
+    assert.match(waiting, /99 tokens/);
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
 test("subagent observability projects every tool result block without persisting output", async () => {
   const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-results-"));
   const childTranscript = join(pluginData, "child.jsonl");
