@@ -13,12 +13,14 @@ const INITIAL_AUDIT_STORE_STATEMENTS = Object.freeze([
     created_at TEXT NOT NULL
   )`,
   `CREATE TABLE IF NOT EXISTS source_events (
-    event_id TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY,
+    event_id TEXT NOT NULL UNIQUE,
     event_version INTEGER NOT NULL CHECK (event_version = 1),
     source TEXT NOT NULL CHECK (length(source) > 0),
     source_version TEXT NOT NULL CHECK (length(source_version) > 0),
     source_event_id TEXT CHECK (source_event_id IS NULL OR length(source_event_id) > 0),
     observed_at TEXT NOT NULL CHECK (length(observed_at) > 0),
+    received_at TEXT NOT NULL CHECK (length(received_at) > 0),
     logical_request_id TEXT CHECK (logical_request_id IS NULL OR length(logical_request_id) > 0),
     attempt_id TEXT CHECK (attempt_id IS NULL OR length(attempt_id) > 0),
     session_id TEXT CHECK (session_id IS NULL OR length(session_id) > 0),
@@ -40,6 +42,14 @@ const INITIAL_AUDIT_STORE_STATEMENTS = Object.freeze([
       'collector_gap',
       'retention_pruned',
       'payload_revealed'
+    )),
+    payload_json TEXT CHECK (payload_json IS NULL OR json_valid(payload_json)),
+    payload_hash TEXT CHECK (payload_hash IS NULL OR length(payload_hash) > 0),
+    normalization_status TEXT NOT NULL CHECK (normalization_status IN (
+      'pending',
+      'normalized',
+      'failed',
+      'ignored'
     )),
     provider TEXT CHECK (provider IS NULL OR length(provider) > 0),
     model TEXT CHECK (model IS NULL OR length(model) > 0),
@@ -111,6 +121,12 @@ const INITIAL_AUDIT_STORE_STATEMENTS = Object.freeze([
     ON source_events(session_id)`,
   `CREATE INDEX IF NOT EXISTS idx_source_events_observed_at
     ON source_events(observed_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_source_events_received_at
+    ON source_events(received_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_source_events_payload_hash
+    ON source_events(payload_hash)`,
+  `CREATE INDEX IF NOT EXISTS idx_source_events_normalization_status
+    ON source_events(normalization_status, received_at)`,
   `CREATE INDEX IF NOT EXISTS idx_source_events_provider_model
     ON source_events(provider, model)`,
   `CREATE INDEX IF NOT EXISTS idx_source_events_time_provider_model
@@ -164,7 +180,8 @@ const APPROVED_AUDIT_DESIGN_STATEMENTS = Object.freeze([
     UNIQUE (provider, account_hash)
   )`,
   `CREATE TABLE IF NOT EXISTS requests (
-    request_id TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY,
+    request_id TEXT NOT NULL UNIQUE CHECK (length(request_id) > 0),
     logical_request_id TEXT NOT NULL UNIQUE CHECK (length(logical_request_id) > 0),
     session_id TEXT REFERENCES sessions(session_id) DEFERRABLE INITIALLY DEFERRED,
     repository_id TEXT REFERENCES repositories(repository_id) DEFERRABLE INITIALLY DEFERRED,
@@ -179,7 +196,7 @@ const APPROVED_AUDIT_DESIGN_STATEMENTS = Object.freeze([
   )`,
   `CREATE TABLE IF NOT EXISTS payload_blobs (
     payload_blob_id INTEGER PRIMARY KEY,
-    request_id TEXT NOT NULL REFERENCES requests(request_id) DEFERRABLE INITIALLY DEFERRED,
+    request_id INTEGER NOT NULL REFERENCES requests(id) DEFERRABLE INITIALLY DEFERRED,
     source_event_id TEXT NOT NULL REFERENCES source_events(event_id) DEFERRABLE INITIALLY DEFERRED,
     blob_kind TEXT NOT NULL CHECK (blob_kind IN ('request', 'response', 'evidence')),
     payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
@@ -188,7 +205,7 @@ const APPROVED_AUDIT_DESIGN_STATEMENTS = Object.freeze([
   )`,
   `CREATE TABLE IF NOT EXISTS usage_observations (
     usage_observation_id INTEGER PRIMARY KEY,
-    request_id TEXT NOT NULL REFERENCES requests(request_id) DEFERRABLE INITIALLY DEFERRED,
+    request_id INTEGER NOT NULL REFERENCES requests(id) DEFERRABLE INITIALLY DEFERRED,
     source_event_id TEXT NOT NULL REFERENCES source_events(event_id) DEFERRABLE INITIALLY DEFERRED,
     provider TEXT CHECK (provider IS NULL OR length(provider) > 0),
     model TEXT CHECK (model IS NULL OR length(model) > 0),
@@ -196,11 +213,11 @@ const APPROVED_AUDIT_DESIGN_STATEMENTS = Object.freeze([
   )`,
   `CREATE TABLE IF NOT EXISTS request_usage (
     request_usage_id INTEGER PRIMARY KEY,
-    request_id TEXT NOT NULL REFERENCES requests(request_id) ON DELETE CASCADE,
+    request_id INTEGER NOT NULL REFERENCES requests(id) ON DELETE CASCADE,
     usage_observation_id INTEGER REFERENCES usage_observations(usage_observation_id) ON DELETE SET NULL,
-    metric TEXT NOT NULL CHECK (length(metric) > 0),
-    value REAL NOT NULL CHECK (value >= 0),
-    unit TEXT NOT NULL CHECK (length(unit) > 0),
+    metric TEXT CHECK (metric IS NULL OR length(metric) > 0),
+    value REAL CHECK (value IS NULL OR value >= 0),
+    unit TEXT CHECK (unit IS NULL OR length(unit) > 0),
     UNIQUE (request_id, metric, usage_observation_id)
   )`,
   `CREATE TABLE IF NOT EXISTS usage_value_provenance (
@@ -360,7 +377,7 @@ const COMPLETE_APPROVED_AUDIT_DESIGN_COLUMNS = Object.freeze([
   `ALTER TABLE request_usage ADD COLUMN derived_total_cost REAL CHECK (derived_total_cost IS NULL OR derived_total_cost >= 0)`,
   `ALTER TABLE request_usage ADD COLUMN pricing_version_id INTEGER REFERENCES pricing_versions(pricing_version_id) DEFERRABLE INITIALLY DEFERRED`,
   `ALTER TABLE request_usage ADD COLUMN normalization_state TEXT`,
-  `ALTER TABLE usage_value_provenance ADD COLUMN request_id TEXT REFERENCES requests(request_id) DEFERRABLE INITIALLY DEFERRED`,
+  `ALTER TABLE usage_value_provenance ADD COLUMN request_id INTEGER REFERENCES requests(id) DEFERRABLE INITIALLY DEFERRED`,
   `ALTER TABLE usage_value_provenance ADD COLUMN metric TEXT`,
   `ALTER TABLE usage_value_provenance ADD COLUMN value REAL`,
   `ALTER TABLE usage_value_provenance ADD COLUMN provenance TEXT`,

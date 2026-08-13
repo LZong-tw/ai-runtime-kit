@@ -96,7 +96,21 @@ function sha256(bytes) {
 }
 
 const APPROVED_SCHEMA_COLUMNS = Object.freeze({
+  source_events: [
+    "id",
+    "event_id",
+    "source",
+    "source_version",
+    "source_event_id",
+    "observed_at",
+    "received_at",
+    "event_kind",
+    "payload_json",
+    "payload_hash",
+    "normalization_status",
+  ],
   requests: [
+    "id",
     "request_id",
     "logical_request_id",
     "attempt_id",
@@ -348,6 +362,117 @@ test("approved design tables expose every approved column", async () => {
       }
     } finally {
       store.close();
+    }
+  });
+});
+
+test("approved request identifiers use integer primary keys for payload foreign keys", async () => {
+  await withRoot(async (paths) => {
+    const store = openTestStore(paths);
+    store.close();
+
+    const raw = new DatabaseSync(paths.databasePath);
+    try {
+      raw.exec("PRAGMA foreign_keys = ON");
+
+      const requestColumns = raw.prepare("PRAGMA table_info(requests)").all();
+      const idColumn = requestColumns.find((column) => column.name === "id");
+      assert.equal(idColumn?.type, "INTEGER");
+      assert.equal(idColumn?.pk, 1);
+      assert.equal(requestColumns.find((column) => column.name === "request_id")?.pk, 0);
+
+      const sourceColumns = raw.prepare("PRAGMA table_info(source_events)").all();
+      const sourceIdColumn = sourceColumns.find((column) => column.name === "id");
+      assert.equal(sourceIdColumn?.type, "INTEGER");
+      assert.equal(sourceIdColumn?.pk, 1);
+
+      const payloadRequestFk = raw.prepare("PRAGMA foreign_key_list(payload_blobs)").all()
+        .find((fk) => fk.from === "request_id");
+      assert.equal(payloadRequestFk?.table, "requests");
+      assert.equal(payloadRequestFk?.to, "id");
+
+      const childFkExpectations = {
+        usage_observations: "id",
+        request_usage: "id",
+        usage_value_provenance: "id",
+      };
+      for (const [table, targetColumn] of Object.entries(childFkExpectations)) {
+        const fk = raw.prepare(`PRAGMA foreign_key_list(${table})`).all()
+          .find((row) => row.from === "request_id");
+        assert.equal(fk?.table, "requests", `${table}.request_id should reference requests`);
+        assert.equal(fk?.to, targetColumn, `${table}.request_id should reference requests.${targetColumn}`);
+      }
+
+      raw.prepare(`
+        INSERT INTO source_events (
+          event_id,
+          event_version,
+          source,
+          source_version,
+          observed_at,
+          received_at,
+          client,
+          event_kind,
+          payload_json,
+          normalization_status,
+          inserted_at
+        ) VALUES (
+          'event_fk_1',
+          1,
+          'airkit-test',
+          '1.0.0',
+          '2026-08-13T01:00:00.000Z',
+          '2026-08-13T01:00:01.000Z',
+          'airclaude',
+          'request_payload',
+          '{}',
+          'pending',
+          '2026-08-13T01:00:01.000Z'
+        )
+      `).run();
+      const requestResult = raw.prepare(`
+        INSERT INTO requests (
+          request_id,
+          logical_request_id,
+          client,
+          started_at,
+          last_observed_at,
+          first_source_event_id
+        ) VALUES (
+          'logical_req_1',
+          'logical_req_1',
+          'airclaude',
+          '2026-08-13T01:00:00.000Z',
+          '2026-08-13T01:00:01.000Z',
+          'event_fk_1'
+        )
+      `).run();
+      const requestRowId = Number(requestResult.lastInsertRowid);
+
+      raw.prepare(`
+        INSERT INTO payload_blobs (
+          request_id,
+          source_event_id,
+          blob_kind,
+          payload_json,
+          created_at
+        ) VALUES (?, 'event_fk_1', 'request', '{}', '2026-08-13T01:00:01.000Z')
+      `).run(requestRowId);
+
+      assert.throws(
+        () => raw.prepare(`
+          INSERT INTO payload_blobs (
+            request_id,
+            source_event_id,
+            blob_kind,
+            payload_json,
+            created_at
+          ) VALUES ('logical_req_1', 'event_fk_1', 'response', '{}', '2026-08-13T01:00:01.000Z')
+        `).run(),
+        /constraint|foreign key/i,
+      );
+    } finally {
+      raw.close();
     }
   });
 });
