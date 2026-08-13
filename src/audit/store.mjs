@@ -3,18 +3,32 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  realpathSync,
   readdirSync,
   statSync,
   unlinkSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { validateAuditEvent } from "./event.mjs";
 import { AUDIT_MIGRATIONS, checksumMigration } from "./migrations.mjs";
 
-const BACKUP_RETAIN_COUNT = 5;
+const BACKUP_RETAIN_COUNT = 3;
 const OPEN_WRITERS = new Set();
+const READONLY_PRAGMAS = new Set([
+  "foreign_keys",
+  "foreign_key_check",
+  "foreign_key_list",
+  "index_info",
+  "index_list",
+  "index_xinfo",
+  "integrity_check",
+  "journal_mode",
+  "quick_check",
+  "table_info",
+  "table_xinfo",
+]);
 const LEDGER_SQL = `CREATE TABLE IF NOT EXISTS audit_migrations (
   id TEXT PRIMARY KEY,
   checksum TEXT NOT NULL,
@@ -47,7 +61,7 @@ export function openAuditStore(options = {}) {
     throw new TypeError("backupDir is required for writable audit stores");
   }
 
-  const writerKey = databasePath;
+  const writerKey = canonicalDatabasePath(databasePath);
   if (!readOnly) {
     if (OPEN_WRITERS.has(writerKey)) {
       throw new AuditStoreError(`audit store already has a writer for ${databasePath}`, {
@@ -64,7 +78,7 @@ export function openAuditStore(options = {}) {
       mkdirSync(dirname(databasePath), { recursive: true });
       mkdirSync(backupDir, { recursive: true });
       if (existsSync(databasePath)) {
-        backupDatabase({ databasePath, backupDir, now });
+        backupDatabase({ databasePath, backupDir, Database, now });
       } else {
         pruneBackups(backupDir);
       }
@@ -110,6 +124,9 @@ export function openAuditStore(options = {}) {
       }
       if (payloadMeta.repository) {
         upsertRepository(payloadMeta.repository, observed);
+      }
+      if (payloadMeta.providerAccount) {
+        upsertProviderAccount(payloadMeta.providerAccount, observed);
       }
 
       db.prepare(`
@@ -160,6 +177,25 @@ export function openAuditStore(options = {}) {
         `).run(Number(payloadResult.lastInsertRowid), validated.event_id);
       }
 
+      if (validated.logical_request_id) {
+        upsertRequest(validated, payloadMeta, observed);
+        if (validated.event_kind === "request_payload") {
+          db.prepare(`
+            INSERT INTO payload_blobs (
+              request_id,
+              source_event_id,
+              blob_kind,
+              payload_json,
+              created_at
+            ) VALUES (?, ?, 'request', ?, ?)
+            ON CONFLICT(source_event_id, blob_kind) DO NOTHING
+          `).run(validated.logical_request_id, validated.event_id, payloadJson, observed);
+        }
+        if (validated.event_kind === "usage_reported") {
+          insertUsageObservation(validated, payloadMeta);
+        }
+      }
+
       if (validated.attempt_id) {
         upsertProviderAttempt(validated, payloadMeta, observed);
       }
@@ -192,14 +228,26 @@ export function openAuditStore(options = {}) {
     if (typeof fields.reason !== "string" || fields.reason.length === 0) {
       throw new TypeError("reason is required");
     }
+    const recordedAt = isoNow(now);
+    const detailsJson = fields.details === undefined ? null : JSON.stringify(fields.details);
     const result = db.prepare(`
       INSERT INTO collector_gaps (source, reason, details_json, recorded_at)
       VALUES (?, ?, ?, ?)
     `).run(
       fields.source,
       fields.reason,
-      fields.details === undefined ? null : JSON.stringify(fields.details),
-      isoNow(now),
+      detailsJson,
+      recordedAt,
+    );
+    db.prepare(`
+      INSERT INTO evidence_gaps (source, source_event_id, reason, details_json, recorded_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(
+      fields.source,
+      fields.source_event_id ?? null,
+      fields.reason,
+      detailsJson,
+      recordedAt,
     );
     return { status: "committed", id: Number(result.lastInsertRowid) };
   }
@@ -234,14 +282,25 @@ export function openAuditStore(options = {}) {
       .map((row) => row.name));
     for (const table of [
       "audit_migrations",
-      "schema_meta",
-      "source_events",
-      "request_payloads",
-      "session_contexts",
-      "repository_contexts",
-      "provider_attempts",
-      "collector_gaps",
       "audit_heartbeats",
+      "collector_gaps",
+      "evidence_gaps",
+      "payload_blobs",
+      "pricing_versions",
+      "provider_accounts",
+      "provider_attempts",
+      "quota_observations",
+      "repositories",
+      "repository_contexts",
+      "request_payloads",
+      "request_usage",
+      "requests",
+      "schema_meta",
+      "session_contexts",
+      "sessions",
+      "source_events",
+      "usage_observations",
+      "usage_value_provenance",
     ]) {
       if (!tables.has(table)) {
         throw new AuditStoreError(`audit schema is missing table ${table}`, {
@@ -263,6 +322,7 @@ export function openAuditStore(options = {}) {
     if (typeof sql !== "string" || sql.trim().length === 0) {
       throw new TypeError("sql must be a non-empty string");
     }
+    assertReadOnlySql(sql);
     const values = Array.isArray(params) ? params : [params];
     return db.prepare(sql).all(...values);
   }
@@ -294,6 +354,12 @@ export function openAuditStore(options = {}) {
       ON CONFLICT(session_id) DO UPDATE SET
         last_observed_at = excluded.last_observed_at
     `).run(event.session_id, event.client, observed, event.observed_at);
+    db.prepare(`
+      INSERT INTO sessions (session_id, client, first_observed_at, last_observed_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(session_id) DO UPDATE SET
+        last_observed_at = excluded.last_observed_at
+    `).run(event.session_id, event.client, observed, event.observed_at);
   }
 
   function upsertRepository(repository, observed) {
@@ -315,6 +381,129 @@ export function openAuditStore(options = {}) {
       observed,
       observed,
     );
+    db.prepare(`
+      INSERT INTO repositories (
+        repository_id,
+        root_encrypted_path,
+        remote_encrypted_path,
+        first_observed_at,
+        last_observed_at
+      ) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(repository_id) DO UPDATE SET
+        remote_encrypted_path = excluded.remote_encrypted_path,
+        last_observed_at = excluded.last_observed_at
+    `).run(
+      repository.id,
+      repository.root,
+      repository.remote,
+      observed,
+      observed,
+    );
+  }
+
+  function upsertProviderAccount(providerAccount, observed) {
+    db.prepare(`
+      INSERT INTO provider_accounts (
+        provider_account_id,
+        provider,
+        account_hash,
+        first_observed_at,
+        last_observed_at
+      ) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(provider_account_id) DO UPDATE SET
+        last_observed_at = excluded.last_observed_at
+    `).run(
+      providerAccount.id,
+      providerAccount.provider,
+      providerAccount.accountHash,
+      observed,
+      observed,
+    );
+  }
+
+  function upsertRequest(event, payload, observed) {
+    db.prepare(`
+      INSERT INTO requests (
+        request_id,
+        logical_request_id,
+        session_id,
+        repository_id,
+        provider_account_id,
+        provider,
+        model,
+        client,
+        started_at,
+        last_observed_at,
+        first_source_event_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(request_id) DO UPDATE SET
+        session_id = COALESCE(excluded.session_id, requests.session_id),
+        repository_id = COALESCE(excluded.repository_id, requests.repository_id),
+        provider_account_id = COALESCE(excluded.provider_account_id, requests.provider_account_id),
+        provider = COALESCE(excluded.provider, requests.provider),
+        model = COALESCE(excluded.model, requests.model),
+        last_observed_at = excluded.last_observed_at
+    `).run(
+      event.logical_request_id,
+      event.logical_request_id,
+      event.session_id,
+      payload.repository?.id ?? null,
+      payload.providerAccount?.id ?? null,
+      payload.provider,
+      payload.model,
+      event.client,
+      event.observed_at,
+      observed,
+      event.event_id,
+    );
+  }
+
+  function insertUsageObservation(event, payload) {
+    const observationResult = db.prepare(`
+      INSERT INTO usage_observations (
+        request_id,
+        source_event_id,
+        provider,
+        model,
+        observed_at
+      ) VALUES (?, ?, ?, ?, ?)
+    `).run(
+      event.logical_request_id,
+      event.event_id,
+      payload.provider,
+      payload.model,
+      event.observed_at,
+    );
+
+    const usage = usageMetrics(event.payload);
+    for (const [metric, value] of Object.entries(usage)) {
+      const usageResult = db.prepare(`
+        INSERT INTO request_usage (
+          request_id,
+          usage_observation_id,
+          metric,
+          value,
+          unit
+        ) VALUES (?, ?, ?, ?, 'tokens')
+      `).run(
+        event.logical_request_id,
+        Number(observationResult.lastInsertRowid),
+        metric,
+        value,
+      );
+      db.prepare(`
+        INSERT INTO usage_value_provenance (
+          request_usage_id,
+          source_event_id,
+          evidence_path,
+          provenance_kind
+        ) VALUES (?, ?, ?, 'provider')
+      `).run(
+        Number(usageResult.lastInsertRowid),
+        event.event_id,
+        `$.usage.${metric}`,
+      );
+    }
   }
 
   function upsertProviderAttempt(event, payload, observed) {
@@ -461,9 +650,15 @@ function execTransaction(db, work) {
   }
 }
 
-function defaultBackupDatabase({ databasePath, backupDir, now }) {
+function defaultBackupDatabase({ databasePath, backupDir, Database = DatabaseSync, now }) {
   mkdirSync(backupDir, { recursive: true });
   if (existsSync(databasePath) && statSync(databasePath).size > 0) {
+    const source = new Database(databasePath);
+    try {
+      source.exec("PRAGMA wal_checkpoint(FULL)");
+    } finally {
+      safeClose(source);
+    }
     const stamp = isoNow(now).replaceAll("-", "").replaceAll(":", "").replace(".", "");
     copyFileSync(databasePath, join(backupDir, `audit-${stamp}.sqlite`));
   }
@@ -482,12 +677,30 @@ function pruneBackups(backupDir) {
 
 function payloadMetadata(payload) {
   if (!isRecord(payload)) {
-    return { provider: null, model: null, repository: null };
+    return { provider: null, model: null, providerAccount: null, repository: null };
   }
+  const provider = stringOrNull(payload.provider ?? payload.provider_id);
   return {
-    provider: stringOrNull(payload.provider ?? payload.provider_id),
+    provider,
     model: stringOrNull(payload.model ?? payload.model_id),
+    providerAccount: providerAccountMetadata(provider, payload),
     repository: repositoryMetadata(payload.repository),
+  };
+}
+
+function providerAccountMetadata(provider, payload) {
+  if (!provider) return null;
+  const accountHash = stringOrNull(
+    payload.provider_account_hash
+      ?? payload.provider_account_hmac
+      ?? payload.account_hash
+      ?? payload.account_hmac,
+  );
+  if (!accountHash) return null;
+  return {
+    id: createHash("sha256").update(`${provider}\n${accountHash}`, "utf8").digest("hex"),
+    provider,
+    accountHash,
   };
 }
 
@@ -548,6 +761,53 @@ function normalizeOpenError(error) {
     });
   }
   return error;
+}
+
+function canonicalDatabasePath(databasePath) {
+  try {
+    return realpathSync.native(databasePath);
+  } catch {
+    const parent = realpathSync.native(dirname(resolve(databasePath)));
+    return join(parent, basename(databasePath));
+  }
+}
+
+function assertReadOnlySql(sql) {
+  const trimmed = sql.trim();
+  const singleStatement = trimmed.replace(/;\s*$/, "");
+  if (/;\s*\S/.test(singleStatement)) {
+    throw new AuditStoreError("audit store query is read-only and accepts one statement", {
+      code: "AIRKIT_AUDIT_QUERY_READ_ONLY",
+    });
+  }
+
+  const command = /^[A-Za-z]+/.exec(singleStatement)?.[0]?.toUpperCase();
+  if (command === "SELECT") return;
+  if (command === "WITH" && !/\b(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|PRAGMA|VACUUM|ATTACH|DETACH)\b/i.test(singleStatement)) {
+    return;
+  }
+  if (command === "PRAGMA" && isReadOnlyPragma(singleStatement)) return;
+  throw new AuditStoreError("audit store query is read-only", {
+    code: "AIRKIT_AUDIT_QUERY_READ_ONLY",
+  });
+}
+
+function isReadOnlyPragma(sql) {
+  if (sql.includes("=")) return false;
+  const match = /^PRAGMA\s+(?:["'`[]?)([A-Za-z_]+)(?:["'`\]]?)(?:\s*\([^)]*\))?\s*$/i.exec(sql);
+  return match ? READONLY_PRAGMAS.has(match[1].toLowerCase()) : false;
+}
+
+function usageMetrics(payload) {
+  const source = isRecord(payload?.usage) ? payload.usage : payload;
+  if (!isRecord(source)) return {};
+  const metrics = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+      metrics[key] = value;
+    }
+  }
+  return metrics;
 }
 
 function safeClose(db) {
