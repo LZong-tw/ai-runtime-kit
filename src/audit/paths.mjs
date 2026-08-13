@@ -12,13 +12,28 @@ export function resolveAuditPaths({ env = process.env, overrides = {} } = {}) {
     overrides.querySocketPath ?? join(rootDir, "auditd-query.sock"),
     "querySocketPath",
   );
+  const homeDir = normalizeAbsolutePath(overrides.homeDir ?? homeFromEnv(env), "homeDir");
+  const launchAgentPath = normalizeAbsolutePath(
+    overrides.launchAgentPath ?? join(homeDir, "Library", "LaunchAgents", "com.airkit.auditd.plist"),
+    "launchAgentPath",
+  );
+  const uid = String(overrides.uid ?? env.AIRKIT_GUI_UID ?? env.UID ?? process.getuid?.() ?? "");
+  if (!/^\d+$/.test(uid)) throw new Error("uid must be a numeric macOS user id");
 
   return Object.freeze({
     rootDir,
     spoolDir,
     socketPath,
     querySocketPath,
+    homeDir,
+    launchAgentPath,
+    launchdDomain: `gui/${uid}`,
+    launchdTarget: `gui/${uid}/com.airkit.auditd`,
   });
+}
+
+function homeFromEnv(env) {
+  return typeof env?.HOME === "string" && env.HOME.length > 0 ? env.HOME : homedir();
 }
 
 function xdgStateHome(env) {
