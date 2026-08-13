@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  copyFile,
+  mkdir,
+  readdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -99,23 +107,38 @@ test("clean create installs the approved schema, pragmas, and searchable indexes
       assert.ok(migrationRows.every((row) => /^[a-f0-9]{64}$/.test(row.checksum)));
       assert.ok(migrationRows.every((row) => row.applied_at === "2026-08-13T02:03:04.005Z"));
 
-      const tableNames = store.query("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")
-        .map((row) => row.name);
-      assert.deepEqual(tableNames, [
-        "audit_heartbeats",
+      const tableNames = new Set(store.query("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")
+        .map((row) => row.name));
+      for (const expected of [
         "audit_migrations",
-        "collector_gaps",
-        "provider_attempts",
-        "repository_contexts",
+        "evidence_gaps",
+        "payload_blobs",
+        "pricing_versions",
+        "provider_accounts",
+        "quota_observations",
+        "repositories",
         "request_payloads",
+        "request_usage",
+        "requests",
+        "sessions",
         "schema_meta",
-        "session_contexts",
         "source_events",
-      ]);
+        "usage_observations",
+        "usage_value_provenance",
+      ]) {
+        assert.ok(tableNames.has(expected), `missing approved table ${expected}`);
+      }
 
       const indexNames = store.query("SELECT name FROM sqlite_schema WHERE type = 'index' ORDER BY name")
         .map((row) => row.name);
       for (const expected of [
+        "idx_payload_blobs_request_id",
+        "idx_quota_observations_provider_time",
+        "idx_request_usage_request_id",
+        "idx_requests_provider_model",
+        "idx_requests_repository_id",
+        "idx_requests_session_id",
+        "idx_requests_started_at",
         "idx_source_events_logical_request_id",
         "idx_source_events_observed_at",
         "idx_source_events_provider_model",
@@ -227,7 +250,7 @@ test("interrupted migration rows stop startup and preserve a backup", async () =
   });
 });
 
-test("migration backups retain the newest five snapshots", async () => {
+test("migration backups retain the newest three snapshots", async () => {
   await withRoot(async (paths) => {
     await mkdir(paths.backupDir, { recursive: true });
     for (let index = 0; index < 7; index += 1) {
@@ -241,10 +264,8 @@ test("migration backups retain the newest five snapshots", async () => {
     store.close();
 
     const names = (await readdir(paths.backupDir)).filter((name) => name.endsWith(".sqlite")).sort();
-    assert.equal(names.length, 5);
+    assert.equal(names.length, 3);
     assert.deepEqual(names, [
-      "audit-2026-old-3.sqlite",
-      "audit-2026-old-4.sqlite",
       "audit-2026-old-5.sqlite",
       "audit-2026-old-6.sqlite",
       "audit-20260813T020304005Z.sqlite",
@@ -254,17 +275,82 @@ test("migration backups retain the newest five snapshots", async () => {
 
 test("verify reports foreign-key and schema failures", async () => {
   await withRoot(async (paths) => {
-    const store = openTestStore(paths);
-    try {
-      await store.ingestEvent(createFixture());
-      store.query("PRAGMA foreign_keys = OFF");
-      store.query("DELETE FROM request_payloads");
-      store.query("PRAGMA foreign_keys = ON");
+    let store = openTestStore(paths);
+    await store.ingestEvent(createFixture());
+    store.close();
 
+    const raw = new DatabaseSync(paths.databasePath);
+    raw.exec("PRAGMA foreign_keys = OFF; DELETE FROM request_payloads; PRAGMA foreign_keys = ON");
+    raw.close();
+
+    store = openTestStore(paths, { readOnly: true });
+    try {
       assert.throws(
         () => store.verify(),
         (error) => error.code === "AIRKIT_AUDIT_VERIFY_FAILED" && /foreign key/i.test(error.message),
       );
+    } finally {
+      store.close();
+    }
+  });
+});
+
+test("writer lock canonicalizes database identity across symlinks", async () => {
+  await withRoot(async (paths) => {
+    const aliasPath = join(paths.root, "audit-alias.sqlite");
+    const store = openTestStore(paths);
+    try {
+      await symlink(paths.databasePath, aliasPath);
+      assert.throws(
+        () => openTestStore({ ...paths, databasePath: aliasPath }),
+        (error) => error.code === "AIRKIT_AUDIT_WRITER_BUSY",
+      );
+    } finally {
+      store.close();
+    }
+  });
+});
+
+test("migration backups include WAL frames from a live source database", async () => {
+  await withRoot(async (paths) => {
+    await mkdir(paths.backupDir, { recursive: true });
+    const raw = new DatabaseSync(paths.databasePath);
+    raw.exec(`
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE legacy_wal_rows (id INTEGER PRIMARY KEY, marker TEXT NOT NULL);
+      INSERT INTO legacy_wal_rows (marker) VALUES ('row only visible through wal');
+    `);
+
+    try {
+      const store = openTestStore(paths);
+      store.close();
+
+      const [backupName] = (await readdir(paths.backupDir)).filter((name) => name.endsWith(".sqlite")).sort();
+      const backup = new DatabaseSync(join(paths.backupDir, backupName), { readOnly: true });
+      try {
+        assert.equal(
+          backup.prepare("SELECT marker FROM legacy_wal_rows WHERE id = 1").get().marker,
+          "row only visible through wal",
+        );
+      } finally {
+        backup.close();
+      }
+    } finally {
+      raw.close();
+    }
+  });
+});
+
+test("public query only allows read-only SQL", async () => {
+  await withRoot(async (paths) => {
+    const store = openTestStore(paths);
+    try {
+      assert.equal(store.query("SELECT count(*) AS n FROM source_events")[0].n, 0);
+      assert.throws(() => store.query("INSERT INTO source_events (event_id) VALUES ('bad')"), /read-only/i);
+      assert.throws(() => store.query("DELETE FROM source_events"), /read-only/i);
+      assert.throws(() => store.query("UPDATE schema_meta SET value = '2'"), /read-only/i);
+      assert.throws(() => store.query("PRAGMA foreign_keys = OFF"), /read-only/i);
+      assert.equal(store.query("PRAGMA foreign_keys")[0].foreign_keys, 1);
     } finally {
       store.close();
     }

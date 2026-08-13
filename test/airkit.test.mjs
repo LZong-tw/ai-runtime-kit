@@ -49,11 +49,11 @@ test("runtime requirements hard-cut to Node 22, Claude Code 2.1.208, and CCR 3.0
     await readFile(resolve(import.meta.dirname, "..", "package.json"), "utf8"),
   );
 
-  assert.equal(packageJson.engines.node, ">=22");
+  assert.equal(packageJson.engines.node, ">=22.13.0");
   assert.deepEqual(airkitRuntime.RUNTIME_REQUIREMENTS, {
     claudeCode: ">=2.1.208",
     claudeCodeRouter: ">=3.0.18 <4",
-    node: ">=22",
+    node: ">=22.13.0",
   });
 });
 
@@ -1716,7 +1716,7 @@ test("runtime check reports installed versions against the hard-cut requirements
   });
 
   assert.equal(exitCode, 0);
-  assert.match(output.join(""), /Node\.js\s+24\.11\.1\s+required >=22\s+ok/);
+  assert.match(output.join(""), /Node\.js\s+24\.11\.1\s+required >=22\.13\.0\s+ok/);
   assert.match(output.join(""), /Claude Code\s+2\.1\.208\s+required >=2\.1\.208\s+ok/);
   assert.match(output.join(""), /Claude Code Router\s+3\.0\.18\s+required >=3\.0\.18 <4\s+ok/);
 });

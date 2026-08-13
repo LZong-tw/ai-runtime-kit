@@ -36,7 +36,7 @@ const compatibilityPluginModule = join(here, "compat", "plugin.mjs");
 export const RUNTIME_REQUIREMENTS = Object.freeze({
   claudeCode: ">=2.1.208",
   claudeCodeRouter: ">=3.0.18 <4",
-  node: ">=22",
+  node: ">=22.13.0",
 });
 const RUNTIME_TARGETS = Object.freeze({ claudeCode: "2.1.208", claudeCodeRouter: "3.0.18" });
 const reusableRuntimeLessonsPrompt = [

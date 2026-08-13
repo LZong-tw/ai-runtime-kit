@@ -125,11 +125,159 @@ const INITIAL_AUDIT_STORE_STATEMENTS = Object.freeze([
     VALUES ('audit_schema_version', '1')`,
 ]);
 
+const APPROVED_AUDIT_DESIGN_STATEMENTS = Object.freeze([
+  `CREATE TABLE IF NOT EXISTS sessions (
+    session_id TEXT PRIMARY KEY,
+    client TEXT NOT NULL CHECK (length(client) > 0),
+    first_observed_at TEXT NOT NULL,
+    last_observed_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS repositories (
+    repository_id TEXT PRIMARY KEY,
+    root_encrypted_path TEXT NOT NULL CHECK (
+      json_valid(root_encrypted_path)
+      AND json_type(root_encrypted_path, '$.v') = 'integer'
+      AND json_type(root_encrypted_path, '$.k') = 'text'
+      AND json_type(root_encrypted_path, '$.n') = 'text'
+      AND json_type(root_encrypted_path, '$.c') = 'text'
+      AND json_type(root_encrypted_path, '$.t') = 'text'
+    ),
+    remote_encrypted_path TEXT CHECK (
+      remote_encrypted_path IS NULL OR (
+        json_valid(remote_encrypted_path)
+        AND json_type(remote_encrypted_path, '$.v') = 'integer'
+        AND json_type(remote_encrypted_path, '$.k') = 'text'
+        AND json_type(remote_encrypted_path, '$.n') = 'text'
+        AND json_type(remote_encrypted_path, '$.c') = 'text'
+        AND json_type(remote_encrypted_path, '$.t') = 'text'
+      )
+    ),
+    first_observed_at TEXT NOT NULL,
+    last_observed_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS provider_accounts (
+    provider_account_id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL CHECK (length(provider) > 0),
+    account_hash TEXT NOT NULL CHECK (length(account_hash) > 0),
+    first_observed_at TEXT NOT NULL,
+    last_observed_at TEXT NOT NULL,
+    UNIQUE (provider, account_hash)
+  )`,
+  `CREATE TABLE IF NOT EXISTS requests (
+    request_id TEXT PRIMARY KEY,
+    logical_request_id TEXT NOT NULL UNIQUE CHECK (length(logical_request_id) > 0),
+    session_id TEXT REFERENCES sessions(session_id) DEFERRABLE INITIALLY DEFERRED,
+    repository_id TEXT REFERENCES repositories(repository_id) DEFERRABLE INITIALLY DEFERRED,
+    provider_account_id TEXT REFERENCES provider_accounts(provider_account_id) DEFERRABLE INITIALLY DEFERRED,
+    provider TEXT CHECK (provider IS NULL OR length(provider) > 0),
+    model TEXT CHECK (model IS NULL OR length(model) > 0),
+    client TEXT NOT NULL CHECK (length(client) > 0),
+    started_at TEXT NOT NULL,
+    last_observed_at TEXT NOT NULL,
+    first_source_event_id TEXT NOT NULL
+      REFERENCES source_events(event_id) DEFERRABLE INITIALLY DEFERRED
+  )`,
+  `CREATE TABLE IF NOT EXISTS payload_blobs (
+    payload_blob_id INTEGER PRIMARY KEY,
+    request_id TEXT NOT NULL REFERENCES requests(request_id) DEFERRABLE INITIALLY DEFERRED,
+    source_event_id TEXT NOT NULL REFERENCES source_events(event_id) DEFERRABLE INITIALLY DEFERRED,
+    blob_kind TEXT NOT NULL CHECK (blob_kind IN ('request', 'response', 'evidence')),
+    payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+    created_at TEXT NOT NULL,
+    UNIQUE (source_event_id, blob_kind)
+  )`,
+  `CREATE TABLE IF NOT EXISTS usage_observations (
+    usage_observation_id INTEGER PRIMARY KEY,
+    request_id TEXT NOT NULL REFERENCES requests(request_id) DEFERRABLE INITIALLY DEFERRED,
+    source_event_id TEXT NOT NULL REFERENCES source_events(event_id) DEFERRABLE INITIALLY DEFERRED,
+    provider TEXT CHECK (provider IS NULL OR length(provider) > 0),
+    model TEXT CHECK (model IS NULL OR length(model) > 0),
+    observed_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS request_usage (
+    request_usage_id INTEGER PRIMARY KEY,
+    request_id TEXT NOT NULL REFERENCES requests(request_id) ON DELETE CASCADE,
+    usage_observation_id INTEGER REFERENCES usage_observations(usage_observation_id) ON DELETE SET NULL,
+    metric TEXT NOT NULL CHECK (length(metric) > 0),
+    value REAL NOT NULL CHECK (value >= 0),
+    unit TEXT NOT NULL CHECK (length(unit) > 0),
+    UNIQUE (request_id, metric, usage_observation_id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS usage_value_provenance (
+    usage_value_provenance_id INTEGER PRIMARY KEY,
+    request_usage_id INTEGER NOT NULL REFERENCES request_usage(request_usage_id) ON DELETE CASCADE,
+    source_event_id TEXT NOT NULL REFERENCES source_events(event_id) DEFERRABLE INITIALLY DEFERRED,
+    evidence_path TEXT NOT NULL CHECK (length(evidence_path) > 0),
+    provenance_kind TEXT NOT NULL CHECK (provenance_kind IN ('provider', 'derived', 'fallback'))
+  )`,
+  `CREATE TABLE IF NOT EXISTS evidence_gaps (
+    evidence_gap_id INTEGER PRIMARY KEY,
+    source TEXT NOT NULL CHECK (length(source) > 0),
+    source_event_id TEXT CHECK (source_event_id IS NULL OR length(source_event_id) > 0),
+    reason TEXT NOT NULL CHECK (length(reason) > 0),
+    details_json TEXT CHECK (details_json IS NULL OR json_valid(details_json)),
+    recorded_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS pricing_versions (
+    pricing_version_id INTEGER PRIMARY KEY,
+    provider TEXT NOT NULL CHECK (length(provider) > 0),
+    model TEXT NOT NULL CHECK (length(model) > 0),
+    currency TEXT NOT NULL CHECK (length(currency) = 3),
+    input_per_million REAL NOT NULL CHECK (input_per_million >= 0),
+    output_per_million REAL NOT NULL CHECK (output_per_million >= 0),
+    cache_write_per_million REAL CHECK (cache_write_per_million IS NULL OR cache_write_per_million >= 0),
+    cache_read_per_million REAL CHECK (cache_read_per_million IS NULL OR cache_read_per_million >= 0),
+    effective_from TEXT NOT NULL,
+    effective_to TEXT,
+    UNIQUE (provider, model, currency, effective_from),
+    CHECK (effective_to IS NULL OR effective_to > effective_from)
+  )`,
+  `CREATE TABLE IF NOT EXISTS quota_observations (
+    quota_observation_id INTEGER PRIMARY KEY,
+    provider_account_id TEXT REFERENCES provider_accounts(provider_account_id) DEFERRABLE INITIALLY DEFERRED,
+    provider TEXT NOT NULL CHECK (length(provider) > 0),
+    quota_name TEXT NOT NULL CHECK (length(quota_name) > 0),
+    observed_at TEXT NOT NULL,
+    remaining REAL CHECK (remaining IS NULL OR remaining >= 0),
+    quota_limit REAL CHECK (quota_limit IS NULL OR quota_limit >= 0),
+    reset_at TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_requests_started_at
+    ON requests(started_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_requests_provider_model
+    ON requests(provider, model)`,
+  `CREATE INDEX IF NOT EXISTS idx_requests_repository_id
+    ON requests(repository_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_requests_session_id
+    ON requests(session_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_payload_blobs_request_id
+    ON payload_blobs(request_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_usage_observations_request_id
+    ON usage_observations(request_id, observed_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_request_usage_request_id
+    ON request_usage(request_id, metric)`,
+  `CREATE INDEX IF NOT EXISTS idx_usage_value_provenance_usage
+    ON usage_value_provenance(request_usage_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_evidence_gaps_source_time
+    ON evidence_gaps(source, recorded_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_pricing_versions_provider_model
+    ON pricing_versions(provider, model, effective_from)`,
+  `CREATE INDEX IF NOT EXISTS idx_quota_observations_provider_time
+    ON quota_observations(provider, observed_at)`,
+  `INSERT OR REPLACE INTO schema_meta (key, value)
+    VALUES ('audit_schema_version', '2')`,
+]);
+
 export const AUDIT_MIGRATIONS = Object.freeze([
   Object.freeze({
     id: "001_initial_audit_store",
     statements: INITIAL_AUDIT_STORE_STATEMENTS,
     checksum: checksumStatements(INITIAL_AUDIT_STORE_STATEMENTS),
+  }),
+  Object.freeze({
+    id: "002_approved_audit_design_tables",
+    statements: APPROVED_AUDIT_DESIGN_STATEMENTS,
+    checksum: checksumStatements(APPROVED_AUDIT_DESIGN_STATEMENTS),
   }),
 ]);
 
