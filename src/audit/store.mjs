@@ -117,6 +117,8 @@ export function openAuditStore(options = {}) {
     const observed = isoNow(now);
     const payloadJson = JSON.stringify(validated.payload ?? null);
     const payloadMeta = payloadMetadata(validated.payload);
+    const sourcePayloadJson = JSON.stringify(sourceEventPayloadMetadata(validated, payloadMeta));
+    const sourcePayloadHash = createHash("sha256").update(sourcePayloadJson, "utf8").digest("hex");
 
     execTransaction(db, () => {
       if (validated.session_id) {
@@ -137,16 +139,20 @@ export function openAuditStore(options = {}) {
           source_version,
           source_event_id,
           observed_at,
+          received_at,
           logical_request_id,
           attempt_id,
           session_id,
           client,
           event_kind,
+          payload_json,
+          payload_hash,
+          normalization_status,
           provider,
           model,
           repository_id,
           inserted_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         validated.event_id,
         validated.event_version,
@@ -154,11 +160,15 @@ export function openAuditStore(options = {}) {
         validated.source_version,
         validated.source_event_id,
         validated.observed_at,
+        observed,
         validated.logical_request_id,
         validated.attempt_id,
         validated.session_id,
         validated.client,
         validated.event_kind,
+        sourcePayloadJson,
+        sourcePayloadHash,
+        "pending",
         payloadMeta.provider,
         payloadMeta.model,
         payloadMeta.repository?.id ?? null,
@@ -178,7 +188,7 @@ export function openAuditStore(options = {}) {
       }
 
       if (validated.logical_request_id) {
-        upsertRequest(validated, payloadMeta, observed);
+        const requestRecordId = upsertRequest(validated, payloadMeta, observed);
         if (validated.event_kind === "request_payload") {
           db.prepare(`
             INSERT INTO payload_blobs (
@@ -189,10 +199,10 @@ export function openAuditStore(options = {}) {
               created_at
             ) VALUES (?, ?, 'request', ?, ?)
             ON CONFLICT(source_event_id, blob_kind) DO NOTHING
-          `).run(validated.logical_request_id, validated.event_id, payloadJson, observed);
+          `).run(requestRecordId, validated.event_id, payloadJson, observed);
         }
         if (validated.event_kind === "usage_reported") {
-          insertUsageObservation(validated, payloadMeta);
+          insertUsageObservation(validated, payloadMeta, requestRecordId);
         }
       }
 
@@ -456,50 +466,111 @@ export function openAuditStore(options = {}) {
       observed,
       event.event_id,
     );
+    return db.prepare("SELECT id FROM requests WHERE request_id = ?")
+      .get(event.logical_request_id).id;
   }
 
-  function insertUsageObservation(event, payload) {
+  function insertUsageObservation(event, payload, requestRecordId) {
+    const usage = usageMetrics(event.payload);
     const observationResult = db.prepare(`
       INSERT INTO usage_observations (
         request_id,
+        source,
         source_event_id,
         provider,
         model,
-        observed_at
-      ) VALUES (?, ?, ?, ?, ?)
+        observed_at,
+        uncached_input_tokens,
+        output_tokens,
+        reasoning_tokens,
+        cache_read_tokens,
+        cache_creation_tokens,
+        cache_creation_5m_tokens,
+        cache_creation_1h_tokens,
+        cache_miss_tokens,
+        total_tokens,
+        raw_usage_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      event.logical_request_id,
+      requestRecordId,
+      event.source,
       event.event_id,
       payload.provider,
       payload.model,
       event.observed_at,
+      usageValue(usage, "uncached_input_tokens", "input_tokens"),
+      usageValue(usage, "output_tokens"),
+      usageValue(usage, "reasoning_tokens"),
+      usageValue(usage, "cache_read_tokens"),
+      usageValue(usage, "cache_creation_tokens"),
+      usageValue(usage, "cache_creation_5m_tokens"),
+      usageValue(usage, "cache_creation_1h_tokens"),
+      usageValue(usage, "cache_miss_tokens"),
+      usageValue(usage, "total_tokens"),
+      JSON.stringify(usage),
     );
 
-    const usage = usageMetrics(event.payload);
+    db.prepare(`
+      INSERT INTO request_usage (
+        request_id,
+        usage_observation_id,
+        uncached_input_tokens,
+        output_tokens,
+        reasoning_tokens,
+        cache_read_tokens,
+        cache_creation_tokens,
+        cache_creation_5m_tokens,
+        cache_creation_1h_tokens,
+        cache_miss_tokens,
+        provider_total_tokens,
+        normalization_state
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'normalized')
+      ON CONFLICT(request_id) DO UPDATE SET
+        usage_observation_id = excluded.usage_observation_id,
+        uncached_input_tokens = excluded.uncached_input_tokens,
+        output_tokens = excluded.output_tokens,
+        reasoning_tokens = excluded.reasoning_tokens,
+        cache_read_tokens = excluded.cache_read_tokens,
+        cache_creation_tokens = excluded.cache_creation_tokens,
+        cache_creation_5m_tokens = excluded.cache_creation_5m_tokens,
+        cache_creation_1h_tokens = excluded.cache_creation_1h_tokens,
+        cache_miss_tokens = excluded.cache_miss_tokens,
+        provider_total_tokens = excluded.provider_total_tokens,
+        normalization_state = excluded.normalization_state
+    `).run(
+      requestRecordId,
+      Number(observationResult.lastInsertRowid),
+      usageValue(usage, "uncached_input_tokens", "input_tokens"),
+      usageValue(usage, "output_tokens"),
+      usageValue(usage, "reasoning_tokens"),
+      usageValue(usage, "cache_read_tokens"),
+      usageValue(usage, "cache_creation_tokens"),
+      usageValue(usage, "cache_creation_5m_tokens"),
+      usageValue(usage, "cache_creation_1h_tokens"),
+      usageValue(usage, "cache_miss_tokens"),
+      usageValue(usage, "provider_total_tokens", "total_tokens"),
+    );
+
+    const usageResult = db.prepare("SELECT request_usage_id FROM request_usage WHERE request_id = ?")
+      .get(requestRecordId);
     for (const [metric, value] of Object.entries(usage)) {
-      const usageResult = db.prepare(`
-        INSERT INTO request_usage (
-          request_id,
-          usage_observation_id,
-          metric,
-          value,
-          unit
-        ) VALUES (?, ?, ?, ?, 'tokens')
-      `).run(
-        event.logical_request_id,
-        Number(observationResult.lastInsertRowid),
-        metric,
-        value,
-      );
       db.prepare(`
         INSERT INTO usage_value_provenance (
           request_usage_id,
+          request_id,
+          metric,
+          value,
+          provenance,
+          confidence,
           source_event_id,
           evidence_path,
           provenance_kind
-        ) VALUES (?, ?, ?, 'provider')
+        ) VALUES (?, ?, ?, ?, 'provider', 1, ?, ?, 'provider')
       `).run(
-        Number(usageResult.lastInsertRowid),
+        usageResult.request_usage_id,
+        requestRecordId,
+        metric,
+        value,
         event.event_id,
         `$.usage.${metric}`,
       );
@@ -688,6 +759,17 @@ function payloadMetadata(payload) {
   };
 }
 
+function sourceEventPayloadMetadata(event, payload) {
+  return {
+    event_kind: event.event_kind,
+    provider: payload.provider,
+    model: payload.model,
+    provider_account_id: payload.providerAccount?.id ?? null,
+    repository_id: payload.repository?.id ?? null,
+    has_payload: event.payload !== null && event.payload !== undefined,
+  };
+}
+
 function providerAccountMetadata(provider, payload) {
   if (!provider) return null;
   const accountHash = stringOrNull(
@@ -808,6 +890,13 @@ function usageMetrics(payload) {
     }
   }
   return metrics;
+}
+
+function usageValue(metrics, ...names) {
+  for (const name of names) {
+    if (Object.hasOwn(metrics, name)) return metrics[name];
+  }
+  return null;
 }
 
 function safeClose(db) {
