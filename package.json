@@ -15,7 +15,8 @@
     "airkit": "src/airkit.mjs",
     "airclaude": "src/airkit.mjs",
     "airpi": "src/airpi.mjs",
-    "airoc": "src/airoc.mjs"
+    "airoc": "src/airoc.mjs",
+    "airkit-auditd": "src/auditd.mjs"
   },
   "files": [
     "CLAUDE.md",
@@ -29,7 +30,7 @@
     "src"
   ],
   "scripts": {
-    "check": "node --check src/airkit.mjs",
+    "check": "node --check src/airkit.mjs && node --check src/audit/crypto.mjs && node --check src/audit/daemon.mjs && node --check src/audit/event.mjs && node --check src/audit/migrations.mjs && node --check src/audit/paths.mjs && node --check src/audit/redaction.mjs && node --check src/audit/spool.mjs && node --check src/audit/store.mjs && node --check src/audit/transport.mjs && node --check src/auditd.mjs",
     "pack:check": "npm pack --dry-run",
     "test": "node --test",
     "verify:ccr3:e2e": "node scripts/verify-ccr3-e2e.mjs",
