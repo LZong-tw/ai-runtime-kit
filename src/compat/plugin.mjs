@@ -30,7 +30,7 @@ import {
   stripClientToolFamily,
   stripServerToolFamily,
 } from "./server-tools.mjs";
-import { applyToolSearchBudget } from "./tool-search.mjs";
+import { applyToolSearchBudget, canApplyToolSearchBudget } from "./tool-search.mjs";
 import { classifyCacheCohort, describeStablePrefix } from "./prefix-observability.mjs";
 
 const MCP_PROTOCOL_VERSION = "2025-03-26";
@@ -474,13 +474,18 @@ function presentedCredentialId(headers) {
 function isConfiguredCompatibilityRequest(body, policies, config) {
   const tools = inspectServerToolRequest(body);
   const history = inspectPendingServerHistory(body);
+  const toolLimit = resolveToolSearchMaxTools(config, body?.model);
+  const oversizedToolCatalog = toolLimit !== null &&
+    Array.isArray(body?.tools) &&
+    body.tools.length > toolLimit;
   return (
     tools.serverTools.length > 0 ||
     [...tools.clientFamilies].some((family) =>
       requiresClientToolFallback(config, policies, family, body.model)) ||
     history.requiresFallback ||
     history.containerId !== null ||
-    (Array.isArray(body.mcp_servers) && body.mcp_servers.length > 0)
+    (Array.isArray(body.mcp_servers) && body.mcp_servers.length > 0) ||
+    (oversizedToolCatalog && !canApplyToolSearchBudget(body, toolLimit))
   );
 }
 

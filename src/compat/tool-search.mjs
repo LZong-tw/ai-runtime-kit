@@ -1,5 +1,9 @@
 import { inspectPendingServerHistory } from "./server-history.mjs";
-import { SERVER_TOOL_TYPES, isFutureServerToolType } from "./server-tools.mjs";
+import {
+  SERVER_TOOL_TYPES,
+  classifyToolDefinition,
+  isFutureServerToolType,
+} from "./server-tools.mjs";
 
 export const TOOL_SEARCH_TYPES = new Set(SERVER_TOOL_TYPES.toolSearch);
 export const MAX_DEFERRED_TOOL_COUNT = 512;
@@ -37,6 +41,28 @@ export class CompatibilityProtocolError extends Error {
   }
 }
 
+export function canApplyToolSearchBudget(body, limit) {
+  const tools = Array.isArray(body?.tools) ? body.tools : null;
+  if (limit === null || tools === null || tools.length <= limit) return true;
+
+  const classifications = tools.map((tool) => classifyToolDefinition(tool));
+  if (tools.some((tool, index) =>
+    classifications[index].kind === "client" && typeof tool?.type === "string")) {
+    return false;
+  }
+
+  const fixedServerTools = classifications.filter(({ family, kind }) =>
+    kind === "server" && family !== "advisor" && family !== "toolSearch",
+  ).length;
+  const bridgeSlots = new Set(
+    classifications
+      .filter(({ family }) => family === "advisor" || family === "toolSearch")
+      .map(({ family }) => family),
+  ).size + (classifications.some(({ kind }) => kind === "client") &&
+    !classifications.some(({ family }) => family === "toolSearch") ? 1 : 0);
+  return fixedServerTools + bridgeSlots <= limit;
+}
+
 // OpenAI-compatible providers often cap the tools array. Preserve the full
 // client catalog by turning only the overflow into Claude's existing deferred
 // ToolSearch protocol. Reserve five slots because a search may activate up to
@@ -44,13 +70,33 @@ export class CompatibilityProtocolError extends Error {
 export function applyToolSearchBudget(body, limit) {
   const tools = Array.isArray(body?.tools) ? body.tools : null;
   if (limit === null || tools === null || tools.length <= limit) return body;
-  if (tools.some((tool) => typeof tool?.type === "string")) return body;
+  if (!canApplyToolSearchBudget(body, limit)) return body;
 
-  const initialToolCount = limit - 1 - MAX_TOOL_SEARCH_RESULTS;
-  const budgetedTools = tools.map((tool, index) => index < initialToolCount
-    ? structuredClone(tool)
-    : { ...structuredClone(tool), defer_loading: true });
-  budgetedTools.push(structuredClone(AUTO_TOOL_SEARCH_DEFINITION));
+  const hasToolSearch = tools.some((tool) => classifyToolDefinition(tool).family === "toolSearch");
+  const fixedServerTools = tools.filter((tool) => {
+    const { family, kind } = classifyToolDefinition(tool);
+    return kind === "server" && family !== "advisor" && family !== "toolSearch";
+  }).length;
+  const bridgeSlots = new Set(
+    tools
+      .map((tool) => classifyToolDefinition(tool).family)
+      .filter((family) => family === "advisor" || family === "toolSearch"),
+  ).size + (hasToolSearch ? 0 : 1);
+  const maxVisibleClientTools = Math.max(
+    0,
+    limit - fixedServerTools - bridgeSlots - MAX_TOOL_SEARCH_RESULTS,
+  );
+  let visibleClientTools = 0;
+
+  const budgetedTools = tools.map((tool) => {
+    const classification = classifyToolDefinition(tool);
+    if (classification.kind === "server" || typeof tool?.type === "string") {
+      return structuredClone(tool);
+    }
+    if (visibleClientTools++ < maxVisibleClientTools) return structuredClone(tool);
+    return { ...structuredClone(tool), defer_loading: true };
+  });
+  if (!hasToolSearch) budgetedTools.push(structuredClone(AUTO_TOOL_SEARCH_DEFINITION));
   return { ...body, tools: budgetedTools };
 }
 

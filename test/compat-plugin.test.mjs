@@ -1531,6 +1531,100 @@ test("oversized GPT catalogs keep Claude Code WebFetch on the bounded client-too
   assert.equal(response.statusCode, 200);
 });
 
+test("oversized GPT catalogs with typed native tools stay within the executor limit", async () => {
+  const calls = [];
+  const fixture = await createPluginFixture({
+    pluginConfig: {
+      toolSearch: {
+        mode: "bridge",
+        maxToolsByModel: { "gpt-5.6-terra": 128 },
+      },
+    },
+    coreClient: createPluginCoreClient({
+      async requestMessage(body) {
+        calls.push(structuredClone(body));
+        return message({ content: [{ type: "text", text: "ok" }] });
+      },
+      async requestFallback() {
+        throw new Error("a safe typed native catalog must stay on the GPT executor route");
+      },
+    }),
+  });
+  const body = {
+    model: "oneportal/gpt-5.6-terra",
+    max_tokens: 512,
+    messages: [{ role: "user", content: "Use the available tools." }],
+    tools: [
+      { type: "web_search_20260318", name: "web_search" },
+      ...Array.from({ length: 170 }, (_, index) => ({
+        name: `client_tool_${index}`,
+        description: `Client tool ${index}`,
+        input_schema: { type: "object", properties: {} },
+      })),
+    ],
+  };
+
+  await fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify(body))),
+    createRecordingResponse(),
+    fixture.helpers,
+  );
+
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].tools.length <= 128);
+  assert.ok(calls[0].tools.some(({ type }) => type === "web_search_20260318"));
+  assert.ok(calls[0].tools.some(({ name }) => name === "airkit_tool_search"));
+});
+
+test("oversized GPT catalogs with unknown typed tools use whole-request fallback", async () => {
+  const executorCalls = [];
+  const fallbackCalls = [];
+  const fixture = await createPluginFixture({
+    pluginConfig: {
+      toolSearch: {
+        mode: "bridge",
+        maxToolsByModel: { "gpt-5.6-terra": 128 },
+      },
+    },
+    coreClient: createPluginCoreClient({
+      async requestMessage(body) {
+        executorCalls.push(structuredClone(body));
+        return message({ content: [{ type: "text", text: "unexpected executor response" }] });
+      },
+      async requestFallback(body) {
+        fallbackCalls.push(structuredClone(body));
+        return new Response(JSON.stringify(message({ content: [{ type: "text", text: "fallback response" }] })), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    }),
+  });
+  const body = {
+    model: "oneportal/gpt-5.6-terra",
+    max_tokens: 512,
+    messages: [{ role: "user", content: "Use the available tools." }],
+    tools: Array.from({ length: 151 }, (_, index) => ({
+      type: "function",
+      name: `typed_tool_${index}`,
+      description: `Typed tool ${index}`,
+      input_schema: { type: "object", properties: {} },
+    })),
+  };
+
+  const response = createRecordingResponse();
+  await fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify(body))),
+    response,
+    fixture.helpers,
+  );
+
+  assert.equal(executorCalls.length, 0);
+  assert.equal(fallbackCalls.length, 1);
+  assert.equal(fallbackCalls[0].tools.length, body.tools.length);
+  assert.equal(response.statusCode, 200);
+});
+
 test("unverified native-first WebFetch definition does not divert an ordinary turn", async () => {
   const calls = [];
   const fixture = await createPluginFixture({
