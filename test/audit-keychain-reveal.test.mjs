@@ -46,6 +46,7 @@ test("reveal authorization binds request/session, expires after 30 seconds, and 
   const third = await authorizer.challenge({ requestId: "req-1", sessionId: "session-1" });
   now = 1_000;
   await assert.rejects(() => authorizer.verifyAndConsume({ challenge: third, requestId: "wrong", sessionId: "session-1", signature: Buffer.from("signature"), publicKey }), { code: "AIRKIT_AUDIT_REVEAL_UNAVAILABLE" });
+  await assert.rejects(() => authorizer.verifyAndConsume({ challenge: third, requestId: "req-1", sessionId: "wrong", signature: Buffer.from("signature"), publicKey }), { code: "AIRKIT_AUDIT_REVEAL_UNAVAILABLE" });
 });
 
 test("helper failures, malformed signatures, and invalid challenge data fail closed", async () => {
@@ -53,5 +54,9 @@ test("helper failures, malformed signatures, and invalid challenge data fail clo
   await assert.rejects(() => unavailable.challenge({ requestId: "r", sessionId: "s" }), { code: "AIRKIT_AUDIT_REVEAL_UNAVAILABLE" });
   const authorizer = createRevealAuthorizer({ runHelper: async () => ({ status: 0, stdout: Buffer.from("sig") }) });
   const challenge = await authorizer.challenge({ requestId: "r", sessionId: "s" });
-  await assert.rejects(() => authorizer.verifyAndConsume({ challenge, requestId: "r", sessionId: "s", signature: Buffer.from("not sig"), publicKey: { verify: () => false } }), { code: "AIRKIT_AUDIT_REVEAL_UNAVAILABLE" });
+  let verifyCalled = false;
+  await assert.rejects(() => authorizer.verifyAndConsume({ challenge, requestId: "r", sessionId: "s", signature: "***", publicKey: { verify: () => { verifyCalled = true; return false; } } }), { code: "AIRKIT_AUDIT_REVEAL_UNAVAILABLE" });
+  assert.equal(verifyCalled, false);
+  await assert.rejects(() => authorizer.challenge({ requestId: "bad\nid", sessionId: "s" }), { code: "AIRKIT_AUDIT_REVEAL_UNAVAILABLE" });
+  await assert.rejects(() => authorizer.challenge({ requestId: "r", sessionId: "bad\rs" }), { code: "AIRKIT_AUDIT_REVEAL_UNAVAILABLE" });
 });

@@ -10,14 +10,10 @@ function unavailable(cause) {
 }
 
 function required(value, name) {
-  if (typeof value !== "string" || value.length === 0 || value.length > 512) throw unavailable(new Error(`invalid ${name}`));
+  if (typeof value !== "string" || value.length === 0 || value.length > 512 || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw unavailable(new Error(`invalid ${name}`));
+  }
   return value;
-}
-
-function bytes(value, name) {
-  const result = Buffer.isBuffer(value) ? Buffer.from(value) : Buffer.from(value instanceof Uint8Array ? value : [],);
-  if (result.length === 0) throw unavailable(new Error(`invalid ${name}`));
-  return result;
 }
 
 export function revealAuthorizationMessage(challenge) {
@@ -31,11 +27,10 @@ export function revealAuthorizationMessage(challenge) {
 function signatureBytes(value) {
   if (Buffer.isBuffer(value) || value instanceof Uint8Array) return Buffer.from(value);
   if (typeof value !== "string" || value.length === 0) throw unavailable(new Error("invalid signature"));
-  try {
-    return Buffer.from(value, "base64");
-  } catch (error) {
-    throw unavailable(error);
-  }
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 === 1) throw unavailable(new Error("invalid signature"));
+  const result = Buffer.from(value, "base64");
+  if (result.length === 0 || result.toString("base64") !== value) throw unavailable(new Error("invalid signature"));
+  return result;
 }
 
 export function createRevealAuthorizer({ runHelper, clock = () => Date.now(), randomBytes = nodeRandomBytes, env = process.env } = {}) {
