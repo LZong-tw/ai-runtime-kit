@@ -15,7 +15,7 @@ import {
 } from "./config.mjs";
 import { inspectPendingServerHistory } from "./server-history.mjs";
 import { inspectServerToolRequest } from "./server-tools.mjs";
-import { bridgeToolSearch } from "./tool-search.mjs";
+import { bridgeToolSearch, canApplyToolSearchBudget } from "./tool-search.mjs";
 
 const TOOL_SEARCH_BRIDGE_NAME = "airkit_tool_search";
 const ADVISOR_BRIDGE_NAME = "airkit_advisor";
@@ -709,6 +709,12 @@ function requiresWholeRequestFallback({ body, config, serverHistory, serverTools
   if (Array.isArray(body?.mcp_servers) && body.mcp_servers.length > 0) return true;
 
   const toolLimit = resolveToolSearchMaxTools(config, body?.model);
+  if (
+    toolLimit !== null &&
+    Array.isArray(body?.tools) &&
+    body.tools.length > toolLimit &&
+    !canApplyToolSearchBudget(body, toolLimit)
+  ) return true;
   const toolSearchOwnsOverflow =
     config.toolSearch?.mode === "bridge" &&
     serverTools.families.has("toolSearch") &&
