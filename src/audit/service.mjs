@@ -1,5 +1,5 @@
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -123,7 +123,21 @@ async function defaultLaunchctl(args) {
 }
 
 function assertPaths(paths) {
-  if (!paths?.rootDir || !paths.launchAgentPath || !paths.launchdDomain || !paths.launchdTarget) throw new TypeError("audit service paths are required");
+  if (!paths?.rootDir || !paths.launchAgentPath || !paths.launchdDomain || !paths.launchdTarget) {
+    throw new TypeError("audit service paths are required");
+  }
+  if (!/^gui\/\d+$/.test(paths.launchdDomain)) throw new Error("paths.launchdDomain must be gui/<uid>");
+  const expectedTarget = `${paths.launchdDomain}/${AUDIT_SERVICE_LABEL}`;
+  if (paths.launchdTarget !== expectedTarget) throw new Error("paths.launchdTarget must target com.airkit.auditd");
+  if (!isAbsolute(paths.launchAgentPath) || basename(paths.launchAgentPath) !== `${AUDIT_SERVICE_LABEL}.plist`) {
+    throw new Error("paths.launchAgentPath must be the absolute auditd plist path");
+  }
+  if (paths.homeDir) {
+    const expectedDir = resolve(paths.homeDir, "Library", "LaunchAgents");
+    if (resolve(dirname(paths.launchAgentPath)) !== expectedDir) {
+      throw new Error("paths.launchAgentPath must be under homeDir/Library/LaunchAgents");
+    }
+  }
 }
 
 function renderPlist(value) {

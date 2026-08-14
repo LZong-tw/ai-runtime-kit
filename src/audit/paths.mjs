@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 const AUDIT_ROOT_NAME = "airkit-audit";
 
@@ -17,6 +17,12 @@ export function resolveAuditPaths({ env = process.env, overrides = {} } = {}) {
     overrides.launchAgentPath ?? join(homeDir, "Library", "LaunchAgents", "com.airkit.auditd.plist"),
     "launchAgentPath",
   );
+  if (basename(launchAgentPath) !== "com.airkit.auditd.plist") {
+    throw new Error("launchAgentPath must be com.airkit.auditd.plist");
+  }
+  if (resolve(dirname(launchAgentPath)) !== resolve(homeDir, "Library", "LaunchAgents")) {
+    throw new Error("launchAgentPath must be under homeDir/Library/LaunchAgents");
+  }
   const uid = String(overrides.uid ?? env.AIRKIT_GUI_UID ?? env.UID ?? process.getuid?.() ?? "");
   if (!/^\d+$/.test(uid)) throw new Error("uid must be a numeric macOS user id");
 

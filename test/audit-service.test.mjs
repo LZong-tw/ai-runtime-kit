@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { resolveAuditPaths } from "../src/audit/paths.mjs";
-import { installAuditService, inspectAuditService, planAuditService, uninstallAuditService } from "../src/audit/service.mjs";
+import { installAuditService, inspectAuditService, planAuditService, stopAuditService, uninstallAuditService } from "../src/audit/service.mjs";
 
 function fixture() {
   const home = join(tmpdir(), "airkit-service-home");
@@ -29,7 +29,7 @@ test("preview performs zero filesystem or launchctl writes", async () => {
 test("write install is atomic, private, and idempotent", async () => {
   const { options, paths } = fixture();
   const root = await mkdtemp(join(tmpdir(), "airkit-service-"));
-  const actual = { ...paths, launchAgentPath: join(root, "LaunchAgents", "com.airkit.auditd.plist") };
+  const actual = { ...paths, homeDir: root, launchAgentPath: join(root, "Library", "LaunchAgents", "com.airkit.auditd.plist") };
   const calls = [];
   const runLaunchctl = async (args) => { calls.push(args); return { ok: true, status: 0 }; };
   await installAuditService({ ...options, paths: actual, write: true, runLaunchctl });
@@ -63,4 +63,22 @@ test("plan has explicit GUI target and absolute paths", () => {
   const plan = planAuditService(options);
   assert.equal(plan.target, "gui/501/com.airkit.auditd");
   assert.deepEqual(plan.plist.ProgramArguments, [options.nodePath, options.daemonPath, "--auth-helper", options.authHelperPath]);
+});
+
+test("rejects path or target drift before touching unrelated jobs", async () => {
+  const { options, paths } = fixture();
+  const calls = [];
+  const io = { readFile: async () => { calls.push("read"); return ""; }, unlink: async () => calls.push("unlink") };
+  const runLaunchctl = async (args) => { calls.push(args); return { ok: true, status: 0 }; };
+  const cases = [
+    [planAuditService, { paths: { ...paths, launchdTarget: "gui/501/com.airkit.ccr-daemon" } }],
+    [planAuditService, { paths: { ...paths, launchAgentPath: "/tmp/com.airkit.auditd.plist" } }],
+    [stopAuditService, { paths: { ...paths, launchdTarget: "gui/501/com.airkit.ccr-daemon" }, runLaunchctl }],
+    [inspectAuditService, { paths: { ...paths, launchAgentPath: "/tmp/com.airkit.auditd.plist" }, io, runLaunchctl }],
+    [uninstallAuditService, { paths: { ...paths, launchdTarget: "gui/501/com.airkit.ccr-daemon" }, io, runLaunchctl, write: true, confirm: true }],
+  ];
+  for (const [operation, input] of cases) {
+    await assert.rejects(async () => operation({ ...options, ...input }), /auditd|audit service|LaunchAgents/i);
+  }
+  assert.deepEqual(calls, []);
 });
