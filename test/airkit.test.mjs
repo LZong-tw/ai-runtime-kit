@@ -2672,6 +2672,26 @@ test("airclaude exposes a model-aware statusline price map when the profile owns
   assert.equal(plan.launch.env.AIRCLAUDE_STATUSLINE_INPUT_PRICE_PER_MILLION, undefined);
 });
 
+test("airclaude uses an exact effective catalog price for the selected provider route", () => {
+  const catalog = launchCatalog();
+  catalog.modelCatalog.pricingVersions = [{
+    provider: "demo",
+    model: "strong-coder",
+    versions: [{
+      version: "strong-coder-2026-08-01",
+      effectiveFrom: "2026-08-01T00:00:00Z",
+      pricesUsdPer1M: { uncachedInput: 2.75 },
+    }],
+  }];
+  catalog.profiles[0].ccr.Router.default = "demo,strong-coder";
+
+  const plan = buildLaunchPlan(catalog, "launch-example", {
+    configDir: "/tmp/airkit-statusline-catalog-price",
+  });
+
+  assert.equal(plan.launch.env.AIRCLAUDE_STATUSLINE_INPUT_PRICE_PER_MILLION, "2.75");
+});
+
 test("airclaude launch quiets the Powerlevel10k instant prompt in its command subshells", async () => {
   const catalog = launchCatalog();
   const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-p10k-"));
