@@ -106,7 +106,7 @@ test("disagreement retains both evidence sources as a conflict", () => {
   assert.ok(result.conflicts.some((conflict) => conflict.field === "uncachedInputTokens"));
 });
 
-test("byte estimates are provenance-tagged and never request token usage", () => {
+test("byte observations stay byte-valued and never become request tokens", () => {
   const result = normalizeUsageObservation({
     source: "provider",
     provider: "openai",
@@ -115,8 +115,28 @@ test("byte estimates are provenance-tagged and never request token usage", () =>
   });
   assert.equal(result.values.uncachedInputTokens, null);
   assert.equal(result.values.outputTokens, null);
-  assert.equal(result.provenance.inputBytes.kind, "estimated");
-  assert.equal(result.provenance.inputBytes.formula, "bytes / 4");
+  assert.equal(result.provenance.inputBytes.kind, "reported");
+  assert.equal(result.provenance.inputBytes.unit, "bytes");
+});
+
+test("cache miss stays unavailable when the exact Gemini pair is incomplete", () => {
+  const result = normalizeUsageObservation({
+    provider: "openai",
+    usage: { usageMetadata: { promptTokenCount: 100 }, cache_read_tokens: 20 },
+  });
+  assert.equal(result.values.cacheMissTokens, null);
+  assert.equal(result.provenance.cacheMissTokens, undefined);
+});
+
+test("numeric-string byte headers remain raw byte observations", () => {
+  const result = normalizeUsageObservation({
+    provider: "openai",
+    usage: {},
+    responseHeaders: { "X-Input-Bytes": "400", "X-Output-Bytes": "40" },
+  });
+  assert.equal(result.values.inputBytes, 400);
+  assert.equal(result.values.outputBytes, 40);
+  assert.equal(result.provenance.inputBytes.unit, "bytes");
 });
 
 test("meter, quota, and headroom observations stay outside request usage", () => {

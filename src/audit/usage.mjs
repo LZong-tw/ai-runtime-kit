@@ -55,9 +55,6 @@ export function normalizeUsageObservation(input = {}) {
   add("outputTokens", metadata.candidatesTokenCount, "usage.usageMetadata.candidatesTokenCount");
   add("providerTotalTokens", usage.total_tokens, "usage.total_tokens");
   add("providerTotalTokens", metadata.totalTokenCount, "usage.usageMetadata.totalTokenCount");
-  add("inputBytes", usage.input_bytes, "usage.input_bytes", "estimated", "bytes / 4");
-  add("outputBytes", usage.output_bytes, "usage.output_bytes", "estimated", "bytes / 4");
-
   for (const field of TOKEN_FIELDS) {
     const entries = candidates.get(field) ?? [];
     if (entries.length === 0) continue;
@@ -76,13 +73,13 @@ export function normalizeUsageObservation(input = {}) {
     }
   }
 
-  if (values.inputBytes === null && counter(usage.input_bytes) !== null) {
-    values.inputBytes = counter(usage.input_bytes);
-    provenance.inputBytes = { kind: "estimated", source: "usage.input_bytes", formula: "bytes / 4" };
+  if (values.inputBytes === null && byteCounter(usage.input_bytes) !== null) {
+    values.inputBytes = byteCounter(usage.input_bytes);
+    provenance.inputBytes = { kind: "reported", source: "usage.input_bytes", unit: "bytes" };
   }
-  if (values.outputBytes === null && counter(usage.output_bytes) !== null) {
-    values.outputBytes = counter(usage.output_bytes);
-    provenance.outputBytes = { kind: "estimated", source: "usage.output_bytes", formula: "bytes / 4" };
+  if (values.outputBytes === null && byteCounter(usage.output_bytes) !== null) {
+    values.outputBytes = byteCounter(usage.output_bytes);
+    provenance.outputBytes = { kind: "reported", source: "usage.output_bytes", unit: "bytes" };
   }
 
   const headers = normalizeHeaders(input.responseHeaders);
@@ -92,7 +89,11 @@ export function normalizeUsageObservation(input = {}) {
   const cacheRead = values.cacheReadTokens;
   let cacheMiss = values.cacheMissTokens;
   const creates = sumKnown(values.cacheCreate5mTokens, values.cacheCreate1hTokens);
-  if (cacheMiss === null && counter(metadata.promptTokenCount) !== null && values.cacheReadTokens !== null) {
+  if (
+    cacheMiss === null
+    && counter(metadata.promptTokenCount) !== null
+    && counter(metadata.cachedContentTokenCount) !== null
+  ) {
     values.cacheMissTokens = Math.max(0, metadata.promptTokenCount - values.cacheReadTokens);
     cacheMiss = values.cacheMissTokens;
     provenance.cacheMissTokens = {
@@ -138,10 +139,10 @@ function normalizeNonRequestObservation(input, key, kind) {
 function addHeaderByteCandidate(values, provenance, field, headers, names) {
   if (values[field] !== null) return;
   for (const name of names) {
-    const value = counter(headers[name]);
+    const value = byteCounter(headers[name]);
     if (value !== null) {
       values[field] = value;
-      provenance[field] = { kind: "estimated", source: `responseHeaders.${name}`, formula: "bytes / 4" };
+      provenance[field] = { kind: "reported", source: `responseHeaders.${name}`, unit: "bytes" };
       return;
     }
   }
@@ -171,6 +172,12 @@ function sumKnown(...values) {
 
 function counter(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function byteCounter(value) {
+  if (typeof value === "number") return counter(value);
+  if (typeof value !== "string" || !/^\d+(?:\.\d+)?$/.test(value.trim())) return null;
+  return counter(Number(value));
 }
 
 function isRecord(value) {
