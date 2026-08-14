@@ -91,3 +91,23 @@ test("verify dispatches to the injected audit verifier", async () => {
   assert.equal(exitCode, 0);
   assert.match(output.text(), /verified: true/);
 });
+
+test("embedded absolute paths inside reason strings are scrubbed to basename-only metadata", async () => {
+  const output = capture();
+  const exitCode = await runAuditCli(["status"], {
+    stdout: output.stdout,
+    audit: {
+      async status() {
+        return {
+          state: "degraded",
+          reason: "failed at /Users/test/.local/state/airkit-audit/audit.sqlite while reading /private/tmp/airkit-audit/error.log.",
+        };
+      },
+    },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.equal(output.text().includes("/Users/test/"), false);
+  assert.equal(output.text().includes("/private/tmp/"), false);
+  assert.match(output.text(), /reason: failed at …\/audit\.sqlite while reading …\/error\.log\./);
+});
