@@ -111,3 +111,33 @@ test("embedded absolute paths inside reason strings are scrubbed to basename-onl
   assert.equal(output.text().includes("/private/tmp/"), false);
   assert.match(output.text(), /reason: failed at …\/audit\.sqlite while reading …\/error\.log\./);
 });
+
+test("retention and export commands pass explicit safety flags", async () => {
+  const calls = [];
+  const audit = {
+    async prune(options) { calls.push(["prune", options]); return { state: options.write ? "healthy" : "stopped" }; },
+    async export(options) { calls.push(["export", options]); return { state: "healthy", rows: 0 }; },
+  };
+  const output = capture();
+  assert.equal(await runAuditCli(["prune", "--write", "--retention-days", "30", "--batch-size", "7"], { stdout: output.stdout, audit }), 0);
+  assert.equal(await runAuditCli(["export", "--format", "csv", "--output", "/tmp/audit.csv", "--include-payload", "--decrypt"], { stdout: output.stdout, audit }), 0);
+  assert.deepEqual(calls, [
+    ["prune", { write: true, preserve: false, retentionDays: 30, batchSize: 7 }],
+    ["export", { format: "csv", includePayload: true, decrypt: true, outputPath: "/tmp/audit.csv" }],
+  ]);
+});
+
+test("stdout export is not contaminated by a CLI status footer", async () => {
+  const output = capture();
+  const exitCode = await runAuditCli(["export"], {
+    stdout: output.stdout,
+    audit: {
+      async export() {
+        output.stdout.write('{"model":"gpt-5.6-terra"}\n');
+        return { state: "healthy", rows: 1 };
+      },
+    },
+  });
+  assert.equal(exitCode, 0);
+  assert.equal(output.text(), '{"model":"gpt-5.6-terra"}\n');
+});
