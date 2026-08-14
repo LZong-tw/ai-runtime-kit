@@ -2970,20 +2970,19 @@ function catalogContextWindow(catalog, provider, model) {
 }
 
 function modelMatches(provider, model, providerEntry, modelEntry) {
-  const candidates = new Set([
+  const modelCandidates = new Set([
     modelEntry.id,
     modelEntry.litellm,
     ...(Array.isArray(modelEntry.aliases) ? modelEntry.aliases : []),
   ].filter(Boolean));
 
-  if (provider) {
-    candidates.add(`${provider}/${model}`);
-    candidates.add(`${provider},${model}`);
-  }
-  if (providerEntry.id) candidates.add(`${providerEntry.id}/${model}`);
-  if (providerEntry.litellmProvider) candidates.add(`${providerEntry.litellmProvider}/${model}`);
-
-  return candidates.has(model);
+  const modelMatches = modelCandidates.has(model);
+  if (!modelMatches) return false;
+  if (!provider) return true;
+  return providerEntry.id === provider
+    || providerEntry.litellmProvider === provider
+    || modelCandidates.has(`${provider}/${model}`)
+    || modelCandidates.has(`${provider},${model}`);
 }
 
 function inputPriceFromValue(value) {

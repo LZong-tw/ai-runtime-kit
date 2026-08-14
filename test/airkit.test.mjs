@@ -2692,6 +2692,22 @@ test("airclaude uses an exact effective catalog price for the selected provider 
   assert.equal(plan.launch.env.AIRCLAUDE_STATUSLINE_INPUT_PRICE_PER_MILLION, "2.75");
 });
 
+test("catalog statusline pricing does not borrow a same-named model from another provider", () => {
+  const catalog = launchCatalog();
+  catalog.modelCatalog.providers.push({
+    id: "openai",
+    litellmProvider: "openai",
+    models: [{ id: "gpt-5.6-terra", pricingUsdPer1M: { input: 2 } }],
+  });
+  catalog.profiles[0].ccr.Router.default = "oneportal,gpt-5.6-terra";
+
+  const plan = buildLaunchPlan(catalog, "launch-example", {
+    configDir: "/tmp/airkit-statusline-provider-isolation",
+  });
+
+  assert.equal(plan.launch.env.AIRCLAUDE_STATUSLINE_INPUT_PRICE_PER_MILLION, undefined);
+});
+
 test("airclaude launch quiets the Powerlevel10k instant prompt in its command subshells", async () => {
   const catalog = launchCatalog();
   const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-p10k-"));
