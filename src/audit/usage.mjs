@@ -86,15 +86,30 @@ export function normalizeUsageObservation(input = {}) {
   addHeaderByteCandidate(values, provenance, "inputBytes", headers, ["x-input-bytes", "x-prompt-bytes"]);
   addHeaderByteCandidate(values, provenance, "outputBytes", headers, ["x-output-bytes", "x-completion-bytes"]);
   const uncachedInput = values.uncachedInputTokens;
-  const cacheRead = values.cacheReadTokens;
+  let cacheRead = values.cacheReadTokens;
   let cacheMiss = values.cacheMissTokens;
   const creates = sumKnown(values.cacheCreate5mTokens, values.cacheCreate1hTokens);
+  const metadataPrompt = counter(metadata.promptTokenCount);
+  const metadataCached = counter(metadata.cachedContentTokenCount);
   if (
     cacheMiss === null
-    && counter(metadata.promptTokenCount) !== null
-    && counter(metadata.cachedContentTokenCount) !== null
+    && metadataPrompt !== null
+    && metadataCached !== null
   ) {
-    values.cacheMissTokens = Math.max(0, metadata.promptTokenCount - values.cacheReadTokens);
+    if (cacheRead !== metadataCached) {
+      conflicts.push({
+        field: "cacheReadTokens",
+        reason: "Gemini metadata disagrees with cache-read alias",
+        values: [metadataCached, cacheRead].filter((value) => value !== null),
+      });
+    }
+    values.cacheReadTokens = metadataCached;
+    cacheRead = metadataCached;
+    provenance.cacheReadTokens = {
+      kind: "reported",
+      source: "usage.usageMetadata.cachedContentTokenCount",
+    };
+    values.cacheMissTokens = Math.max(0, metadataPrompt - metadataCached);
     cacheMiss = values.cacheMissTokens;
     provenance.cacheMissTokens = {
       kind: "derived",
