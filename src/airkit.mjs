@@ -28,6 +28,9 @@ import { startCompatibilityMiddleware } from "./compat/middleware.mjs";
 import { renderHeartbeatManagedFiles } from "./context-heartbeat.mjs";
 import { buildContextObservability } from "./context-observability.mjs";
 import { runAuditCli } from "./audit/cli.mjs";
+import { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
+
+export { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
@@ -2928,6 +2931,14 @@ function profileStatuslinePriceMap(profile) {
 }
 
 function catalogInputPrice(catalog, provider, model) {
+  const pricing = resolvePricingVersion({
+    catalog,
+    provider,
+    model,
+    observedAt: new Date().toISOString(),
+  });
+  if (pricing) return inputPriceFromValue(pricing.pricesUsdPer1M);
+
   const providers = catalog.modelCatalog?.providers;
   if (!Array.isArray(providers)) return null;
 
