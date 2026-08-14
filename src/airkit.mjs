@@ -2990,7 +2990,7 @@ function inputPriceFromValue(value) {
   if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
   if (!value || typeof value !== "object") return null;
 
-  const input = Number(value.input ?? value.inputCacheMiss);
+  const input = Number(value.input ?? value.inputCacheMiss ?? value.uncachedInput);
   return Number.isFinite(input) && input > 0 ? input : null;
 }
 

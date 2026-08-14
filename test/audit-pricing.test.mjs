@@ -11,6 +11,28 @@ test("resolves exact provider/model pricing by effective date", () => {
   });
 });
 
+test("selects the newest effective version when catalog entries are append-only", () => {
+  const appendOnlyCatalog = {
+    modelCatalog: {
+      pricingVersions: [{
+        provider: "web_litellm",
+        model: "gpt-5.6-terra",
+        versions: [
+          { version: "terra-2026-08-01", effectiveFrom: "2026-08-01T00:00:00Z", pricesUsdPer1M: { uncachedInput: 2 } },
+          { version: "terra-2026-09-01", effectiveFrom: "2026-09-01T00:00:00Z", pricesUsdPer1M: { uncachedInput: 2.2 } },
+        ],
+      }],
+    },
+  };
+
+  assert.equal(resolvePricingVersion({
+    catalog: appendOnlyCatalog,
+    provider: "web_litellm",
+    model: "gpt-5.6-terra",
+    observedAt: "2026-09-15T00:00:00Z",
+  }).version, "terra-2026-09-01");
+});
+
 test("does not guess an unlisted provider or billing label", () => {
   assert.equal(resolvePricingVersion({ catalog, provider: "oneportal", model: "gpt-5.6-terra", observedAt: "2026-08-14T12:00:00Z" }), null);
   assert.equal(resolvePricingVersion({ catalog, provider: "web_litellm", model: "gpt-5.6-terra", billingLabel: "gpt-5.6-sol", observedAt: "2026-08-14T12:00:00Z" }), null);

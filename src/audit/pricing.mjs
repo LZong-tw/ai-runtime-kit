@@ -14,12 +14,13 @@ export function resolvePricingVersion({ catalog, provider, model, observedAt, bi
   const entry = entries.find((candidate) => candidate?.provider === provider && candidate?.model === model);
   if (!entry || !Array.isArray(entry.versions)) return null;
   const at = Date.parse(observedAt);
-  const version = entry.versions.find((candidate) => {
+  const candidates = entry.versions.filter((candidate) => {
     if (!candidate || !isNonEmptyString(candidate.version) || !isDate(candidate.effectiveFrom)) return false;
     if (Date.parse(candidate.effectiveFrom) > at) return false;
     if (candidate.effectiveTo !== undefined && (!isDate(candidate.effectiveTo) || Date.parse(candidate.effectiveTo) <= at)) return false;
     return billingLabel === undefined || candidate.billingLabel === billingLabel;
   });
+  const version = candidates.sort((left, right) => Date.parse(right.effectiveFrom) - Date.parse(left.effectiveFrom))[0];
   if (!version) return null;
   return {
     provider,
