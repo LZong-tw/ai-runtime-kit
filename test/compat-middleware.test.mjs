@@ -58,6 +58,63 @@ test("middleware authenticates callers and forwards ordinary Messages requests t
   assert.equal(await result.text(), '{"type":"message","content":[]}');
 });
 
+test("middleware emits audit boundaries without changing forwarded request bytes", async (t) => {
+  const rawBody = Buffer.from('{"model":"claude-sonnet","messages":[],"metadata":{"order":[2,1]}}');
+  const upstreamBodies = [];
+  const events = [];
+  const upstream = await startFixture(t, async (request, response) => {
+    upstreamBodies.push(await readBody(request));
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end('{"type":"message","content":[]}');
+  });
+  const adapter = await startCompatibilityMiddleware({
+    compatibility: COMPATIBILITY,
+    gatewayOrigin: upstream.origin,
+    gatewayToken: GATEWAY_TOKEN,
+    auditEmitter: {
+      emit: async (kind, fields) => events.push({ kind, fields }),
+    },
+    launchInstanceId: "launch-test",
+    sessionContext: { session_id: "session-test" },
+    port: 0,
+  });
+  t.after(() => adapter.close());
+
+  const result = await fetch(`${adapter.origin}/v1/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": GATEWAY_TOKEN },
+    body: rawBody,
+  });
+
+  assert.equal(result.status, 200);
+  assert.deepEqual(upstreamBodies, [rawBody.toString("utf8")]);
+  assert.deepEqual(events.map(({ kind }) => kind), ["request_started", "request_payload"]);
+  assert.equal(events[1].fields.payload.body_bytes, rawBody.byteLength);
+  assert.equal(events[1].fields.payload.body_sha256.length, 64);
+});
+
+test("middleware remains fail-open when the audit emitter rejects", async (t) => {
+  const upstream = await startFixture(t, async (_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end('{"type":"message","content":[]}');
+  });
+  const adapter = await startCompatibilityMiddleware({
+    compatibility: COMPATIBILITY,
+    gatewayOrigin: upstream.origin,
+    gatewayToken: GATEWAY_TOKEN,
+    auditEmitter: { emit: async () => { throw new Error("audit unavailable"); } },
+    port: 0,
+  });
+  t.after(() => adapter.close());
+
+  const result = await fetch(`${adapter.origin}/v1/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": GATEWAY_TOKEN },
+    body: '{"model":"claude-sonnet","messages":[]}',
+  });
+  assert.equal(result.status, 200);
+});
+
 test("middleware accepts the generated gateway key through Bearer authentication", async (t) => {
   const upstream = await startFixture(t, async (request, response) => {
     assert.equal(request.headers["x-api-key"], GATEWAY_TOKEN);
