@@ -189,6 +189,7 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
     "docs/install.md",
     "docs/profile-schema.md",
     "docs/runtime-lessons.md",
+    "native",
     "profiles",
     "scripts/capture-claude-tool-contract.mjs",
     "scripts/verify-ccr3-e2e.mjs",
@@ -216,8 +217,14 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
 
     assert.deepEqual(packageJson.files, expectedFiles);
     assert.deepEqual(exportedPackage.files, expectedFiles);
+    assert.equal(packageJson.bin["airkit-auditd"], "src/auditd.mjs");
+    assert.equal(exportedPackage.bin["airkit-auditd"], "src/auditd.mjs");
     assert.equal((await readFile(join(outDir, "src", "airpi.mjs"), "utf8")).includes("runExternalClientCli(\"pi\")"), true);
     assert.equal((await readFile(join(outDir, "src", "airoc.mjs"), "utf8")).includes("runExternalClientCli(\"opencode\")"), true);
+    assert.equal((await readFile(join(outDir, "src", "audit", "service.mjs"), "utf8")).includes("installAuditService"), true);
+    assert.equal((await readFile(join(outDir, "src", "audit", "cli.mjs"), "utf8")).includes("runAuditCli"), true);
+    assert.equal((await readFile(join(outDir, "src", "auditd.mjs"), "utf8")).includes("createAuditDaemon"), true);
+    assert.equal((await readFile(join(outDir, "native", "airkit-audit-auth.swift"), "utf8")).includes("import"), true);
     assert.equal((await readFile(join(outDir, "src", "subagent-observability.mjs"), "utf8")).includes("runSubagentStatusLine"), true);
     for (const candidate of [packageJson, exportedPackage]) {
       assert.equal(candidate.name, expectedIdentity.name);
@@ -339,6 +346,25 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
   } finally {
     await rm(outDir, { force: true, recursive: true });
   }
+});
+
+test("audit status dispatches before catalog loading", async () => {
+  let statusCalls = 0;
+  const stdout = [];
+  const exitCode = await runCli(["audit", "status"], {
+    catalogPath: "/definitely/missing/catalog.json",
+    audit: {
+      async status() {
+        statusCalls += 1;
+        return { state: "healthy", listening: true };
+      },
+    },
+    stdout: { write(chunk) { stdout.push(String(chunk)); } },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(statusCalls, 1);
+  assert.match(stdout.join(""), /state: healthy/);
 });
 
 test("CCR 3 merge creates CCR-only mode profiles and preserves unrelated configuration", () => {

@@ -27,6 +27,7 @@ import {
 import { startCompatibilityMiddleware } from "./compat/middleware.mjs";
 import { renderHeartbeatManagedFiles } from "./context-heartbeat.mjs";
 import { buildContextObservability } from "./context-observability.mjs";
+import { runAuditCli } from "./audit/cli.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
@@ -889,7 +890,9 @@ export async function exportOssRelease({ outDir }) {
   };
 
   await mkdir(join(outDir, "src"), { recursive: true });
+  await mkdir(join(outDir, "src", "audit"), { recursive: true });
   await mkdir(join(outDir, "src", "compat"), { recursive: true });
+  await mkdir(join(outDir, "native"), { recursive: true });
   await mkdir(join(outDir, "profiles"), { recursive: true });
   await mkdir(join(outDir, "scripts"), { recursive: true });
   const binPath = join(outDir, "src", "airkit.mjs");
@@ -905,6 +908,10 @@ export async function exportOssRelease({ outDir }) {
   await copyFile(join(here, "context-heartbeat.mjs"), join(outDir, "src", "context-heartbeat.mjs"));
   await copyFile(join(here, "context-observability.mjs"), join(outDir, "src", "context-observability.mjs"));
   await copyFile(join(here, "subagent-observability.mjs"), join(outDir, "src", "subagent-observability.mjs"));
+  await copyDirectory(join(here, "audit"), join(outDir, "src", "audit"));
+  await copyFile(join(here, "auditd.mjs"), join(outDir, "src", "auditd.mjs"));
+  await chmod(join(outDir, "src", "auditd.mjs"), 0o755);
+  await copyDirectory(join(repoRoot, "native"), join(outDir, "native"));
   for (const module of [
     "activity.mjs",
     "config.mjs",
@@ -933,6 +940,19 @@ export async function exportOssRelease({ outDir }) {
   await writeFile(join(outDir, "package.json"), `${JSON.stringify(publicPackage(packageVersion), null, 2)}\n`);
   await copyFile(join(repoRoot, "CLAUDE.md"), join(outDir, "CLAUDE.md"));
   await copyFile(join(repoRoot, "README.md"), join(outDir, "README.md"));
+}
+
+async function copyDirectory(fromDir, toDir) {
+  await mkdir(toDir, { recursive: true });
+  for (const entry of readdirSync(fromDir, { withFileTypes: true })) {
+    const source = join(fromDir, entry.name);
+    const target = join(toDir, entry.name);
+    if (entry.isDirectory()) {
+      await copyDirectory(source, target);
+    } else if (entry.isFile()) {
+      await copyFile(source, target);
+    }
+  }
 }
 
 export function planInstall(catalog, profileName, options = {}) {
@@ -1893,6 +1913,7 @@ function publicPackage(version) {
       airclaude: "src/airkit.mjs",
       airpi: "src/airpi.mjs",
       airoc: "src/airoc.mjs",
+      "airkit-auditd": "src/auditd.mjs",
     },
     files: [
       "CLAUDE.md",
@@ -1900,13 +1921,14 @@ function publicPackage(version) {
       "docs/install.md",
       "docs/profile-schema.md",
       "docs/runtime-lessons.md",
+      "native",
       "profiles",
       "scripts/capture-claude-tool-contract.mjs",
       "scripts/verify-ccr3-e2e.mjs",
       "src",
     ],
     scripts: {
-      check: "node --check src/airkit.mjs",
+      check: "node --check src/airkit.mjs && node --check src/audit/cli.mjs && node --check src/audit/crypto.mjs && node --check src/audit/daemon.mjs && node --check src/audit/event.mjs && node --check src/audit/keychain.mjs && node --check src/audit/migrations.mjs && node --check src/audit/paths.mjs && node --check src/audit/redaction.mjs && node --check src/audit/reveal.mjs && node --check src/audit/service.mjs && node --check src/audit/spool.mjs && node --check src/audit/store.mjs && node --check src/audit/transport.mjs && node --check src/auditd.mjs",
       "pack:check": "npm pack --dry-run",
       test: "node --test",
       "verify:ccr3:e2e": "node scripts/verify-ccr3-e2e.mjs",
@@ -1930,6 +1952,10 @@ export async function runCli(argv = process.argv.slice(2), options = {}) {
 
   if (command === "airclaude") {
     return runAirclaudeCli([subcommand, ...rest].filter((arg) => arg !== undefined), options);
+  }
+
+  if (command === "audit") {
+    return runAuditCli([subcommand, ...rest].filter((arg) => arg !== undefined), { ...options, stdout });
   }
 
   if (command === "runtime" && subcommand === "check") {
@@ -2460,6 +2486,7 @@ function renderAirkitHelp() {
 
 Commands:
   connect [--profile <name>] [--mode <mode>] [--port <port>]
+  audit <install|start|stop|status|doctor|update|verify|query> [options]
   runtime check
   runtime update [--write]
   repair codex-takeover [--write]
