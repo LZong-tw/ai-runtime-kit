@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 
 import { createGatewayClient } from "./gateway.mjs";
@@ -25,6 +25,9 @@ export async function startCompatibilityMiddleware({
   clientToken = gatewayToken,
   mode,
   port = 0,
+  auditEmitter = null,
+  launchInstanceId = null,
+  sessionContext = null,
 }) {
   validateCompatibilityConfig(compatibility);
   if (typeof clientToken !== "string" || clientToken.length === 0) {
@@ -57,6 +60,9 @@ export async function startCompatibilityMiddleware({
       gatewayToken: clientToken,
       mcp,
       messages,
+      auditEmitter,
+      launchInstanceId,
+      sessionContext,
       mode,
       request,
       response,
@@ -75,7 +81,18 @@ export async function startCompatibilityMiddleware({
   };
 }
 
-async function handleRequest({ coreClient, gatewayToken, mcp, messages, mode, request, response }) {
+async function handleRequest({
+  coreClient,
+  gatewayToken,
+  mcp,
+  messages,
+  auditEmitter,
+  launchInstanceId,
+  sessionContext,
+  mode,
+  request,
+  response,
+}) {
   if (!isAuthorized(request.headers, gatewayToken)) {
     request.resume();
     response.writeHead(401, { "content-type": "application/json" });
@@ -97,13 +114,38 @@ async function handleRequest({ coreClient, gatewayToken, mcp, messages, mode, re
     // keeps this internal routing label out of the upstream request.
     request.headers = { ...request.headers, [AIRKIT_MODE_HEADER]: mode };
   }
+  const logicalRequestId = safeRequestId(request.headers);
+  await emitAudit(auditEmitter, "request_started", {
+    logical_request_id: logicalRequestId,
+    session_id: sessionContext?.session_id ?? null,
+    payload: {
+      method: request.method,
+      path,
+      launch_instance_id: launchInstanceId,
+      content_type: request.headers["content-type"] ?? null,
+    },
+  });
+  const readBodyWithAudit = async (bodyRequest) => {
+    const rawBody = await readBody(bodyRequest);
+    await emitAudit(auditEmitter, "request_payload", {
+      logical_request_id: logicalRequestId,
+      session_id: sessionContext?.session_id ?? null,
+      payload: {
+        path,
+        body_bytes: rawBody.byteLength,
+        body_sha256: createHash("sha256").update(rawBody).digest("hex"),
+        content_type: request.headers["content-type"] ?? null,
+      },
+    });
+    return rawBody;
+  };
   try {
     if (request.method === "POST" && path === "/v1/messages") {
-      await messages(request, response, { readBody });
+      await messages(request, response, { readBody: readBodyWithAudit, logicalRequestId });
       return;
     }
     if (request.method === "POST" && path === "/airkit/compatibility/mcp") {
-      await mcp(request, response, { readBody });
+      await mcp(request, response, { readBody: readBodyWithAudit, logicalRequestId });
       return;
     }
     await coreClient.forward({
@@ -116,6 +158,16 @@ async function handleRequest({ coreClient, gatewayToken, mcp, messages, mode, re
     });
   } catch (error) {
     containFailure(response, error);
+  }
+}
+
+async function emitAudit(auditEmitter, kind, fields) {
+  if (typeof auditEmitter?.emit !== "function") return;
+  try {
+    await auditEmitter.emit(kind, fields);
+  } catch {
+    // A caller-supplied emitter is untrusted infrastructure. Compatibility
+    // forwarding remains authoritative when it fails.
   }
 }
 
@@ -167,6 +219,13 @@ async function readBody(request) {
   const chunks = [];
   for await (const chunk of request) chunks.push(chunk);
   return Buffer.concat(chunks);
+}
+
+function safeRequestId(headers) {
+  const candidate = typeof headers?.["x-request-id"] === "string"
+    ? headers["x-request-id"]
+    : "";
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(candidate) ? candidate : randomUUID();
 }
 
 function containFailure(response, error) {
