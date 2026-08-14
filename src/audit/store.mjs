@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   copyFileSync,
   existsSync,
@@ -12,6 +12,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { validateAuditEvent } from "./event.mjs";
+import { encryptAuditValue } from "./crypto.mjs";
 import { AUDIT_MIGRATIONS, checksumMigration } from "./migrations.mjs";
 
 const BACKUP_RETAIN_COUNT = 3;
@@ -52,6 +53,8 @@ export function openAuditStore(options = {}) {
     Database = DatabaseSync,
     backupDatabase = defaultBackupDatabase,
     now = () => new Date(),
+    vacuum = () => db?.exec("PRAGMA incremental_vacuum"),
+    masterKey,
   } = options;
 
   if (typeof databasePath !== "string" || databasePath.length === 0) {
@@ -103,6 +106,9 @@ export function openAuditStore(options = {}) {
     getEvent,
     recordGap,
     heartbeat,
+    prunePayloadBatch,
+    exportManifest,
+    exportRows,
     verify,
     query,
     close,
@@ -119,6 +125,15 @@ export function openAuditStore(options = {}) {
     const payloadMeta = payloadMetadata(validated.payload);
     const sourcePayloadJson = JSON.stringify(sourceEventPayloadMetadata(validated, payloadMeta));
     const sourcePayloadHash = createHash("sha256").update(sourcePayloadJson, "utf8").digest("hex");
+    const encryptedEvidence = validated.event_kind === "request_payload" && masterKey
+      ? encryptAuditValue({
+        masterKey,
+        purpose: "request-evidence/v1",
+        identity: validated.attempt_id ?? validated.event_id,
+        aad: validated.event_id,
+        plaintext: payloadJson,
+      })
+      : null;
 
     execTransaction(db, () => {
       if (validated.session_id) {
@@ -131,6 +146,7 @@ export function openAuditStore(options = {}) {
         upsertProviderAccount(payloadMeta.providerAccount, observed);
       }
 
+      const markerId = randomUUID();
       db.prepare(`
         INSERT INTO source_events (
           event_id,
@@ -196,10 +212,37 @@ export function openAuditStore(options = {}) {
               source_event_id,
               blob_kind,
               payload_json,
-              created_at
-            ) VALUES (?, ?, 'request', ?, ?)
+              created_at,
+              id,
+              algorithm,
+              key_id,
+              nonce,
+              ciphertext,
+              auth_tag,
+              wire_hash,
+              evidence_hash,
+              plaintext_bytes,
+              redaction_count,
+              expires_at
+            ) VALUES (?, ?, 'request', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source_event_id, blob_kind) DO NOTHING
-          `).run(requestRecordId, validated.event_id, payloadJson, observed);
+          `).run(
+            requestRecordId,
+            validated.event_id,
+            payloadJson,
+            observed,
+            encryptedEvidence ? `request-${validated.event_id}` : null,
+            encryptedEvidence ? "aes-256-gcm" : null,
+            encryptedEvidence?.keyId ?? null,
+            encryptedEvidence?.nonce ?? null,
+            encryptedEvidence?.ciphertext ?? null,
+            encryptedEvidence?.authTag ?? null,
+            sourcePayloadHash,
+            encryptedEvidence ? createHash("sha256").update(payloadJson, "utf8").digest("hex") : null,
+            encryptedEvidence ? Buffer.byteLength(payloadJson, "utf8") : null,
+            0,
+            encryptedEvidence ? new Date(Date.parse(observed) + 90 * 86400000).toISOString() : null,
+          );
         }
         if (validated.event_kind === "usage_reported") {
           insertUsageObservation(validated, payloadMeta, requestRecordId);
@@ -282,6 +325,81 @@ export function openAuditStore(options = {}) {
       isoNow(now),
     );
     return { status: "committed" };
+  }
+
+  async function prunePayloadBatch({ cutoff, batchSize = 500, preserve = false } = {}) {
+    assertWritable();
+    if (preserve) return { pruned: 0, preserved: true, done: true };
+    if (typeof cutoff !== "string" || Number.isNaN(Date.parse(cutoff))) throw new TypeError("cutoff must be an ISO date");
+    if (!Number.isInteger(batchSize) || batchSize < 1) throw new RangeError("batchSize must be a positive integer");
+    const candidates = db.prepare(`
+      SELECT payload_blob_id, source_event_id
+      FROM payload_blobs
+      WHERE expires_at IS NOT NULL AND expires_at <= ? AND pruned_at IS NULL AND preserved_at IS NULL
+      ORDER BY expires_at, payload_blob_id
+      LIMIT ?
+    `).all(cutoff, batchSize);
+    if (candidates.length === 0) return { pruned: 0, preserved: 0, done: true };
+    const observed = isoNow(now);
+    const markerPayload = { cutoff, pruned: candidates.length, batch_size: batchSize };
+    const markerJson = JSON.stringify(markerPayload);
+    const markerHash = createHash("sha256").update(markerJson, "utf8").digest("hex");
+    const markerId = randomUUID();
+    execTransaction(db, () => {
+      for (const candidate of candidates) {
+        db.prepare(`
+          UPDATE payload_blobs
+          SET payload_json = 'null', nonce = NULL, ciphertext = NULL, auth_tag = NULL, pruned_at = ?
+          WHERE payload_blob_id = ?
+        `).run(observed, candidate.payload_blob_id);
+        db.prepare("UPDATE request_payloads SET payload_json = 'null' WHERE event_id = ?")
+          .run(candidate.source_event_id);
+        db.prepare("UPDATE source_events SET payload_json = NULL WHERE event_id = ?")
+          .run(candidate.source_event_id);
+      }
+      db.prepare(`
+        INSERT INTO source_events (
+          event_id, event_version, source, source_version, source_event_id,
+          observed_at, received_at, client, event_kind, payload_json, payload_hash,
+          normalization_status, inserted_at
+        ) VALUES (?, 1, 'airkit-audit', '1', ?, ?, ?, 'airkit', 'retention_pruned', ?, ?, 'normalized', ?)
+      `).run(markerId, `retention-${markerId}`, observed, observed, markerJson, markerHash, observed);
+    });
+    vacuum();
+    return { pruned: candidates.length, preserved: 0, done: candidates.length < batchSize };
+  }
+
+  async function* exportRows() {
+    assertOpen();
+    const rows = db.prepare(`
+      SELECT
+        r.request_id, r.logical_request_id, r.session_id, r.provider, r.model, r.client,
+        r.status_code, r.failure_kind, r.effort, r.started_at, r.last_observed_at,
+        r.completed_at, r.duration_ms, r.capture_completeness,
+        u.uncached_input_tokens AS input_tokens, u.output_tokens, u.reasoning_tokens,
+        u.provider_total_tokens AS total_tokens, u.cache_read_tokens, u.cache_creation_tokens,
+        pb.source_event_id AS payload_event_id, se.attempt_id, pb.payload_json,
+        pb.key_id, pb.nonce, pb.ciphertext, pb.auth_tag, pb.wire_hash,
+        pb.evidence_hash, pb.plaintext_bytes, pb.redaction_count, pb.expires_at, pb.pruned_at,
+        pb.preserved_at
+      FROM requests r
+      LEFT JOIN request_usage u ON u.request_id = r.id
+      LEFT JOIN payload_blobs pb ON pb.request_id = r.id AND pb.blob_kind = 'request'
+      LEFT JOIN source_events se ON se.event_id = pb.source_event_id
+      ORDER BY r.started_at, r.id
+    `).all();
+    yield* rows;
+  }
+
+  async function exportManifest() {
+    assertOpen();
+    return db.prepare(`
+      SELECT r.request_id, pb.source_event_id AS payload_event_id, se.attempt_id
+      FROM requests r
+      LEFT JOIN payload_blobs pb ON pb.request_id = r.id AND pb.blob_kind = 'request'
+      LEFT JOIN source_events se ON se.event_id = pb.source_event_id
+      ORDER BY r.started_at, r.id
+    `).all();
   }
 
   function verify() {

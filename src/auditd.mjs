@@ -29,6 +29,7 @@ async function main() {
     storeFactory: () => openAuditStore({
       databasePath: env.AIRKIT_AUDIT_DATABASE_PATH ?? `${paths.rootDir}/audit.sqlite`,
       backupDir: env.AIRKIT_AUDIT_BACKUP_DIR ?? `${paths.rootDir}/backups`,
+      masterKey,
     }),
   });
 

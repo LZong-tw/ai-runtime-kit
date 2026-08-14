@@ -45,7 +45,9 @@ export async function runAuditCli(argv = [], dependencies = {}) {
   if (!handler) throw new Error(`unknown audit command: ${argv.join(" ") || "(none)"}`);
 
   const result = await handler(rest, audit);
-  stdout.write(renderAuditResult(command, result));
+  // A metadata export streamed to stdout is itself the CLI artifact; appending
+  // a status line would corrupt JSONL/CSV. File exports may still report status.
+  if (command !== "export" || hasFlag(rest, "--output")) stdout.write(renderAuditResult(command, result));
   return exitCodeFor(result?.state);
 }
 
@@ -57,6 +59,18 @@ const AUDIT_COMMANDS = Object.freeze({
   doctor: (_argv, audit) => audit.doctor(),
   update: (argv, audit) => audit.update({ write: hasFlag(argv, "--write") }),
   verify: (_argv, audit) => audit.verify(),
+  prune: (argv, audit) => audit.prune({
+    write: hasFlag(argv, "--write"),
+    preserve: hasFlag(argv, "--preserve"),
+    retentionDays: numericFlag(argv, "--retention-days", 90),
+    batchSize: numericFlag(argv, "--batch-size", 500),
+  }),
+  export: (argv, audit) => audit.export({
+    format: valueFlag(argv, "--format", "jsonl"),
+    includePayload: hasFlag(argv, "--include-payload"),
+    decrypt: hasFlag(argv, "--decrypt"),
+    outputPath: valueFlag(argv, "--output", undefined),
+  }),
 });
 
 async function runAuditQueryCli(argv, dependencies) {
@@ -81,11 +95,15 @@ async function runAuditQueryCli(argv, dependencies) {
 
 async function createDefaultAuditDependencies(dependencies = {}) {
   const env = dependencies.env ?? process.env;
-  const [{ createMasterKeyProvider }, { resolveAuditPaths }, service, storeModule] = await Promise.all([
+  const [{ createMasterKeyProvider }, { resolveAuditPaths }, service, storeModule, retention, exporter, revealExport, reveal] = await Promise.all([
     import("./keychain.mjs"),
     import("./paths.mjs"),
     import("./service.mjs"),
     import("./store.mjs"),
+    import("./retention.mjs"),
+    import("./export.mjs"),
+    import("./reveal-export.mjs"),
+    import("./reveal.mjs"),
   ]);
   const paths = resolveAuditPaths({ env, overrides: dependencies.auditPathOverrides ?? {} });
   const databasePath = env.AIRKIT_AUDIT_DATABASE_PATH ?? `${paths.rootDir}/audit.sqlite`;
@@ -95,7 +113,8 @@ async function createDefaultAuditDependencies(dependencies = {}) {
   const authHelperPath = dependencies.authHelperPath ?? env.AIRKIT_AUDIT_AUTH_HELPER ?? resolve(repoRoot, "native", "airkit-audit-auth.swift");
   const runLaunchctl = dependencies.runLaunchctl ?? createExecRunner("launchctl");
   const runSecurity = dependencies.runSecurity ?? createExecRunner(env.AIRKIT_SECURITY_PATH || "security");
-  const masterKeyProvider = createMasterKeyProvider({ env, runSecurity });
+  const masterKeyProvider = dependencies.masterKeyProvider ?? createMasterKeyProvider({ env, runSecurity });
+  const openAuditStore = dependencies.openAuditStore ?? storeModule.openAuditStore;
 
   return {
     async install({ write = false } = {}) {
@@ -137,7 +156,7 @@ async function createDefaultAuditDependencies(dependencies = {}) {
         nodePath,
         runLaunchctl,
         masterKeyProvider,
-        openAuditStore: storeModule.openAuditStore,
+        openAuditStore,
         databasePath,
         backupDir,
       });
@@ -151,7 +170,7 @@ async function createDefaultAuditDependencies(dependencies = {}) {
         nodePath,
         runLaunchctl,
         masterKeyProvider,
-        openAuditStore: storeModule.openAuditStore,
+        openAuditStore,
         databasePath,
         backupDir,
       });
@@ -163,12 +182,66 @@ async function createDefaultAuditDependencies(dependencies = {}) {
     },
 
     async verify() {
-      const database = await inspectDatabase({ backupDir, databasePath, openAuditStore: storeModule.openAuditStore });
+      const database = await inspectDatabase({ backupDir, databasePath, openAuditStore });
       return {
         state: database.present ? (database.ok ? "healthy" : "blocked") : "stopped",
         verified: database.ok,
         database,
       };
+    },
+
+    async prune({ write = false, preserve = false, retentionDays = 90, batchSize = 500 } = {}) {
+      if (!write || preserve) {
+        return retention.pruneExpiredPayloads(null, { write: false, preserve, retentionDays, batchSize });
+      }
+      const store = openAuditStore({ backupDir, databasePath, readOnly: false });
+      try {
+        const result = await retention.pruneExpiredPayloads(store, {
+          write: true,
+          retentionDays,
+          batchSize,
+        });
+        return { state: "healthy", ...result };
+      } finally {
+        store.close();
+      }
+    },
+
+    async export({ format = "jsonl", includePayload = false, decrypt = false, outputPath } = {}) {
+      const store = openAuditStore({ backupDir, databasePath, readOnly: true });
+      try {
+        const options = {
+          format,
+          includePayload,
+          decrypt,
+          outputPath,
+          output: dependencies.stdout ?? process.stdout,
+          signalProcess: dependencies.signalProcess,
+        };
+        if (includePayload && dependencies.authorizer && dependencies.decryptRow) {
+          options.interactive = dependencies.interactive ?? false;
+          options.authorizer = dependencies.authorizer;
+          options.decryptRow = dependencies.decryptRow;
+        } else if (includePayload) {
+          const authorizer = dependencies.revealAuthorizer ?? reveal.createRevealAuthorizer({
+            runHelper: dependencies.runAuditAuth ?? createExecRunner(authHelperPath),
+            env,
+          });
+          const coordinator = dependencies.revealCoordinator ?? revealExport.createRevealExportCoordinator({
+            authorizer,
+            masterKeyProvider,
+            runHelper: dependencies.runAuditAuth ?? createExecRunner(authHelperPath),
+            publicKey: dependencies.publicKey,
+            confirm: dependencies.confirmReveal ?? revealExport.createInteractiveRevealConfirmation(),
+            env,
+          });
+          options.authorizeExport = coordinator.authorizeExport;
+          options.decryptRow = coordinator.decryptRow;
+        }
+        return await exporter.exportAuditData(store, options);
+      } finally {
+        store.close();
+      }
     },
   };
 }
@@ -257,6 +330,8 @@ function renderAuditHelp() {
   audit doctor
   audit update [--write]
   audit verify
+  audit prune [--write] [--preserve]
+  audit export [--format jsonl|csv] [--output path] [--include-payload --decrypt]
   audit query [name]
 
 Options:
@@ -352,6 +427,17 @@ function exitCodeFor(state) {
 
 function hasFlag(argv, flag) {
   return argv.includes(flag);
+}
+
+function valueFlag(argv, flag, fallback) {
+  const index = argv.indexOf(flag);
+  return index >= 0 && argv[index + 1] ? argv[index + 1] : fallback;
+}
+
+function numericFlag(argv, flag, fallback) {
+  const value = Number(valueFlag(argv, flag, fallback));
+  if (!Number.isInteger(value) || value < 1) throw new RangeError(`${flag} must be a positive integer`);
+  return value;
 }
 
 async function pathExists(target) {
