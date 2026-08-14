@@ -134,6 +134,14 @@ test("Gemini usageMetadata cache counters remain truthful", () => {
   );
 });
 
+test("context projection does not derive cache misses from unrelated metadata", () => {
+  const result = summarizeCompletionUsage({
+    usageMetadata: { promptTokenCount: 100 },
+    cache_read_tokens: 20,
+  });
+  assert.equal(result.cacheMissInputTokens, null);
+});
+
 test("Anthropic cache counters contribute to truthful total input accounting", () => {
   assert.deepEqual(
     summarizeCompletionUsage({
