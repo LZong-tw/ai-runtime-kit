@@ -16,6 +16,24 @@
       "xaiModels": "https://docs.x.ai/developers/models",
       "azureModels": "https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure"
     },
+    "pricingVersions": [
+      {
+        "provider": "web_litellm",
+        "model": "gpt-5.6-terra",
+        "versions": [
+          {
+            "version": "gpt-5.6-terra-2026-08-05",
+            "effectiveFrom": "2026-08-05T00:00:00Z",
+            "billingLabel": "gpt-5.6-terra",
+            "pricesUsdPer1M": {
+              "uncachedInput": 2,
+              "cacheRead": 0.2,
+              "output": 12
+            }
+          }
+        ]
+      }
+    ],
     "capabilityLevels": [
       "economy",
       "balanced",
