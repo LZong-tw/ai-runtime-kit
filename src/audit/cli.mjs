@@ -282,7 +282,7 @@ function sanitizeMetadata(value, key = "") {
   }
   if (typeof value === "string") {
     if (SENSITIVE_FIELD.test(key)) return "[redacted]";
-    if (isAbsolute(value)) return shortenPath(value);
+    return scrubEmbeddedAbsolutePaths(value);
   }
   return value;
 }
@@ -304,6 +304,46 @@ function formatValue(value) {
 function shortenPath(value) {
   const leaf = basename(value);
   return leaf ? `…/${leaf}` : value;
+}
+
+function scrubEmbeddedAbsolutePaths(value) {
+  if (isAbsolute(value)) return shortenPath(value);
+
+  let result = "";
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index] !== "/") {
+      result += value[index];
+      continue;
+    }
+
+    let end = index + 1;
+    while (end < value.length && !isPathDelimiter(value[end])) {
+      end += 1;
+    }
+
+    const candidate = value.slice(index, end);
+    const match = candidate.match(/^(.*?)([),.:;\]}]+)?$/);
+    const pathPart = match?.[1] ?? candidate;
+    const suffix = match?.[2] ?? "";
+    if (looksLikeUnixAbsolutePath(pathPart)) {
+      result += `${shortenPath(pathPart)}${suffix}`;
+      index = end - 1;
+      continue;
+    }
+
+    result += value[index];
+  }
+  return result;
+}
+
+function looksLikeUnixAbsolutePath(value) {
+  return isAbsolute(value)
+    && value.includes("/")
+    && /^\/(?:Users|private|tmp|var|opt|Volumes|Library|Applications|System|bin|sbin|etc|usr|dev|cores|Network|home)\//.test(value);
+}
+
+function isPathDelimiter(char) {
+  return /\s|["'`<>{}|[\]()]/.test(char);
 }
 
 function exitCodeFor(state) {
