@@ -128,6 +128,21 @@ test("cache miss stays unavailable when the exact Gemini pair is incomplete", ()
   assert.equal(result.provenance.cacheMissTokens, undefined);
 });
 
+test("complete Gemini metadata wins over a conflicting cache-read alias", () => {
+  const result = normalizeUsageObservation({
+    provider: "gemini",
+    usage: {
+      usageMetadata: { promptTokenCount: 100, cachedContentTokenCount: 30 },
+      cache_read_tokens: 20,
+    },
+  });
+  assert.equal(result.values.cacheReadTokens, 30);
+  assert.equal(result.values.cacheMissTokens, 70);
+  assert.equal(result.provenance.cacheMissTokens.kind, "derived");
+  assert.ok(result.conflicts.some((conflict) => conflict.field === "cacheReadTokens"));
+  assert.equal(result.confidence, 0.5);
+});
+
 test("numeric-string byte headers remain raw byte observations", () => {
   const result = normalizeUsageObservation({
     provider: "openai",
