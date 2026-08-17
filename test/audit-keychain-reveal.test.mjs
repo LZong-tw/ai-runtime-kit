@@ -19,7 +19,7 @@ test("master key provider uses the fixed Keychain identity and never puts secret
   assert.deepEqual(await provider.create(), secret);
   assert.deepEqual(await provider.get(), secret);
   assert.ok(calls.every(({ args }) => !args.includes(secret.toString())));
-  assert.ok(calls.some(({ args }) => args.includes("ai-runtime-kit.audit") && args.includes("payload-master-v1")));
+  assert.ok(calls.some(({ args }) => args.includes("ai-runtime-kit.audit") && (args.includes("payload-master-v1") || args.includes("payload-master-v2"))));
 });
 
 test("reveal authorization binds request/session, expires after 30 seconds, and is single use", async () => {

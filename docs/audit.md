@@ -157,8 +157,9 @@ normalized metadata. `--preserve` is an explicit no-op safety switch.
 ## Security boundary
 
 - The audit master key is stored in the macOS Keychain under service
-  `ai-runtime-kit.audit` and account `payload-master-v1`; it is not a CLI
-  argument or normal log field.
+  `ai-runtime-kit.audit`. New records use `payload-master-v2`; `payload-master-v1`
+  remains a read-only compatibility fallback. The key is never a CLI argument
+  or normal log field.
 - The daemon accepts one length-bounded frame per Unix-socket connection. The
   socket and state directories are created with owner-only permissions, and
   frames require a capability HMAC before decryption.
