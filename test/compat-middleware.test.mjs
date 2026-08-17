@@ -88,9 +88,73 @@ test("middleware emits audit boundaries without changing forwarded request bytes
 
   assert.equal(result.status, 200);
   assert.deepEqual(upstreamBodies, [rawBody.toString("utf8")]);
-  assert.deepEqual(events.map(({ kind }) => kind), ["request_started", "request_payload"]);
+  assert.deepEqual(events.slice(0, 2).map(({ kind }) => kind), ["request_started", "request_payload"]);
+  assert.deepEqual(events.slice(2).map(({ kind }) => kind), ["provider_request", "provider_response"]);
   assert.equal(events[1].fields.payload.body_bytes, rawBody.byteLength);
   assert.equal(events[1].fields.payload.body_sha256.length, 64);
+});
+
+test("middleware carries audit context into compatibility provider attempts", async (t) => {
+  const events = [];
+  let upstreamCalls = 0;
+  const upstream = await startFixture(t, async (request, response) => {
+    const body = JSON.parse(await readBody(request));
+    upstreamCalls += 1;
+    const message = upstreamCalls === 1
+      ? {
+        type: "message",
+        model: "gpt-5.6-terra",
+        provider: "oneportal",
+        content: [{ type: "tool_use", id: "toolu_advisor", name: "airkit_advisor", input: {} }],
+        usage: { input_tokens: 4, output_tokens: 1 },
+      }
+      : typeof body.messages?.[0]?.content === "string" && body.messages[0].content.startsWith("Review this")
+        ? {
+          type: "message",
+          model: "claude-sonnet",
+          provider: "anthropic-messages",
+          content: [{ type: "text", text: "advisor result" }],
+          usage: { input_tokens: 3, output_tokens: 2 },
+        }
+        : {
+          type: "message",
+          model: "gpt-5.6-terra",
+          provider: "oneportal",
+          content: [{ type: "text", text: "final" }],
+          usage: { input_tokens: 5, output_tokens: 2 },
+        };
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify(message));
+  });
+  const adapter = await startCompatibilityMiddleware({
+    compatibility: { ...COMPATIBILITY, advisor: { mode: "bridge" } },
+    gatewayOrigin: upstream.origin,
+    gatewayToken: GATEWAY_TOKEN,
+    auditEmitter: { emit: async (kind, fields) => events.push({ kind, fields }) },
+    sessionContext: { session_id: "session-advisor" },
+    launchInstanceId: "launch-advisor",
+    port: 0,
+  });
+  t.after(() => adapter.close());
+
+  const result = await fetch(`${adapter.origin}/v1/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": GATEWAY_TOKEN },
+    body: JSON.stringify({
+      model: "oneportal/gpt-5.6-terra",
+      messages: [{ role: "user", content: "ask advisor" }],
+      tools: [{ type: "advisor_20260301", name: "advisor" }],
+      stream: false,
+    }),
+  });
+
+  assert.equal(result.status, 200);
+  assert.equal((await result.json()).content.at(-1).text, "final");
+  const attempts = events.filter(({ kind }) => kind === "provider_request");
+  assert.equal(attempts.length, 3);
+  assert.ok(attempts.every(({ fields }) => fields.logical_request_id));
+  assert.ok(attempts.every(({ fields }) => fields.session_id === "session-advisor"));
+  assert.equal(upstreamCalls, 3);
 });
 
 test("middleware remains fail-open when the audit emitter rejects", async (t) => {

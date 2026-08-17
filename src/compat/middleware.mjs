@@ -52,6 +52,11 @@ export async function startCompatibilityMiddleware({
     config: compatibility,
     coreClient,
     policies,
+    auditEmitter,
+    auditContext: {
+      ...(sessionContext ?? {}),
+      ...(launchInstanceId === null ? {} : { launchInstanceId }),
+    },
   });
   const mcp = createMcpHandler({ config: compatibility, coreClient });
   const server = createServer((request, response) => {
