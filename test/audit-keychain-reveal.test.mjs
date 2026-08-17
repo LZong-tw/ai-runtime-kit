@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { createMasterKeyProvider } from "../src/audit/keychain.mjs";
 import { createRevealAuthorizer, revealAuthorizationMessage } from "../src/audit/reveal.mjs";
@@ -20,6 +21,35 @@ test("master key provider uses the fixed Keychain identity and never puts secret
   assert.deepEqual(await provider.get(), secret);
   assert.ok(calls.every(({ args }) => !args.includes(secret.toString())));
   assert.ok(calls.some(({ args }) => args.includes("ai-runtime-kit.audit") && (args.includes("payload-master-v1") || args.includes("payload-master-v2"))));
+});
+
+test("v2 reads stay on the native helper and do not trigger security CLI prompts", async () => {
+  const secret = Buffer.alloc(32, 0x5a);
+  const securityCalls = [];
+  const helperCalls = [];
+  const provider = createMasterKeyProvider({
+    env: {},
+    keychainHelperPath: "/absolute/airkit-audit-keychain.swift",
+    runSecurity: async (request) => {
+      securityCalls.push(request);
+      return { status: 44, stdout: "" };
+    },
+    runKeychainHelper: async (request) => {
+      helperCalls.push(request);
+      return { status: 0, stdout: Buffer.from(secret).toString("base64") };
+    },
+  });
+  assert.deepEqual(await provider.get(), secret);
+  assert.equal(securityCalls.length, 0);
+  assert.deepEqual(helperCalls[0].args, ["/absolute/airkit-audit-keychain.swift", "read", "payload-master-v2"]);
+  assert.equal(helperCalls[0].input, undefined);
+});
+
+test("auditd wires v2 Keychain reads through the native helper", async () => {
+  const source = await readFile(new URL("../src/auditd.mjs", import.meta.url), "utf8");
+  assert.match(source, /runKeychainHelper/);
+  assert.match(source, /AIRKIT_AUDIT_KEYCHAIN_HELPER/);
+  assert.match(source, /airkit-audit-keychain\.swift/);
 });
 
 test("reveal authorization binds request/session, expires after 30 seconds, and is single use", async () => {
