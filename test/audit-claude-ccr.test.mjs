@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import { test } from "node:test";
 
 import { reconcileCcrRequestLogs } from "../src/audit/reconcile/ccr.mjs";
 import { reconcileClaudeCode } from "../src/audit/reconcile/claude-code.mjs";
 import { processAuditHook } from "../src/audit/claude-hook.mjs";
-import { processContextHook } from "../src/context-heartbeat.mjs";
+import { createClaudeAuditHookEmitter } from "../src/audit/claude-hook-runtime.mjs";
+import { processContextHook, runHeartbeatHook } from "../src/context-heartbeat.mjs";
 
 test("CCR reconciliation pages by createdAt/id and preserves field provenance", async () => {
   const calls = [];
@@ -81,4 +83,73 @@ test("audit hook emits lifecycle metadata and remains additive when its emitter 
     { AIRCLAUDE_PROFILE: "test", __airkitAudit: { emit: async () => { throw new Error("offline"); } } },
   );
   assert.equal(response.hookSpecificOutput.hookEventName, "UserPromptSubmit");
+});
+
+test("Claude-Sub audit-only hooks emit without enabling AirClaude routing", async () => {
+  const events = [];
+  const response = await processContextHook(
+    {
+      hook_event_name: "UserPromptSubmit",
+      session_id: "subscription-session",
+      prompt: "private prompt",
+    },
+    {
+      AIRKIT_AUDIT_ENABLED: "1",
+      __airkitAudit: { emit: async (event) => events.push(event) },
+    },
+  );
+
+  assert.equal(response, null);
+  assert.deepEqual(events.map((event) => event.event_kind), ["session_context", "request_started"]);
+  assert.ok(!JSON.stringify(events).includes("private prompt"));
+});
+
+test("Claude-Sub hook runtime builds an encrypted audit emitter from the local capability", async () => {
+  let sent;
+  const emitter = await createClaudeAuditHookEmitter({
+    env: {
+      AIRKIT_AUDIT_CAPABILITY_FILE: "/tmp/audit-capability",
+      AIRKIT_AUDIT_SOCKET_PATH: "/tmp/auditd.sock",
+    },
+    readFileImpl: async () => "capability-value\n",
+    masterKeyProvider: { get: async () => Buffer.alloc(32, 7) },
+    createClient: (options) => ({
+      options,
+      async send(envelope) {
+        sent = envelope;
+        return { event_id: envelope.event_id, status: "committed" };
+      },
+    }),
+  });
+
+  await emitter.emit("session_context", {
+    session_id: "sub-session",
+    payload: { lifecycle: "SessionStart" },
+  });
+
+  assert.equal(typeof sent.event_id, "string");
+  assert.ok(sent.event_id.length > 0);
+  assert.equal(sent.encrypted.keyId, "payload-master-v1");
+  assert.equal(sent.encrypted.ciphertext.includes("SessionStart"), false);
+});
+
+test("Claude-Sub hook command uses the audit-only path without AirClaude context", async () => {
+  const events = [];
+  const output = [];
+  await runHeartbeatHook({
+    env: { AIRKIT_AUDIT_ENABLED: "1" },
+    input: Readable.from([JSON.stringify({
+      hook_event_name: "UserPromptSubmit",
+      session_id: "sub-session",
+      prompt: "private prompt",
+    })]),
+    output: { write: (value) => output.push(value) },
+    createAuditHookEmitter: async ({ env }) => {
+      assert.equal(env.AIRKIT_AUDIT_ENABLED, "1");
+      return { emit: async (event) => events.push(event) };
+    },
+  });
+
+  assert.deepEqual(events.map((event) => event.event_kind), ["session_context", "request_started"]);
+  assert.deepEqual(output, []);
 });

@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { processSubagentObservabilityHook } from "./subagent-observability.mjs";
 import { processAuditHook } from "./audit/claude-hook.mjs";
+import { createClaudeAuditHookEmitter } from "./audit/claude-hook-runtime.mjs";
 
 export const HEARTBEAT_CONTEXT_LIMIT = 512;
 export const TASK_CAPSULE_CONTEXT_LIMIT = 3072;
@@ -72,7 +73,8 @@ export function parseTaskCapsule(summary) {
 }
 
 export async function processContextHook(input, env = process.env) {
-  if (!env.AIRCLAUDE_PROFILE) return null;
+  const auditOnly = env.AIRKIT_AUDIT_ENABLED === "1" && env.__airkitAudit;
+  if (!env.AIRCLAUDE_PROFILE && !auditOnly) return null;
   if (env.__airkitAudit) {
     try {
       await processAuditHook(input, env.__airkitAudit);
@@ -80,6 +82,7 @@ export async function processContextHook(input, env = process.env) {
       // Audit is additive; preserve all existing context and completion hooks.
     }
   }
+  if (auditOnly) return null;
   if (["SubagentStart", "PostToolUse", "SubagentStop"].includes(input?.hook_event_name)) {
     try {
       await processSubagentObservabilityHook(input, env);
@@ -288,7 +291,12 @@ async function readTranscriptModel(transcriptPath) {
   return null;
 }
 
-export async function runHeartbeatHook({ env = process.env, input = process.stdin, output = process.stdout } = {}) {
+export async function runHeartbeatHook({
+  env = process.env,
+  input = process.stdin,
+  output = process.stdout,
+  createAuditHookEmitter: createAuditHookEmitterOption = createAuditHookEmitter,
+} = {}) {
   let raw = "";
   for await (const chunk of input) {
     raw += chunk;
@@ -302,8 +310,22 @@ export async function runHeartbeatHook({ env = process.env, input = process.stdi
     return;
   }
 
-  const response = await processContextHook(hookInput, env);
+  let hookEnv = env;
+  let auditEmitter = env.AIRKIT_AUDIT_ENABLED === "1" && !env.__airkitAudit
+    ? await createAuditHookEmitterOption({ env })
+    : null;
+  if (auditEmitter) hookEnv = { ...env, __airkitAudit: auditEmitter };
+  const response = await processContextHook(hookInput, hookEnv);
+  await auditEmitter?.flush?.();
   if (response) output.write(`${JSON.stringify(response)}\n`);
+}
+
+async function createAuditHookEmitter(env) {
+  try {
+    return await createClaudeAuditHookEmitter({ env });
+  } catch {
+    return null;
+  }
 }
 
 export function renderHeartbeatManagedFiles(configDir, runtimeModuleUrl = import.meta.url) {
