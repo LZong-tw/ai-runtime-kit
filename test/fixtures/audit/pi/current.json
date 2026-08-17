@@ -1,0 +1,16 @@
+{
+  "contractVersion": 1,
+  "piVersion": "0.84.1",
+  "capturedAt": "2026-08-17T00:00:00.000Z",
+  "source": "installed-pi-extension-contract",
+  "events": [
+    { "type": "session_start", "fields": ["session_id", "hasUI"] },
+    { "type": "before_agent_start", "fields": ["prompt_bytes", "session_id"] },
+    { "type": "turn_start", "fields": ["turn_id", "session_id"] },
+    { "type": "turn_end", "fields": ["turn_id", "usage", "session_id"] }
+  ],
+  "redaction": {
+    "payload": "metadata_only",
+    "omitted": ["prompt", "tool_input", "tool_output", "credentials", "local_paths"]
+  }
+}
