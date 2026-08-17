@@ -509,6 +509,7 @@ export function openAuditStore(options = {}) {
         request_usage.cache_creation_tokens AS cache_creation_tokens,
         requests.capture_completeness AS capture_completeness,
         payload_blobs.source_event_id AS payload_event_id,
+        source_events.attempt_id AS attempt_id,
         payload_blobs.payload_json AS payload_json,
         payload_blobs.key_id AS key_id,
         payload_blobs.nonce AS nonce,
@@ -533,6 +534,8 @@ export function openAuditStore(options = {}) {
           ORDER BY candidate.created_at DESC, candidate.payload_blob_id DESC
           LIMIT 1
         )
+      LEFT JOIN source_events
+        ON source_events.event_id = payload_blobs.source_event_id
       ORDER BY requests.started_at, requests.id
     `).all();
 
