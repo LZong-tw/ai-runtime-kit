@@ -27,6 +27,7 @@
     "native",
     "profiles",
     "scripts/capture-claude-tool-contract.mjs",
+    "scripts/capture-pi-audit-contract.mjs",
     "scripts/verify-audit-core.mjs",
     "scripts/verify-ccr3-e2e.mjs",
     "src"
