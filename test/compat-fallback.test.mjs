@@ -466,6 +466,12 @@ test("gateway audit records executor actual model and allowlisted usage", async 
   assert.ok(response);
   assert.equal(request.fields.logical_request_id, "logical-executor");
   assert.equal(request.fields.attempt_id, response.fields.attempt_id);
+  assert.deepEqual(request.fields.payload.selected, {
+    route: "web_litellm/gpt-5.6-terra",
+    provider: "web_litellm",
+    account: null,
+    model: "gpt-5.6-terra",
+  });
   assert.deepEqual(response.fields.payload.actual, {
     provider: "web_litellm",
     account: null,
@@ -476,6 +482,62 @@ test("gateway audit records executor actual model and allowlisted usage", async 
     output_tokens: 2,
     cache_read_input_tokens: 8,
   });
+});
+
+test("gateway audit records the Advisor provider attempt separately", async () => {
+  const events = [];
+  let calls = 0;
+  const result = await handleCompatibilityMessage({
+    body: {
+      model: "oneportal/gpt-5.6-terra",
+      messages: [{ role: "user", content: "ask advisor" }],
+      tools: [{ type: "advisor_20260301", name: "advisor" }],
+      stream: false,
+    },
+    config: { ...VALID_CONFIG, advisor: { mode: "bridge" } },
+    headers: {},
+    auditEmitter: { emit: async (kind, fields) => events.push({ kind, fields }) },
+    auditContext: { logicalRequestId: "logical-advisor" },
+    coreClient: {
+      async requestMessage(requestBody) {
+        calls += 1;
+        if (calls === 1) {
+          return {
+            type: "message",
+            model: "gpt-5.6-terra",
+            provider: "oneportal",
+            content: [{ type: "tool_use", id: "toolu_advisor", name: "airkit_advisor", input: {} }],
+            usage: { input_tokens: 4, output_tokens: 1 },
+          };
+        }
+        if (typeof requestBody.messages?.[0]?.content === "string" &&
+          requestBody.messages[0].content.startsWith("Review this")) {
+          return {
+            type: "message",
+            model: "claude-sonnet",
+            provider: "anthropic-messages",
+            content: [{ type: "text", text: "advisor result" }],
+            usage: { input_tokens: 3, output_tokens: 2 },
+          };
+        }
+        return {
+          type: "message",
+          model: "gpt-5.6-terra",
+          provider: "oneportal",
+          content: [{ type: "text", text: "final" }],
+          usage: { input_tokens: 5, output_tokens: 2 },
+        };
+      },
+    },
+  });
+
+  assert.equal(result.content.at(-1).text, "final");
+  const attempts = events.filter(({ kind }) => kind === "provider_request");
+  const advisorAttempt = attempts.find(({ fields }) => fields.payload.selected.model === "claude-sonnet");
+  assert.ok(advisorAttempt);
+  assert.equal(advisorAttempt.fields.logical_request_id, "logical-advisor");
+  assert.equal(advisorAttempt.fields.payload.selected.provider, "anthropic-messages");
+  assert.equal(events.filter(({ kind }) => kind === "provider_response").length, 3);
 });
 
 test("real core fallback preserves stream true, SSE bytes, and backpressure", async (t) => {

@@ -538,7 +538,8 @@ async function requestAdvisor({
     { role: "assistant", content: executorMessage.content },
   ]);
   try {
-    const result = await coreClient.requestMessage(
+    const result = await requestCoreMessage(
+      coreClient,
       {
         model: compatibilityFallbackSelector(selected),
         max_tokens: advisor?.max_tokens ?? body.max_tokens,
@@ -551,10 +552,10 @@ async function requestAdvisor({
         stream: false,
       },
       headers,
+      "CCR advisor request failed",
       signal,
       audit,
     );
-    assertMessageResponse(result);
     return result;
   } catch {
     return null;
@@ -832,14 +833,25 @@ export function createAttemptAudit({ auditEmitter, auditContext, body }) {
 function selectedIdentity(model, route, context) {
   const selectedModel = typeof model === "string" && model.length > 0 ? model : null;
   const selectedRoute = typeof route === "string" && route.length > 0 ? route : selectedModel;
-  const selector = selectedRoute?.split("/", 1)[0] ?? "";
-  const provider = selector.split(",", 1)[0];
+  const routeParts = splitSelector(selectedRoute);
+  const modelParts = splitSelector(selectedModel);
   return {
     route: selectedRoute,
-    provider: provider.length > 0 && provider !== selectedRoute ? provider : null,
+    provider: routeParts.provider ?? modelParts.provider,
     account: context?.selectedAccountHmac ?? context?.selected_account_hmac ?? null,
-    model: selectedModel,
+    model: modelParts.model ?? routeParts.model,
   };
+}
+
+function splitSelector(value) {
+  if (typeof value !== "string" || value.length === 0) return { provider: null, model: null };
+  const slash = value.indexOf("/");
+  const comma = value.indexOf(",");
+  const separator = slash >= 0 && (comma < 0 || slash < comma) ? slash : comma;
+  if (separator <= 0 || separator === value.length - 1) {
+    return { provider: null, model: value };
+  }
+  return { provider: value.slice(0, separator), model: value.slice(separator + 1) };
 }
 
 function allowlistedHeaderCounters(headers, prefix) {
