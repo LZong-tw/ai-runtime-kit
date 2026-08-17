@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { processSubagentObservabilityHook } from "./subagent-observability.mjs";
+import { processAuditHook } from "./audit/claude-hook.mjs";
 
 export const HEARTBEAT_CONTEXT_LIMIT = 512;
 export const TASK_CAPSULE_CONTEXT_LIMIT = 3072;
@@ -72,6 +73,13 @@ export function parseTaskCapsule(summary) {
 
 export async function processContextHook(input, env = process.env) {
   if (!env.AIRCLAUDE_PROFILE) return null;
+  if (env.__airkitAudit) {
+    try {
+      await processAuditHook(input, env.__airkitAudit);
+    } catch {
+      // Audit is additive; preserve all existing context and completion hooks.
+    }
+  }
   if (["SubagentStart", "PostToolUse", "SubagentStop"].includes(input?.hook_event_name)) {
     try {
       await processSubagentObservabilityHook(input, env);
