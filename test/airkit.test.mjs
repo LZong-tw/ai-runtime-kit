@@ -192,9 +192,10 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
     "native",
     "profiles",
     "scripts/capture-claude-tool-contract.mjs",
-    "scripts/capture-codex-audit-contract.mjs",
-    "scripts/capture-pi-audit-contract.mjs",
-    "scripts/verify-audit-core.mjs",
+      "scripts/capture-codex-audit-contract.mjs",
+      "scripts/capture-pi-audit-contract.mjs",
+      "scripts/verify-audit-clients.mjs",
+      "scripts/verify-audit-core.mjs",
     "scripts/verify-ccr3-e2e.mjs",
     "src",
   ];
