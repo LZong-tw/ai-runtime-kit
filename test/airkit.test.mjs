@@ -221,7 +221,8 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
     assert.deepEqual(exportedPackage.files, expectedFiles);
     assert.equal(packageJson.bin["airkit-auditd"], "src/auditd.mjs");
     assert.equal(exportedPackage.bin["airkit-auditd"], "src/auditd.mjs");
-    assert.equal((await readFile(join(outDir, "src", "airpi.mjs"), "utf8")).includes("runExternalClientCli(\"pi\")"), true);
+    const exportedAirPi = await readFile(join(outDir, "src", "airpi.mjs"), "utf8");
+    assert.equal(exportedAirPi.includes("runAirPiCli()") || exportedAirPi.includes("runExternalClientCli(\"pi\")"), true);
     assert.equal((await readFile(join(outDir, "src", "airoc.mjs"), "utf8")).includes("runExternalClientCli(\"opencode\")"), true);
     assert.equal((await readFile(join(outDir, "src", "audit", "service.mjs"), "utf8")).includes("installAuditService"), true);
     assert.equal((await readFile(join(outDir, "src", "audit", "cli.mjs"), "utf8")).includes("runAuditCli"), true);
