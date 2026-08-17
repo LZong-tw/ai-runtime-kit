@@ -130,9 +130,11 @@ async function createDefaultAuditDependencies(dependencies = {}) {
   const nodePath = dependencies.nodePath ?? process.execPath;
   const daemonPath = dependencies.daemonPath ?? resolve(repoRoot, "src", "auditd.mjs");
   const authHelperPath = dependencies.authHelperPath ?? env.AIRKIT_AUDIT_AUTH_HELPER ?? resolve(repoRoot, "native", "airkit-audit-auth.swift");
+  const keychainHelperPath = dependencies.keychainHelperPath ?? env.AIRKIT_AUDIT_KEYCHAIN_HELPER ?? resolve(repoRoot, "native", "airkit-audit-keychain.swift");
   const runLaunchctl = dependencies.runLaunchctl ?? createExecRunner("launchctl");
   const runSecurity = dependencies.runSecurity ?? createExecRunner(env.AIRKIT_SECURITY_PATH || "security");
-  const masterKeyProvider = dependencies.masterKeyProvider ?? createMasterKeyProvider({ env, runSecurity });
+  const runKeychainHelper = dependencies.runKeychainHelper ?? createExecRunner("swift");
+  const masterKeyProvider = dependencies.masterKeyProvider ?? createMasterKeyProvider({ env, runSecurity, runKeychainHelper, keychainHelperPath });
   const openAuditStore = dependencies.openAuditStore ?? storeModule.openAuditStore;
 
   return {
