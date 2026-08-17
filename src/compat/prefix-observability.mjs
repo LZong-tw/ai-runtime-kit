@@ -4,7 +4,8 @@ import { createHash } from "node:crypto";
 // cache key. The forwarded Claude request remains untouched; providers may
 // apply additional boundaries or TTL rules that this local fingerprint cannot
 // see.
-export function describeStablePrefix(body) {
+export function describeStablePrefix(body, options = {}) {
+  const wirePrefixHash = exactWirePrefixHash(options?.rawPrefixBytes);
   if (!isRecord(body) || !Array.isArray(body.messages)) {
     return {
       candidate: false,
@@ -12,6 +13,7 @@ export function describeStablePrefix(body) {
       stablePrefixHash: null,
       stablePrefixBytes: null,
       stablePrefixMessages: null,
+      ...(wirePrefixHash ? { wirePrefixHash } : {}),
     };
   }
 
@@ -23,6 +25,7 @@ export function describeStablePrefix(body) {
       stablePrefixHash: null,
       stablePrefixBytes: null,
       stablePrefixMessages: 0,
+      ...(wirePrefixHash ? { wirePrefixHash } : {}),
     };
   }
   const serialized = JSON.stringify({
@@ -38,7 +41,18 @@ export function describeStablePrefix(body) {
     stablePrefixHash: createHash("sha256").update(serialized).digest("hex"),
     stablePrefixBytes: bytes,
     stablePrefixMessages: stableMessages.length,
+    ...(wirePrefixHash ? { wirePrefixHash } : {}),
   };
+}
+
+function exactWirePrefixHash(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" && !Buffer.isBuffer(value) && !(value instanceof Uint8Array)) {
+    return null;
+  }
+  const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
+  if (bytes.byteLength === 0) return null;
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 // This classification is deliberately model-agnostic. It separates a request
