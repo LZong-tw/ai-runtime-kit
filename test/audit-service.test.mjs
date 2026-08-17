@@ -63,6 +63,8 @@ test("plan has explicit GUI target and absolute paths", () => {
   const plan = planAuditService(options);
   assert.equal(plan.target, "gui/501/com.airkit.auditd");
   assert.deepEqual(plan.plist.ProgramArguments, [options.nodePath, options.daemonPath, "--auth-helper", options.authHelperPath]);
+  assert.match(plan.plist.EnvironmentVariables.AIRKIT_AUDIT_CAPABILITY_FILE, /airkit-audit\/capability$/);
+  assert.equal(Object.hasOwn(plan.plist.EnvironmentVariables, "AIRKIT_AUDIT_MASTER_KEY_HEX"), false);
 });
 
 test("rejects path or target drift before touching unrelated jobs", async () => {

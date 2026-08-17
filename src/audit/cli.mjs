@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
-import { access } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { access, chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -136,6 +138,11 @@ async function createDefaultAuditDependencies(dependencies = {}) {
   return {
     async install({ write = false } = {}) {
       const keychain = await inspectKeychain(masterKeyProvider);
+      const capabilityFile = paths.capabilityFile ?? resolve(paths.rootDir, "capability");
+      if (write) {
+        await ensureCapabilityFile(capabilityFile);
+        if (!keychain.present) await masterKeyProvider.create();
+      }
       const servicePlan = await service.installAuditService({
         authHelperPath,
         daemonPath,
@@ -144,20 +151,29 @@ async function createDefaultAuditDependencies(dependencies = {}) {
         runLaunchctl,
         write,
       });
-      if (write && !keychain.present) {
-        await masterKeyProvider.create();
-      }
+      const serviceState = write
+        ? await inspectService({ authHelperPath, daemonPath, nodePath, paths, runLaunchctl })
+        : null;
+      const socketReady = write && await pathExists(paths.socketPath);
       return {
-        state: write ? "healthy" : keychain.present ? "stopped" : "degraded",
+        state: write ? (serviceState.loaded && socketReady ? "healthy" : "degraded") : keychain.present ? "stopped" : "degraded",
         write,
         keychain: keychain.present ? "present" : write ? "created" : "missing",
+        serviceState,
+        socketReady: write ? socketReady : null,
         service: servicePlan,
       };
     },
 
     async start() {
+      const keychain = await inspectKeychain(masterKeyProvider);
+      const capabilityFile = paths.capabilityFile ?? resolve(paths.rootDir, "capability");
+      await ensureCapabilityFile(capabilityFile);
+      if (!keychain.present) await masterKeyProvider.create();
       const result = await service.startAuditService({ authHelperPath, daemonPath, nodePath, paths, runLaunchctl });
-      return { state: "healthy", started: true, service: result };
+      const serviceState = await inspectService({ authHelperPath, daemonPath, nodePath, paths, runLaunchctl });
+      const socketReady = await pathExists(paths.socketPath);
+      return { state: serviceState.loaded && socketReady ? "healthy" : "degraded", started: true, socketReady, service: result };
     },
 
     async stop() {
@@ -553,20 +569,53 @@ async function pathExists(target) {
   }
 }
 
+async function ensureCapabilityFile(path) {
+  if (await pathExists(path)) {
+    const existing = (await readFile(path, "utf8")).trim();
+    if (/^[0-9a-f]{64}$/i.test(existing)) return existing;
+    throw new Error("audit capability file is invalid; remove it only after inspecting the audit service state");
+  }
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const capability = randomBytes(32).toString("hex");
+  const tempPath = `${path}.tmp-${process.pid}`;
+  await writeFile(tempPath, `${capability}\n`, { mode: 0o600 });
+  await chmod(tempPath, 0o600);
+  await rename(tempPath, path);
+  return capability;
+}
+
 function createExecRunner(command) {
   return async (request) => {
     const args = Array.isArray(request?.args) ? request.args : request;
     const input = request?.input;
-    try {
-      const result = await execFileAsync(command, args, input === undefined ? {} : { input });
-      return { ok: true, status: 0, stderr: result.stderr, stdout: result.stdout };
-    } catch (error) {
-      return {
-        ok: false,
-        status: typeof error?.code === "number" ? error.code : 1,
-        stderr: error?.stderr ?? error?.message ?? "",
-        stdout: error?.stdout ?? "",
-      };
+    if (input === undefined) {
+      try {
+        const result = await execFileAsync(command, args, { timeout: 15_000, maxBuffer: 4 * 1024 });
+        return { ok: true, status: 0, stderr: result.stderr, stdout: result.stdout };
+      } catch (error) {
+        return { ok: false, status: typeof error?.code === "number" ? error.code : 1, stderr: error?.stderr ?? error?.message ?? "", stdout: error?.stdout ?? "" };
+      }
     }
+    return runPipedCommand(command, args, input);
   };
+}
+
+function runPipedCommand(command, args, input) {
+  return new Promise((resolveResult) => {
+    const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
+    const stdout = [];
+    const stderr = [];
+    const timer = setTimeout(() => child.kill("SIGTERM"), 15_000);
+    child.stdout.on("data", (chunk) => stdout.push(chunk));
+    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      resolveResult({ ok: false, status: typeof error?.code === "number" ? error.code : 1, stderr: error.message, stdout: "" });
+    });
+    child.once("close", (status) => {
+      clearTimeout(timer);
+      resolveResult({ ok: status === 0, status: status ?? 1, stderr: Buffer.concat(stderr).toString(), stdout: Buffer.concat(stdout).toString() });
+    });
+    child.stdin.end(input);
+  });
 }

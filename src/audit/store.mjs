@@ -453,9 +453,15 @@ export function openAuditStore(options = {}) {
         SET payload_json = ?
         WHERE event_id = ?
       `);
+      const clearSourceEvent = db.prepare(`
+        UPDATE source_events
+        SET payload_json = NULL
+        WHERE event_id = ?
+      `);
       for (const candidate of candidates) {
         clearBlob.run("null", prunedAt, candidate.payload_blob_id);
         clearPayload.run("null", candidate.source_event_id);
+        clearSourceEvent.run(candidate.source_event_id);
       }
       insertRetentionPrunedEvent({
         cutoff,
