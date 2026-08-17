@@ -48,7 +48,9 @@ export function createMasterKeyProvider({ runSecurity, env = process.env, random
       await invoke(runSecurity, {
         command,
         args: ["add-generic-password", "-U", ...identity, "-w"],
-        input: key,
+        // `security -w` reads a textual password. Store a stable hex
+        // representation so the daemon can retrieve the exact 32 bytes.
+        input: Buffer.from(`${key.toString("hex")}\n`, "utf8"),
       });
       return key;
     } catch (error) {
