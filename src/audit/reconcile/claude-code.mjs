@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { open } from "node:fs/promises";
 
 const MAX_READ_BYTES = 256 * 1024;
 
@@ -6,13 +6,15 @@ export async function reconcileClaudeCode({ sessionPath, cursor = null, emit, ma
   if (typeof sessionPath !== "string" || sessionPath.length === 0) throw new TypeError("Claude session path is required");
   if (typeof emit !== "function") throw new TypeError("Claude audit emitter is required");
   if (!Number.isInteger(maxBytes) || maxBytes < 1) throw new RangeError("Claude JSONL bound must be positive");
-  const bytes = await readFile(sessionPath);
-  let offset = Number.isInteger(cursor?.offset) && cursor.offset >= 0 && cursor.offset <= bytes.length
+  const handle = await open(sessionPath, "r");
+  const { size } = await handle.stat();
+  let offset = Number.isInteger(cursor?.offset) && cursor.offset >= 0 && cursor.offset <= size
     ? cursor.offset
     : 0;
-  if (offset > bytes.length) offset = 0;
-  const end = Math.min(bytes.length, offset + maxBytes);
-  const chunk = bytes.subarray(offset, end);
+  if (offset > size) offset = 0;
+  const chunk = Buffer.alloc(Math.min(maxBytes, Math.max(0, size - offset)));
+  if (chunk.byteLength > 0) await handle.read(chunk, 0, chunk.byteLength, offset);
+  await handle.close();
   const completeLength = chunk.lastIndexOf(0x0a) + 1;
   const complete = completeLength > 0 ? chunk.subarray(0, completeLength) : Buffer.alloc(0);
   let events = 0;
