@@ -33,6 +33,8 @@ import { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs
 
 export { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
 export { tailHeadroomSavings } from "./audit/reconcile/headroom.mjs";
+export { correlateObservations, buildCacheCohorts } from "./audit/correlation.mjs";
+export { resolveProviderAccountIdentity, resolveRepositoryIdentity } from "./audit/registry.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
@@ -1969,7 +1971,7 @@ function publicPackage(version) {
       "src",
     ],
     scripts: {
-      check: "node --check src/airkit.mjs && node --check scripts/verify-audit-core.mjs && node --check scripts/capture-codex-audit-contract.mjs && node --check scripts/capture-pi-audit-contract.mjs && node --check src/audit/cli.mjs && node --check src/audit/crypto.mjs && node --check src/audit/daemon.mjs && node --check src/audit/event.mjs && node --check src/audit/export.mjs && node --check src/audit/keychain.mjs && node --check src/audit/migrations.mjs && node --check src/audit/paths.mjs && node --check src/audit/pricing.mjs && node --check src/audit/redaction.mjs && node --check src/audit/reconcile/codex.mjs && node --check src/audit/reconcile/headroom.mjs && node --check src/audit/retention.mjs && node --check src/audit/reveal-export.mjs && node --check src/audit/reveal.mjs && node --check src/audit/service.mjs && node --check src/audit/spool.mjs && node --check src/audit/store.mjs && node --check src/audit/transport.mjs && node --check src/auditd.mjs",
+      check: "node --check src/airkit.mjs && node --check scripts/verify-audit-core.mjs && node --check scripts/capture-codex-audit-contract.mjs && node --check scripts/capture-pi-audit-contract.mjs && node --check src/audit/cli.mjs && node --check src/audit/correlation.mjs && node --check src/audit/crypto.mjs && node --check src/audit/daemon.mjs && node --check src/audit/event.mjs && node --check src/audit/export.mjs && node --check src/audit/keychain.mjs && node --check src/audit/migrations.mjs && node --check src/audit/paths.mjs && node --check src/audit/pricing.mjs && node --check src/audit/redaction.mjs && node --check src/audit/reconcile/codex.mjs && node --check src/audit/reconcile/headroom.mjs && node --check src/audit/registry.mjs && node --check src/audit/retention.mjs && node --check src/audit/reveal-export.mjs && node --check src/audit/reveal.mjs && node --check src/audit/service.mjs && node --check src/audit/spool.mjs && node --check src/audit/store.mjs && node --check src/audit/transport.mjs && node --check src/auditd.mjs",
       "pack:check": "npm pack --dry-run",
       test: "node --test",
       "verify:ccr3:e2e": "node scripts/verify-ccr3-e2e.mjs",
