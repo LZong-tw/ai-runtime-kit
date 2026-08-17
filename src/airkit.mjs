@@ -952,6 +952,10 @@ export async function exportOssRelease({ outDir }) {
     join(outDir, "scripts", "capture-pi-audit-contract.mjs"),
     await readFile(join(repoRoot, "scripts", "capture-pi-audit-contract.mjs"), "utf8"),
   );
+  await writeFile(
+    join(outDir, "scripts", "verify-audit-clients.mjs"),
+    await readFile(join(repoRoot, "scripts", "verify-audit-clients.mjs"), "utf8"),
+  );
   await writeFile(join(outDir, "package.json"), `${JSON.stringify(publicPackage(packageVersion), null, 2)}\n`);
   await copyFile(join(repoRoot, "CLAUDE.md"), join(outDir, "CLAUDE.md"));
   await copyFile(join(repoRoot, "README.md"), join(outDir, "README.md"));
@@ -1966,12 +1970,13 @@ function publicPackage(version) {
       "scripts/capture-claude-tool-contract.mjs",
       "scripts/capture-codex-audit-contract.mjs",
       "scripts/capture-pi-audit-contract.mjs",
+      "scripts/verify-audit-clients.mjs",
       "scripts/verify-audit-core.mjs",
       "scripts/verify-ccr3-e2e.mjs",
       "src",
     ],
     scripts: {
-      check: "node --check src/airkit.mjs && node --check scripts/verify-audit-core.mjs && node --check scripts/capture-codex-audit-contract.mjs && node --check scripts/capture-pi-audit-contract.mjs && node --check src/audit/cli.mjs && node --check src/audit/correlation.mjs && node --check src/audit/crypto.mjs && node --check src/audit/daemon.mjs && node --check src/audit/event.mjs && node --check src/audit/export.mjs && node --check src/audit/keychain.mjs && node --check src/audit/migrations.mjs && node --check src/audit/paths.mjs && node --check src/audit/pricing.mjs && node --check src/audit/redaction.mjs && node --check src/audit/reconcile/codex.mjs && node --check src/audit/reconcile/headroom.mjs && node --check src/audit/registry.mjs && node --check src/audit/retention.mjs && node --check src/audit/reveal-export.mjs && node --check src/audit/reveal.mjs && node --check src/audit/service.mjs && node --check src/audit/spool.mjs && node --check src/audit/store.mjs && node --check src/audit/transport.mjs && node --check src/auditd.mjs",
+      check: "node --check src/airkit.mjs && node --check scripts/verify-audit-core.mjs && node --check scripts/verify-audit-clients.mjs && node --check scripts/capture-codex-audit-contract.mjs && node --check scripts/capture-pi-audit-contract.mjs && node --check src/audit/cli.mjs && node --check src/audit/correlation.mjs && node --check src/audit/crypto.mjs && node --check src/audit/daemon.mjs && node --check src/audit/event.mjs && node --check src/audit/export.mjs && node --check src/audit/keychain.mjs && node --check src/audit/migrations.mjs && node --check src/audit/paths.mjs && node --check src/audit/pricing.mjs && node --check src/audit/redaction.mjs && node --check src/audit/reconcile/codex.mjs && node --check src/audit/reconcile/headroom.mjs && node --check src/audit/registry.mjs && node --check src/audit/retention.mjs && node --check src/audit/reveal-export.mjs && node --check src/audit/reveal.mjs && node --check src/audit/service.mjs && node --check src/audit/spool.mjs && node --check src/audit/store.mjs && node --check src/audit/transport.mjs && node --check src/auditd.mjs",
       "pack:check": "npm pack --dry-run",
       test: "node --test",
       "verify:ccr3:e2e": "node scripts/verify-ccr3-e2e.mjs",
@@ -2566,7 +2571,7 @@ function renderAirkitHelp() {
 
 Commands:
   connect [--profile <name>] [--mode <mode>] [--port <port>]
-  audit <install|start|stop|status|doctor|update|verify|query> [options]
+  audit <install|start|stop|status|doctor|update|verify|repo|account|requests|request|sessions|clients|accounts|repos|usage|cache|gaps|query> [options]
   runtime check
   runtime update [--write]
   repair codex-takeover [--write]

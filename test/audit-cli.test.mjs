@@ -141,3 +141,22 @@ test("stdout export is not contaminated by a CLI status footer", async () => {
   assert.equal(exitCode, 0);
   assert.equal(output.text(), '{"model":"gpt-5.6-terra"}\n');
 });
+
+test("registry mutations and client query commands use the audit service boundary", async () => {
+  const calls = [];
+  const audit = {
+    async repo(options) { calls.push(["repo", options]); return { state: options.write ? "healthy" : "stopped", ...options }; },
+    async account(options) { calls.push(["account", options]); return { state: options.write ? "healthy" : "stopped", ...options }; },
+    async query(name, args) { calls.push(["query", name, args]); return { state: "healthy", rows: [{ client: "codex-desktop", completeness: "metadata_only" }] }; },
+  };
+  const output = capture();
+  assert.equal(await runAuditCli(["repo", "classify", "repo-1", "personal", "--write"], { audit, stdout: output.stdout }), 0);
+  assert.equal(await runAuditCli(["account", "group", "acct-1", "personal-main", "--write"], { audit, stdout: output.stdout }), 0);
+  assert.equal(await runAuditCli(["clients"], { audit, stdout: output.stdout }), 0);
+  assert.deepEqual(calls, [
+    ["repo", { action: "classify", repositoryId: "repo-1", classification: "personal", write: true }],
+    ["account", { action: "group", accountId: "acct-1", group: "personal-main", write: true }],
+    ["query", "clients", []],
+  ]);
+  assert.match(output.text(), /metadata_only/);
+});
