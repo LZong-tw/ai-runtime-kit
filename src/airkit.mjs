@@ -1962,6 +1962,7 @@ function publicPackage(version) {
     files: [
       "CLAUDE.md",
       "README.md",
+      "docs/audit.md",
       "docs/install.md",
       "docs/profile-schema.md",
       "docs/runtime-lessons.md",

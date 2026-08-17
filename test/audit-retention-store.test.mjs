@@ -77,7 +77,7 @@ test("exportRows reads request metadata and normalized usage", async () => {
   });
 });
 
-test("retention clears both plaintext copies at the inclusive cutoff", async () => {
+test("retention clears all request plaintext copies at the inclusive cutoff", async () => {
   await withStore(async ({ databasePath, backupDir }) => {
     const seed = openAuditStore({ databasePath, backupDir, now: () => new Date("2026-08-14T00:00:00.000Z") });
     for (const id of ["before", "exact", "after", "preserved"]) await seed.ingestEvent(requestEvent(id));
@@ -121,9 +121,7 @@ test("retention clears both plaintext copies at the inclusive cutoff", async () 
     assert.notEqual(blobs.find((row) => row.source_event_id === "event-after").payload_json, "null");
     assert.notEqual(blobs.find((row) => row.source_event_id === "event-preserved").payload_json, "null");
     assert.equal(store.query("SELECT payload_json FROM request_payloads WHERE event_id = 'event-exact'")[0].payload_json, "null");
-    const sourceEventPayload = store.query("SELECT payload_json FROM source_events WHERE event_id = 'event-exact'")[0].payload_json;
-    assert.ok(sourceEventPayload);
-    assert.doesNotMatch(sourceEventPayload, /marker|request-exact/);
+    assert.equal(store.query("SELECT payload_json FROM source_events WHERE event_id = 'event-exact'")[0].payload_json, null);
     assert.equal(store.query("SELECT count(*) AS count FROM source_events WHERE event_kind = 'retention_pruned'")[0].count, 1);
     assert.equal(vacuumCalls, 1);
     store.close();

@@ -186,6 +186,7 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
   const expectedFiles = [
     "CLAUDE.md",
     "README.md",
+    "docs/audit.md",
     "docs/install.md",
     "docs/profile-schema.md",
     "docs/runtime-lessons.md",

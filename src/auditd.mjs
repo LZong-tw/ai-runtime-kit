@@ -3,11 +3,21 @@
 import { openAuditStore } from "./audit/store.mjs";
 import { createAuditDaemon } from "./audit/daemon.mjs";
 import { resolveAuditPaths } from "./audit/paths.mjs";
+import { createMasterKeyProvider } from "./audit/keychain.mjs";
+import { readFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 async function main() {
   const env = process.env;
-  const capability = requireEnv(env, "AIRKIT_AUDIT_CAPABILITY");
-  const masterKey = readMasterKey(env);
+  const capability = (await readFile(requireEnv(env, "AIRKIT_AUDIT_CAPABILITY_FILE"), "utf8")).trim();
+  if (!capability) throw new Error("AIRKIT_AUDIT_CAPABILITY_FILE is empty");
+  const masterKey = await createMasterKeyProvider({
+    env,
+    runSecurity: (request) => runSecurityCommand(request, env),
+  }).get();
   const paths = resolveAuditPaths({
     env,
     overrides: {
@@ -57,16 +67,18 @@ async function main() {
   await new Promise(() => {});
 }
 
-function readMasterKey(env) {
-  const hex = requireEnv(env, "AIRKIT_AUDIT_MASTER_KEY_HEX");
-  if (!/^[0-9a-fA-F]+$/.test(hex) || hex.length % 2 !== 0) {
-    throw new Error("AIRKIT_AUDIT_MASTER_KEY_HEX must be an even-length hex string");
+async function runSecurityCommand(request, env) {
+  const args = Array.isArray(request?.args) ? request.args : [];
+  try {
+    const result = await execFileAsync(env.AIRKIT_SECURITY_PATH || "security", args, {
+      input: request?.input,
+      timeout: 10_000,
+      maxBuffer: 4 * 1024,
+    });
+    return { status: 0, stdout: result.stdout, stderr: result.stderr };
+  } catch (error) {
+    return { status: typeof error?.code === "number" ? error.code : 1, stdout: error?.stdout ?? "", stderr: error?.stderr ?? "" };
   }
-  const key = Buffer.from(hex, "hex");
-  if (key.length < 32) {
-    throw new Error("AIRKIT_AUDIT_MASTER_KEY_HEX must decode to at least 32 bytes");
-  }
-  return key;
 }
 
 function requireEnv(env, name) {
