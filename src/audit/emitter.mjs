@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { encryptAuditValue } from "./crypto.mjs";
 import { createAuditEvent } from "./event.mjs";
 import { redactEvidence } from "./redaction.mjs";
 
@@ -17,6 +18,7 @@ export function createAuditEmitter(options = {}) {
   const {
     spool = null,
     client = null,
+    masterKey = null,
     launchInstanceId = null,
     sessionContext = null,
     source = SOURCE,
@@ -37,7 +39,7 @@ export function createAuditEmitter(options = {}) {
         clientName,
       });
       pending.add(event.event_id);
-      await persist(event, { spool, client });
+      await persist(event, { spool, client, masterKey });
       pending.delete(event.event_id);
       return event;
     } catch (error) {
@@ -53,6 +55,7 @@ export function createAuditEmitter(options = {}) {
         error,
         spool,
         client,
+        masterKey,
       });
       return null;
     }
@@ -76,12 +79,17 @@ export function hashAuditBody(body) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-async function persist(event, { spool, client }) {
+async function persist(event, { spool, client, masterKey }) {
   if (typeof spool?.enqueue === "function") {
     await spool.enqueue(event);
     return;
   }
-  if (typeof client?.send === "function") await client.send(event);
+  if (typeof client?.send === "function") {
+    if (masterKey === null || masterKey === undefined) {
+      throw new Error("audit transport client requires masterKey");
+    }
+    await client.send(encryptEvent(event, masterKey));
+  }
 }
 
 async function emitGap(options) {
@@ -96,6 +104,7 @@ async function emitGap(options) {
     error,
     spool,
     client,
+    masterKey,
   } = options;
   try {
     const logicalRequestId = fields?.logical_request_id ?? sessionContext?.logical_request_id ?? null;
@@ -117,10 +126,27 @@ async function emitGap(options) {
       clientName,
     });
     if (typeof spool?.enqueue === "function") await spool.enqueue(gap);
-    else if (typeof client?.send === "function") await client.send(gap);
+    else if (typeof client?.send === "function") {
+      if (masterKey === null || masterKey === undefined) {
+        throw new Error("audit transport client requires masterKey");
+      }
+      await client.send(encryptEvent(gap, masterKey));
+    }
   } catch {
     // A broken audit path must not produce a second failure or leak details.
   }
+}
+
+function encryptEvent(event, masterKey) {
+  return {
+    event_id: event.event_id,
+    encrypted: encryptAuditValue({
+      masterKey,
+      purpose: "request-evidence/v1",
+      identity: event.event_id,
+      plaintext: Buffer.from(JSON.stringify(event), "utf8"),
+    }),
+  };
 }
 
 function buildEvent({ kind, fields, launchInstanceId, sessionContext, source, sourceVersion, clientName }) {
