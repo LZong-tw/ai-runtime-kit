@@ -78,6 +78,17 @@ do not claim onboarding is complete merely because `init --write` succeeded.
 See [`docs/install.md`](docs/install.md) for updates, takeover recovery,
 troubleshooting, and the complete fresh-machine workflow.
 
+## Local audit and observability
+
+AirKit includes an opt-in local audit daemon and metadata-first client
+reconcilers. Enable and verify it with `airkit audit install --write`,
+`airkit audit start`, `airkit audit status`, and `airkit audit verify`, then
+inspect `airkit audit clients`, `airkit audit usage`, `airkit audit cache`, and
+`airkit audit gaps`. A healthy daemon does not prove every client is captured;
+check the reported completeness for the actual client/session. The complete
+security boundary, supported client lanes, exports, retention, and known
+coverage limits are documented in [`docs/audit.md`](docs/audit.md).
+
 ## Pi and OpenCode
 
 Use the external-client adapter when Pi or OpenCode should use the same managed

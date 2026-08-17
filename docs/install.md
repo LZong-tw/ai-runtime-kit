@@ -411,6 +411,11 @@ repo, chat, or docs.
 
 ## Troubleshooting
 
+For the audit daemon and client-evidence workflow, see
+[`audit.md`](audit.md). It covers installation, status/doctor/verify,
+metadata-only queries, encrypted payload export, retention, and the distinction
+between a healthy daemon and complete client capture.
+
 `missing command: ccr`
 
 : Verify with `command -v ccr`. Install or expose CCR on `PATH` through the
