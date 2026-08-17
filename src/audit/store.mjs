@@ -109,6 +109,8 @@ export function openAuditStore(options = {}) {
     exportManifest,
     verify,
     query,
+    classifyRepository,
+    groupProviderAccount,
     prunePayloadBatch,
     exportRows,
     close,
@@ -389,6 +391,26 @@ export function openAuditStore(options = {}) {
     assertReadOnlySql(sql);
     const values = Array.isArray(params) ? params : [params];
     return db.prepare(sql).all(...values);
+  }
+
+  function classifyRepository(repositoryId, classification) {
+    assertWritable();
+    const result = db.prepare(`
+      UPDATE repositories
+      SET classification = ?, classification_source = 'manual', last_seen_at = COALESCE(last_seen_at, ?)
+      WHERE repository_id = ? OR id = ?
+    `).run(String(classification), isoNow(now), String(repositoryId), String(repositoryId));
+    return { changes: Number(result.changes ?? 0) };
+  }
+
+  function groupProviderAccount(accountId, group) {
+    assertWritable();
+    const result = db.prepare(`
+      UPDATE provider_accounts
+      SET logical_group = ?, identity_source = COALESCE(identity_source, 'manual'), last_seen_at = COALESCE(last_seen_at, ?)
+      WHERE provider_account_id = ? OR id = ?
+    `).run(String(group), isoNow(now), String(accountId), String(accountId));
+    return { changes: Number(result.changes ?? 0) };
   }
 
   async function prunePayloadBatch(options = {}) {

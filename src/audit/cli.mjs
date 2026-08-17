@@ -51,7 +51,7 @@ export async function runAuditCli(argv = [], dependencies = {}) {
   return exitCodeFor(result?.state);
 }
 
-const AUDIT_COMMANDS = Object.freeze({
+const AUDIT_COMMANDS = {
   install: (argv, audit) => audit.install({ write: hasFlag(argv, "--write") }),
   start: (_argv, audit) => audit.start(),
   stop: (_argv, audit) => audit.stop(),
@@ -71,7 +71,24 @@ const AUDIT_COMMANDS = Object.freeze({
     decrypt: hasFlag(argv, "--decrypt"),
     outputPath: valueFlag(argv, "--output", undefined),
   }),
-});
+  repo: (argv, audit) => audit.repo({
+    action: argv[0],
+    repositoryId: argv[1],
+    classification: argv[2],
+    write: hasFlag(argv, "--write"),
+  }),
+  account: (argv, audit) => audit.account({
+    action: argv[0],
+    accountId: argv[1],
+    group: argv[2],
+    write: hasFlag(argv, "--write"),
+  }),
+};
+
+for (const queryName of ["requests", "request", "sessions", "clients", "accounts", "repos", "usage", "cache", "gaps"]) {
+  AUDIT_COMMANDS[queryName] = (argv, audit) => audit.query(queryName, argv.filter((arg) => arg !== "--json"));
+}
+Object.freeze(AUDIT_COMMANDS);
 
 async function runAuditQueryCli(argv, dependencies) {
   const stdout = dependencies.stdout ?? process.stdout;
@@ -243,7 +260,91 @@ async function createDefaultAuditDependencies(dependencies = {}) {
         store.close();
       }
     },
+
+    async repo({ action, repositoryId, classification, write = false } = {}) {
+      if (action !== "classify" || !repositoryId || !classification) {
+        throw new Error("usage: audit repo classify <repository-id> <classification> [--write]");
+      }
+      if (!write) return { state: "stopped", write: false, repositoryId, classification };
+      const store = openAuditStore({ backupDir, databasePath, readOnly: false });
+      try {
+        const result = store.classifyRepository(repositoryId, classification);
+        return { state: "healthy", write: true, repositoryId, classification, changed: result.changes ?? 0 };
+      } finally {
+        store.close();
+      }
+    },
+
+    async account({ action, accountId, group, write = false } = {}) {
+      if (action !== "group" || !accountId || !group) {
+        throw new Error("usage: audit account group <account-id> <logical-group> [--write]");
+      }
+      if (!write) return { state: "stopped", write: false, accountId, group };
+      const store = openAuditStore({ backupDir, databasePath, readOnly: false });
+      try {
+        const result = store.groupProviderAccount(accountId, group);
+        return { state: "healthy", write: true, accountId, group, changed: result.changes ?? 0 };
+      } finally {
+        store.close();
+      }
+    },
+
+    async query(name, args = []) {
+      const store = openAuditStore({ backupDir, databasePath, readOnly: true });
+      try {
+        return { state: "healthy", name, rows: queryAuditStore(store, name, args) };
+      } finally {
+        store.close();
+      }
+    },
   };
+}
+
+const AUDIT_QUERY_SQL = Object.freeze({
+  requests: `SELECT request_id, logical_request_id, session_id, repository_id, provider, model,
+    client, started_at, last_observed_at, actual_provider, actual_model, status_code,
+    capture_completeness, correlation_confidence FROM requests ORDER BY started_at, id`,
+  request: `SELECT request_id, logical_request_id, session_id, repository_id, provider, model,
+    client, started_at, last_observed_at, actual_provider, actual_model, status_code,
+    capture_completeness, correlation_confidence FROM requests
+    WHERE request_id = ? OR logical_request_id = ? ORDER BY started_at, id`,
+  sessions: "SELECT session_id, client, first_observed_at, last_observed_at FROM sessions ORDER BY first_observed_at, session_id",
+  clients: `SELECT client, COUNT(*) AS event_count, MIN(observed_at) AS first_observed_at,
+    MAX(observed_at) AS last_observed_at,
+    CASE WHEN SUM(event_kind = 'provider_request') > 0 AND SUM(event_kind = 'usage_reported') > 0
+      THEN 'complete' WHEN COUNT(*) > 0 THEN 'metadata_only' ELSE 'gap' END AS completeness
+    FROM source_events GROUP BY client ORDER BY client`,
+  accounts: `SELECT provider_account_id, provider, first_observed_at, last_observed_at,
+    logical_group, credential_kind, display_label, identity_source
+    FROM provider_accounts ORDER BY provider, provider_account_id`,
+  repos: `SELECT repository_id, id, classification, classification_source,
+    remote_display, first_seen_at, last_seen_at FROM repositories ORDER BY repository_id`,
+  usage: `SELECT r.request_id, r.provider, r.model, ru.metric, ru.value, ru.unit,
+    ru.cache_read_tokens, ru.cache_creation_5m_tokens, ru.cache_creation_1h_tokens,
+    ru.uncached_input_tokens, ru.output_tokens, ru.derived_total_cost, ru.normalization_state
+    FROM request_usage ru JOIN requests r ON r.id = ru.request_id ORDER BY r.started_at, ru.request_usage_id`,
+  cache: `SELECT r.request_id, r.provider, r.model, ru.cache_read_tokens,
+    ru.cache_creation_5m_tokens, ru.cache_creation_1h_tokens, ru.cache_miss_tokens,
+    ru.uncached_input_tokens, ru.cache_reuse_ratio, ru.normalization_state
+    FROM request_usage ru JOIN requests r ON r.id = ru.request_id
+    WHERE ru.cache_read_tokens IS NOT NULL OR ru.cache_creation_5m_tokens IS NOT NULL
+      OR ru.cache_creation_1h_tokens IS NOT NULL OR ru.cache_miss_tokens IS NOT NULL
+    ORDER BY r.started_at, ru.request_usage_id`,
+  gaps: `SELECT 'evidence' AS gap_kind, source, reason, recorded_at, affected_client,
+    affected_session, resolution FROM evidence_gaps
+    UNION ALL SELECT 'collector', source, reason, recorded_at, NULL, NULL, NULL FROM collector_gaps
+    ORDER BY recorded_at`,
+});
+
+function queryAuditStore(store, name, args = []) {
+  const sql = AUDIT_QUERY_SQL[name];
+  if (!sql) throw new Error(`unknown audit query command: ${name}`);
+  if (name === "request") {
+    const id = args.find((arg) => !arg.startsWith("--"));
+    if (!id) throw new Error("usage: audit request <request-id>");
+    return store.query(sql, [id, id]);
+  }
+  return store.query(sql);
 }
 
 async function inspectAuditState({
@@ -332,6 +433,9 @@ function renderAuditHelp() {
   audit verify
   audit prune [--write] [--preserve]
   audit export [--format jsonl|csv] [--output path] [--include-payload --decrypt]
+  audit repo classify <repository-id> <classification> [--write]
+  audit account group <account-id> <logical-group> [--write]
+  audit requests|request|sessions|clients|accounts|repos|usage|cache|gaps [id]
   audit query [name]
 
 Options:
