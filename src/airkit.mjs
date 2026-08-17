@@ -1422,6 +1422,9 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
         compatibility: managed.compatibility,
         gatewayOrigin,
         gatewayToken,
+        auditEmitter: options.auditEmitter ?? null,
+        launchInstanceId: options.launchInstanceId ?? null,
+        sessionContext: options.sessionContext ?? null,
       });
     const compatibilityLaunch = middleware
       ? buildCompatibilityLaunch(managed.compatibility, middleware.origin, gatewayToken)
@@ -1476,6 +1479,9 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
       gatewayToken,
       clientToken,
       port: options.adapterPort ?? 0,
+      auditEmitter: options.auditEmitter ?? null,
+      launchInstanceId: options.launchInstanceId ?? null,
+      sessionContext: options.sessionContext ?? null,
     });
     externalClient = {
       close: middleware.close,

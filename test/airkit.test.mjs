@@ -5474,6 +5474,9 @@ test("prepareExternalClient exposes a separate local credential and stable adapt
       env: { DEMO_API_KEY: "runtime-secret", HOME: configDir },
       runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
       runtimeVersions: passingRuntimeVersions(),
+      auditEmitter: { emit: async () => {} },
+      launchInstanceId: "launch-opencode",
+      sessionContext: { session_id: "session-opencode" },
       startCompatibilityMiddleware: async (options) => {
         adapters.push(options);
         return { close: async () => {}, origin: "http://127.0.0.1:4568" };
@@ -5488,6 +5491,9 @@ test("prepareExternalClient exposes a separate local credential and stable adapt
     assert.equal(adapters[0].clientToken, "local-client-token");
     assert.equal(adapters[0].gatewayToken, "gateway-key-from-helper");
     assert.equal(adapters[0].port, 4568);
+    assert.equal(adapters[0].launchInstanceId, "launch-opencode");
+    assert.deepEqual(adapters[0].sessionContext, { session_id: "session-opencode" });
+    assert.equal(typeof adapters[0].auditEmitter.emit, "function");
     assert.doesNotMatch(JSON.stringify(saved), /gateway-key-from-helper|local-client-token/);
   } finally {
     await rm(configDir, { force: true, recursive: true });
