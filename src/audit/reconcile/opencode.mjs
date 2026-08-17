@@ -14,12 +14,12 @@ export async function scanOpenCode({ dbPath, cursor = null, pageSize = PAGE_SIZE
     let count = 0;
     let nextCursor = normalizeCursor(cursor);
     for (const row of messages) {
+      nextCursor = { timeCreated: row.time_created, id: row.id };
       const event = mapMessage(row);
       if (!event) continue;
       await emit(event);
       count += 1;
       sessionIds.add(row.session_id);
-      nextCursor = { timeCreated: row.time_created, id: row.id };
     }
     for (const row of readSessions(db, sessionIds)) {
       await emit(mapSessionMeter(row));
