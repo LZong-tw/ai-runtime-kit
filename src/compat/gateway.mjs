@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import {
   ADVISOR_TOOL_TYPE,
@@ -16,6 +17,8 @@ import {
 import { inspectPendingServerHistory } from "./server-history.mjs";
 import { inspectServerToolRequest } from "./server-tools.mjs";
 import { bridgeToolSearch, canApplyToolSearchBudget } from "./tool-search.mjs";
+import { allowlistedUsage } from "../audit/redaction.mjs";
+import { describeStablePrefix } from "./prefix-observability.mjs";
 
 const TOOL_SEARCH_BRIDGE_NAME = "airkit_tool_search";
 const ADVISOR_BRIDGE_NAME = "airkit_advisor";
@@ -75,7 +78,8 @@ export function createCoreClient({ config, fetchImpl = fetch, readFile = readFil
       });
       return parseCoreMessageResponse(result);
     },
-    async forwardRaw({ body, fallback, headers, method = "POST", response, signal, onResponse }) {
+    async forwardRaw({ body, fallback, headers, method = "POST", response, signal, onResponse, onAttempt }) {
+      await onAttempt?.({ phase: "start", body });
       let result = await fetchImpl(endpoint, {
         method,
         headers: coreHeaders(headers),
@@ -83,14 +87,17 @@ export function createCoreClient({ config, fetchImpl = fetch, readFile = readFil
         signal,
       });
       const fallbackUsed = shouldRetryRawFallback(result, fallback);
+      await onAttempt?.({ phase: "response", body, status: result.status, headers: result.headers });
       if (fallbackUsed) {
         await result.body?.cancel().catch(() => {});
+        await onAttempt?.({ phase: "start", body: fallback.body });
         result = await fetchImpl(endpoint, {
           method,
           headers: coreHeaders(headers),
           body: fallback.body,
           signal,
         });
+        await onAttempt?.({ phase: "response", body: fallback.body, status: result.status, headers: result.headers });
       }
       onResponse?.({ fallbackUsed, headers: result.headers, status: result.status });
       await pipeCoreResponse(result, response, signal);
@@ -141,11 +148,14 @@ export function createGatewayClient({ origin, token, fetchImpl = fetch, response
       });
       return parseCoreMessageResponse(result);
     },
-    async forwardRaw({ body, fallback, headers, method = "POST", response, signal, onResponse }) {
+    async forwardRaw({ body, fallback, headers, method = "POST", response, signal, onResponse, onAttempt }) {
+      await onAttempt?.({ phase: "start", body });
       let result = await request({ body, headers, method, path: "/v1/messages", signal });
       const fallbackUsed = shouldRetryRawFallback(result, fallback);
+      await onAttempt?.({ phase: "response", body, status: result.status, headers: result.headers });
       if (fallbackUsed) {
         await result.body?.cancel().catch(() => {});
+        await onAttempt?.({ phase: "start", body: fallback.body });
         result = await request({
           body: fallback.body,
           headers,
@@ -153,6 +163,7 @@ export function createGatewayClient({ origin, token, fetchImpl = fetch, response
           path: "/v1/messages",
           signal,
         });
+        await onAttempt?.({ phase: "response", body: fallback.body, status: result.status, headers: result.headers });
       }
       onResponse?.({ fallbackUsed, headers: result.headers, status: result.status });
       await pipeCoreResponse(result, response, signal, responseTransformFactory?.({ body }));
@@ -178,11 +189,14 @@ export async function handleCompatibilityMessage({
   createId = defaultCreateId,
   response,
   signal,
+  auditEmitter = null,
+  auditContext = null,
 }) {
+  const audit = createAttemptAudit({ auditEmitter, auditContext, body });
   const serverTools = inspectServerToolRequest(body);
   const serverHistory = inspectPendingServerHistory(body);
   if (requiresWholeRequestFallback({ body, config, serverHistory, serverTools })) {
-    return routeWholeRequestFallback({ body, headers, config, coreClient, response, signal });
+    return routeWholeRequestFallback({ body, headers, config, coreClient, response, signal, audit });
   }
 
   const inspection = inspectCompatibilityRequest(body);
@@ -190,7 +204,7 @@ export async function handleCompatibilityMessage({
   try {
     normalized = normalizeCompatibilityHistory(body.messages);
   } catch {
-    return routeWholeRequestFallback({ body, headers, config, coreClient, response, signal });
+    return routeWholeRequestFallback({ body, headers, config, coreClient, response, signal, audit });
   }
 
   const activeDeferredTools = new Set(normalized.referencedTools);
@@ -218,6 +232,7 @@ export async function handleCompatibilityMessage({
       headers,
       "CCR executor request failed",
       signal,
+      audit,
     );
     executorUsage.push(copyUsage(executorMessage.usage));
 
@@ -270,6 +285,7 @@ export async function handleCompatibilityMessage({
             executorMessage,
             advisor: inspection.advisor,
             signal,
+            audit,
           });
           if (advisorMessage === null) {
             result = createAdvisorToolResult({ toolUseId: serverUseId, errorCode: "unavailable" });
@@ -302,7 +318,7 @@ export async function handleCompatibilityMessage({
         toolUseId: serverUseId,
       });
       if (bridged.kind === "fallback") {
-        return routeWholeRequestFallback({ body, headers, config, coreClient, response, signal });
+        return routeWholeRequestFallback({ body, headers, config, coreClient, response, signal, audit });
       }
       const result = bridged.block;
       for (const reference of result.content.tool_references ?? []) {
@@ -320,7 +336,7 @@ export async function handleCompatibilityMessage({
     messages.push({ role: "user", content: resumeResults });
   }
 
-  return routeWholeRequestFallback({ body, headers, config, coreClient, response, signal });
+  return routeWholeRequestFallback({ body, headers, config, coreClient, response, signal, audit });
 }
 
 export function writeAnthropicMessage(response, message, stream) {
@@ -513,6 +529,7 @@ async function requestAdvisor({
   executorMessage,
   advisor,
   signal,
+  audit,
 }) {
   const { fallback, familyFallbacks } = resolveCompatibilityPolicies(config, {});
   const selected = familyFallbacks.advisor ?? fallback;
@@ -535,6 +552,7 @@ async function requestAdvisor({
       },
       headers,
       signal,
+      audit,
     );
     assertMessageResponse(result);
     return result;
@@ -693,13 +711,155 @@ function assertMessageResponse(message) {
   }
 }
 
-async function requestCoreMessage(coreClient, body, headers, publicMessage, signal) {
+async function requestCoreMessage(coreClient, body, headers, publicMessage, signal, audit = null) {
+  const attempt = await audit?.start(body);
   try {
     const message = await coreClient.requestMessage(body, headers, signal);
     assertMessageResponse(message);
+    await audit?.response(attempt, {
+      status: 200,
+      actual: actualFromMessage(message),
+      usage: message.usage,
+    });
     return message;
-  } catch {
+  } catch (error) {
+    await audit?.response(attempt, {
+      status: responseErrorStatus(error),
+      actual: actualFromMessage(error),
+      usage: null,
+    });
     throw new Error(publicMessage);
+  }
+}
+
+function responseErrorStatus(error) {
+  const status = Number(error?.status ?? error?.statusCode);
+  return Number.isInteger(status) && status >= 100 && status <= 999 ? status : null;
+}
+
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function responseStatusFromResult(result) {
+  const status = Number(result?.status ?? result?.statusCode);
+  return Number.isInteger(status) && status >= 100 && status <= 999 ? status : null;
+}
+
+function actualFromMessage(message) {
+  if (!isRecord(message)) return { provider: null, account: null, model: null };
+  return actualIdentity(message.provider ?? message.provider_name, message.model);
+}
+
+function actualFromResult(result) {
+  return actualIdentity(
+    headerValue(result?.headers, "x-provider") ?? headerValue(result?.headers, "x-provider-name"),
+    headerValue(result?.headers, "x-model"),
+  );
+}
+
+function actualIdentity(provider, model) {
+  return {
+    provider: typeof provider === "string" && provider.trim() !== "" ? provider : null,
+    account: null,
+    model: typeof model === "string" && model.trim() !== "" ? model : null,
+  };
+}
+
+function headerValue(headers, name) {
+  if (typeof headers?.get === "function") return headers.get(name);
+  if (!isRecord(headers)) return null;
+  const entry = Object.entries(headers).find(([key]) => key.toLowerCase() === name);
+  return entry?.[1] ?? null;
+}
+
+export function createAttemptAudit({ auditEmitter, auditContext, body }) {
+  const enabled = typeof auditEmitter?.emit === "function";
+  const logicalRequestId = auditContext?.logicalRequestId ?? auditContext?.logical_request_id ?? randomUUID();
+  const sessionId = auditContext?.sessionId ?? auditContext?.session_id ?? null;
+  const stablePrefix = describeStablePrefix(body, { rawPrefixBytes: auditContext?.rawPrefixBytes });
+  const selectedRoute = auditContext?.selectedRoute ?? auditContext?.selected_route ?? null;
+
+  const start = async (attemptBody) => {
+    if (!enabled) return null;
+    const attemptId = randomUUID();
+    const selected = selectedIdentity(attemptBody?.model, selectedRoute, auditContext);
+    await safeAuditEmit(auditEmitter, "provider_request", {
+      logical_request_id: logicalRequestId,
+      attempt_id: attemptId,
+      session_id: sessionId,
+      payload: {
+        selected,
+        actual: { provider: null, account: null, model: null },
+        ...(stablePrefix?.wirePrefixHash ? { wirePrefixHash: stablePrefix.wirePrefixHash } : {}),
+      },
+    });
+    return { attemptId, selected };
+  };
+
+  const response = async (attempt, observation) => {
+    if (!enabled || !attempt) return;
+    const usage = allowlistedUsage(observation.usage);
+    const payload = {
+      selected: attempt.selected,
+      actual: observation.actual ?? { provider: null, account: null, model: null },
+      status: observation.status ?? null,
+      ...(usage && Object.keys(usage).length > 0 ? { usage } : {}),
+      ...(stablePrefix?.wirePrefixHash ? { wirePrefixHash: stablePrefix.wirePrefixHash } : {}),
+    };
+    await safeAuditEmit(auditEmitter, "provider_response", {
+      logical_request_id: logicalRequestId,
+      attempt_id: attempt.attemptId,
+      session_id: sessionId,
+      payload,
+    });
+    const headers = observation.headers;
+    for (const [kind, prefix] of [["meter_reported", "x-provider-meter-"], ["quota_reported", "x-provider-quota-"]]) {
+      const counters = allowlistedHeaderCounters(headers, prefix);
+      if (Object.keys(counters).length === 0) continue;
+      await safeAuditEmit(auditEmitter, kind, {
+        logical_request_id: logicalRequestId,
+        attempt_id: attempt.attemptId,
+        session_id: sessionId,
+        payload: { counters },
+      });
+    }
+  };
+
+  return { start, response };
+}
+
+function selectedIdentity(model, route, context) {
+  const selectedModel = typeof model === "string" && model.length > 0 ? model : null;
+  const selectedRoute = typeof route === "string" && route.length > 0 ? route : selectedModel;
+  const selector = selectedRoute?.split("/", 1)[0] ?? "";
+  const provider = selector.split(",", 1)[0];
+  return {
+    route: selectedRoute,
+    provider: provider.length > 0 && provider !== selectedRoute ? provider : null,
+    account: context?.selectedAccountHmac ?? context?.selected_account_hmac ?? null,
+    model: selectedModel,
+  };
+}
+
+function allowlistedHeaderCounters(headers, prefix) {
+  const counters = {};
+  if (!headers) return counters;
+  const entries = typeof headers.entries === "function" ? [...headers.entries()] : Object.entries(headers);
+  for (const [name, raw] of entries) {
+    const key = String(name).toLowerCase();
+    if (!key.startsWith(prefix)) continue;
+    const value = Number(raw);
+    if (Number.isFinite(value) && value >= 0) counters[key.slice(prefix.length)] = value;
+  }
+  return counters;
+}
+
+async function safeAuditEmit(emitter, kind, fields) {
+  try {
+    await emitter.emit(kind, fields);
+  } catch {
+    // Audit is advisory; forwarding must remain authoritative.
   }
 }
 
@@ -754,13 +914,31 @@ function serverToolDefinitionRequiresFallback(config, policies, family) {
   return mode === "anthropic-fallback" || mode === "mcp";
 }
 
-async function routeWholeRequestFallback({ body, headers, config, coreClient, response, signal }) {
+async function routeWholeRequestFallback({ body, headers, config, coreClient, response, signal, audit = null }) {
   const requestFallback = coreClient.requestFallback?.bind(coreClient) ??
     coreClient.requestMessage.bind(coreClient);
   const route = createFallbackRouter({
     config,
-    coreClient: ({ body: fallbackBody, headers: fallbackHeaders, signal: fallbackSignal }) =>
-      requestFallback(fallbackBody, fallbackHeaders, fallbackSignal),
+    coreClient: async ({ body: fallbackBody, headers: fallbackHeaders, signal: fallbackSignal }) => {
+      const attempt = await audit?.start(fallbackBody);
+      try {
+        const result = await requestFallback(fallbackBody, fallbackHeaders, fallbackSignal);
+        await audit?.response(attempt, {
+          status: responseStatusFromResult(result),
+          actual: actualFromResult(result),
+          usage: null,
+          headers: result?.headers,
+        });
+        return result;
+      } catch (error) {
+        await audit?.response(attempt, {
+          status: responseErrorStatus(error),
+          actual: actualFromMessage(error),
+          usage: null,
+        });
+        throw error;
+      }
+    },
   });
   const result = await route({ body, headers, signal });
   const families = fallbackFamilies(body);

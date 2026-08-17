@@ -2664,6 +2664,67 @@ test("stable prefix observation changes only when the prefix changes", () => {
   assert.equal(samePrefix.candidate, true);
 });
 
+test("stable prefix only includes a wire hash when raw prefix bytes are supplied", () => {
+  const body = {
+    model: "oneportal/deepseek-v4-flash",
+    messages: [
+      { role: "user", content: "earlier request" },
+      { role: "user", content: "tail" },
+    ],
+  };
+  assert.equal(Object.hasOwn(describeStablePrefix(body), "wirePrefixHash"), false);
+  const observed = describeStablePrefix(body, { rawPrefixBytes: Buffer.from('{"messages":[') });
+  assert.match(observed.wirePrefixHash, /^[0-9a-f]{64}$/);
+  assert.equal(describeStablePrefix(body, { rawPrefixBytes: "" }).wirePrefixHash, undefined);
+});
+
+test("audit provider attempts preserve one logical request across raw fallback responses", async () => {
+  const events = [];
+  const primary = Buffer.from('{"model":"web_litellm,gpt-5.6-terra","messages":[]}');
+  const fallback = Buffer.from('{"model":"oneportal/gpt-5.6-terra","messages":[]}');
+  const handler = createMessagesHandler({
+    config: structuredClone(COMPLETE_PLUGIN_CONFIG),
+    policies: resolveCompatibilityPolicies(COMPLETE_PLUGIN_CONFIG, VERIFIED_NATIVE_COMPATIBILITY).policies,
+    auditEmitter: { emit: async (kind, fields) => events.push({ kind, fields }) },
+    coreClient: {
+      async forwardRaw(options) {
+        await options.onAttempt({ phase: "start", body: primary });
+        await options.onAttempt({ phase: "response", body: primary, status: 401, headers: new Headers() });
+        await options.onAttempt({ phase: "start", body: fallback });
+        await options.onAttempt({ phase: "response", body: fallback, status: 200, headers: new Headers() });
+      },
+    },
+  });
+  await handler(
+    createPluginRequest(primary),
+    {},
+    { readBody: async () => primary, logicalRequestId: "logical-fallback" },
+  );
+  const attempts = events.filter(({ kind }) => kind === "provider_request");
+  const responses = events.filter(({ kind }) => kind === "provider_response");
+  assert.equal(attempts.length, 2);
+  assert.equal(responses.length, 2);
+  assert.deepEqual(responses.map(({ fields }) => fields.payload.status), [401, 200]);
+  assert.equal(new Set(attempts.map(({ fields }) => fields.logical_request_id)).size, 1);
+  assert.equal(new Set(attempts.map(({ fields }) => fields.attempt_id)).size, 2);
+  assert.deepEqual(attempts.map(({ fields }) => fields.payload.selected.provider), ["web_litellm", "oneportal"]);
+});
+
+test("audit emitter failures never block raw forwarding", async () => {
+  const body = Buffer.from('{"model":"web_litellm/gpt-5.6-terra","messages":[]}');
+  let forwarded = false;
+  const handler = createMessagesHandler({
+    config: structuredClone(COMPLETE_PLUGIN_CONFIG),
+    policies: resolveCompatibilityPolicies(COMPLETE_PLUGIN_CONFIG, VERIFIED_NATIVE_COMPATIBILITY).policies,
+    auditEmitter: { emit: async () => { throw new Error("audit down"); } },
+    coreClient: {
+      async forwardRaw() { forwarded = true; },
+    },
+  });
+  await handler(createPluginRequest(body), {}, { readBody: async () => body });
+  assert.equal(forwarded, true);
+});
+
 test("cache cohort classifies every model from request shape and provider counters", () => {
   const coldStart = describeStablePrefix({
     model: "oneportal/Kimi-K3",

@@ -430,6 +430,54 @@ test("gateway sends typed server tools through whole-request fallback unchanged"
   assert.equal(calls[0].body.tools, body.tools);
 });
 
+test("gateway audit records executor actual model and allowlisted usage", async () => {
+  const events = [];
+  const result = await handleCompatibilityMessage({
+    body: {
+      model: "web_litellm/gpt-5.6-terra",
+      messages: [{ role: "user", content: "hello" }],
+      stream: false,
+    },
+    config: VALID_CONFIG,
+    headers: {},
+    auditEmitter: { emit: async (kind, fields) => events.push({ kind, fields }) },
+    auditContext: { logicalRequestId: "logical-executor" },
+    coreClient: {
+      async requestMessage() {
+        return {
+          type: "message",
+          model: "gpt-5.6-terra",
+          provider: "web_litellm",
+          content: [{ type: "text", text: "hello" }],
+          usage: {
+            input_tokens: 10,
+            output_tokens: 2,
+            cache_read_input_tokens: 8,
+            secret_tokens: 999,
+          },
+        };
+      },
+    },
+  });
+  assert.equal(result.model, "gpt-5.6-terra");
+  const request = events.find(({ kind }) => kind === "provider_request");
+  const response = events.find(({ kind }) => kind === "provider_response");
+  assert.ok(request);
+  assert.ok(response);
+  assert.equal(request.fields.logical_request_id, "logical-executor");
+  assert.equal(request.fields.attempt_id, response.fields.attempt_id);
+  assert.deepEqual(response.fields.payload.actual, {
+    provider: "web_litellm",
+    account: null,
+    model: "gpt-5.6-terra",
+  });
+  assert.deepEqual(response.fields.payload.usage, {
+    input_tokens: 10,
+    output_tokens: 2,
+    cache_read_input_tokens: 8,
+  });
+});
+
 test("real core fallback preserves stream true, SSE bytes, and backpressure", async (t) => {
   let seenBody;
   let releaseSecondChunk;

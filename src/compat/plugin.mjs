@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 
 import {
   handleCompatibilityMessage,
+  createAttemptAudit,
   writeAnthropicMessage,
 } from "./gateway.mjs";
 import {
@@ -102,7 +103,7 @@ function containHandlerFailure(response, error) {
   return "response_destroyed";
 }
 
-export function createMessagesHandler({ config, coreClient, policies }) {
+export function createMessagesHandler({ config, coreClient, policies, auditEmitter = null, auditContext = null }) {
   return async (request, response, helpers) => {
     const signal = requestLifecycleSignal(request, response);
     const telemetry = beginRequestTelemetry(config.routeLog, request, response);
@@ -159,6 +160,15 @@ export function createMessagesHandler({ config, coreClient, policies }) {
         requestId: telemetry.requestId,
       });
       if (!compat) {
+        const audit = createAttemptAudit({
+          auditEmitter,
+          auditContext: {
+            ...auditContext,
+            logicalRequestId: helpers?.logicalRequestId ?? auditContext?.logicalRequestId,
+            rawPrefixBytes: auditContext?.rawPrefixBytes,
+          },
+          body: outboundBody,
+        });
         const fallbackSelector = isRecord(outboundBody)
           ? resolveTransportFallback(config, outboundBody.model, 401)
           : null;
@@ -166,6 +176,7 @@ export function createMessagesHandler({ config, coreClient, policies }) {
           body: Buffer.from(JSON.stringify({ ...outboundBody, model: fallbackSelector }), "utf8"),
           statuses: [401],
         };
+        let currentAttempt = null;
         await coreClient.forwardRaw({
           body: outboundRaw,
           fallback,
@@ -173,6 +184,14 @@ export function createMessagesHandler({ config, coreClient, policies }) {
           method: request.method,
           response,
           signal,
+          onAttempt: async (attempt) => {
+            if (attempt.phase === "start") currentAttempt = await audit.start(parseJsonCopy(attempt.body));
+            else await audit.response(currentAttempt, {
+              status: attempt.status,
+              actual: actualFromHeaders(attempt.headers),
+              headers: attempt.headers,
+            });
+          },
           onResponse: ({ headers }) => {
             telemetry.promptCache = summarizeGatewayResponseHeaders(headers);
           },
@@ -187,6 +206,12 @@ export function createMessagesHandler({ config, coreClient, policies }) {
         headers: request.headers,
         response,
         signal,
+        auditEmitter,
+        auditContext: {
+          ...auditContext,
+          logicalRequestId: helpers?.logicalRequestId ?? auditContext?.logicalRequestId,
+          rawPrefixBytes: auditContext?.rawPrefixBytes,
+        },
       });
       if (message !== undefined) {
         telemetry.promptCache = summarizePromptCacheUsage(message.usage, message.model);
@@ -689,6 +714,21 @@ function parseJsonCopy(rawBody) {
   } catch {
     return null;
   }
+}
+
+function actualFromHeaders(headers) {
+  const read = (name) => typeof headers?.get === "function"
+    ? headers.get(name)
+    : isRecord(headers)
+      ? Object.entries(headers).find(([key]) => key.toLowerCase() === name)?.[1] ?? null
+      : null;
+  const provider = read("x-provider") ?? read("x-provider-name");
+  const model = read("x-model");
+  return {
+    provider: typeof provider === "string" && provider.trim() !== "" ? provider : null,
+    account: null,
+    model: typeof model === "string" && model.trim() !== "" ? model : null,
+  };
 }
 
 function isJsonRpcRequest(value) {
