@@ -6,9 +6,12 @@ import { resolveAuditPaths } from "./audit/paths.mjs";
 import { createMasterKeyProvider } from "./audit/keychain.mjs";
 import { readFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 async function main() {
   const env = process.env;
@@ -17,6 +20,8 @@ async function main() {
   const masterKey = await createMasterKeyProvider({
     env,
     runSecurity: (request) => runSecurityCommand(request, env),
+    runKeychainHelper: (request) => runKeychainHelperCommand(request, env),
+    keychainHelperPath: env.AIRKIT_AUDIT_KEYCHAIN_HELPER ?? resolve(repoRoot, "native", "airkit-audit-keychain.swift"),
   }).get();
   const paths = resolveAuditPaths({
     env,
@@ -68,9 +73,17 @@ async function main() {
 }
 
 async function runSecurityCommand(request, env) {
+  return runCommand(env.AIRKIT_SECURITY_PATH || "security", request);
+}
+
+async function runKeychainHelperCommand(request, env) {
+  return runCommand(env.AIRKIT_SWIFT_PATH || "swift", request);
+}
+
+async function runCommand(command, request) {
   const args = Array.isArray(request?.args) ? request.args : [];
   try {
-    const result = await execFileAsync(env.AIRKIT_SECURITY_PATH || "security", args, {
+    const result = await execFileAsync(command, args, {
       input: request?.input,
       timeout: 10_000,
       maxBuffer: 4 * 1024,

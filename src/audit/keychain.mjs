@@ -34,7 +34,9 @@ export function createMasterKeyProvider({ runSecurity, runKeychainHelper = null,
 
   const readAccount = async (account) => {
     const identity = identityFor(account);
-    const result = await invoke(runSecurity, { command, args: ["find-generic-password", ...identity, "-w"] });
+    const result = account === AUDIT_KEYCHAIN_NEXT_ACCOUNT && typeof runKeychainHelper === "function"
+      ? await invoke(runKeychainHelper, { command: "swift", args: [keychainHelperPath, "read", account] })
+      : await invoke(runSecurity, { command, args: ["find-generic-password", ...identity, "-w"] });
     const key = outputBytes(result);
     if (key.length !== 32) throw failure("audit master key has invalid length");
     return key;
