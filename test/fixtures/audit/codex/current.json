@@ -1,0 +1,46 @@
+{
+  "contractVersion": 1,
+  "codexVersion": "0.147.0",
+  "capturedAt": "2026-08-17T03:31:43.345Z",
+  "source": "installed-codex-cli-contract",
+  "responses_route_supported": false,
+  "observed_cli_shapes": {
+    "session_meta": [
+      "id",
+      "cli_version",
+      "source",
+      "model_provider"
+    ],
+    "event_msg": [
+      "task_started",
+      "task_complete",
+      "token_count"
+    ],
+    "response_item": [
+      "type",
+      "role"
+    ],
+    "token_usage": [
+      "input_tokens",
+      "cached_input_tokens",
+      "output_tokens",
+      "reasoning_output_tokens",
+      "total_tokens"
+    ]
+  },
+  "probe": {
+    "exec_help_available": true,
+    "provider_attempts_observed": false
+  },
+  "redaction": {
+    "payload": "metadata_only",
+    "omitted": [
+      "prompt",
+      "response_text",
+      "tool_input",
+      "tool_output",
+      "credentials",
+      "local_paths"
+    ]
+  }
+}
