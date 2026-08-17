@@ -27,6 +27,7 @@ import {
 import { startCompatibilityMiddleware } from "./compat/middleware.mjs";
 import { renderHeartbeatManagedFiles } from "./context-heartbeat.mjs";
 import { buildContextObservability } from "./context-observability.mjs";
+import { createPiAuditRuntime } from "./audit/adapters/pi-extension.mjs";
 import { runAuditCli } from "./audit/cli.mjs";
 import { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
 
@@ -1549,10 +1550,18 @@ export async function runExternalClientCli(client, argv = process.argv.slice(2),
   childEnv.ANTHROPIC_API_KEY = adapter.token;
 
   const clientArgs = [];
+  let piAuditRuntime = null;
   if (client === "pi") {
+    piAuditRuntime = await createManagedPiAuditRuntime(options);
+    if (piAuditRuntime) {
+      Object.assign(childEnv, piAuditRuntime.env);
+    }
     if (!hasExternalOption(parsed.userArgs, "--provider")) clientArgs.push("--provider", "anthropic");
     if (!hasExternalOption(parsed.userArgs, "--model")) clientArgs.push("--model", "claude-sonnet-5");
     clientArgs.push(...parsed.userArgs);
+    if (piAuditRuntime && !hasExternalOptionValue(parsed.userArgs, ["-e", "--extension"], piAuditRuntime.extensionPath)) {
+      clientArgs.push("--extension", piAuditRuntime.extensionPath);
+    }
   } else {
     if (!hasExternalOption(parsed.userArgs, "--model")) clientArgs.push("--model", "anthropic/claude-sonnet-5");
     clientArgs.push(...parsed.userArgs);
@@ -1561,6 +1570,8 @@ export async function runExternalClientCli(client, argv = process.argv.slice(2),
 
   const spawnCommand = options.spawnCommand ?? spawnCommandAsync;
   let child;
+  let exitCode;
+  let failure;
   try {
     child = spawnCommand(spec.binary, clientArgs, {
       env: childEnv,
@@ -1568,9 +1579,18 @@ export async function runExternalClientCli(client, argv = process.argv.slice(2),
     });
   } catch (error) {
     await adapter.close();
+    await cleanupPiAuditRuntime(piAuditRuntime, options.stderr ?? process.stderr);
     throw error;
   }
-  return monitorChildLifecycle(adapter, child);
+  try {
+    exitCode = await monitorChildLifecycle(adapter, child);
+  } catch (error) {
+    failure = error;
+  } finally {
+    await cleanupPiAuditRuntime(piAuditRuntime, options.stderr ?? process.stderr);
+  }
+  if (failure) throw failure;
+  return exitCode;
 }
 
 export async function doctorProfile(catalog, profileName, options = {}) {
@@ -2344,6 +2364,42 @@ function parseExternalClientArgs(argv) {
 
 function hasExternalOption(args, name) {
   return args.some((arg) => arg === name || arg.startsWith(`${name}=`));
+}
+
+function hasExternalOptionValue(args, names, expected) {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (names.includes(arg) && args[index + 1] === expected) return true;
+    if (names.some((name) => arg.startsWith(`${name}=`)) && arg.slice(arg.indexOf("=") + 1) === expected) return true;
+  }
+  return false;
+}
+
+async function createManagedPiAuditRuntime(options) {
+  const factory = options.createPiAuditRuntime ?? createPiAuditRuntime;
+  return factory({
+    auditEmitter: options.auditEmitter ?? null,
+    stderr: options.stderr ?? process.stderr,
+    tempRoot: options.tempRoot,
+  });
+}
+
+async function cleanupPiAuditRuntime(runtime, stderr) {
+  if (!runtime) return;
+  try {
+    await runtime.drain?.();
+  } catch (error) {
+    stderr?.write?.(`airkit: Pi audit drain skipped (${safeExternalClientWarning(error)})\n`);
+  }
+  try {
+    await runtime.cleanup?.();
+  } catch (error) {
+    stderr?.write?.(`airkit: Pi audit cleanup skipped (${safeExternalClientWarning(error)})\n`);
+  }
+}
+
+function safeExternalClientWarning(error) {
+  return error instanceof Error ? error.message : "unknown error";
 }
 
 function holdExternalClient(client) {
