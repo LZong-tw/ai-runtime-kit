@@ -2,6 +2,7 @@ import { chmod, mkdir, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 
 import { decryptAuditValue } from "./crypto.mjs";
+import { createAuditQueryServer, queryAuditStore } from "./query.mjs";
 import { encodeAuditFrame, verifyEnvelopeAuthorization, createAuditFrameDecoder } from "./transport.mjs";
 
 const DEFAULT_MAX_FRAME_BYTES = 256 * 1024;
@@ -24,6 +25,7 @@ export function createAuditDaemon(options = {}) {
   if (!isKeyProvider(keyProvider)) throw new TypeError("keyProvider.getMasterKey is required");
 
   let server = null;
+  let queryServer = null;
   let store = null;
   let startPromise = null;
   let stopPromise = null;
@@ -64,6 +66,8 @@ export function createAuditDaemon(options = {}) {
       completed: counters.completed,
       rejected: counters.rejected,
       socketPath: paths.socketPath,
+      querySocketPath: paths.querySocketPath ?? null,
+      queryListening: queryServer?.status().listening ?? false,
       startedAt: startPromise ? new Date(clock.now()).toISOString() : null,
     };
   }
@@ -74,6 +78,16 @@ export function createAuditDaemon(options = {}) {
     await rm(paths.socketPath, { force: true });
 
     store = await Promise.resolve(storeFactory({ paths }));
+    if (paths.querySocketPath) {
+      queryServer = createAuditQueryServer({
+        socketPath: paths.querySocketPath,
+        capability,
+        maxFrameBytes,
+        readTimeoutMs,
+        query: (request) => queryAuditStore(store, request.operation, request.params, { limit: request.limit }),
+      });
+      await queryServer.start();
+    }
     server = createServer({ allowHalfOpen: true }, (socket) => {
       counters.accepted += 1;
       const work = handleConnection(socket)
@@ -115,6 +129,8 @@ export function createAuditDaemon(options = {}) {
         server.close();
         server = null;
       }
+      await queryServer?.stop().catch(() => {});
+      queryServer = null;
       if (store?.close) store.close();
       store = null;
       startPromise = null;
@@ -132,6 +148,8 @@ export function createAuditDaemon(options = {}) {
       server = null;
       listening = false;
     }
+    await queryServer?.stop();
+    queryServer = null;
     await rm(paths.socketPath, { force: true }).catch(() => {});
     await Promise.allSettled([...inFlight]);
     if (store?.close) store.close();
