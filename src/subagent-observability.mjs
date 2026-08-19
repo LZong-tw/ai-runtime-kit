@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const LIFECYCLE_EVENTS = new Set(["PostToolUse", "SubagentStart", "SubagentStop"]);
@@ -224,19 +224,82 @@ async function loadState(path, parent, child) {
 }
 
 async function renderTaskRow(task, input, env) {
-  const parent = identity(input?.parent_id ?? input?.session_id, "unknown-parent");
-  const child = identity(taskIdentity(task));
-  if (!parent || !child || !validPluginData(env)) return `ambiguous child transcript: ${taskLabel(task)}`;
-  const path = join(env.CLAUDE_PLUGIN_DATA, "subagent-timelines", parent.key, child.key, ".state.json");
-  const state = await loadState(path, parent, child);
+  const parentValue = input?.parent_id ?? input?.session_id;
+  const parent = typeof parentValue === "string" && parentValue.length > 0 ? identity(parentValue) : null;
+  const childValues = taskIdentityCandidates(task);
+  if (!validPluginData(env) || childValues.length === 0 || (parent && childValues.length !== 1)) {
+    return `ambiguous child transcript: ${taskLabel(task)}`;
+  }
+
+  let child = identity(childValues[0]);
+  let state;
+  if (parent) {
+    const path = join(env.CLAUDE_PLUGIN_DATA, "subagent-timelines", parent.key, child.key, ".state.json");
+    state = await loadState(path, parent, child);
+  } else {
+    const matches = await findChildStates(env.CLAUDE_PLUGIN_DATA, childValues);
+    if (matches.length > 1) return `ambiguous child transcript: ${taskLabel(task)}`;
+    if (matches.length === 1) {
+      ({ child, state } = matches[0]);
+    } else {
+      state = emptyState({ hash: "unknown-parent" }, child);
+    }
+  }
+
+  const model = taskModel(task, input, env);
   if (state.entries.length === 0) {
-    return [child.label, "waiting for first event", ...taskMetadata(task)].join(" | ");
+    return [child.label, ...(model ? [`model: ${model}`] : []), "waiting for first event", ...taskMetadata(task)].join(" | ");
   }
   const latestText = [...state.entries].reverse().find((entry) => entry.kind === "assistant")?.text;
   const latestTool = [...state.entries].reverse().find((entry) => entry.kind === "tool")?.name;
-  const parts = [child.label, oneLine(redactSensitive(latestText || "waiting for first event"))];
+  const parts = [child.label, ...(model ? [`model: ${model}`] : []), oneLine(redactSensitive(latestText || "waiting for first event"))];
   if (latestTool) parts.push(`tool: ${latestTool}`);
   return [...parts, ...taskMetadata(task)].join(" | ");
+}
+
+async function findChildStates(pluginData, values) {
+  const root = join(pluginData, "subagent-timelines");
+  const matches = [];
+  try {
+    const parents = await readdir(root, { withFileTypes: true });
+    for (const parentEntry of parents) {
+      if (!parentEntry.isDirectory()) continue;
+      const parentPath = join(root, parentEntry.name);
+      const children = await readdir(parentPath, { withFileTypes: true });
+      for (const value of values) {
+        const child = identity(value);
+        if (!child) continue;
+        const childEntry = children.find((entry) => entry.isDirectory() && entry.name === child.key);
+        if (!childEntry) continue;
+        const statePath = join(parentPath, childEntry.name, ".state.json");
+        const state = await loadStateWithoutParent(statePath, child);
+        if (state) matches.push({ child, state });
+      }
+    }
+  } catch {
+    return [];
+  }
+  return matches;
+}
+
+async function loadStateWithoutParent(path, child) {
+  try {
+    const state = JSON.parse(await readBoundedFile(path, MAX_STATE_BYTES));
+    if (!state || state.childHash !== child.hash) return null;
+    return boundState({
+      parentHash: typeof state.parentHash === "string" ? state.parentHash : "unknown-parent",
+      childHash: child.hash,
+      offset: Number.isInteger(state.offset) && state.offset >= 0 ? state.offset : 0,
+      discardingOversizeLine: state.discardingOversizeLine === true,
+      entries: sanitizeEntries(state.entries),
+      seen: Array.isArray(state.seen) ? state.seen.filter((value) => typeof value === "string") : [],
+      diagnostics: Array.isArray(state.diagnostics)
+        ? state.diagnostics.filter((value) => typeof value === "string").map(redactSensitive)
+        : [],
+    });
+  } catch {
+    return null;
+  }
 }
 
 function taskMetadata(task) {
@@ -249,18 +312,88 @@ function taskMetadata(task) {
   return parts;
 }
 
-function taskIdentity(task) {
-  const explicit = ["agent_id", "child_id", "child_name"]
+function taskIdentityCandidates(task) {
+  const explicit = ["agent_id", "agentId", "child_id", "childId", "child_name", "childName"]
     .map((key) => typeof task?.[key] === "string" ? task[key] : "")
     .filter((value) => value.trim().length > 0);
-  if (explicit.length > 0) return new Set(explicit).size === 1 ? explicit[0] : null;
+  if (explicit.length > 0) return [...new Set(explicit)];
   const nativeId = ["id", "task_id", "taskId"]
     .map((key) => typeof task?.[key] === "string" ? task[key] : "")
     .find((value) => value.trim().length > 0);
-  return nativeId || null;
+  return nativeId ? [nativeId] : [];
 }
 
-function taskLabel(task) { return boundedMetadata(typeof task?.name === "string" ? task.name : "task", 80); }
+function taskModel(task, input, env) {
+  const explicitRoute = firstString([
+    task?.actual_route,
+    task?.actualRoute,
+    task?.selected_route,
+    task?.selectedRoute,
+    task?.route,
+    task?.provider_model,
+    task?.providerModel,
+    input?.actual_route,
+    input?.actualRoute,
+    input?.selected_route,
+    input?.selectedRoute,
+    input?.route,
+  ]);
+  if (isProviderQualifiedRoute(explicitRoute)) return routeLabel(explicitRoute);
+
+  const value = task?.model ?? task?.model_name ?? task?.modelName ?? task?.agent_model ?? task?.agentModel;
+  const nativeModel = modelString(value);
+  if (isProviderQualifiedRoute(nativeModel)) return routeLabel(nativeModel);
+  const routeKey = nativeModel && nativeClaudeRouteKey(nativeModel);
+  const route = routeKey
+    ? env?.[`AIRCLAUDE_ROUTE_${routeKey}`] ?? env?.AIRCLAUDE_ROUTE_DEFAULT
+    : null;
+  if (isProviderQualifiedRoute(route)) return routeLabel(route);
+  if (typeof value === "string") return boundedMetadata(value, 100);
+  if (value && typeof value === "object") {
+    for (const key of ["display_name", "displayName", "name", "id"]) {
+      if (typeof value[key] === "string" && value[key].trim().length > 0) return boundedMetadata(value[key], 100);
+    }
+  }
+  return "";
+}
+
+function firstString(values) {
+  return values.find((value) => typeof value === "string" && value.trim().length > 0) ?? "";
+}
+
+function modelString(value) {
+  if (typeof value === "string" && value.trim().length > 0) return value.trim();
+  if (value && typeof value === "object") {
+    return firstString([value.display_name, value.displayName, value.name, value.id]);
+  }
+  return "";
+}
+
+function nativeClaudeRouteKey(model) {
+  const normalized = model.toLowerCase();
+  if (normalized.includes("opus")) return "OPUS";
+  if (normalized.includes("sonnet")) return "SONNET";
+  if (normalized.includes("haiku")) return "BACKGROUND";
+  return "";
+}
+
+function isProviderQualifiedRoute(value) {
+  return typeof value === "string" && /^[^,/\s]+[,/][^,/\s]+$/.test(value.trim());
+}
+
+function routeLabel(value) {
+  const trimmed = value.trim();
+  const separator = trimmed.includes("/") ? "/" : ",";
+  const index = trimmed.indexOf(separator);
+  return boundedMetadata(`${trimmed.slice(0, index)}/${trimmed.slice(index + 1)}`, 120);
+}
+
+function taskLabel(task) {
+  return boundedMetadata(
+    typeof task?.name === "string" ? task.name : typeof task?.description === "string" ? task.description : "task",
+    80,
+  );
+}
 
 function oneLine(value, limit = MAX_VISIBLE) {
   const normalized = String(value).replaceAll(/[\r\n\t]+/g, " ").replaceAll(/\s+/g, " ").trim();

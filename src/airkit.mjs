@@ -42,6 +42,8 @@ const repoRoot = resolve(here, "..");
 const defaultCatalogPath = join(repoRoot, "profiles", "catalog.json");
 const compatibilityPluginId = "airkit-compatibility";
 const compatibilityPluginModule = join(here, "compat", "plugin.mjs");
+const auditUiPluginId = "airkit-audit-ui";
+const auditUiPluginModule = join(here, "audit", "ccr-plugin.mjs");
 export const RUNTIME_REQUIREMENTS = Object.freeze({
   claudeCode: ">=2.1.208",
   claudeCodeRouter: ">=3.0.18 <4",
@@ -230,6 +232,21 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
   if (Array.isArray(baseConfig.plugins)) {
     baseConfig.plugins = baseConfig.plugins.filter((plugin) => plugin?.id !== compatibilityPluginId);
   }
+  // CCR's managed config deliberately removes the compatibility plugin: the
+  // request adapter is started as a separate local middleware. The audit UI is
+  // different: it is a real CCR wrapper plugin and must be present in the
+  // persisted managed config so CCR can register its app and gateway routes.
+  baseConfig.plugins = [
+    ...(baseConfig.plugins ?? []),
+    {
+      id: auditUiPluginId,
+      enabled: true,
+      module: auditUiPluginModule,
+      surfaces: { apps: true, gateway: true, provider: false },
+      permissions: ["trusted-code", "apps", "gateway-routes"],
+      config: {},
+    },
+  ];
   const managedProviderNames = new Set(managedProviderEntries.map((entry) => entry.sourceName));
   const managedProviderIdSet = new Set(managedProviders.map((provider) => provider.id));
   for (const provider of currentConfig.Providers ?? []) {

@@ -2,6 +2,7 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile }
 import { spawnSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -941,7 +942,17 @@ test("CCR compatibility migrates the catalog plugin into adapter metadata and pr
     profile: { profiles: [] },
   }, { configDir: "/tmp/airkit-compatibility" });
 
-  assert.deepEqual(merged.config.plugins, [unrelated]);
+  assert.deepEqual(merged.config.plugins, [
+    unrelated,
+    {
+      id: "airkit-audit-ui",
+      enabled: true,
+      module: join(dirname(fileURLToPath(import.meta.url)), "../src/audit/ccr-plugin.mjs"),
+      surfaces: { apps: true, gateway: true, provider: false },
+      permissions: ["trusted-code", "apps", "gateway-routes"],
+      config: {},
+    },
+  ]);
   assert.equal(merged.config.plugins.some((plugin) => plugin.id === "airkit-compatibility"), false);
   assert.deepEqual(merged.config.observability, { keep: "this-field", requestLogs: true });
   assert.deepEqual(
@@ -1003,7 +1014,17 @@ test("a non-compatibility profile removes a stale compatibility gateway route", 
     profile: { profiles: [] },
   }, { configDir: "/tmp/airkit-stale-compatibility" });
 
-  assert.deepEqual(merged.config.plugins, [unrelated]);
+  assert.deepEqual(merged.config.plugins, [
+    unrelated,
+    {
+      id: "airkit-audit-ui",
+      enabled: true,
+      module: join(dirname(fileURLToPath(import.meta.url)), "../src/audit/ccr-plugin.mjs"),
+      surfaces: { apps: true, gateway: true, provider: false },
+      permissions: ["trusted-code", "apps", "gateway-routes"],
+      config: {},
+    },
+  ]);
 });
 
 test("CCR compatibility preserves the managed opus route selector", () => {
@@ -3335,6 +3356,85 @@ test("subagent status line accepts Claude Code native task ids and token counts"
     }, env);
     assert.match(waiting, /waiting for first event/);
     assert.match(waiting, /99 tokens/);
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+test("subagent status line resolves row context without a parent id and displays non-Claude model names", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-row-context-"));
+  const childTranscript = join(pluginData, "child.jsonl");
+  const env = { CLAUDE_PLUGIN_DATA: pluginData };
+
+  try {
+    await writeFile(childTranscript, `${JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "GPT child progress" }] },
+    })}\n`);
+    await processSubagentObservabilityHook({
+      hook_event_name: "SubagentStart",
+      session_id: "row-context-parent",
+      agent_id: "row-context-child",
+      transcript_path: childTranscript,
+    }, env);
+
+    const [row] = await renderSubagentStatusLine({
+      tasks: [{
+        id: "row-context-child",
+        name: "GPT child",
+        model: "gpt-5.6-luna",
+        tokenCount: 12,
+      }],
+    }, env);
+    assert.match(row, /GPT child progress/);
+    assert.match(row, /model: gpt-5\.6-luna/);
+    assert.doesNotMatch(row, /ambiguous child transcript/);
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+test("subagent status line resolves Claude task labels to the selected AirKit provider route", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-route-model-"));
+  const childTranscript = join(pluginData, "child.jsonl");
+  const env = {
+    CLAUDE_PLUGIN_DATA: pluginData,
+    AIRCLAUDE_ROUTE_DEFAULT: "oneportal,GLM-5.2",
+  };
+
+  try {
+    await writeFile(childTranscript, `${JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "route-aware child progress" }] },
+    })}\n`);
+    await processSubagentObservabilityHook({
+      hook_event_name: "SubagentStart",
+      session_id: "route-model-parent",
+      agent_id: "route-model-child",
+      transcript_path: childTranscript,
+    }, env);
+
+    const [row] = await renderSubagentStatusLine({
+      parent_id: "route-model-parent",
+      tasks: [{
+        id: "route-model-child",
+        name: "Opus adversarial review",
+        model: "claude-opus-5",
+      }],
+    }, env);
+    assert.match(row, /route-aware child progress/);
+    assert.match(row, /model: oneportal\/GLM-5\.2/);
+    assert.doesNotMatch(row, /model: claude-opus-5/);
+
+    const [explicitRoute] = await renderSubagentStatusLine({
+      parent_id: "route-model-parent",
+      tasks: [{
+        id: "route-model-child",
+        model: "claude-opus-5",
+        route: "web_litellm_anthropic,claude-opus-5",
+      }],
+    }, env);
+    assert.match(explicitRoute, /model: web_litellm_anthropic\/claude-opus-5/);
   } finally {
     await rm(pluginData, { force: true, recursive: true });
   }
