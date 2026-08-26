@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, mkdir, open, readdir, rename, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 const LIFECYCLE_EVENTS = new Set(["PostToolUse", "SubagentStart", "SubagentStop"]);
 const MAX_INPUT_BYTES = 1_000_000;
@@ -19,11 +19,92 @@ export async function processSubagentObservabilityHook(input, env = process.env)
 }
 
 export async function renderSubagentStatusLine(input, env = process.env) {
+  await hydrateTaskStates(input, env);
   const rows = [];
   for (const task of Array.isArray(input?.tasks) ? input.tasks : []) {
     rows.push(await renderTaskRow(task, input, env));
   }
   return rows;
+}
+
+async function hydrateTaskStates(input, env) {
+  if (!validPluginData(env)) return;
+  const parentValue = statuslineParentValue(input);
+  const transcriptPath = input?.transcript_path;
+  if (!parentValue || typeof transcriptPath !== "string" || transcriptPath.length === 0) return;
+  const sessionDirectory = join(dirname(transcriptPath), basename(transcriptPath, ".jsonl"), "subagents");
+  let children;
+  try {
+    children = await readdir(sessionDirectory, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  const tasks = Array.isArray(input?.tasks) ? input.tasks : [];
+  for (const task of tasks) {
+    const labels = taskLabelCandidates(task);
+    if (labels.length === 0) continue;
+    const parent = identity(parentValue);
+    if (parent) {
+      const existing = await findParentChildStates(
+        env.CLAUDE_PLUGIN_DATA,
+        parent,
+        taskIdentityCandidates(task),
+        labels,
+      );
+      if (existing.length > 0) continue;
+    }
+    const candidates = [];
+    for (const entry of children) {
+      if (!entry.isFile() || !entry.name.startsWith("agent-") || !entry.name.endsWith(".jsonl")) continue;
+      const childLabels = await childTranscriptLabels(join(sessionDirectory, entry.name));
+      if (labels.some((label) => childLabels.includes(label))) candidates.push({ entry, childLabels });
+    }
+    if (candidates.length !== 1) continue;
+    const childId = candidates[0].entry.name.slice("agent-".length, -".jsonl".length);
+    if (!/^[A-Za-z0-9._-]+$/.test(childId)) continue;
+    try {
+      await observeChildTranscript({
+        hook_event_name: "SubagentStart",
+        session_id: parentValue,
+        agent_id: childId,
+        agent_type: labels[0],
+        transcript_path: join(sessionDirectory, candidates[0].entry.name),
+      }, env);
+    } catch {
+      // Statusline rendering must remain fail-open if hydration cannot persist.
+    }
+  }
+}
+
+async function childTranscriptLabels(path) {
+  try {
+    const prefix = await readFilePrefix(path, 64 * 1024);
+    const labels = new Set();
+    for (const line of prefix.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      try { collectAgentLabels(JSON.parse(line), labels); } catch { /* ignore malformed prefix records */ }
+      if (labels.size >= 8) break;
+    }
+    return [...labels];
+  } catch {
+    return [];
+  }
+}
+
+function collectAgentLabels(value, labels, depth = 0) {
+  if (!value || typeof value !== "object" || depth > 6 || labels.size >= 8) return;
+  if (Array.isArray(value)) {
+    for (const item of value) collectAgentLabels(item, labels, depth + 1);
+    return;
+  }
+  if (value.type === "tool_use" && value.name === "Agent" && value.input && typeof value.input === "object") {
+    for (const key of ["name", "agent_name", "agentName", "description"]) {
+      if (typeof value.input[key] === "string" && value.input[key].trim().length > 0) {
+        labels.add(boundedMetadata(value.input[key], 120));
+      }
+    }
+  }
+  for (const child of Object.values(value)) collectAgentLabels(child, labels, depth + 1);
 }
 
 export async function runSubagentStatusLine({ env = process.env, input = process.stdin, output = process.stdout } = {}) {
@@ -56,6 +137,11 @@ async function observeChildTranscript(input, env) {
   const timelinePath = join(directory, "timeline.md");
   const statePath = join(directory, ".state.json");
   let previous = await loadState(statePath, parent, child);
+  const labels = taskLabelsFromHook(input);
+  const labeled = mergeStateLabels(previous, labels);
+  const labelsChanged = labeled.labels.length !== previous.labels.length
+    || labeled.labels.some((value, index) => value !== previous.labels[index]);
+  previous = labeled;
   let transcript;
   try {
     transcript = await open(input.transcript_path, "r");
@@ -68,10 +154,10 @@ async function observeChildTranscript(input, env) {
   try {
     const { size } = await transcript.stat();
     if (previous.offset > size) {
-      previous = addDiagnostic(emptyState(parent, child), "diagnostic: child transcript was truncated; projection restarted");
+      previous = addDiagnostic(emptyState(parent, child, labels), "diagnostic: child transcript was truncated; projection restarted");
     }
     if (previous.offset === size) {
-      if (previous.diagnostics.length > 0 && previous.offset === 0) {
+      if (labelsChanged || (previous.diagnostics.length > 0 && previous.offset === 0)) {
         await saveProjection(directory, timelinePath, statePath, previous);
       }
       return;
@@ -217,6 +303,7 @@ async function loadState(path, parent, child) {
       diagnostics: Array.isArray(state.diagnostics)
         ? state.diagnostics.filter((value) => typeof value === "string").map(redactSensitive)
         : [],
+      labels: sanitizeLabels(state.labels),
     });
   } catch {
     return emptyState(parent, child);
@@ -224,56 +311,55 @@ async function loadState(path, parent, child) {
 }
 
 async function renderTaskRow(task, input, env) {
-  const parentValue = input?.parent_id ?? input?.session_id;
+  const parentValue = statuslineParentValue(input);
   const parent = typeof parentValue === "string" && parentValue.length > 0 ? identity(parentValue) : null;
   const childValues = taskIdentityCandidates(task);
-  if (!validPluginData(env) || childValues.length === 0 || (parent && childValues.length !== 1)) {
-    return `ambiguous child transcript: ${taskLabel(task)}`;
-  }
+  const labels = taskLabelCandidates(task);
+  if (!validPluginData(env)) return waitingTaskRow(task, taskLabel(task), env);
+  if (childValues.length > 1) return ambiguousTaskRow(task);
 
-  let child = identity(childValues[0]);
+  const matches = parent
+    ? await findParentChildStates(env.CLAUDE_PLUGIN_DATA, parent, childValues, labels)
+    : await findChildStates(env.CLAUDE_PLUGIN_DATA, childValues, labels);
+  if (matches.length > 1) return ambiguousTaskRow(task);
+
+  let child;
   let state;
-  if (parent) {
-    const path = join(env.CLAUDE_PLUGIN_DATA, "subagent-timelines", parent.key, child.key, ".state.json");
-    state = await loadState(path, parent, child);
+  if (matches.length === 1) {
+    ({ child, state } = matches[0]);
   } else {
-    const matches = await findChildStates(env.CLAUDE_PLUGIN_DATA, childValues);
-    if (matches.length > 1) return `ambiguous child transcript: ${taskLabel(task)}`;
-    if (matches.length === 1) {
-      ({ child, state } = matches[0]);
-    } else {
-      state = emptyState({ hash: "unknown-parent" }, child);
-    }
+    const fallback = childValues[0] ?? labels[0] ?? taskLabel(task);
+    child = identity(fallback, "task");
+    state = emptyState(parent ?? { hash: "unknown-parent" }, child);
   }
 
   const model = taskModel(task, input, env);
   if (state.entries.length === 0) {
-    return [child.label, ...(model ? [`model: ${model}`] : []), "waiting for first event", ...taskMetadata(task)].join(" | ");
+    return [taskDisplayLabel(task, child), ...(model ? [`model: ${model}`] : []), "waiting for first event", ...taskMetadata(task)].join(" | ");
   }
   const latestText = [...state.entries].reverse().find((entry) => entry.kind === "assistant")?.text;
   const latestTool = [...state.entries].reverse().find((entry) => entry.kind === "tool")?.name;
-  const parts = [child.label, ...(model ? [`model: ${model}`] : []), oneLine(redactSensitive(latestText || "waiting for first event"))];
+  const parts = [taskDisplayLabel(task, child), ...(model ? [`model: ${model}`] : []), oneLine(redactSensitive(latestText || "waiting for first event"))];
   if (latestTool) parts.push(`tool: ${latestTool}`);
   return [...parts, ...taskMetadata(task)].join(" | ");
 }
 
-async function findChildStates(pluginData, values) {
-  const root = join(pluginData, "subagent-timelines");
+async function findParentChildStates(pluginData, parent, values, labels) {
+  const root = join(pluginData, "subagent-timelines", parent.key);
   const matches = [];
+  const seen = new Set();
   try {
-    const parents = await readdir(root, { withFileTypes: true });
-    for (const parentEntry of parents) {
-      if (!parentEntry.isDirectory()) continue;
-      const parentPath = join(root, parentEntry.name);
-      const children = await readdir(parentPath, { withFileTypes: true });
-      for (const value of values) {
-        const child = identity(value);
-        if (!child) continue;
-        const childEntry = children.find((entry) => entry.isDirectory() && entry.name === child.key);
-        if (!childEntry) continue;
-        const statePath = join(parentPath, childEntry.name, ".state.json");
-        const state = await loadStateWithoutParent(statePath, child);
-        if (state) matches.push({ child, state });
+    const children = await readdir(root, { withFileTypes: true });
+    for (const childEntry of children) {
+      if (!childEntry.isDirectory()) continue;
+      const statePath = join(root, childEntry.name, ".state.json");
+      const state = await loadStateWithoutParent(statePath);
+      if (!state || state.parentHash !== parent.hash) continue;
+      const child = storedIdentity(childEntry.name, state.childHash);
+      const identityMatch = values.some((value) => identity(value)?.key === childEntry.name);
+      if ((identityMatch || labelsOverlap(state.labels, labels)) && !seen.has(childEntry.name)) {
+        seen.add(childEntry.name);
+        matches.push({ child, state });
       }
     }
   } catch {
@@ -282,13 +368,42 @@ async function findChildStates(pluginData, values) {
   return matches;
 }
 
-async function loadStateWithoutParent(path, child) {
+async function findChildStates(pluginData, values, labels) {
+  const root = join(pluginData, "subagent-timelines");
+  const matches = [];
+  const seen = new Set();
+  try {
+    const parents = await readdir(root, { withFileTypes: true });
+    for (const parentEntry of parents) {
+      if (!parentEntry.isDirectory()) continue;
+      const parentPath = join(root, parentEntry.name);
+      const children = await readdir(parentPath, { withFileTypes: true });
+      for (const childEntry of children) {
+        if (!childEntry.isDirectory()) continue;
+        const statePath = join(parentPath, childEntry.name, ".state.json");
+        const state = await loadStateWithoutParent(statePath);
+        if (!state) continue;
+        const child = storedIdentity(childEntry.name, state.childHash);
+        const identityMatch = values.some((value) => identity(value)?.key === childEntry.name);
+        if ((identityMatch || labelsOverlap(state.labels, labels)) && !seen.has(`${parentEntry.name}/${childEntry.name}`)) {
+          seen.add(`${parentEntry.name}/${childEntry.name}`);
+          matches.push({ child, state });
+        }
+      }
+    }
+  } catch {
+    return [];
+  }
+  return matches;
+}
+
+async function loadStateWithoutParent(path, child = null) {
   try {
     const state = JSON.parse(await readBoundedFile(path, MAX_STATE_BYTES));
-    if (!state || state.childHash !== child.hash) return null;
+    if (!state || typeof state.childHash !== "string" || (child && state.childHash !== child.hash)) return null;
     return boundState({
       parentHash: typeof state.parentHash === "string" ? state.parentHash : "unknown-parent",
-      childHash: child.hash,
+      childHash: state.childHash,
       offset: Number.isInteger(state.offset) && state.offset >= 0 ? state.offset : 0,
       discardingOversizeLine: state.discardingOversizeLine === true,
       entries: sanitizeEntries(state.entries),
@@ -296,6 +411,7 @@ async function loadStateWithoutParent(path, child) {
       diagnostics: Array.isArray(state.diagnostics)
         ? state.diagnostics.filter((value) => typeof value === "string").map(redactSensitive)
         : [],
+      labels: sanitizeLabels(state.labels),
     });
   } catch {
     return null;
@@ -304,6 +420,7 @@ async function loadStateWithoutParent(path, child) {
 
 function taskMetadata(task) {
   const parts = [];
+  if (typeof task.status === "string" && task.status.trim().length > 0) parts.push(`status: ${boundedMetadata(task.status, 32)}`);
   if (task.elapsed_ms !== undefined) parts.push(`${boundedMetadata(task.elapsed_ms)}ms`);
   if (task.elapsed !== undefined) parts.push(boundedMetadata(task.elapsed));
   const tokenCount = task.tokenCount ?? task.output_tokens;
@@ -323,6 +440,52 @@ function taskIdentityCandidates(task) {
   return nativeId ? [nativeId] : [];
 }
 
+function taskLabelCandidates(task) {
+  return [...new Set([task?.name, task?.label, task?.description]
+    .filter((value) => typeof value === "string" && value.trim().length > 0)
+    .map((value) => value.trim()))];
+}
+
+function taskLabelsFromHook(input) {
+  return [...new Set([
+    input?.agent_type,
+    input?.agentType,
+    input?.agent_name,
+    input?.agentName,
+  ].filter((value) => typeof value === "string" && value.trim().length > 0)
+    .map((value) => boundedMetadata(value, 120)))];
+}
+
+function sanitizeLabels(labels) {
+  return [...new Set((Array.isArray(labels) ? labels : [])
+    .filter((value) => typeof value === "string" && value.trim().length > 0)
+    .map((value) => boundedMetadata(value, 120)))].slice(-8);
+}
+
+function mergeStateLabels(state, labels) {
+  const merged = sanitizeLabels([...(state.labels ?? []), ...labels]);
+  return { ...state, labels: merged };
+}
+
+function labelsOverlap(left, right) {
+  const candidates = new Set(sanitizeLabels(right));
+  return sanitizeLabels(left).some((value) => candidates.has(value));
+}
+
+function storedIdentity(key, hash) {
+  const label = typeof key === "string" ? key.split("--")[0] || "task" : "task";
+  return { hash, key, label };
+}
+
+function waitingTaskRow(task, label, env) {
+  const model = taskModel(task, {}, env);
+  return [label || taskLabel(task), ...(model ? [`model: ${model}`] : []), "waiting for first event", ...taskMetadata(task)].join(" | ");
+}
+
+function ambiguousTaskRow(task) {
+  return [taskLabel(task), "ambiguous child transcript", ...taskMetadata(task)].join(" | ");
+}
+
 function taskModel(task, input, env) {
   const explicitRoute = firstString([
     task?.actual_route,
@@ -338,17 +501,23 @@ function taskModel(task, input, env) {
     input?.selectedRoute,
     input?.route,
   ]);
-  if (isProviderQualifiedRoute(explicitRoute)) return routeLabel(explicitRoute);
+  const explicitOpaqueRoute = decodeOpaqueClaudeRoute(explicitRoute);
+  if (explicitOpaqueRoute) return routeLabel(explicitOpaqueRoute);
+  if (isProviderQualifiedRoute(explicitRoute) && !isOpaqueClaudeModel(explicitRoute)) return routeLabel(explicitRoute);
 
   const value = task?.model ?? task?.model_name ?? task?.modelName ?? task?.agent_model ?? task?.agentModel;
   const nativeModel = modelString(value);
-  if (isProviderQualifiedRoute(nativeModel)) return routeLabel(nativeModel);
+  const nativeOpaqueRoute = decodeOpaqueClaudeRoute(nativeModel);
+  if (nativeOpaqueRoute) return routeLabel(nativeOpaqueRoute);
+  if (isProviderQualifiedRoute(nativeModel) && !isOpaqueClaudeModel(nativeModel)) return routeLabel(nativeModel);
   const routeKey = nativeModel && nativeClaudeRouteKey(nativeModel);
   const route = routeKey
     ? env?.[`AIRCLAUDE_ROUTE_${routeKey}`] ?? env?.AIRCLAUDE_ROUTE_DEFAULT
-    : null;
+    : isOpaqueClaudeModel(nativeModel)
+      ? env?.AIRCLAUDE_ROUTE_DEFAULT
+      : null;
   if (isProviderQualifiedRoute(route)) return routeLabel(route);
-  if (typeof value === "string") return boundedMetadata(value, 100);
+  if (typeof value === "string" && !isOpaqueClaudeModel(value)) return boundedMetadata(value, 100);
   if (value && typeof value === "object") {
     for (const key of ["display_name", "displayName", "name", "id"]) {
       if (typeof value[key] === "string" && value[key].trim().length > 0) return boundedMetadata(value[key], 100);
@@ -381,6 +550,22 @@ function isProviderQualifiedRoute(value) {
   return typeof value === "string" && /^[^,/\s]+[,/][^,/\s]+$/.test(value.trim());
 }
 
+function isOpaqueClaudeModel(value) {
+  return typeof value === "string" && /(?:^|[\/,])claude-ccr-[^,\s/]+$/i.test(value.trim());
+}
+
+function decodeOpaqueClaudeRoute(value) {
+  if (typeof value !== "string") return "";
+  const match = value.trim().match(/(?:^|[\/,])claude-ccr-h([0-9a-f]+)(?:\[1m\])?$/i);
+  if (!match || match[1].length % 2 !== 0 || match[1].length > 1024) return "";
+  try {
+    const decoded = Buffer.from(match[1], "hex").toString("utf8");
+    return isProviderQualifiedRoute(decoded) ? decoded : "";
+  } catch {
+    return "";
+  }
+}
+
 function routeLabel(value) {
   const trimmed = value.trim();
   const separator = trimmed.includes("/") ? "/" : ",";
@@ -393,6 +578,10 @@ function taskLabel(task) {
     typeof task?.name === "string" ? task.name : typeof task?.description === "string" ? task.description : "task",
     80,
   );
+}
+
+function taskDisplayLabel(task, child) {
+  return taskLabelCandidates(task)[0] ?? child?.label ?? "task";
 }
 
 function oneLine(value, limit = MAX_VISIBLE) {
@@ -428,7 +617,7 @@ function identity(value, fallback = "") {
   return { hash, key: `${label.slice(0, 48)}--${hash}`, label };
 }
 
-function emptyState(parent, child) {
+function emptyState(parent, child, labels = []) {
   return {
     parentHash: parent.hash,
     childHash: child.hash,
@@ -437,6 +626,7 @@ function emptyState(parent, child) {
     entries: [],
     seen: [],
     diagnostics: [],
+    labels: sanitizeLabels(labels),
   };
 }
 
@@ -453,6 +643,7 @@ function boundState(state) {
     diagnostics: Array.isArray(state.diagnostics)
       ? state.diagnostics.map((value) => redactSensitive(value)).slice(-MAX_DIAGNOSTICS)
       : [],
+    labels: sanitizeLabels(state.labels),
   };
 }
 
@@ -499,6 +690,26 @@ async function readBoundedFile(path, limit) {
     if (size > limit) throw new Error("file exceeds bound");
     const buffer = Buffer.allocUnsafe(size);
     const { bytesRead } = await file.read(buffer, 0, size, 0);
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  } finally {
+    await file.close();
+  }
+}
+
+function statuslineParentValue(input) {
+  const explicit = input?.parent_id ?? input?.session_id;
+  if (typeof explicit === "string" && explicit.length > 0) return explicit;
+  if (typeof input?.transcript_path !== "string" || input.transcript_path.length === 0) return "";
+  const name = basename(input.transcript_path, ".jsonl");
+  return name.length > 0 ? name : "";
+}
+
+async function readFilePrefix(path, limit) {
+  const file = await open(path, "r");
+  try {
+    const { size } = await file.stat();
+    const buffer = Buffer.allocUnsafe(Math.min(size, limit));
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
     return buffer.subarray(0, bytesRead).toString("utf8");
   } finally {
     await file.close();

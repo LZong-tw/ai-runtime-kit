@@ -19,3 +19,7 @@
   Before declaring an existing multi-model session repaired, verify each failed
   `/model` route from its request log, including provider, model, tool count,
   upstream stage, and the adapter process start time.
+- Claude Code statusline task identities are not the same fields as lifecycle
+  hook identities. Persist the hook's agent labels and resolve statusline rows
+  by a unique parent plus label; do not turn a missing direct id match into an
+  ambiguous row when bounded live metadata is still available.
