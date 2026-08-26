@@ -3137,7 +3137,8 @@ function managedRouterEntries(router = {}) {
 function statuslineLabel(mode, ccrConfig) {
   const route = ccrConfig.Router?.default;
   if (typeof route !== "string") return `airclaude ${mode}`;
-  return `airclaude ${mode} ${splitRoute(route).model}`;
+  const { provider, model } = splitRoute(route);
+  return `airclaude ${mode} ${provider}/${model}`;
 }
 
 function managedProviderId(profile, provider) {
