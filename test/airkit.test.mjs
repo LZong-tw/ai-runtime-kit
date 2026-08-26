@@ -2645,7 +2645,7 @@ test("buildLaunchPlan applies pro mode CCR routing overlay without mutating the 
     assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_DEFAULT_MODEL, "strong-coder");
     assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_THINK, undefined);
     assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_LONG_CONTEXT_MODEL, undefined);
-    assert.equal(plan.launch.env.AIRCLAUDE_STATUSLINE_LABEL, "airclaude pro strong-coder");
+    assert.equal(plan.launch.env.AIRCLAUDE_STATUSLINE_LABEL, "airclaude pro demo/strong-coder");
     assert.equal(plan.launch.env.AIRCLAUDE_STATUSLINE_INPUT_PRICE_PER_MILLION, "2");
     assert.equal(plan.launch.env.AIRCLAUDE_RESTORE_MODEL, undefined);
     assert.match(plan.launch.env.CLAUDE_STATUSLINE_CACHE_DIR, /\/\.claude\/cache\/airclaude\/launch-example\/pro$/);
@@ -4664,7 +4664,7 @@ test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves
       AIRCLAUDE_ROUTE_DEFAULT_MODEL: "strong-coder",
       AIRCLAUDE_ROUTE_DEFAULT_PROVIDER: "demo",
       AIRCLAUDE_STATUSLINE_INPUT_PRICE_PER_MILLION: "2",
-      AIRCLAUDE_STATUSLINE_LABEL: "airclaude pro strong-coder",
+      AIRCLAUDE_STATUSLINE_LABEL: "airclaude pro demo/strong-coder",
       CLAUDE_STATUSLINE_CACHE_DIR: "/tmp/airkit-isolated-home/.claude/cache/airclaude/launch-example/pro",
       POWERLEVEL9K_INSTANT_PROMPT: "off",
       CCR_PROFILE: "launch-example",
