@@ -3361,6 +3361,76 @@ test("subagent status line accepts Claude Code native task ids and token counts"
   }
 });
 
+test("subagent status line joins Claude task names to hook agent types and keeps live metadata", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-task-name-"));
+  const childTranscript = join(pluginData, "child.jsonl");
+  const env = { CLAUDE_PLUGIN_DATA: pluginData };
+
+  try {
+    await writeFile(childTranscript, `${JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "lessons child progress" }, { type: "tool_use", name: "Read" }] },
+    })}\n`);
+    await processSubagentObservabilityHook({
+      hook_event_name: "SubagentStart",
+      session_id: "task-name-parent",
+      agent_id: "opaque-agent-id",
+      agent_type: "lessons-extractor",
+      transcript_path: childTranscript,
+    }, env);
+
+    const [row] = await renderSubagentStatusLine({
+      session_id: "task-name-parent",
+      tasks: [{
+        id: "task-6",
+        name: "lessons-extractor",
+        type: "agent",
+        status: "running",
+        tokenCount: 643,
+        effort: "medium",
+      }],
+    }, env);
+    assert.match(row, /lessons child progress/);
+    assert.match(row, /Read/);
+    assert.match(row, /643 tokens/);
+    assert.match(row, /status: running/);
+    assert.doesNotMatch(row, /ambiguous child transcript/);
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+test("subagent status line hydrates an existing session from child transcripts", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-hydrate-"));
+  const parentTranscript = join(pluginData, "existing-parent.jsonl");
+  const childrenDirectory = join(pluginData, "existing-parent", "subagents");
+  const childTranscript = join(childrenDirectory, "agent-existing-child.jsonl");
+  const env = { CLAUDE_PLUGIN_DATA: join(pluginData, "plugin-data") };
+
+  try {
+    await mkdir(childrenDirectory, { recursive: true });
+    await writeFile(parentTranscript, "");
+    await writeFile(childTranscript, `${JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", name: "Agent", input: { name: "lessons-extractor" } }] },
+    })}\n${JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "existing child progress" }, { type: "tool_use", name: "Read" }] },
+    })}\n`);
+    const [row] = await renderSubagentStatusLine({
+      session_id: "existing-parent",
+      transcript_path: parentTranscript,
+      tasks: [{ id: "task-6", name: "lessons-extractor", status: "running", tokenCount: 42 }],
+    }, env);
+    assert.match(row, /existing child progress/);
+    assert.match(row, /Read/);
+    assert.match(row, /42 tokens/);
+    assert.doesNotMatch(row, /waiting for first event|ambiguous child transcript/);
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
 test("subagent status line resolves row context without a parent id and displays non-Claude model names", async () => {
   const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-row-context-"));
   const childTranscript = join(pluginData, "child.jsonl");
@@ -3435,6 +3505,16 @@ test("subagent status line resolves Claude task labels to the selected AirKit pr
       }],
     }, env);
     assert.match(explicitRoute, /model: web_litellm_anthropic\/claude-opus-5/);
+
+    const [opaqueRoute] = await renderSubagentStatusLine({
+      parent_id: "route-model-parent",
+      tasks: [{
+        id: "route-model-child",
+        model: "anthropic/claude-ccr-h6169726b69742d70726f76696465722d7765622d6c6974656c6c6d2f4b696d692d4b33",
+      }],
+    }, env);
+    assert.match(opaqueRoute, /model: airkit-provider-web-litellm\/Kimi-K3/);
+    assert.doesNotMatch(opaqueRoute, /claude-ccr-/);
   } finally {
     await rm(pluginData, { force: true, recursive: true });
   }
