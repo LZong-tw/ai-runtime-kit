@@ -139,6 +139,30 @@ Setting `POWERLEVEL9K_INSTANT_PROMPT=off` for the launched process prevents
 git-aware prompt fragments from polluting tool output without changing the
 user's interactive shell.
 
+## GPT delegation and completion guard scope
+
+GPT delegation discipline and the completion guard solve different problems.
+The delegation guidance is a launch-time instruction for GPT-family modes: work
+directly by default, delegate only when the user explicitly asks, a skill or
+project rule requires it, or several independent work streams genuinely benefit
+from parallel execution. It is guidance, not an automatic task splitter.
+
+The completion guard is a Stop-hook nudge that activates only when
+`AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS` is set and the active model
+matches the current GPT/DeepSeek allowlist. After a tool-bearing turn it can
+append one bounded reminder to finish the requested deliverable before stopping.
+It does not retain prompt text, tool input, transcript payloads, or session
+content in its persisted state.
+
+Important boundaries:
+
+- It does not create a subagent, retry a command, or otherwise force
+  delegation.
+- It does not apply to Claude-family launches or unrelated model families just
+  because they were routed through AirKit.
+- A later route switch is evaluated from the actual transcript/route model, so
+  a Claude turn after a GPT turn is not guarded as GPT by accident.
+
 ## Prefix-cache observability
 
 DeepSeek and GPT routes keep the native-first/fallback boundary intact. AirKit
@@ -153,6 +177,13 @@ response headers into request telemetry. Missing counters remain unavailable;
 catalog pricing, `cache_control`, or a prefix hash must not be presented as a
 cache hit. The forwarded request bytes remain unchanged by this observability
 layer, which preserves Claude Code tool behavior and session resume semantics.
+
+The stable-prefix fields are therefore evidence about reuse candidates, not a
+cache-control mechanism. `stablePrefixHash`, `stablePrefixBytes`,
+`stablePrefixMessages`, and any `wirePrefixHash` are telemetry only. They help
+explain whether a prior-message prefix looked reusable and whether usage later
+reported a hit or miss; they never become outbound provider fields and never
+rewrite the Claude request body.
 
 ## Verification contract
 

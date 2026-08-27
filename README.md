@@ -4,6 +4,21 @@ AirKit turns public runtime profiles into managed Claude Code Router configurati
 and an `airclaude` launcher. It previews every managed-file or runtime change,
 keeps machine state outside git, and verifies the installed launch path.
 
+## Feature map
+
+- Installation, runtime pinning, takeover repair, and daily launcher flow:
+  [`docs/install.md`](docs/install.md)
+- Local audit daemon, audit UI, exports, retention, client completeness, and
+  gap interpretation: [`docs/audit.md`](docs/audit.md)
+- Launch-path, routing, statusline, Headroom/cache evidence, and completion
+  guard lessons: [`docs/runtime-lessons.md`](docs/runtime-lessons.md)
+- External-client adapter flow for Pi and OpenCode: the `Pi and OpenCode`
+  section below plus [`docs/install.md`](docs/install.md)
+- Bounded child-task timeline and additive `subagentStatusLine` behavior:
+  [`docs/subagent-observability.md`](docs/subagent-observability.md)
+- Compatibility policy and profile wiring: the `Server-tool compatibility`
+  section below plus [`docs/profile-schema.md`](docs/profile-schema.md)
+
 ## Quick start
 
 Prerequisites are Node.js 22 or newer, Claude Code 2.1.208 or newer, Claude Code
@@ -89,6 +104,11 @@ check the reported completeness for the actual client/session. The complete
 security boundary, supported client lanes, exports, retention, and known
 coverage limits are documented in [`docs/audit.md`](docs/audit.md).
 
+AirKit can also register a gateway-authenticated local audit UI that shows the
+same metadata-only projections and service status without turning the audit
+store into a payload browser. See [`docs/audit.md`](docs/audit.md) for the UI
+surface, safe export path, gated reveal flow, and gap interpretation rules.
+
 ## Pi and OpenCode
 
 Use the external-client adapter when Pi or OpenCode should use the same managed
@@ -117,6 +137,11 @@ airoc --profile openai-compatible-example --mode auto
 Anthropic provider and enables OpenCode's fullscreen TUI by default; pass an
 explicit `--tui-mode regular` if a split/non-fullscreen TUI is desired.
 
+Headroom savings and cost counters can also be reconciled into the same local
+audit store as bounded metadata. Those rows remain observational: unlinked
+Headroom events stay marked as candidates until they correlate to a specific
+AirKit request. [`docs/audit.md`](docs/audit.md) covers the evidence boundary.
+
 ## Daily use
 
 ```bash
@@ -126,6 +151,11 @@ airclaude --dry-run
 airclaude --doctor
 airclaude -- --resume
 ```
+
+For current launch-path, routing, statusline, prefix-cache, and completion-guard
+behavior, see [`docs/runtime-lessons.md`](docs/runtime-lessons.md). For the
+bounded child-task timeline and additive `subagentStatusLine` surface, see
+[`docs/subagent-observability.md`](docs/subagent-observability.md).
 
 ## Server-tool compatibility
 
