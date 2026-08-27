@@ -93,14 +93,58 @@ function requestLifecycleSignal(request, response) {
 
 function containHandlerFailure(response, error) {
   if (response?.headersSent !== true && typeof response?.writeHead === "function") {
-    response.writeHead(502, { "content-type": "application/json" });
-    response.end(JSON.stringify({
-      error: { message: "compatibility forwarding failed", type: "api_error" },
-    }));
+    const status = publicUpstreamStatus(error);
+    const headers = { "content-type": "application/json" };
+    const retryAfter = status === 429 ? validRetryAfter(error?.headers) ?? "3" : null;
+    if (retryAfter !== null) headers["retry-after"] = retryAfter;
+    const requestId = validResponseRequestId(error?.headers);
+    if (requestId !== null) headers["x-request-id"] = requestId;
+    response.writeHead(status, headers);
+    response.end(JSON.stringify({ error: publicFailure(status) }));
     return "forwarding_failed";
   }
   response?.destroy?.(error instanceof Error ? error : new Error(String(error)));
   return "response_destroyed";
+}
+
+function publicUpstreamStatus(error) {
+  const status = Number(error?.status ?? error?.statusCode);
+  return Number.isInteger(status) && status >= 400 && status <= 599 ? status : 502;
+}
+
+function publicFailure(status) {
+  return status === 429
+    ? {
+        message: "Upstream provider rate limited the request; retry after the indicated delay.",
+        type: "rate_limit_error",
+      }
+    : {
+        message: status === 502 ? "compatibility forwarding failed" : "Upstream provider rejected the request",
+        type: "api_error",
+      };
+}
+
+function validRetryAfter(headers) {
+  const value = responseHeader(headers, "retry-after");
+  if (value === null) return null;
+  if (/^\d{1,4}$/.test(value)) return value;
+  const timestamp = Date.parse(value);
+  return Number.isNaN(timestamp) ? null : new Date(timestamp).toUTCString();
+}
+
+function validResponseRequestId(headers) {
+  const value = responseHeader(headers, "x-request-id");
+  return value !== null && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value) ? value : null;
+}
+
+function responseHeader(headers, name) {
+  if (typeof headers?.get === "function") {
+    const value = headers.get(name);
+    return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+  }
+  if (!isRecord(headers)) return null;
+  const value = Object.entries(headers).find(([key]) => key.toLowerCase() === name)?.[1];
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
 }
 
 export function createMessagesHandler({ config, coreClient, policies, auditEmitter = null, auditContext = null }) {
