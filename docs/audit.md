@@ -9,6 +9,36 @@ Auditd is a collector boundary, not a provider health check and not a
 guarantee that every client is fully observable. Always check the client
 completeness and evidence gaps after enabling it.
 
+## Gateway audit UI
+
+AirKit can register a gateway-authenticated local app named `AirKit Audit` at
+`/plugins/airkit-audit`. It serves one HTML page plus two gateway-only JSON
+endpoints:
+
+- `GET /plugins/airkit-audit/api/status`
+- `GET /plugins/airkit-audit/api/query?name=<query>[&id=<request-id>]`
+
+The UI contract is intentionally narrower than the SQLite schema. It projects
+metadata only, always returns `metadata_only: true` and `payload_included:
+false`, and strips absolute paths, URLs, payload fields, and common
+credential-like values before they reach the browser. Supported query names are
+`requests`, `request`, `sessions`, `clients`, `accounts`, `repos`, `usage`,
+`cache`, and `gaps`. Unknown query names, oversized arguments, and degraded
+query/status paths return a bounded error or gap code instead of exposing raw
+collector errors.
+
+Status is also projected through an allowlist. A healthy or degraded response
+may include only:
+
+- `database.present` and `database.ok`
+- `service.installed`, `service.loaded`, and `service.stale` when that status
+  is available from the caller
+- `keychain.present`
+
+Treat the UI as a convenience surface for the same audit evidence, not as a
+different source of truth. A healthy page still requires the same completeness
+and gap checks as the CLI.
+
 ## Enable the local service
 
 The commands below are macOS commands because the service is installed as a
@@ -82,6 +112,19 @@ launch a client or send a provider request. A healthy auditd service therefore
 does not by itself mean that `claude-sub`, Pi, OpenCode, Codex, or Headroom has
 been captured. Check `audit clients` and `audit gaps` for the current machine.
 
+Client completeness is deliberately conservative. The current aggregate query
+marks a client as:
+
+- `complete` only when both a provider request and a usage report have been
+  observed
+- `metadata_only` when bounded metadata was observed without the full request +
+  usage pair
+- `gap` when no captured evidence exists for that lane
+
+This is why Codex and some JSONL-backed sources usually remain
+`metadata_only`: their measured contract exposes session/task/token metadata,
+not provider attempts or raw payloads.
+
 ## Query the evidence
 
 All query commands return metadata-only rows and sanitize sensitive field names
@@ -100,10 +143,23 @@ airkit audit gaps
 ```
 
 Use `clients` first. A client row is `complete` only when both a provider
-request and a usage report have been observed. `metadata_only`, `partial`, and
-`gap` are not successful-capture claims; investigate the corresponding source
-and `gaps` rows. `request` accepts a request or logical-request ID and keeps
-provider attempts separate, which matters when CCR falls back.
+request and a usage report have been observed. `metadata_only` and `gap` are
+also not successful-capture claims; investigate the corresponding source and
+`gaps` rows. Fixture or source-specific intermediate states may exist during
+testing, but the shipped aggregate client query reports `complete`,
+`metadata_only`, or `gap`. `request` accepts a request or logical-request ID
+and keeps provider attempts separate, which matters when CCR falls back.
+
+`gaps` combines both evidence gaps and collector gaps. Read it literally:
+
+- evidence gap: the collector observed enough structure to say a specific
+  request/session/client is missing expected evidence
+- collector gap: the collector could not safely parse or persist a source lane
+  and recorded that failure as metadata
+
+Unknown external schemas, unreadable bounded inputs, or collector failures
+should surface as gaps. They must not be filled in with guessed provider,
+request, or payload text.
 
 Repository and provider-account labels are explicit metadata operations. They
 preview by default and require `--write`:
@@ -144,6 +200,11 @@ authorization to the exact export manifest, and consumes the short-lived
 challenge once. If the helper is unavailable, keep using metadata-only export;
 do not bypass the gate by copying database or spool files.
 
+Both flags are required for reveal: `--include-payload` asks for payload
+columns, and `--decrypt` asks to unwrap them. A decrypt-only request is
+rejected. The reveal authorization is single-use and is bound to the exact set
+of rows and output manifest, so a later row swap or replay must fail closed.
+
 Preview payload retention before changing anything:
 
 ```bash
@@ -153,6 +214,11 @@ airkit audit prune --retention-days 90 --write
 
 Retention removes expired encrypted payload blobs in bounded batches and keeps
 normalized metadata. `--preserve` is an explicit no-op safety switch.
+
+This split is intentional: `prune` changes retention state for encrypted
+payload blobs, not the normalized request/usage/cache metadata that powers the
+queries above. A successful prune should therefore reduce revealable payload
+surface without making past request metadata disappear.
 
 ## Security boundary
 
