@@ -2423,8 +2423,12 @@ async function createCoreFixture(t, { coreHost = "127.0.0.1", tokenEntry = CORE_
       response.end(RAW_RESPONSE_BODY);
       return;
     }
-    if (body.model === "rate-limited") {
-      response.writeHead(429, { "content-type": "application/json" });
+    if (body.model === "rate-limited" || body.model === "oneportal/gpt-5.6-terra") {
+      response.writeHead(429, {
+        "content-type": "application/json",
+        "retry-after": "4",
+        "x-request-id": "upstream-rate-limit",
+      });
       response.end(
         JSON.stringify({
           type: "error",
@@ -3511,6 +3515,26 @@ test("handler contains forwarding failures instead of rejecting into the daemon"
 
   assert.equal(response.statusCode, 502);
   assert.match(response.body.toString(), /compatibility forwarding failed/);
+});
+
+test("compatibility preserves upstream rate-limit status and retry guidance", async (t) => {
+  const core = await createCoreFixture(t);
+  const fixture = await createPluginFixture({
+    coreClient: createCoreClient(core.options),
+  });
+  const response = createRecordingResponse();
+  const body = Buffer.from(JSON.stringify({
+    ...compatibilityRequestBody(false),
+    model: "oneportal/gpt-5.6-terra",
+  }));
+
+  await fixture.messages.handler(createPluginRequest(body), response, fixture.helpers);
+
+  assert.equal(response.statusCode, 429);
+  assert.equal(response.headers["retry-after"], "4");
+  assert.equal(response.headers["x-request-id"], "upstream-rate-limit");
+  assert.match(response.body.toString(), /rate limit/i);
+  assert.doesNotMatch(response.body.toString(), /upstream rate limited/);
 });
 
 test("handler destroys the response when failure happens after headers were sent", async () => {

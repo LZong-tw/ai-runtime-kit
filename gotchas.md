@@ -23,3 +23,8 @@
   hook identities. Persist the hook's agent labels and resolve statusline rows
   by a unique parent plus label; do not turn a missing direct id match into an
   ambiguous row when bounded live metadata is still available.
+- A compatibility executor must preserve an upstream HTTP failure status and
+  safe retry headers. Turning a provider 429 JSON error into a generic 502
+  hides backoff guidance and makes Claude Code retry rapidly until tool work is
+  interrupted; the adapter must not retry request bodies itself because that
+  can duplicate tool side effects.

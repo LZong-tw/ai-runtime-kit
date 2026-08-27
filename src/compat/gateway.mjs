@@ -25,6 +25,7 @@ const ADVISOR_BRIDGE_NAME = "airkit_advisor";
 const MAX_EXECUTOR_ITERATIONS = 8;
 const MAX_TRANSCRIPT_LENGTH = 32_768;
 const MAX_HISTORY_TEXT_LENGTH = 4_096;
+const CORE_RESPONSE_METADATA = Symbol("airkitCoreResponseMetadata");
 
 const SAFE_HEADER_NAMES = new Set([
   "accept",
@@ -76,7 +77,15 @@ export function createCoreClient({ config, fetchImpl = fetch, readFile = readFil
         body: JSON.stringify({ ...body, stream: false }),
         signal,
       });
-      return parseCoreMessageResponse(result);
+      try {
+        return attachCoreResponseMetadata(await parseCoreMessageResponse(result), result);
+      } catch (error) {
+        throw Object.assign(new Error("CCR core returned an invalid Messages response"), {
+          status: result.status,
+          headers: result.headers,
+          cause: error,
+        });
+      }
     },
     async forwardRaw({ body, fallback, headers, method = "POST", response, signal, onResponse, onAttempt }) {
       await onAttempt?.({ phase: "start", body });
@@ -707,8 +716,12 @@ function isValidUsageCounter(value) {
 }
 
 function assertMessageResponse(message) {
+  const metadata = message?.[CORE_RESPONSE_METADATA];
+  if (message?.type === "error" && Number(metadata?.status) >= 400) {
+    throw Object.assign(new Error("CCR core returned an upstream error"), metadata);
+  }
   if (message?.type !== "message" || !Array.isArray(message.content)) {
-    throw new Error("CCR core returned an invalid Messages response");
+    throw Object.assign(new Error("CCR core returned an invalid Messages response"), metadata ?? {});
   }
 }
 
@@ -729,8 +742,21 @@ async function requestCoreMessage(coreClient, body, headers, publicMessage, sign
       actual: actualFromMessage(error),
       usage: null,
     });
-    throw new Error(publicMessage);
+    const wrapped = new Error(publicMessage);
+    const status = responseErrorStatus(error);
+    if (status !== null) wrapped.status = status;
+    if (error?.headers !== undefined) wrapped.headers = error.headers;
+    throw wrapped;
   }
+}
+
+function attachCoreResponseMetadata(value, response) {
+  if (!isRecord(value)) return value;
+  Object.defineProperty(value, CORE_RESPONSE_METADATA, {
+    value: { status: response.status, headers: response.headers },
+    enumerable: false,
+  });
+  return value;
 }
 
 function responseErrorStatus(error) {
