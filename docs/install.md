@@ -250,24 +250,28 @@ Doctor reports `native` and `bridged` for verified policies,
 `unverified` for the legacy MCP route. It does not claim provider success or
 fallback billing evidence without a real request.
 
-The 1M context window is **not** controlled by an env var (there is no such env
-var in Claude Code — `ANTHROPIC_1M_CONTEXT` is a no-op). Claude Code enables 1M
-only when the resolved model string ends in the literal `[1m]` suffix, so the
-masked context window is selected per launch via the profile's
-`launch.claudeModel` (`claude-sonnet-5[1m]`). AirKit passes that value only as
-Claude Code's `--model` argument; it never writes a model into Claude settings
-or transcripts. Claude Code remains responsible for `/model` and its normal
-model-choice persistence. The suffix is stripped back to `claude-sonnet-5`
-for the on-wire API id, so the gateway never sees it.
+The 1M context capability is **not** controlled by `ANTHROPIC_1M_CONTEXT` (that
+variable is a no-op). Claude Code enables its 1M mode when the resolved model
+string ends in `[1m]`; AirKit adds that marker only when the selected route's
+catalog context is at least 1M. For any other positive context size, AirKit
+passes the exact catalog value through `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, so a
+500K or 750K provider is neither treated as 200K nor allowed to grow to 1M.
+These routes use a dedicated non-`claude-*` launch id (`airkit-mode`) because
+Claude Code only honors that explicit ceiling for unrecognized ids that do not
+start with `claude-`.
+`AIRCLAUDE_STATUSLINE_CONTEXT_WINDOW` and each
+`AIRCLAUDE_ROUTE_*_CONTEXT_WINDOW` carry the same metadata for statusline and
+diagnostics. The launch model remains a Claude-Code-local id; its `[1m]`
+marker is stripped from the on-wire API id.
 
-Because the suffix lives in that launch argument and nowhere else, AirKit can
-only guarantee it for the model the profile launches with. Whether Claude Code
-carries it across an in-session model change is Claude Code's behavior, not
-AirKit's, and is not verified here; relaunching through the profile is the
-reliable way to get it back. Behind a gateway the general point still holds:
-Claude Code cannot ask the provider what the real window is and budgets against
-what the model string claims, so the suffix is a belief — every route the
-profile can reach should actually have the window the belief asserts.
+The launch ceiling is computed from the selected mode's default route. By
+default AirKit starts Claude Code with `--autocompact auto`, so Claude Code
+resolves its native compaction threshold from the active model and refreshes it
+when `/model` changes. AirKit clears inherited static compaction overrides so a
+stale 250K shell setting cannot freeze a new route. Set
+`launch.context.autoCompactWindow` or `autoCompactPercentage` only when a
+profile intentionally wants a fixed override; that explicit setting takes
+precedence over native adaptive mode.
 
 ## Run Doctor
 

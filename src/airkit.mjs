@@ -281,7 +281,9 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
   const currentProfiles = currentConfig.profile?.profiles ?? [];
   const managedProfiles = modes.map((mode) => {
     const modeConfig = modeConfigs.get(mode);
-    const claudeModel = resolveClaudeLaunchModel(profile);
+    const modeRoute = splitRoute(modeConfig?.Router?.default ?? "");
+    const modeContextWindow = catalogContextWindow(catalog, modeRoute.provider, modeRoute.model);
+    const claudeModel = resolveClaudeLaunchModel(profile, modeContextWindow);
     const launchVars = launchTemplateVars(profile, configDir, mode, modeConfig, claudeModel);
     const id = `${managedPrefix}${slug(mode)}`;
     const currentProfile = currentProfiles.find((candidate) => candidate.id === id);
@@ -1109,6 +1111,10 @@ const LAUNCH_CLEARED_ENV = Object.freeze([
   "ANTHROPIC_DEFAULT_OPUS_MODEL",
   "CCR_CLAUDE_CODE_MODEL",
   "CODEXL_CLAUDE_CODE_MODEL",
+  "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+  "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+  "CLAUDE_CODE_AUTO_COMPACT_PERCENTAGE",
+  "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
   "AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS",
   // Cloud-provider selectors reroute Claude Code away from ANTHROPIC_BASE_URL
   // entirely; one inherited from the shell would bypass the CCR gateway.
@@ -1183,7 +1189,9 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
   const compatibility = resolveConfiguredCompatibility(ccrConfig);
   const logOverride = resolveCcrLogOverride(options.env ?? process.env);
   if (logOverride !== undefined) ccrConfig.LOG = logOverride;
-  const claudeModel = resolveClaudeLaunchModel(profile);
+  const defaultRoute = splitRoute(ccrConfig.Router?.default);
+  const contextWindow = catalogContextWindow(catalog, defaultRoute.provider, defaultRoute.model);
+  const claudeModel = resolveClaudeLaunchModel(profile, contextWindow);
   const launchVars = launchTemplateVars(profile, configDir, mode, ccrConfig, claudeModel);
   const basePlan = planInstall(catalog, profileName, { configDir, write: true, force: true });
   const managedProfileId = `airkit-${slug(profile.name)}-${slug(mode)}`;
@@ -1207,10 +1215,15 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
     ? []
     : withHeartbeatPluginArg(
       appendLaunchRuntimePrompts(
-        withAirclaudeModelArg(
-          renderedLaunchArgs,
+        withAutoCompactArg(
+          withAirclaudeModelArg(
+            renderedLaunchArgs,
+            launch.binary,
+            claudeModel,
+          ),
           launch.binary,
-          claudeModel,
+          profile,
+          combinedLaunchArgs,
         ),
         launch.binary,
         mode,
@@ -2797,7 +2810,12 @@ ${contextEnvLines(result.launch.env)}- cleared: ${(result.launch.clearEnv ?? [])
 // `launch.context` overrides are invisible in the launch argv but change how the
 // child behaves, so a dry run that omits them under-reports the plan.
 function contextEnvLines(env = {}) {
-  return ["CLAUDE_CODE_MAX_OUTPUT_TOKENS", "CLAUDE_CODE_AUTO_COMPACT_WINDOW", "CLAUDE_CODE_AUTO_COMPACT_PERCENTAGE"]
+  return [
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+    "CLAUDE_CODE_AUTO_COMPACT_PERCENTAGE",
+  ]
     .filter((name) => env[name] !== undefined)
     .map((name) => `- ${name}: ${env[name]}\n`)
     .join("");
@@ -2867,6 +2885,20 @@ function withHeartbeatPluginArg(args, binary, configDir) {
   return [...args, "--plugin-dir", join(configDir, "plugins", "airkit-context")];
 }
 
+// Let Claude Code own the adaptive threshold. Its native `auto` mode resolves
+// the threshold from the active model and refreshes it when `/model` changes;
+// static AirKit env overrides would freeze the first route's 250K-ish default.
+// A profile that explicitly owns a compact window or percentage remains
+// authoritative and uses the env contract below instead.
+function withAutoCompactArg(args, binary, profile, allLaunchArgs = args) {
+  if (!shouldAppendReusableRuntimeLessons(binary)) return args;
+  if ((profile.launch?.context?.autoCompactWindow ?? profile.launch?.context?.autoCompactPercentage) !== undefined) {
+    return args;
+  }
+  if (allLaunchArgs.some((arg) => arg === "--autocompact" || String(arg).startsWith("--autocompact="))) return args;
+  return [...args, "--autocompact", "auto"];
+}
+
 // AirClaude launchers pass their Claude-compatible display model as `--model` for
 // this managed launch only. AirKit never persists it to Claude settings or session
 // transcripts, so Claude Code remains the owner of the user's saved model choice.
@@ -2926,13 +2958,12 @@ function airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, runtimeEnv = proc
     AIRCLAUDE_MODE: mode,
     AIRCLAUDE_STATUSLINE_LABEL: statuslineLabel(mode, ccrConfig),
     CLAUDE_STATUSLINE_CACHE_DIR: join(home, ".claude", "cache", "airclaude", profile.name, mode),
-    // NOTE: there is no env var that enables Claude Code's 1M context window. (ANTHROPIC_1M_CONTEXT
-    // is a no-op — it does not appear in the 2.1.178 binary.) 1M is gated purely on the resolved
-    // model string ending in the literal suffix `[1m]` (Jf = /\[1m\]/i, checked first in the window
-    // resolver), with CLAUDE_CODE_DISABLE_1M_CONTEXT as the only opt-out. So 1M is achieved by giving
-    // the launch model a `[1m]` suffix (launch.claudeModel: claude-sonnet-5[1m]); the API
-    // id is normalized back to claude-sonnet-5 on the wire, so the suffix is a Claude-Code-local
-    // marker and the gateway never sees it. See resolveClaudeLaunchModel.
+    // Claude Code's 1M capability is gated by the resolved model string ending
+    // in `[1m]`; `ANTHROPIC_1M_CONTEXT` is a no-op. For arbitrary provider
+    // windows, `CLAUDE_CODE_MAX_CONTEXT_TOKENS` below carries the catalog's
+    // exact ceiling, while resolveClaudeLaunchModel adds the marker only when
+    // the selected route actually supports at least 1M. The API id is
+    // normalized back to the bare launch id on the wire.
     // Claude Code sources the user's zsh snapshot in its non-interactive command shells. A
     // Powerlevel10k instant prompt there re-evals its git/dir segments and spams
     // "(eval): command not found: git/head/awk/dirname/basename". Quiet it for the launched
@@ -2955,6 +2986,10 @@ function airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, runtimeEnv = proc
   const contextWindow = catalogContextWindow(catalog, defaultRoute.provider, defaultRoute.model);
   if (contextWindow !== null) {
     env.AIRCLAUDE_STATUSLINE_CONTEXT_WINDOW = String(contextWindow);
+    // Claude Code's dedicated launch id is intentionally not a real provider
+    // model. Tell its unknown-model guard the provider's actual ceiling so a
+    // 500K/750K model is neither mistaken for 200K nor allowed to grow to 1M.
+    env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(contextWindow);
   }
   const maxStopBlocks = profile.launch?.modes?.[mode]?.completionGuard?.maxStopBlocks;
   if (maxStopBlocks !== undefined) {
@@ -2967,6 +3002,8 @@ function airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, runtimeEnv = proc
     env[envKey] = route;
     env[`${envKey}_PROVIDER`] = provider;
     env[`${envKey}_MODEL`] = model;
+    const routeContextWindow = catalogContextWindow(catalog, provider, model);
+    if (routeContextWindow !== null) env[`${envKey}_CONTEXT_WINDOW`] = String(routeContextWindow);
   }
 
   return env;
@@ -3191,8 +3228,23 @@ function toEnvKey(value) {
     .toUpperCase();
 }
 
-function resolveClaudeLaunchModel(profile) {
-  return profile.launch?.claudeModel ?? null;
+function resolveClaudeLaunchModel(profile, contextWindow = null) {
+  const model = profile.launch?.claudeModel;
+  if (typeof model !== "string" || model.trim() === "") return null;
+  const marker = /\[1m\]$/i;
+  const bare = model.replace(marker, "").trim();
+  // Claude Code only applies CLAUDE_CODE_MAX_CONTEXT_TOKENS to unrecognized
+  // ids that do not start with `claude-`. Keep the dedicated AirKit launcher
+  // opaque to Claude Code so 200K/256K/500K routes get their exact ceiling;
+  // preserve the local `[1m]` display marker only for a genuinely 1M route.
+  if (/^(?:claude-)?airkit-mode$/i.test(bare)) {
+    return Number.isInteger(contextWindow) && contextWindow >= 1_000_000
+      ? "airkit-mode[1m]"
+      : "airkit-mode";
+  }
+  if (!Number.isInteger(contextWindow) || contextWindow <= 0) return model;
+  if (contextWindow < 1_000_000) return bare;
+  return `${bare}[1m]`;
 }
 
 // Claude Code strips `[1m]` before it builds the request, so the gateway only
@@ -3200,7 +3252,7 @@ function resolveClaudeLaunchModel(profile) {
 function bareClaudeModelId(model) {
   if (typeof model !== "string") return null;
   const bare = model.replace(/\[1m\]$/i, "").trim();
-  return /^claude-[a-z0-9][a-z0-9._-]*$/i.test(bare) ? bare : null;
+  return /^(?:claude-[a-z0-9][a-z0-9._-]*|airkit-[a-z0-9][a-z0-9._-]*)$/i.test(bare) ? bare : null;
 }
 
 function timestampForPath() {

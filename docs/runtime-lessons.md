@@ -117,7 +117,12 @@ requests instead of relocating homes — carry the mode in the request, not in t
 filesystem.
 
 The `[1m]` suffix is Claude Code-local launch/display metadata. It is not an
-upstream provider model ID and is not enabled by `ANTHROPIC_1M_CONTEXT`.
+upstream provider model ID and is not enabled by `ANTHROPIC_1M_CONTEXT`. AirKit
+adds it only for routes whose catalog context is at least 1M; other route
+ceilings are passed through `CLAUDE_CODE_MAX_CONTEXT_TOKENS` as exact integer
+metadata using the dedicated non-`claude-*` `airkit-mode` launch id. With no
+explicit compact override, AirKit delegates threshold selection to Claude Code
+via `--autocompact auto`, which is re-resolved by Claude Code after `/model`.
 
 ## Statusline and launch environment
 

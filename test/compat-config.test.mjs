@@ -566,15 +566,53 @@ test("the launch id is matched before the family prefixes, so old profiles keep 
   );
 });
 
-test("launchModel must be a bare claude-* id", () => {
+test("a dedicated non-Claude launch id still routes its own traffic to default without opening arbitrary models", () => {
+  const routes = {
+    default: "demo/glm-coder",
+    background: "demo/glm-mini",
+    opus: "web-litellm/claude-opus-5",
+    sonnet: "web-litellm/claude-sonnet-5",
+  };
+  const body = (model) => ({ model, max_tokens: 8, messages: [] });
+
+  assert.equal(
+    routeBareClaudeModel(body("airkit-mode"), routes, "airkit-mode").model,
+    "demo/glm-coder",
+    "the dedicated launch id still maps to the mode default route",
+  );
+  assert.equal(
+    routeBareClaudeModel(body("claude-sonnet-5"), routes, "airkit-mode").model,
+    "web-litellm/claude-sonnet-5",
+    "real Claude Sonnet picks still reach the sonnet route",
+  );
+  assert.equal(routeBareClaudeModel(body("grok-4.6"), routes, "airkit-mode"), null);
+  assert.equal(routeBareClaudeModel(body("airkit-mode/extra"), routes, "airkit-mode"), null);
+});
+
+test("launchModel accepts only bare claude-* ids or dedicated airkit-* ids", () => {
   const withLaunch = (launchModel) => ({ ...VALID_CONFIG, launchModel });
 
   assert.doesNotThrow(() => validateCompatibilityConfig(withLaunch("claude-airkit-mode")));
   assert.doesNotThrow(() => validateCompatibilityConfig(withLaunch("claude-sonnet-5")));
-  for (const value of ["", "airkit-mode", "demo/claude-sonnet-5", "claude-sonnet-5[1m]", "claude-", 7]) {
+  assert.doesNotThrow(() => validateCompatibilityConfig(withLaunch("airkit-mode")));
+  assert.doesNotThrow(() => validateCompatibilityConfig(withLaunch("airkit-coder.v2")));
+  for (
+    const value of [
+      "",
+      "steady-coder",
+      "grok-4.6",
+      "demo/claude-sonnet-5",
+      "claude-sonnet-5[1m]",
+      "claude-",
+      "demo/airkit-mode",
+      "airkit-mode/extra",
+      "airkit-",
+      7,
+    ]
+  ) {
     assert.throws(
       () => validateCompatibilityConfig(withLaunch(value)),
-      /launchModel must be a bare claude-\* model id/,
+      /launchModel must be a bare claude-\* model id or a dedicated airkit-\* id/,
       `rejects ${JSON.stringify(value)}`,
     );
   }

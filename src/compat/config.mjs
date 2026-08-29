@@ -48,6 +48,7 @@ const TRANSPORT_FALLBACK_KEYS = new Set(["from", "to", "statuses"]);
 const TRANSPORT_FALLBACK_TARGET_KEYS = new Set(["provider", "model"]);
 const MODE_PATTERN = /^[a-z0-9][a-z0-9._-]*$/i;
 const BARE_CLAUDE_MODEL_PATTERN = /^claude-[a-z0-9][a-z0-9._-]*$/i;
+const DEDICATED_LAUNCH_MODEL_PATTERN = /^airkit-[a-z0-9][a-z0-9._-]*$/i;
 const EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
 
 // One plugin instance serves every launch mode, and CCR discards the caller's
@@ -107,8 +108,8 @@ export function validateCompatibilityConfig(config) {
     throw new Error("routeLog must be a boolean");
   }
 
-  if (config.launchModel !== undefined && !BARE_CLAUDE_MODEL_PATTERN.test(String(config.launchModel))) {
-    throw new Error("launchModel must be a bare claude-* model id");
+  if (config.launchModel !== undefined && !isSupportedLaunchModelId(config.launchModel)) {
+    throw new Error("launchModel must be a bare claude-* model id or a dedicated airkit-* id");
   }
 
   if (config.modeEffort !== undefined) {
@@ -295,16 +296,20 @@ export function requestedMode(headers) {
 // Code sends a bare id and carries `[1m]` only as an `anthropic-beta` header —
 // so a mode whose launch id is `claude-sonnet-5` cannot offer real Sonnet 5 as a
 // choice: every request looks like the launcher's. Giving the launcher its own
-// id (any `claude-*` string; Claude Code forwards unknown ids verbatim)
-// separates the two, which is what frees `routes.sonnet`. Profiles that keep a
-// family id as their launch model still work: the exact match wins first and
-// `routes.sonnet ?? routes.default` preserves the old target.
+// id (either a bare `claude-*` id or a dedicated `airkit-*` id) separates the
+// two, which is what frees `routes.sonnet`. Profiles that keep a family id as
+// their launch model still work: the exact match wins first and
+// `routes.sonnet ?? routes.default` preserves the old target. Exact-match launch
+// routing stays limited to those two validated launch-id families so arbitrary
+// provider models are never promoted into launcher ids.
 export function routeBareClaudeModel(body, routes, launchModel = null) {
   if (!isRecord(body) || typeof body.model !== "string") return null;
   if (!isRecord(routes)) return null;
-  if (body.model.includes("/") || !body.model.startsWith("claude-")) return null;
-  const target = body.model === launchModel
+  if (body.model.includes("/")) return null;
+  const target = body.model === launchModel && isSupportedLaunchModelId(launchModel)
     ? routes.default
+    : !body.model.startsWith("claude-")
+      ? null
     : body.model.startsWith("claude-opus-")
       ? routes.opus ?? routes.default
       : body.model.startsWith("claude-haiku-")
@@ -390,6 +395,11 @@ function validateFallback(fallback, label, allowedKeys, requireContinuationLimit
 
 function resolveNativeFirst(mode, nativeCapability) {
   return mode === "native-first" && nativeCapability === true ? "native" : "anthropic-fallback";
+}
+
+function isSupportedLaunchModelId(model) {
+  return typeof model === "string"
+    && (BARE_CLAUDE_MODEL_PATTERN.test(model) || DEDICATED_LAUNCH_MODEL_PATTERN.test(model));
 }
 
 function isRecord(value) {

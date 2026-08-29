@@ -2678,6 +2678,61 @@ test("airclaude exposes the selected route context window to statusline", () => 
   assert.equal(plan.launch.env.AIRCLAUDE_STATUSLINE_CONTEXT_WINDOW, "256000");
 });
 
+test("airclaude propagates arbitrary route context limits without a false 1M launch marker", () => {
+  const catalog = launchCatalog();
+  catalog.modelCatalog.providers[0].models.push({ id: "grok-4.6", contextWindow: 500_000 });
+  catalog.profiles[0].launch.claudeModel = "claude-airkit-mode[1m]";
+  catalog.profiles[0].ccr.Router.default = "demo,grok-4.6";
+
+  const plan = buildLaunchPlan(catalog, "launch-example", {
+    configDir: "/tmp/airkit-statusline-arbitrary-context-window",
+  });
+
+  assert.equal(plan.launch.env.AIRCLAUDE_STATUSLINE_CONTEXT_WINDOW, "500000");
+  assert.equal(plan.launch.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "500000");
+  const modelIndex = plan.launch.args.indexOf("--model");
+  assert.equal(plan.launch.args[modelIndex + 1], "airkit-mode");
+  assert.equal(plan.launch.env.AIRCLAUDE_ROUTE_DEFAULT_CONTEXT_WINDOW, "500000");
+  const managed = airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {}, {
+    configDir: "/tmp/airkit-statusline-arbitrary-context-window-managed",
+  });
+  const managedProfile = managed.config.profile.profiles.find(
+    (candidate) => candidate.id === "airkit-launch-example-auto",
+  );
+  assert.equal(managedProfile.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "500000");
+});
+
+test("airclaude keeps the 1M launch marker only for routes with at least a 1M context", () => {
+  const catalog = launchCatalog();
+  catalog.modelCatalog.providers[0].models.push({ id: "large-coder", contextWindow: 1_000_000 });
+  catalog.profiles[0].launch.claudeModel = "claude-airkit-mode";
+  catalog.profiles[0].ccr.Router.default = "demo,large-coder";
+
+  const plan = buildLaunchPlan(catalog, "launch-example", {
+    configDir: "/tmp/airkit-statusline-one-million-context-window",
+  });
+
+  assert.equal(plan.launch.env.AIRCLAUDE_STATUSLINE_CONTEXT_WINDOW, "1000000");
+  assert.equal(plan.launch.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "1000000");
+  const modelIndex = plan.launch.args.indexOf("--model");
+  assert.equal(plan.launch.args[modelIndex + 1], "airkit-mode[1m]");
+});
+
+test("sub-1M routed launches use a non-Claude dedicated model id so the explicit max-context env stays effective", () => {
+  const catalog = launchCatalog();
+  catalog.modelCatalog.providers[0].models.push({ id: "grok-4.6", contextWindow: 500_000 });
+  catalog.profiles[0].launch.claudeModel = "claude-airkit-mode[1m]";
+  catalog.profiles[0].ccr.Router.default = "demo,grok-4.6";
+
+  const plan = buildLaunchPlan(catalog, "launch-example", {
+    configDir: "/tmp/airkit-safe-dedicated-launch-id",
+  });
+
+  const modelIndex = plan.launch.args.indexOf("--model");
+  assert.equal(plan.launch.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "500000");
+  assert.equal(plan.launch.args[modelIndex + 1], "airkit-mode");
+});
+
 test("airclaude exposes a model-aware statusline price map when the profile owns verified pricing", () => {
   const catalog = launchCatalog();
   catalog.profiles[0].statusline = {
@@ -2782,6 +2837,75 @@ test("airclaude launch scopes proactive compaction policy to the managed child",
   }
 });
 
+test("airclaude delegates auto-compact threshold resolution to Claude Code per active model", () => {
+  const cases = [
+    { model: "compact-coder", contextWindow: 200_000 },
+    { model: "steady-coder", contextWindow: 256_000 },
+    { model: "grok-4.6", contextWindow: 500_000 },
+    { model: "large-coder", contextWindow: 1_000_000 },
+  ];
+
+  for (const { model, contextWindow } of cases) {
+    const catalog = launchCatalog();
+    if (!catalog.modelCatalog.providers[0].models.some((candidate) => candidate.id === model)) {
+      catalog.modelCatalog.providers[0].models.push({ id: model, contextWindow });
+    }
+    catalog.profiles[0].ccr.Router.default = `demo,${model}`;
+
+    const plan = buildLaunchPlan(catalog, "launch-example", {
+      configDir: `/tmp/airkit-adaptive-compaction-${model}`,
+    });
+    const managed = airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {}, {
+      configDir: `/tmp/airkit-adaptive-compaction-managed-${model}`,
+    });
+    const managedProfile = managed.config.profile.profiles.find(
+      (candidate) => candidate.id === "airkit-launch-example-auto",
+    );
+
+    const autoCompactIndex = plan.launch.args.indexOf("--autocompact");
+    assert.equal(plan.launch.args[autoCompactIndex + 1], "auto", model);
+    assert.equal(plan.launch.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, String(contextWindow), model);
+    assert.equal(plan.launch.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, undefined, model);
+    assert.equal(plan.launch.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, undefined, model);
+    assert.equal(managedProfile.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, undefined, model);
+    assert.equal(managedProfile.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, undefined, model);
+  }
+});
+
+test("explicit launch compaction settings override the adaptive per-route defaults", async () => {
+  const catalog = launchCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-explicit-compaction-"));
+  catalog.modelCatalog.providers[0].models.push({ id: "large-coder", contextWindow: 1_000_000 });
+  catalog.profiles[0].ccr.Router.default = "demo,large-coder";
+  catalog.profiles[0].launch.context = {
+    autoCompactWindow: 240_000,
+    autoCompactPercentage: 25,
+  };
+
+  try {
+    const plan = buildLaunchPlan(catalog, "launch-example", { configDir });
+    const managed = airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {}, { configDir });
+    const managedProfile = managed.config.profile.profiles.find(
+      (candidate) => candidate.id === "airkit-launch-example-auto",
+    );
+
+    assert.equal(plan.launch.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "240000");
+    assert.equal(plan.launch.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, "25");
+    assert.equal(plan.launch.args.includes("--autocompact"), false);
+    assert.equal(managedProfile.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "240000");
+    assert.equal(managedProfile.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, "25");
+
+    const userOverride = buildLaunchPlan(catalog, "launch-example", {
+      configDir,
+      userArgs: ["--autocompact", "240000"],
+    });
+    assert.equal(userOverride.launch.args.includes("--autocompact"), false);
+    assert.deepEqual(userOverride.launch.userArgs, ["--autocompact", "240000"]);
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
 test("a dedicated launch id frees the sonnet route and keeps full output length", async () => {
   const catalog = compatibilityCatalog();
   const profile = catalog.profiles[0];
@@ -2797,7 +2921,7 @@ test("a dedicated launch id frees the sonnet route and keeps full output length"
     const merged = airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {}, { configDir });
     const compatibility = merged.compatibility;
 
-    assert.equal(compatibility.launchModel, "claude-airkit-mode", "the `[1m]` marker never reaches the wire");
+    assert.equal(compatibility.launchModel, "airkit-mode", "the `[1m]` marker never reaches the wire");
     assert.doesNotThrow(() => validateCompatibilityConfig(compatibility));
     assert.equal(
       compatibility.routes.sonnet,
@@ -2814,7 +2938,7 @@ test("a dedicated launch id frees the sonnet route and keeps full output length"
     );
     assert.equal(
       routeBareClaudeModel(
-        { model: "claude-airkit-mode", max_tokens: 8, messages: [] },
+        { model: "airkit-mode", max_tokens: 8, messages: [] },
         compatibility.modeRoutes.pro,
         compatibility.launchModel,
       ).model,
@@ -2839,7 +2963,7 @@ test("a dedicated launch id frees the sonnet route and keeps full output length"
     const prompt = appendSystemPromptText(plan.launch.args);
     assert.match(prompt, /- sonnet: anthropic-messages,claude-sonnet \(model claude-sonnet\)/);
     assert.match(prompt, /Picking a Claude model in session does change the route/);
-    assert.match(prompt, /not a served model: claude-airkit-mode\[1m\]/);
+    assert.match(prompt, /not a served model: airkit-mode(?:\.| -)/);
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }
@@ -3423,6 +3547,41 @@ test("subagent status line hydrates an existing session from child transcripts",
       tasks: [{ id: "task-6", name: "lessons-extractor", status: "running", tokenCount: 42 }],
     }, env);
     assert.match(row, /existing child progress/);
+    assert.match(row, /Read/);
+    assert.match(row, /42 tokens/);
+    assert.doesNotMatch(row, /waiting for first event|ambiguous child transcript/);
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+test("subagent status line hydrates a native child through its metadata sidecar", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-sidecar-"));
+  const parentTranscript = join(pluginData, "sidecar-parent.jsonl");
+  const childrenDirectory = join(pluginData, "sidecar-parent", "subagents");
+  const childTranscript = join(childrenDirectory, "agent-opaque-native-id.jsonl");
+  const childMetadata = join(childrenDirectory, "agent-opaque-native-id.meta.json");
+  const env = { CLAUDE_PLUGIN_DATA: join(pluginData, "plugin-data") };
+
+  try {
+    await mkdir(childrenDirectory, { recursive: true });
+    await writeFile(parentTranscript, "");
+    await writeFile(childTranscript, `${JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "sidecar child progress" }, { type: "tool_use", name: "Read" }] },
+    })}\n`);
+    await writeFile(childMetadata, JSON.stringify({
+      name: "sidecar-child",
+      description: "Native child has no Agent tool call in its transcript",
+      model: "opus",
+    }));
+
+    const [row] = await renderSubagentStatusLine({
+      session_id: "sidecar-parent",
+      transcript_path: parentTranscript,
+      tasks: [{ id: "task-opaque", name: "sidecar-child", status: "running", tokenCount: 42 }],
+    }, env);
+    assert.match(row, /sidecar child progress/);
     assert.match(row, /Read/);
     assert.match(row, /42 tokens/);
     assert.doesNotMatch(row, /waiting for first event|ambiguous child transcript/);
