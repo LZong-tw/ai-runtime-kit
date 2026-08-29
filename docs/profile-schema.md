@@ -148,9 +148,9 @@ Claude Code sends a bare model id on the wire and carries `[1m]` only as an
 `anthropic-beta` header, so a profile whose `launch.claudeModel` is
 `claude-sonnet-5` cannot also offer Sonnet 5 as an in-session choice — both
 arrive as the same string. Giving the launcher its own id
-(`claude-airkit-mode`, say) separates them and is what makes `routes.sonnet`
-usable. Claude Code forwards an id it does not recognize verbatim; the only
-cost is that it assumes a 32000 max output, which
+(`airkit-mode`, say) separates them and is what makes `routes.sonnet` usable.
+Claude Code forwards an id it does not recognize verbatim; the only cost is
+that it assumes a 32000 max output, which
 `launch.context.maxOutputTokens` restores.
 
 This is what lets bare Claude model names — plain `claude` launched outside a
@@ -299,9 +299,13 @@ MCP registration is then rendered.
 - `claudeModel`: the model id passed as the launched process's `--model`
   argument, and the id the loopback compatibility adapter routes to
   `Router.default`.
-  Claude Code accepts any string here. Use a dedicated id such as
-  `claude-airkit-mode[1m]` when the profile also wants `Router.sonnet` to serve
-  a real in-session Sonnet pick; use a Claude-recognized id when it does not.
+  Claude Code accepts any string here. AirKit's dedicated launcher id is
+  emitted as `airkit-mode` (or `airkit-mode[1m]` for a 1M route), keeping a real
+  in-session Claude-family pick distinct and allowing
+  `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to apply to sub-1M custom routes. AirKit
+  strips or adds the `[1m]` marker at launch to match the selected default
+  route's catalog context, while the compatibility adapter always uses the
+  bare `airkit-mode` id.
 - `context.maxOutputTokens`: optional integer from `1024` through `512000`
   passed as `CLAUDE_CODE_MAX_OUTPUT_TOKENS` to the managed AirClaude child.
   Claude Code derives max output from the launch model id and falls back to
@@ -309,13 +313,23 @@ MCP registration is then rendered.
   `claudeModel` sets this to the value its routed model can actually produce.
 - `context.autoCompactWindow`: optional integer from `100000` through `1000000`
   passed as `CLAUDE_CODE_AUTO_COMPACT_WINDOW` to the managed AirClaude child.
-  It changes when Claude Code compacts, not the model's real context window or
-  the status line's full-window percentage.
+  When omitted, AirKit passes Claude Code's native `--autocompact auto` mode so
+  the threshold follows the active `/model` choice. This field is a deliberate
+  fixed override: it changes when Claude Code compacts, not the model's real
+  context window or the status line's full-window percentage.
+- `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is derived automatically from the selected
+  mode's `Router.default` model catalog entry when that entry declares a
+  positive `contextWindow`. This is the hard ceiling Claude Code uses for the
+  dedicated AirClaude launch id, including nonstandard windows such as `500000`.
+  The matching `AIRCLAUDE_STATUSLINE_CONTEXT_WINDOW` and
+  `AIRCLAUDE_ROUTE_*_CONTEXT_WINDOW` variables are diagnostic metadata; they do
+  not override Claude Code's live `/model` selection.
 - `context.autoCompactPercentage`: optional integer from `1` through `100`, or
   `"default"`. An integer sets the managed child's percentage override;
-  `"default"` clears an inherited override for that child. Omitting the field
-  preserves normal environment inheritance. When `context` owns either value,
-  it takes precedence over the matching generic `launch.env` key.
+  `"default"` clears an inherited override for that child. Omitting both
+  compaction fields selects native adaptive mode and clears inherited static
+  overrides. When `context` owns either value, it takes precedence over the
+  matching generic `launch.env` key.
 - `defaultMode`: mode selected by plain `airclaude`.
 - `modes.<name>.ccr`: partial CCR overlay for that managed mode.
 

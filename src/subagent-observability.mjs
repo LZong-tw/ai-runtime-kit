@@ -77,15 +77,30 @@ async function hydrateTaskStates(input, env) {
 }
 
 async function childTranscriptLabels(path) {
+  const labels = new Set(await childMetadataLabels(path));
   try {
     const prefix = await readFilePrefix(path, 64 * 1024);
-    const labels = new Set();
     for (const line of prefix.split(/\r?\n/)) {
       if (!line.trim()) continue;
       try { collectAgentLabels(JSON.parse(line), labels); } catch { /* ignore malformed prefix records */ }
       if (labels.size >= 8) break;
     }
     return [...labels];
+  } catch {
+    return [];
+  }
+}
+
+async function childMetadataLabels(transcriptPath) {
+  const metadataPath = transcriptPath.endsWith(".jsonl")
+    ? `${transcriptPath.slice(0, -".jsonl".length)}.meta.json`
+    : "";
+  if (!metadataPath) return [];
+  try {
+    const metadata = JSON.parse(await readBoundedFile(metadataPath, 64 * 1024));
+    return [...new Set([metadata?.name, metadata?.description]
+      .filter((value) => typeof value === "string" && value.trim().length > 0)
+      .map((value) => boundedMetadata(value, 120)))];
   } catch {
     return [];
   }
