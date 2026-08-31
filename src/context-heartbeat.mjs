@@ -362,13 +362,6 @@ export function renderHeartbeatManagedFiles(configDir, runtimeModuleUrl = import
           type: "command",
         }],
       }],
-      Stop: [{
-        hooks: [{
-          args: ["${CLAUDE_PLUGIN_ROOT}/scripts/user-prompt-submit.mjs"],
-          command: "node",
-          type: "command",
-        }],
-      }],
       SubagentStart: [{
         hooks: [{
           args: ["${CLAUDE_PLUGIN_ROOT}/scripts/user-prompt-submit.mjs"],

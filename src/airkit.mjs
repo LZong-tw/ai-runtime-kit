@@ -58,6 +58,7 @@ const reusableRuntimeLessonsPrompt = [
   "When a command fails inside a shell wrapper, first verify whether the command is a shell wrapper or the real binary with type, command -v, or whence. Rule out local shell wrapper/helper leakage before diagnosing the remote service.",
   "Advisor capability: when Advisor is available, treat '找 Advisor', '問 Advisor', '和 Advisor 討論', 'ask Advisor', or 'get a second opinion' as a request to invoke the Advisor tool. Send a concise question with relevant context, wait for advisor_tool_result, and never claim Advisor was consulted without a returned result. Do not invoke Advisor for trivial work unless explicitly requested.",
 ].join(" ");
+const gptCompletionDisciplinePrompt = "GPT completion discipline: Do not emit a final answer while any explicit deliverable, requested change, verification step, or user question remains unresolved. Before final, reconcile every requested item against evidence; if blocked, state the exact blocker and continue every safe in-scope step. Tool calls are not completion, and never claim done, created, published, or pushed without command output.";
 
 export async function loadCatalog(path = defaultCatalogPath, options = {}) {
   const raw = await readFile(path, "utf8");
@@ -3132,7 +3133,8 @@ function inputPriceFromValue(value) {
 function airclaudeRoutingPrompt(mode, ccrConfig, claudeModel) {
   if (!ccrConfig?.Router || typeof ccrConfig.Router !== "object") return "";
 
-  const routeLines = sortedRouterEntries(ccrConfig.Router).map(([key, route]) => {
+  const routes = sortedRouterEntries(ccrConfig.Router);
+  const routeLines = routes.map(([key, route]) => {
     const { model } = splitRoute(route);
     return `- ${key}: ${route} (model ${model})`;
   });
@@ -3150,6 +3152,7 @@ function airclaudeRoutingPrompt(mode, ccrConfig, claudeModel) {
       ? ["- Picking a Claude model in session does change the route: it follows the opus/sonnet route listed above, not the default."]
       : []),
     "- background/tool-heavy work may use the background route when the runtime/router selects it.",
+    ...(routes.some(([, route]) => /^gpt-/i.test(splitRoute(route).model)) ? [gptCompletionDisciplinePrompt] : []),
     "- When compacting, restoring, summarizing, or reporting status, preserve AirClaude mode and provider routes separately from Claude-compatible display metadata.",
     "- Every manual or automatic compact summary ends with the following seven-field, single-line-value capsule. Never include credentials or provider-private payloads in the capsule.\n[AIRKIT_TASK_CAPSULE]\nobjective: current objective\nconstraints: accepted constraints\ndecisions: accepted decisions\nchanged_files: changed files\nverification: verification state\nrepository_state: repository and worktree state\nnext_action: next concrete action\n[/AIRKIT_TASK_CAPSULE]",
   ].join(" ");

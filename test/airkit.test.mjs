@@ -1859,6 +1859,13 @@ test("airclaude launch injects reusable runtime lessons", async () => {
   assert.doesNotMatch(prompt, /Picking a Claude model in session/);
 });
 
+test("AirClaude routing prompt carries GPT completion discipline for in-session GPT lane switches", async () => {
+  const catalog = await loadCatalog();
+  catalog.profiles[0].ccr.Router.sonnet = "openai-compatible,gpt-5.6-luna";
+  const plan = buildLaunchPlan(catalog, profile, { configDir: "/tmp/airkit-test" });
+  assert.match(appendSystemPromptText(plan.launch.args), /GPT completion discipline/);
+});
+
 test("generated shell wrappers delegate to the managed CCR 3 launch path", async () => {
   const catalog = await loadCatalog();
   const snippet = buildShellSnippet(catalog, profile, { configDir: "/tmp/airkit-test" });
@@ -3790,12 +3797,11 @@ test("AirClaude renders an additive session plugin for the heartbeat", async () 
       "PostCompact",
       "PostToolUse",
       "SessionStart",
-      "Stop",
       "SubagentStart",
       "SubagentStop",
       "UserPromptSubmit",
     ]);
-    assert.equal(renderedHooks.Stop[0].hooks[0].command, "node");
+    assert.equal(renderedHooks.Stop, undefined, "AirKit does not install a generic completion Stop hook");
     const hookInput = JSON.stringify({
       hook_event_name: "UserPromptSubmit",
       prompt: "ordinary prompt",
