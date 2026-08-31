@@ -44,20 +44,26 @@ async function hydrateTaskStates(input, env) {
     const labels = taskLabelCandidates(task);
     if (labels.length === 0) continue;
     const parent = identity(parentValue);
-    if (parent) {
-      const existing = await findParentChildStates(
-        env.CLAUDE_PLUGIN_DATA,
-        parent,
-        taskIdentityCandidates(task),
-        labels,
-      );
-      if (existing.length > 0) continue;
-    }
+    const childEntries = children.filter((entry) => entry.isFile()
+      && entry.name.startsWith("agent-") && entry.name.endsWith(".jsonl"));
+    const existing = parent
+      ? await findParentChildStates(env.CLAUDE_PLUGIN_DATA, parent, taskIdentityCandidates(task), labels)
+      : [];
     const candidates = [];
-    for (const entry of children) {
-      if (!entry.isFile() || !entry.name.startsWith("agent-") || !entry.name.endsWith(".jsonl")) continue;
+    for (const entry of childEntries) {
       const childLabels = await childTranscriptLabels(join(sessionDirectory, entry.name));
       if (labels.some((label) => childLabels.includes(label))) candidates.push({ entry, childLabels });
+    }
+    if (candidates.length !== 1 && existing.length === 1) {
+      const stored = existing[0].child;
+      const byIdentity = childEntries.filter((entry) => {
+        const childId = entry.name.slice("agent-".length, -".jsonl".length);
+        return childId === stored.label || childId.startsWith(`${stored.label}--`);
+      });
+      if (byIdentity.length === 1) candidates.splice(0, candidates.length, { entry: byIdentity[0], childLabels: [] });
+      else if (candidates.length === 0 && childEntries.length === 1) {
+        candidates.push({ entry: childEntries[0], childLabels: [] });
+      }
     }
     if (candidates.length !== 1) continue;
     const childId = candidates[0].entry.name.slice("agent-".length, -".jsonl".length);

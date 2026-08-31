@@ -3562,6 +3562,45 @@ test("subagent status line hydrates an existing session from child transcripts",
   }
 });
 
+test("subagent status line refreshes an existing empty state as the child transcript grows", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-refresh-"));
+  const parentTranscript = join(pluginData, "refresh-parent.jsonl");
+  const childrenDirectory = join(pluginData, "refresh-parent", "subagents");
+  const childTranscript = join(childrenDirectory, "agent-refresh-child.jsonl");
+  const env = { CLAUDE_PLUGIN_DATA: join(pluginData, "plugin-data") };
+
+  try {
+    await mkdir(childrenDirectory, { recursive: true });
+    await writeFile(parentTranscript, "");
+    await writeFile(childTranscript, "");
+    await processSubagentObservabilityHook({
+      hook_event_name: "SubagentStart",
+      session_id: "refresh-parent",
+      agent_id: "refresh-child",
+      agent_type: "refresh-child-task",
+      transcript_path: childTranscript,
+    }, env);
+
+    const statuslineInput = {
+      session_id: "refresh-parent",
+      transcript_path: parentTranscript,
+      tasks: [{ id: "task-refresh", name: "refresh-child-task", status: "running", tokenCount: 42 }],
+    };
+    const [waiting] = await renderSubagentStatusLine(statuslineInput, env);
+    assert.match(waiting, /waiting for first event/);
+
+    await writeFile(childTranscript, `${JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "child event arrived" }] },
+    })}\n`);
+    const [refreshed] = await renderSubagentStatusLine(statuslineInput, env);
+    assert.match(refreshed, /child event arrived/);
+    assert.doesNotMatch(refreshed, /waiting for first event/);
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
 test("subagent status line hydrates a native child through its metadata sidecar", async () => {
   const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-sidecar-"));
   const parentTranscript = join(pluginData, "sidecar-parent.jsonl");
