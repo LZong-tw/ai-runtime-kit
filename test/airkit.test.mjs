@@ -554,6 +554,10 @@ test("CCR 3 merge translates base routes into gateway rules for bare Claude mode
   assert.equal(background.type, "condition");
   assert.equal(background.enabled, true);
   assert.deepEqual(merged.config.Router.builtInRules, { "claude-code": { enabled: true } });
+  assert.deepEqual(
+    merged.config.profile.profiles.find(({ id }) => id === "airkit-launch-example-auto").routing,
+    { enabled: true, enhancedRoute: false, rules: [] },
+  );
   assert.deepEqual(merged.config.Router.fallback, { mode: "off", models: [], retryCount: 1 });
 
   const repeated = airkitRuntime.buildCcr3ManagedConfig(launchCatalog(), "launch-example", merged.config, {

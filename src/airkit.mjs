@@ -302,6 +302,10 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
       id,
       model: managedRouteSelector(modeConfig.Router?.default),
       name: `AirKit ${profile.name} ${mode}`,
+      // CCR's built-in Claude agent rule runs before Router.rules. AirKit owns
+      // the provider-qualified route, so keep the profile active while opting
+      // out of that generic rewrite path.
+      routing: { enabled: true, enhancedRoute: false, rules: [] },
       scope: "ccr",
       settingsFile: join(configDir, "ccr-profiles", `${managedPrefix}${slug(mode)}`, "settings.json"),
       smallFastModel: managedRouteSelector(modeConfig.Router?.background ?? modeConfig.Router?.default),
