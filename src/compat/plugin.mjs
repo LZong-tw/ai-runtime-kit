@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   handleCompatibilityMessage,
   createAttemptAudit,
+  normalizeMessageSystemRoles,
   writeAnthropicMessage,
 } from "./gateway.mjs";
 import {
@@ -154,7 +155,8 @@ export function createMessagesHandler({ config, coreClient, policies, auditEmitt
     let outcome = "completed";
     try {
       const rawBody = await helpers.readBody(request);
-      const body = parseJsonCopy(rawBody);
+      const parsedBody = parseJsonCopy(rawBody);
+      const body = normalizeMessageSystemRoles(parsedBody);
       // Route bare Claude model ids before any forwarding decision: this
       // plugin owns POST /v1/messages, so CCR Router rules never see these
       // requests and the core rejects unlisted model names. A single rewrite
@@ -184,7 +186,7 @@ export function createMessagesHandler({ config, coreClient, policies, auditEmitt
         outputBudgetAdjustedBody,
         resolveToolSearchMaxTools(config, outputBudgetAdjustedBody?.model),
       );
-      const outboundRaw = outboundBody === body
+      const outboundRaw = outboundBody === parsedBody
         ? rawBody
         : Buffer.from(JSON.stringify(outboundBody), "utf8");
       const compat = isRecord(outboundBody) && isConfiguredCompatibilityRequest(outboundBody, policies, config);

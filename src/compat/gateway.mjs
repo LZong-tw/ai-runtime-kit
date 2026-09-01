@@ -542,7 +542,7 @@ function normalizeCompatibilityHistory(source) {
   return { messages, referencedTools };
 }
 
-function normalizeMessageSystemRoles(body) {
+export function normalizeMessageSystemRoles(body) {
   if (!isRecord(body) || !Array.isArray(body.messages)) return body;
   const movedSystem = [];
   const messages = [];

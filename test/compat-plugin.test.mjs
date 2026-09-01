@@ -1086,6 +1086,43 @@ test("ordinary Messages requests preserve raw bytes and abort propagation", asyn
   assert.deepEqual(response.body, Buffer.from("raw-response"));
 });
 
+test("ordinary Messages requests move Claude Code system hooks before raw passthrough", async () => {
+  const forwarded = [];
+  const fixture = await createPluginFixture({
+    coreClient: createPluginCoreClient({
+      async forwardRaw(input) {
+        forwarded.push(JSON.parse(input.body.toString("utf8")));
+        input.response.end();
+      },
+    }),
+  });
+  const body = {
+    model: "oneportal/claude-sonnet-5",
+    system: [{ type: "text", text: "original system" }],
+    messages: [
+      { role: "user", content: "first request" },
+      { role: "assistant", content: "first response" },
+      { role: "system", content: "UserPromptSubmit hook additional context" },
+      { role: "user", content: "second request" },
+    ],
+  };
+
+  await fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify(body))),
+    createRecordingResponse(),
+    fixture.helpers,
+  );
+
+  assert.deepEqual(forwarded, [{
+    ...body,
+    system: [
+      { type: "text", text: "original system" },
+      { type: "text", text: "UserPromptSubmit hook additional context" },
+    ],
+    messages: [body.messages[0], body.messages[1], body.messages[3]],
+  }]);
+});
+
 // The whole point of the strip is where it happens: a server-tool definition
 // diverts the request on presence alone, so removing advisor after that
 // decision would be too late. These two assert the decision itself flips.
