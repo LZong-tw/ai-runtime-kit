@@ -5620,6 +5620,52 @@ test("resume launches fail clearly when no interactive terminal is attached", ()
   }));
 });
 
+test("airclaude blocks a resume target that is still an active background agent", async () => {
+  const catalogPath = await writeLaunchCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-resume-background-"));
+  const output = [];
+  let spawned = false;
+
+  try {
+    const exitCode = await runAirclaudeCli([
+      "--profile", "launch-example",
+      "--config-dir", configDir,
+      "--", "--resume", "279696b2-f08c-4b3d-9e88-2f44b2fc5152",
+    ], {
+      catalogPath,
+      commandExists: async () => true,
+      env: { DEMO_API_KEY: "runtime-secret", HOME: configDir },
+      runCommand: async (command, args) => {
+        if (command === "claude" && args[0] === "agents") {
+          return {
+            ok: true,
+            status: 0,
+            stdout: JSON.stringify([{
+              kind: "background",
+              name: "DEMO Drift",
+              sessionId: "279696b2-f08c-4b3d-9e88-2f44b2fc5152",
+              status: "working",
+            }]),
+          };
+        }
+        return { ok: true, status: 0, stdout: "gateway-key-from-helper" };
+      },
+      runtimeVersions: passingRuntimeVersions(),
+      spawnCommand: () => { spawned = true; return { status: 0 }; },
+      stdout: { write: (chunk) => output.push(chunk) },
+    });
+
+    assert.equal(exitCode, 2);
+    assert.equal(spawned, false);
+    assert.match(output.join(""), /RESUME BLOCKED ─ ACTIVE SESSION/);
+    assert.match(output.join(""), /claude stop 279696b2/);
+    assert.match(output.join(""), /--force-resume/);
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+    await rm(resolve(catalogPath, ".."), { force: true, recursive: true });
+  }
+});
+
 // A stale plugin host must be announced before the child starts, because a
 // launch renders its own report only after the session ends.
 async function staleHostLaunch(extraArgv, { ccrResult, launchctlResult, restartStale, supervised = false }) {

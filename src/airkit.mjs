@@ -2210,6 +2210,16 @@ export async function runAirclaudeCli(argv = process.argv.slice(2), options = {}
   const preProfile = catalog.profiles.find((candidate) => candidate.name === preProfileName);
   const validModes = new Set(["auto", "pro", ...Object.keys(preProfile?.launch?.modes ?? {})]);
   const parsed = parseAirclaudeArgs(argv, validModes);
+  if (!parsed.forceResume && !parsed.dryRun && !parsed.doctor) {
+    const activeSession = await findActiveResumeSession(parsed.userArgs, {
+      env: options.env,
+      runCommand: options.runCommand ?? runCommandSync,
+    });
+    if (activeSession) {
+      stdout.write(renderActiveResumeNotice(activeSession));
+      return 2;
+    }
+  }
   if (options.spawnCommand === undefined && !parsed.dryRun && !parsed.doctor) {
     assertInteractiveResumeLaunch(parsed.userArgs);
   }
@@ -2249,6 +2259,54 @@ export function assertInteractiveResumeLaunch(userArgs = [], options = {}) {
   throw new Error(
     "airclaude resume requires an interactive terminal; run it from the terminal that should own the Claude UI instead of a detached/background shell",
   );
+}
+
+function resumeSessionId(userArgs = []) {
+  for (let index = 0; index < userArgs.length; index += 1) {
+    const arg = String(userArgs[index]);
+    if (arg === "--resume" || arg === "-r") return userArgs[index + 1] ?? null;
+    if (arg.startsWith("--resume=")) return arg.slice("--resume=".length) || null;
+  }
+  return null;
+}
+
+async function findActiveResumeSession(userArgs, options = {}) {
+  const sessionId = resumeSessionId(userArgs);
+  if (!sessionId) return null;
+
+  const result = await options.runCommand("claude", ["agents", "--json"], {
+    env: options.env,
+    timeoutMs: 5000,
+  });
+  if (!result.ok) return null;
+
+  let sessions;
+  try {
+    sessions = JSON.parse(result.stdout);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(sessions)) return null;
+
+  return sessions.find((session) => (
+    typeof session?.sessionId === "string"
+    && (session.sessionId === sessionId || session.sessionId.startsWith(sessionId))
+  )) ?? null;
+}
+
+function renderActiveResumeNotice(session) {
+  const sessionId = session.sessionId;
+  const shortId = sessionId.slice(0, 8);
+  const name = session.name || "unnamed agent";
+  const status = session.status || "active";
+  return `\n╔═ AIRCLAUDE RESUME BLOCKED ─ ACTIVE SESSION\n`
+    + `║ ${name} (${shortId}) is still ${status}.\n`
+    + `║ Open it here:       claude attach ${shortId}\n`
+    + `║ Move it here safely: claude stop ${shortId}\n`
+    + `║                      airclaude -- --resume ${sessionId}\n`
+    + `║ Override (fork/duplicate intentionally):\n`
+    + `║                      airclaude --force-resume -- --resume ${sessionId}\n`
+    + "╚═ Nothing was launched.\n";
 }
 
 function isHelpRequest(argv) {
@@ -2344,6 +2402,8 @@ function parseAirclaudeArgs(argv, validModes = new Set(["auto", "pro"])) {
       parsed.doctor = true;
     } else if (arg === "--restart-stale") {
       parsed.restartStale = true;
+    } else if (arg === "--force-resume") {
+      parsed.forceResume = true;
     } else if (["--repair-restore", "--restore-projects-dir", "--restore-backups-dir"].includes(arg)) {
       throw new Error(`${arg} was removed; AirKit no longer reads or rewrites Claude Code session model state`);
     } else if (validModes.has(arg) && !parsed.mode) {
@@ -2702,6 +2762,9 @@ Options:
                          reload it before launching. This stops every
                          CCR-backed session on the machine. Without the flag a
                          stale host is reported and left alone.
+  --force-resume         Allow --resume even when that exact session is still
+                         active. Use only when intentionally forking or
+                         duplicating the session.
   -h, --help             Show this help.
 
 Examples:
@@ -2709,6 +2772,7 @@ Examples:
   airclaude pro
   airclaude --doctor
   airclaude --restart-stale
+  airclaude --force-resume -- --resume <session-id>
   airclaude -- --dangerously-skip-permissions
 `;
 }
