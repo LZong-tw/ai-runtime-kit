@@ -44,8 +44,10 @@ export const DEFAULT_ADVISOR_UNSUPPORTED = "strip";
 const FAMILY_FALLBACK_KEYS = new Set(["provider", "model"]);
 const ROUTE_KEYS = new Set(["default", "background", "opus", "sonnet"]);
 const ROUTE_SELECTOR_PATTERN = /^[a-z0-9][a-z0-9._-]*\/\S+$/i;
-const TRANSPORT_FALLBACK_KEYS = new Set(["from", "to", "statuses"]);
+const TRANSPORT_FALLBACK_KEYS = new Set(["from", "to", "statuses", "scope", "timeoutMs"]);
 const TRANSPORT_FALLBACK_TARGET_KEYS = new Set(["provider", "model"]);
+const TRANSPORT_FALLBACK_SCOPES = new Set(["all", "classifier"]);
+const TRANSPORT_FALLBACK_STATUSES = new Set([401, 408, 429, 499, 500, 502, 503, 504]);
 const MODE_PATTERN = /^[a-z0-9][a-z0-9._-]*$/i;
 const BARE_CLAUDE_MODEL_PATTERN = /^claude-[a-z0-9][a-z0-9._-]*$/i;
 const DEDICATED_LAUNCH_MODEL_PATTERN = /^airkit-[a-z0-9][a-z0-9._-]*$/i;
@@ -151,12 +153,36 @@ export function validateCompatibilityConfig(config) {
   return config;
 }
 
-export function resolveTransportFallback(config, model, status) {
+export function resolveTransportFallback(config, model, status, body = null) {
   validateCompatibilityConfig(config);
   if (typeof model !== "string" || !Number.isInteger(status)) return null;
   const fallback = config.transportFallbacks?.find((entry) =>
-    `${entry.from.provider}/${entry.from.model}` === model && entry.statuses.includes(status));
+    `${entry.from.provider}/${entry.from.model}` === model &&
+    entry.statuses.includes(status) &&
+    (entry.scope !== "classifier" || isAutoModeClassifierRequest(body)));
   return fallback === undefined ? null : `${fallback.to.provider}/${fallback.to.model}`;
+}
+
+export function resolveTransportFallbackPolicy(config, model, body = null) {
+  validateCompatibilityConfig(config);
+  if (typeof model !== "string") return null;
+  const fallback = config.transportFallbacks?.find((entry) =>
+    `${entry.from.provider}/${entry.from.model}` === model &&
+    (entry.scope !== "classifier" || isAutoModeClassifierRequest(body))
+  );
+  if (fallback === undefined) return null;
+  return {
+    selector: `${fallback.to.provider}/${fallback.to.model}`,
+    statuses: [...fallback.statuses],
+    ...(fallback.timeoutMs === undefined ? {} : { timeoutMs: fallback.timeoutMs }),
+  };
+}
+
+export function isAutoModeClassifierRequest(body) {
+  if (!isRecord(body) || !Array.isArray(body.system)) return false;
+  return body.system.some((block) =>
+    isRecord(block) && typeof block.text === "string" &&
+    block.text.startsWith("You are a security monitor for autonomous AI coding agents."));
 }
 
 export function requiresClientToolFallback(config, policies, family, model) {
@@ -230,8 +256,15 @@ function validateTransportFallback(fallback, label) {
     }
   }
   if (!Array.isArray(fallback.statuses) || fallback.statuses.length === 0 ||
-    fallback.statuses.some((status) => status !== 401)) {
-    throw new Error(`${label}.statuses must contain only 401`);
+    fallback.statuses.some((status) => !TRANSPORT_FALLBACK_STATUSES.has(status))) {
+    throw new Error(`${label}.statuses must contain supported transport statuses`);
+  }
+  if (fallback.scope !== undefined && !TRANSPORT_FALLBACK_SCOPES.has(fallback.scope)) {
+    throw new Error(`${label}.scope must be one of: ${[...TRANSPORT_FALLBACK_SCOPES].join(", ")}`);
+  }
+  if (fallback.timeoutMs !== undefined &&
+    (!Number.isInteger(fallback.timeoutMs) || fallback.timeoutMs < 1_000 || fallback.timeoutMs > 120_000)) {
+    throw new Error(`${label}.timeoutMs must be an integer from 1000 through 120000`);
   }
 }
 

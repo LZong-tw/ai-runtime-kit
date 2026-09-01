@@ -236,7 +236,7 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
   // CCR's managed config deliberately removes the compatibility plugin: the
   // request adapter is started as a separate local middleware. The audit UI is
   // different: it is a real CCR wrapper plugin and must be present in the
-  // persisted managed config so CCR can register its app and gateway routes.
+  // persisted managed config so CCR can register its app and loopback backend.
   baseConfig.plugins = [
     ...(baseConfig.plugins ?? []),
     {
@@ -244,7 +244,7 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
       enabled: true,
       module: auditUiPluginModule,
       surfaces: { apps: true, gateway: true, provider: false },
-      permissions: ["trusted-code", "apps", "gateway-routes"],
+      permissions: ["trusted-code", "apps", "http-backends"],
       config: {},
     },
   ];

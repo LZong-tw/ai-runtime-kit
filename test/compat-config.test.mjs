@@ -4,11 +4,13 @@ import { test } from "node:test";
 import {
   AIRKIT_MODE_HEADER,
   airkitModeLabel,
+  isAutoModeClassifierRequest,
   isAirkitModeLabel,
   requestedMode,
   resolveCompatibilityPolicies,
   resolveModeRoutes,
   resolveTransportFallback,
+  resolveTransportFallbackPolicy,
   requiresClientToolFallback,
   resolveToolSearchMaxTools,
   routeBareClaudeModel,
@@ -50,28 +52,44 @@ test("resolves all six policies and verified native web capabilities", () => {
   });
 });
 
-test("resolves only an explicitly configured 401 transport fallback", () => {
+test("resolves status and classifier-scoped transport fallbacks", () => {
   const config = {
     ...VALID_CONFIG,
     transportFallbacks: [{
-      from: { provider: "web-litellm", model: "gpt-5.6-terra" },
-      to: { provider: "oneportal", model: "gpt-5.6-terra" },
-      statuses: [401],
+      from: { provider: "oneportal", model: "gpt-5.6-luna" },
+      to: { provider: "oneportal", model: "deepseek-v4-flash" },
+      statuses: [500, 502, 503, 504],
+      scope: "classifier",
+      timeoutMs: 30_000,
     }],
+  };
+  const classifierBody = {
+    model: "oneportal/gpt-5.6-luna",
+    system: [{ type: "text", text: "You are a security monitor for autonomous AI coding agents." }],
   };
 
   assert.deepEqual(
-    resolveTransportFallback(config, "web-litellm/gpt-5.6-terra", 401),
-    "oneportal/gpt-5.6-terra",
+    resolveTransportFallback(config, "oneportal/gpt-5.6-luna", 500, classifierBody),
+    "oneportal/deepseek-v4-flash",
   );
-  assert.equal(resolveTransportFallback(config, "web-litellm/gpt-5.6-terra", 429), null);
-  assert.equal(resolveTransportFallback(config, "web-litellm/claude-opus-5", 401), null);
+  assert.deepEqual(
+    resolveTransportFallbackPolicy(config, "oneportal/gpt-5.6-luna", classifierBody),
+    {
+      selector: "oneportal/deepseek-v4-flash",
+      statuses: [500, 502, 503, 504],
+      timeoutMs: 30_000,
+    },
+  );
+  assert.equal(isAutoModeClassifierRequest(classifierBody), true);
+  assert.equal(resolveTransportFallbackPolicy(config, "oneportal/gpt-5.6-luna", { system: [] }), null);
+  assert.equal(resolveTransportFallback(config, "oneportal/gpt-5.6-luna", 429, classifierBody), null);
+  assert.equal(resolveTransportFallback(config, "oneportal/claude-opus-5", 500, classifierBody), null);
   assert.throws(
     () => validateCompatibilityConfig({
       ...config,
-      transportFallbacks: [{ ...config.transportFallbacks[0], statuses: [429] }],
+      transportFallbacks: [{ ...config.transportFallbacks[0], statuses: [400] }],
     }),
-    /transportFallbacks\[0\]\.statuses.*401/,
+    /transportFallbacks\[0\]\.statuses.*supported/,
   );
 });
 

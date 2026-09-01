@@ -21,10 +21,10 @@ function responseRecorder() {
   };
 }
 
-test("CCR audit wrapper registers a gateway-authenticated app and metadata routes", async () => {
+test("CCR audit wrapper registers a browser backend and one-time bootstrap app", async () => {
   const root = await mkdtemp("/tmp/airkit-ccr-plugin-");
   const apps = [];
-  const routes = [];
+  const backends = [];
   try {
     await plugin.setup({
       pluginConfig: {
@@ -32,33 +32,39 @@ test("CCR audit wrapper registers a gateway-authenticated app and metadata route
         auditQuerySocketPath: join(root, "auditd-query.sock"),
       },
       registerApp(app) { apps.push(app); },
-      registerGatewayRoute(route) { routes.push(route); },
+      async registerHttpBackend(backend) {
+        backends.push(backend);
+        return { host: backend.host, port: 4567, url: "http://127.0.0.1:4567" };
+      },
     });
 
     assert.equal(apps.length, 1);
-    assert.equal(apps[0].id, "airkit-audit-ui");
-    assert.equal(apps[0].url, "/plugins/airkit-audit");
-    assert.equal(routes.length, 3);
-    assert.deepEqual(routes.map((route) => route.auth), ["gateway", "gateway", "gateway"]);
-    assert.deepEqual(routes.map((route) => route.methods ?? [route.method]), [
-      ["GET"], ["GET"], ["GET"],
-    ]);
+    assert.equal(apps[0].id, "airkit-audit");
+    assert.match(apps[0].url, /^http:\/\/127\.0\.0\.1:4567\/\?bootstrap=/);
+    assert.equal(backends.length, 1);
+    assert.equal(backends[0].id, "airkit-audit-ui");
+    assert.equal(backends[0].host, "127.0.0.1");
+    assert.equal(backends[0].port, 0);
+    assert.equal(typeof backends[0].handler, "function");
 
+    const bootstrap = new URL(apps[0].url).searchParams.get("bootstrap");
+    assert.ok(bootstrap);
     const pageResponse = responseRecorder();
-    await routes[0].handler({}, pageResponse);
+    await backends[0].handler(
+      { method: "GET", url: `/?bootstrap=${encodeURIComponent(bootstrap)}`, headers: { host: "127.0.0.1:4567" } },
+      pageResponse,
+    );
     assert.equal(pageResponse.statusCode, 200);
+    assert.match(pageResponse.headers["set-cookie"], /HttpOnly/i);
     assert.match(pageResponse.body(), /metadata-only local audit view/i);
     assert.doesNotMatch(pageResponse.body(), /api[_-]?key|authorization|bearer|secret|\/Users\//i);
 
-    const statusResponse = responseRecorder();
-    await routes[1].handler({}, statusResponse, {
-      sendJson(response, status, body) {
-        response.writeHead(status, { "content-type": "application/json" });
-        response.end(JSON.stringify(body));
-      },
-    });
-    assert.equal(statusResponse.statusCode, 200);
-    assert.equal(JSON.parse(statusResponse.body()).state, "degraded");
+    const replayResponse = responseRecorder();
+    await backends[0].handler(
+      { method: "GET", url: `/?bootstrap=${encodeURIComponent(bootstrap)}`, headers: { host: "127.0.0.1:4567" } },
+      replayResponse,
+    );
+    assert.equal(replayResponse.statusCode, 410);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -13,7 +13,7 @@ import {
   resolveCompatibilityPolicies,
   resolveModeEffort,
   resolveModeRoutes,
-  resolveTransportFallback,
+  resolveTransportFallbackPolicy,
   resolveToolSearchMaxTools,
   requiresClientToolFallback,
   routeBareClaudeModel,
@@ -213,12 +213,13 @@ export function createMessagesHandler({ config, coreClient, policies, auditEmitt
           },
           body: outboundBody,
         });
-        const fallbackSelector = isRecord(outboundBody)
-          ? resolveTransportFallback(config, outboundBody.model, 401)
+        const fallbackPolicy = isRecord(outboundBody)
+          ? resolveTransportFallbackPolicy(config, outboundBody.model, outboundBody)
           : null;
-        const fallback = fallbackSelector === null ? undefined : {
-          body: Buffer.from(JSON.stringify({ ...outboundBody, model: fallbackSelector }), "utf8"),
-          statuses: [401],
+        const fallback = fallbackPolicy === null ? undefined : {
+          body: Buffer.from(JSON.stringify({ ...outboundBody, model: fallbackPolicy.selector }), "utf8"),
+          statuses: fallbackPolicy.statuses,
+          ...(fallbackPolicy.timeoutMs === undefined ? {} : { timeoutMs: fallbackPolicy.timeoutMs }),
         };
         let currentAttempt = null;
         await coreClient.forwardRaw({

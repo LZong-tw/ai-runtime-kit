@@ -53,6 +53,44 @@ const SAFE_HEADER_NAMES = new Set([
   "x-request-id",
 ]);
 
+async function fetchWithTimeout(fetchImpl, endpoint, options, timeoutMs) {
+  if (!Number.isInteger(timeoutMs)) {
+    return { response: await fetchImpl(endpoint, options), timedOut: false };
+  }
+
+  const timeoutController = new AbortController();
+  const parentSignal = options.signal;
+  const onParentAbort = () => timeoutController.abort(parentSignal.reason);
+  if (parentSignal?.aborted) {
+    throw new DOMException("The operation was aborted", "AbortError");
+  }
+  parentSignal?.addEventListener("abort", onParentAbort, { once: true });
+  const timer = setTimeout(() => timeoutController.abort(), timeoutMs);
+  try {
+    return {
+      response: await fetchImpl(endpoint, { ...options, signal: timeoutController.signal }),
+      timedOut: false,
+    };
+  } catch (error) {
+    if (timeoutController.signal.aborted && !parentSignal?.aborted) {
+      return { response: null, timedOut: true };
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    parentSignal?.removeEventListener("abort", onParentAbort);
+  }
+}
+
+function createTimeoutResponse() {
+  return new Response(JSON.stringify({
+    error: { type: "upstream_timeout", message: "Upstream provider request timed out" },
+  }), {
+    status: 504,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 export function createCoreClient({ config, fetchImpl = fetch, readFile = readFileSync }) {
   const endpoint = coreMessagesEndpoint(config.gateway);
   const coreHeaders = (headers = {}) => ({
@@ -89,23 +127,25 @@ export function createCoreClient({ config, fetchImpl = fetch, readFile = readFil
     },
     async forwardRaw({ body, fallback, headers, method = "POST", response, signal, onResponse, onAttempt }) {
       await onAttempt?.({ phase: "start", body });
-      let result = await fetchImpl(endpoint, {
+      const primary = await fetchWithTimeout(fetchImpl, endpoint, {
         method,
         headers: coreHeaders(headers),
         body,
         signal,
-      });
+      }, fallback?.timeoutMs);
+      let result = primary.response ?? createTimeoutResponse();
       const fallbackUsed = shouldRetryRawFallback(result, fallback);
       await onAttempt?.({ phase: "response", body, status: result.status, headers: result.headers });
       if (fallbackUsed) {
         await result.body?.cancel().catch(() => {});
         await onAttempt?.({ phase: "start", body: fallback.body });
-        result = await fetchImpl(endpoint, {
+        const retry = await fetchWithTimeout(fetchImpl, endpoint, {
           method,
           headers: coreHeaders(headers),
           body: fallback.body,
           signal,
-        });
+        }, fallback.timeoutMs);
+        result = retry.response ?? createTimeoutResponse();
         await onAttempt?.({ phase: "response", body: fallback.body, status: result.status, headers: result.headers });
       }
       onResponse?.({ fallbackUsed, headers: result.headers, status: result.status });
@@ -126,7 +166,7 @@ export function createGatewayClient({ origin, token, fetchImpl = fetch, response
     ...copySafeAnthropicHeaders(headers),
     "x-api-key": token,
   });
-  const request = async ({ body, headers, method = "POST", path, signal }) => {
+  const prepareRequest = ({ body, headers, method = "POST", path, signal }) => {
     const options = {
       method,
       headers: gatewayHeaders(headers),
@@ -136,7 +176,11 @@ export function createGatewayClient({ origin, token, fetchImpl = fetch, response
       options.body = body;
       if (isReadableBody(body)) options.duplex = "half";
     }
-    return fetchImpl(new URL(path, gatewayOrigin), options);
+    return { endpoint: new URL(path, gatewayOrigin), options };
+  };
+  const request = async (requestArgs) => {
+    const { endpoint, options } = prepareRequest(requestArgs);
+    return fetchImpl(endpoint, options);
   };
 
   return {
@@ -159,19 +203,33 @@ export function createGatewayClient({ origin, token, fetchImpl = fetch, response
     },
     async forwardRaw({ body, fallback, headers, method = "POST", response, signal, onResponse, onAttempt }) {
       await onAttempt?.({ phase: "start", body });
-      let result = await request({ body, headers, method, path: "/v1/messages", signal });
+      const primaryRequest = prepareRequest({ body, headers, method, path: "/v1/messages", signal });
+      const primary = await fetchWithTimeout(
+        fetchImpl,
+        primaryRequest.endpoint,
+        primaryRequest.options,
+        fallback?.timeoutMs,
+      );
+      let result = primary.response ?? createTimeoutResponse();
       const fallbackUsed = shouldRetryRawFallback(result, fallback);
       await onAttempt?.({ phase: "response", body, status: result.status, headers: result.headers });
       if (fallbackUsed) {
         await result.body?.cancel().catch(() => {});
         await onAttempt?.({ phase: "start", body: fallback.body });
-        result = await request({
+        const retryRequest = prepareRequest({
           body: fallback.body,
           headers,
           method,
           path: "/v1/messages",
           signal,
         });
+        const retry = await fetchWithTimeout(
+          fetchImpl,
+          retryRequest.endpoint,
+          retryRequest.options,
+          fallback.timeoutMs,
+        );
+        result = retry.response ?? createTimeoutResponse();
         await onAttempt?.({ phase: "response", body: fallback.body, status: result.status, headers: result.headers });
       }
       onResponse?.({ fallbackUsed, headers: result.headers, status: result.status });
@@ -201,6 +259,7 @@ export async function handleCompatibilityMessage({
   auditEmitter = null,
   auditContext = null,
 }) {
+  body = normalizeMessageSystemRoles(body);
   const audit = createAttemptAudit({ auditEmitter, auditContext, body });
   const serverTools = inspectServerToolRequest(body);
   const serverHistory = inspectPendingServerHistory(body);
@@ -481,6 +540,31 @@ function normalizeCompatibilityHistory(source) {
   }
   if (pendingUses.size > 0) throw unsupportedHistory();
   return { messages, referencedTools };
+}
+
+function normalizeMessageSystemRoles(body) {
+  if (!isRecord(body) || !Array.isArray(body.messages)) return body;
+  const movedSystem = [];
+  const messages = [];
+  for (const message of body.messages) {
+    if (message?.role !== "system") {
+      messages.push(message);
+      continue;
+    }
+    const content = message.content;
+    if (typeof content === "string" && content.length > 0) {
+      movedSystem.push({ type: "text", text: content });
+    } else if (Array.isArray(content)) {
+      movedSystem.push(...content.map((block) => structuredClone(block)));
+    }
+  }
+  if (movedSystem.length === 0) return body;
+  const existingSystem = Array.isArray(body.system)
+    ? body.system.map((block) => structuredClone(block))
+    : typeof body.system === "string" && body.system.length > 0
+      ? [{ type: "text", text: body.system }]
+      : [];
+  return { ...body, system: [...existingSystem, ...movedSystem], messages };
 }
 
 function isCompatibilityServerUse(block) {

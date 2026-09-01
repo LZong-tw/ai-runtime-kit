@@ -6,6 +6,8 @@ const LIFECYCLE_EVENTS = new Set(["PostToolUse", "SubagentStart", "SubagentStop"
 const MAX_INPUT_BYTES = 1_000_000;
 const MAX_STATE_BYTES = 1_000_000;
 const MAX_TRANSCRIPT_READ_BYTES = 256 * 1024;
+const MAX_PARENT_TRANSCRIPT_READ_BYTES = 2 * 1024 * 1024;
+const MAX_PARENT_TRANSCRIPT_HEAD_BYTES = 512 * 1024;
 const MAX_ENTRIES = 200;
 const MAX_SEEN = 500;
 const MAX_DIAGNOSTICS = 20;
@@ -14,15 +16,18 @@ const MAX_VISIBLE = 160;
 
 export async function processSubagentObservabilityHook(input, env = process.env) {
   if (!isSubagentLifecycleEvent(input) || !validPluginData(env)) return null;
-  await observeChildTranscript(input, env);
+  const transcriptPath = transcriptPathValue(input);
+  if (transcriptPath) await observeChildTranscript({ ...input, transcript_path: transcriptPath }, env);
+  else await persistPendingChildState(input, env);
   return null;
 }
 
 export async function renderSubagentStatusLine(input, env = process.env) {
   await hydrateTaskStates(input, env);
+  const parentAgentStates = await readParentAgentStates(transcriptPathValue(input));
   const rows = [];
   for (const task of Array.isArray(input?.tasks) ? input.tasks : []) {
-    rows.push(await renderTaskRow(task, input, env));
+    rows.push(await renderTaskRow(task, input, env, parentAgentStates));
   }
   return rows;
 }
@@ -30,7 +35,7 @@ export async function renderSubagentStatusLine(input, env = process.env) {
 async function hydrateTaskStates(input, env) {
   if (!validPluginData(env)) return;
   const parentValue = statuslineParentValue(input);
-  const transcriptPath = input?.transcript_path;
+  const transcriptPath = transcriptPathValue(input);
   if (!parentValue || typeof transcriptPath !== "string" || transcriptPath.length === 0) return;
   const sessionDirectory = join(dirname(transcriptPath), basename(transcriptPath, ".jsonl"), "subagents");
   let children;
@@ -143,7 +148,7 @@ export async function runSubagentStatusLine({ env = process.env, input = process
 function isSubagentLifecycleEvent(input) {
   return LIFECYCLE_EVENTS.has(input?.hook_event_name)
     && typeof input?.session_id === "string" && input.session_id.length > 0
-    && typeof input?.transcript_path === "string" && input.transcript_path.length > 0;
+    && typeof input?.agent_id === "string" && input.agent_id.length > 0;
 }
 
 function validPluginData(env) {
@@ -193,6 +198,18 @@ async function observeChildTranscript(input, env) {
   } finally {
     await transcript.close();
   }
+}
+
+async function persistPendingChildState(input, env) {
+  const parent = identity(input.session_id, "unknown-parent");
+  const child = identity(input.agent_id);
+  if (!parent || !child) return;
+  const directory = join(env.CLAUDE_PLUGIN_DATA, "subagent-timelines", parent.key, child.key);
+  const timelinePath = join(directory, "timeline.md");
+  const statePath = join(directory, ".state.json");
+  const previous = await loadState(statePath, parent, child);
+  const next = mergeStateLabels(previous, taskLabelsFromHook(input));
+  await saveProjection(directory, timelinePath, statePath, next);
 }
 
 function projectTranscriptChunk(previous, bytes) {
@@ -331,13 +348,13 @@ async function loadState(path, parent, child) {
   }
 }
 
-async function renderTaskRow(task, input, env) {
+async function renderTaskRow(task, input, env, parentAgentStates = new Map()) {
   const parentValue = statuslineParentValue(input);
   const parent = typeof parentValue === "string" && parentValue.length > 0 ? identity(parentValue) : null;
   const childValues = taskIdentityCandidates(task);
   const labels = taskLabelCandidates(task);
   if (!validPluginData(env)) return waitingTaskRow(task, taskLabel(task), env);
-  if (childValues.length > 1) return ambiguousTaskRow(task);
+  if (explicitTaskIdentities(task).length > 1) return ambiguousTaskRow(task);
 
   const matches = parent
     ? await findParentChildStates(env.CLAUDE_PLUGIN_DATA, parent, childValues, labels)
@@ -355,8 +372,11 @@ async function renderTaskRow(task, input, env) {
   }
 
   const model = taskModel(task, input, env);
+  const parentState = matches.length === 0 ? parentAgentStateForTask(task, parentAgentStates) : null;
   if (state.entries.length === 0) {
-    return [taskDisplayLabel(task, child), ...(model ? [`model: ${model}`] : []), "waiting for first event", ...taskMetadata(task)].join(" | ");
+    const statusText = parentState?.text ?? "waiting for first event";
+    const status = parentState?.status ?? task.status;
+    return [taskDisplayLabel(task, child), ...(model ? [`model: ${model}`] : []), statusText, ...taskMetadata(task, status)].join(" | ");
   }
   const latestText = [...state.entries].reverse().find((entry) => entry.kind === "assistant")?.text;
   const latestTool = [...state.entries].reverse().find((entry) => entry.kind === "tool")?.name;
@@ -365,9 +385,83 @@ async function renderTaskRow(task, input, env) {
   return [...parts, ...taskMetadata(task)].join(" | ");
 }
 
+async function readParentAgentStates(transcriptPath) {
+  if (typeof transcriptPath !== "string" || transcriptPath.length === 0) return new Map();
+  let content;
+  try {
+    content = await readParentTranscript(transcriptPath);
+  } catch {
+    return new Map();
+  }
+
+  const states = new Map();
+  const calls = new Map();
+  for (const line of content.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let record;
+    try { record = JSON.parse(line); } catch { continue; }
+    if (record?.type === "assistant") {
+      const blocks = Array.isArray(record.message?.content) ? record.message.content : [];
+      for (const block of blocks) {
+        if (block?.type !== "tool_use" || block.name !== "Agent" || typeof block.id !== "string") continue;
+        const keys = agentCallLabels(block.input);
+        if (keys.length === 0) continue;
+        const state = { keys, status: "initializing", text: "initializing: waiting for Agent launch authorization" };
+        calls.set(block.id, state);
+        for (const key of keys) states.set(key, state);
+      }
+      continue;
+    }
+    if (record?.type !== "user") continue;
+    const blocks = Array.isArray(record.message?.content) ? record.message.content : [];
+    for (const result of blocks) {
+      if (result?.type !== "tool_result" || typeof result.tool_use_id !== "string") continue;
+      const state = calls.get(result.tool_use_id);
+      if (!state) continue;
+      const text = toolResultText(result.content);
+      if (result.is_error === true && /automode-unavailable|cannot determine the safety/i.test(text)) {
+        state.status = "launch-denied";
+        state.text = "launch denied: auto mode safety check unavailable";
+      } else if (result.is_error === true) {
+        state.status = "launch-failed";
+        state.text = "launch failed: Agent tool error";
+      } else if (/async agent launched successfully/i.test(text)) {
+        state.status = "running";
+        state.text = "running: waiting for child event";
+      }
+      for (const key of state.keys) states.set(key, state);
+    }
+  }
+  return states;
+}
+
+function agentCallLabels(input) {
+  return [...new Set([input?.name, input?.agent_name, input?.agentName, input?.description]
+    .filter((value) => typeof value === "string" && value.trim().length > 0)
+    .map((value) => value.trim()))];
+}
+
+function parentAgentStateForTask(task, states) {
+  for (const key of [...taskIdentityCandidates(task), ...taskLabelCandidates(task)]) {
+    const state = states.get(key);
+    if (state) return state;
+  }
+  return null;
+}
+
+function toolResultText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((block) => {
+    if (typeof block === "string") return block;
+    return typeof block?.text === "string" ? block.text : "";
+  }).filter(Boolean).join(" ");
+}
+
 async function findParentChildStates(pluginData, parent, values, labels) {
   const root = join(pluginData, "subagent-timelines", parent.key);
-  const matches = [];
+  const identityMatches = [];
+  const labelMatches = [];
   const seen = new Set();
   try {
     const children = await readdir(root, { withFileTypes: true });
@@ -378,20 +472,24 @@ async function findParentChildStates(pluginData, parent, values, labels) {
       if (!state || state.parentHash !== parent.hash) continue;
       const child = storedIdentity(childEntry.name, state.childHash);
       const identityMatch = values.some((value) => identity(value)?.key === childEntry.name);
-      if ((identityMatch || labelsOverlap(state.labels, labels)) && !seen.has(childEntry.name)) {
+      if (identityMatch && !seen.has(childEntry.name)) {
         seen.add(childEntry.name);
-        matches.push({ child, state });
+        identityMatches.push({ child, state });
+      } else if (labelsOverlap(state.labels, labels) && !seen.has(childEntry.name)) {
+        seen.add(childEntry.name);
+        labelMatches.push({ child, state });
       }
     }
   } catch {
     return [];
   }
-  return matches;
+  return identityMatches.length > 0 ? identityMatches : labelMatches;
 }
 
 async function findChildStates(pluginData, values, labels) {
   const root = join(pluginData, "subagent-timelines");
-  const matches = [];
+  const identityMatches = [];
+  const labelMatches = [];
   const seen = new Set();
   try {
     const parents = await readdir(root, { withFileTypes: true });
@@ -406,16 +504,19 @@ async function findChildStates(pluginData, values, labels) {
         if (!state) continue;
         const child = storedIdentity(childEntry.name, state.childHash);
         const identityMatch = values.some((value) => identity(value)?.key === childEntry.name);
-        if ((identityMatch || labelsOverlap(state.labels, labels)) && !seen.has(`${parentEntry.name}/${childEntry.name}`)) {
+        if (identityMatch && !seen.has(`${parentEntry.name}/${childEntry.name}`)) {
           seen.add(`${parentEntry.name}/${childEntry.name}`);
-          matches.push({ child, state });
+          identityMatches.push({ child, state });
+        } else if (labelsOverlap(state.labels, labels) && !seen.has(`${parentEntry.name}/${childEntry.name}`)) {
+          seen.add(`${parentEntry.name}/${childEntry.name}`);
+          labelMatches.push({ child, state });
         }
       }
     }
   } catch {
     return [];
   }
-  return matches;
+  return identityMatches.length > 0 ? identityMatches : labelMatches;
 }
 
 async function loadStateWithoutParent(path, child = null) {
@@ -439,9 +540,10 @@ async function loadStateWithoutParent(path, child = null) {
   }
 }
 
-function taskMetadata(task) {
+function taskMetadata(task, statusOverride = "") {
   const parts = [];
-  if (typeof task.status === "string" && task.status.trim().length > 0) parts.push(`status: ${boundedMetadata(task.status, 32)}`);
+  const status = statusOverride || task.status;
+  if (typeof status === "string" && status.trim().length > 0) parts.push(`status: ${boundedMetadata(status, 32)}`);
   if (task.elapsed_ms !== undefined) parts.push(`${boundedMetadata(task.elapsed_ms)}ms`);
   if (task.elapsed !== undefined) parts.push(boundedMetadata(task.elapsed));
   const tokenCount = task.tokenCount ?? task.output_tokens;
@@ -451,14 +553,21 @@ function taskMetadata(task) {
 }
 
 function taskIdentityCandidates(task) {
-  const explicit = ["agent_id", "agentId", "child_id", "childId", "child_name", "childName"]
+  const explicit = explicitTaskIdentities(task);
+  const nativeId = nativeTaskIdentity(task);
+  return [...new Set([nativeId, ...explicit].filter(Boolean))];
+}
+
+function explicitTaskIdentities(task) {
+  return [...new Set(["agent_id", "agentId", "child_id", "childId", "child_name", "childName"]
     .map((key) => typeof task?.[key] === "string" ? task[key] : "")
-    .filter((value) => value.trim().length > 0);
-  if (explicit.length > 0) return [...new Set(explicit)];
-  const nativeId = ["id", "task_id", "taskId"]
+    .filter((value) => value.trim().length > 0))];
+}
+
+function nativeTaskIdentity(task) {
+  return ["id", "task_id", "taskId"]
     .map((key) => typeof task?.[key] === "string" ? task[key] : "")
-    .find((value) => value.trim().length > 0);
-  return nativeId ? [nativeId] : [];
+    .find((value) => value.trim().length > 0) ?? "";
 }
 
 function taskLabelCandidates(task) {
@@ -717,12 +826,52 @@ async function readBoundedFile(path, limit) {
   }
 }
 
+async function readFileTail(path, limit) {
+  const file = await open(path, "r");
+  try {
+    const { size } = await file.stat();
+    const start = Math.max(0, size - limit);
+    const buffer = Buffer.allocUnsafe(size - start);
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, start);
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  } finally {
+    await file.close();
+  }
+}
+
 function statuslineParentValue(input) {
   const explicit = input?.parent_id ?? input?.session_id;
   if (typeof explicit === "string" && explicit.length > 0) return explicit;
-  if (typeof input?.transcript_path !== "string" || input.transcript_path.length === 0) return "";
-  const name = basename(input.transcript_path, ".jsonl");
+  const transcriptPath = transcriptPathValue(input);
+  if (!transcriptPath) return "";
+  const name = basename(transcriptPath, ".jsonl");
   return name.length > 0 ? name : "";
+}
+
+function transcriptPathValue(input) {
+  return firstString([
+    input?.transcript_path,
+    input?.transcriptPath,
+    input?.agent_transcript_path,
+    input?.agentTranscriptPath,
+  ]);
+}
+
+async function readParentTranscript(path) {
+  const file = await open(path, "r");
+  try {
+    const { size } = await file.stat();
+    if (size <= MAX_PARENT_TRANSCRIPT_READ_BYTES) {
+      const buffer = Buffer.allocUnsafe(size);
+      const { bytesRead } = await file.read(buffer, 0, size, 0);
+      return buffer.subarray(0, bytesRead).toString("utf8");
+    }
+  } finally {
+    await file.close();
+  }
+  const head = await readFilePrefix(path, MAX_PARENT_TRANSCRIPT_HEAD_BYTES);
+  const tail = await readFileTail(path, MAX_PARENT_TRANSCRIPT_READ_BYTES - MAX_PARENT_TRANSCRIPT_HEAD_BYTES);
+  return `${head}\n${tail}`;
 }
 
 async function readFilePrefix(path, limit) {
