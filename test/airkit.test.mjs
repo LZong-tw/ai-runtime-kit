@@ -5206,6 +5206,75 @@ test("prepareLaunch uses an asynchronous default child so compatibility middlewa
   }
 });
 
+test("prepareLaunch keeps the compatibility adapter alive for a matching background Claude host", async () => {
+  const catalog = compatibilityCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-persistent-compatibility-launch-"));
+  let adapterClosed = 0;
+
+  try {
+    const result = await prepareLaunch(catalog, "launch-example", {
+      ccrClient: ccrTestClient([]),
+      commandExists: async () => true,
+      configDir,
+      env: { DEMO_API_KEY: "runtime-secret", HOME: configDir },
+      runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
+      runtimeVersions: passingRuntimeVersions(),
+      startCompatibilityMiddleware: async () => ({
+        close: async () => { adapterClosed += 1; },
+        origin: "http://127.0.0.1:4599",
+      }),
+      spawnCommand: () => ({ status: 0 }),
+      backgroundHostDetector: async () => true,
+      backgroundMiddlewareGraceMs: 1_000,
+    });
+
+    assert.equal(result.childStatus, 0);
+    assert.equal(adapterClosed, 0, "background-capable adapters outlive the foreground Claude process");
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("prepareLaunch closes the compatibility adapter after its matching background host exits", async () => {
+  const catalog = compatibilityCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-background-host-exit-"));
+  let adapterClosed = 0;
+  let detectorCalls = 0;
+
+  try {
+    await prepareLaunch(catalog, "launch-example", {
+      ccrClient: ccrTestClient([]),
+      commandExists: async () => true,
+      configDir,
+      env: { DEMO_API_KEY: "runtime-secret", HOME: configDir },
+      runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
+      runtimeVersions: passingRuntimeVersions(),
+      startCompatibilityMiddleware: async () => ({
+        close: async () => { adapterClosed += 1; },
+        origin: "http://127.0.0.1:4599",
+      }),
+      spawnCommand: () => ({ status: 0 }),
+      backgroundHostDetector: async () => ++detectorCalls === 1,
+      backgroundMiddlewareGraceMs: 1_000,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    assert.equal(adapterClosed, 1, "the adapter closes after the matching background host is gone");
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("background host matching recognizes the adapter endpoint embedded in Claude settings", () => {
+  const command = [
+    "/Applications/Claude.app/Contents/MacOS/claude --bg-pty-host /tmp/session.sock",
+    '--settings {"env":{"ANTHROPIC_API_BASE_URL":"http://127.0.0.1:57785","CLAUDE_AGENT_API_BASE_URL":"http://127.0.0.1:57785"}}',
+  ].join(" ");
+
+  assert.equal(airkitRuntime.backgroundHostUsesAdapter(command, "http://127.0.0.1:57785"), true);
+  assert.equal(airkitRuntime.backgroundHostUsesAdapter(command, "http://127.0.0.1:57672"), false);
+});
+
 test("prepareLaunch resolves ccrTokenOpRef once for the CCR 3 config merge", async () => {
   const catalog = compatibilityCatalog();
   for (const provider of catalog.profiles[0].ccr.Providers) {
