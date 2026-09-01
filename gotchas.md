@@ -28,3 +28,23 @@
   hides backoff guidance and makes Claude Code retry rapidly until tool work is
   interrupted; the adapter must not retry request bodies itself because that
   can duplicate tool side effects.
+- A provider failure must be grounded in the raw upstream request record before
+  proposing credential or gateway changes; inspect provider, model, status,
+  duration, request shape, and fallback availability first.
+- Claude Code 2.1.251 lifecycle hooks use `agent_transcript_path` on
+  `SubagentStop` and may omit a transcript path on `SubagentStart`; normalize
+  those fields and persist a pending identity instead of dropping the event.
+- A unique native child identity must win over shared labels such as
+  `Explore`; only fall back to labels when no identity matches, while keeping
+  genuinely conflicting explicit identities ambiguous.
+- A parent Agent launch record can be outside a small transcript tail after a
+  long session. Read a bounded head plus tail (or a persisted incremental
+  index), and keep `waiting for first event` as an evidence gap rather than a
+  claim that no child event exists.
+- Repeated model narration about empty user messages or interrupted commands
+  is not emitted by the AirKit subagent statusline hook. Verify the raw Claude
+  Code transcript and command lifecycle before changing the observer.
+- Claude Code hook context can arrive as `role: system` inside `messages` after
+  an assistant turn; OnePortal Anthropic rejects that ordering. Move those
+  blocks to top-level `system` only at the compatibility boundary, while
+  preserving raw passthrough bytes.

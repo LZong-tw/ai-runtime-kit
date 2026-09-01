@@ -599,6 +599,44 @@ test("real core fallback preserves stream true, SSE bytes, and backpressure", as
   }
 });
 
+test("real core fallback retries a timed-out primary request", async (t) => {
+  const seenBodies = [];
+  const fixture = await createFallbackCoreFixture(t, async ({ body, response }) => {
+    seenBodies.push(body);
+    if (seenBodies.length === 1) {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      response.end();
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ ok: true }));
+  });
+  const downstream = createFallbackResponse();
+  const attempts = [];
+  const primaryBody = Buffer.from(JSON.stringify({ model: "oneportal/gpt-5.6-luna" }), "utf8");
+  const fallbackBody = Buffer.from(JSON.stringify({ model: "oneportal/deepseek-v4-flash" }), "utf8");
+
+  await createCoreClient(fixture.options).forwardRaw({
+    body: primaryBody,
+    fallback: { body: fallbackBody, statuses: [504], timeoutMs: 20 },
+    response: downstream,
+    onAttempt: (attempt) => attempts.push({ phase: attempt.phase, status: attempt.status }),
+  });
+
+  assert.deepEqual(seenBodies.map(({ model }) => model), [
+    "oneportal/gpt-5.6-luna",
+    "oneportal/deepseek-v4-flash",
+  ]);
+  assert.deepEqual(attempts, [
+    { phase: "start", status: undefined },
+    { phase: "response", status: 504 },
+    { phase: "start", status: undefined },
+    { phase: "response", status: 200 },
+  ]);
+  assert.equal(downstream.statusCode, 200);
+  assert.deepEqual(downstream.body, Buffer.from(JSON.stringify({ ok: true })));
+});
+
 test("real core fallback preserves non-2xx status, headers, and body", async (t) => {
   let seenBody;
   const errorBody = Buffer.from(JSON.stringify({

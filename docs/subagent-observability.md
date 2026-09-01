@@ -20,6 +20,12 @@ projection keeps:
 Raw child JSONL remains the source of truth. The AirKit projection is a
 secondary read model for quick status and audit-friendly review.
 
+Claude Code 2.1.251 sends `agent_id` and `agent_type` on `SubagentStart`, and
+uses `agent_transcript_path` on `SubagentStop`. AirKit accepts both the
+underscore and camel-case path spellings, and persists a bounded pending child
+state when a start event has no path yet. A later lifecycle event hydrates that
+state from the child transcript instead of losing the launch entirely.
+
 ## What it does not do
 
 - It does not rewrite the child transcript.
@@ -61,9 +67,18 @@ join the current task metadata to one observed child timeline and then shows:
 - the latest tool name, if any
 - live task metadata such as status, elapsed time, and token counts
 
-If no safe match exists yet, the row says `waiting for first event`. If more
-than one child could match the same task, the row says `ambiguous child
-transcript`. In both cases AirKit prefers an explicit gap over made-up prose.
+Identity matches take precedence over generic labels such as `Explore`. This
+prevents several concurrent children with the same agent type from making a
+task ambiguous when its native id is unique. If no identity matches, labels
+are used as a fallback; genuinely conflicting explicit identities still show
+`ambiguous child transcript`. If no safe match exists yet, the row says
+`waiting for first event`. These are bounded evidence states, not claims that
+the child process has done no work.
+
+Parent Agent launch records are read from the beginning and recent tail of a
+bounded transcript window, so a long parent transcript does not immediately
+hide an earlier launch authorization/result. The raw transcript remains the
+source of truth beyond that bounded window.
 
 The row is a compact view, not a full transcript browser. It surfaces only the
 latest assistant text and tool marker, and it may show a sanitized route/model

@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 import { resolveAuditPaths } from "./paths.mjs";
@@ -5,8 +6,7 @@ import { createAuditQueryClient } from "./query.mjs";
 import { createAuditUiAdapter } from "./ui-contract.mjs";
 
 const PLUGIN_ID = "airkit-audit-ui";
-const PAGE_PATH = "/plugins/airkit-audit";
-const API_PATH = `${PAGE_PATH}/api`;
+const API_PATH = "/api";
 const QUERY_NAMES = ["requests", "sessions", "clients", "accounts", "repos", "usage", "cache", "gaps"];
 
 export default {
@@ -34,31 +34,53 @@ export default {
       }
     };
     const adapter = createAuditUiAdapter({ query, status });
-    ctx.registerGatewayRoute({
-      id: `${PLUGIN_ID}-page`, method: "GET", path: PAGE_PATH, auth: "gateway",
-      handler(_request, response) {
-        response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-        response.end(AUDIT_PAGE_HTML);
-      },
-    });
-    ctx.registerGatewayRoute({
-      id: `${PLUGIN_ID}-status`, method: "GET", path: `${API_PATH}/status`, auth: "gateway",
-      async handler(_request, response, helpers) { helpers.sendJson(response, 200, await adapter.status()); },
-    });
-    ctx.registerGatewayRoute({
-      id: `${PLUGIN_ID}-query`, method: "GET", path: `${API_PATH}/query`, auth: "gateway",
-      async handler(request, response, helpers) {
+    let bootstrapToken = randomToken();
+    const sessions = new Map();
+    const backend = await ctx.registerHttpBackend({
+      id: PLUGIN_ID,
+      host: "127.0.0.1",
+      port: 0,
+      async handler(request, response) {
         const url = new URL(request.url ?? "/", "http://airkit-audit.local");
-        const name = url.searchParams.get("name") ?? "";
-        const id = url.searchParams.get("id");
-        helpers.sendJson(response, 200, await adapter.query(name, id ? [id] : []));
+        const session = sessions.get(readCookie(request.headers?.cookie, "airkit_audit_session"));
+        if (request.method !== "GET") return sendJson(response, 405, { error: "method_not_allowed" });
+
+        if (url.pathname === "/") {
+          const supplied = url.searchParams.get("bootstrap");
+          if (supplied !== null) {
+            if (!bootstrapToken || supplied !== bootstrapToken) return sendJson(response, 410, { error: "bootstrap_expired" });
+            bootstrapToken = null;
+            const sessionId = randomToken();
+            sessions.set(sessionId, { createdAt: Date.now() });
+            response.writeHead(200, {
+              "content-type": "text/html; charset=utf-8",
+              "cache-control": "no-store",
+              "set-cookie": `airkit_audit_session=${sessionId}; HttpOnly; SameSite=Strict; Path=/; Max-Age=1800`,
+            });
+            response.end(AUDIT_PAGE_HTML);
+            return;
+          }
+          if (!session) return sendJson(response, 401, { error: "audit_session_required" });
+          response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+          response.end(AUDIT_PAGE_HTML);
+          return;
+        }
+
+        if (!session) return sendJson(response, 401, { error: "audit_session_required" });
+        if (url.pathname === `${API_PATH}/status`) return sendJson(response, 200, await adapter.status());
+        if (url.pathname === `${API_PATH}/query`) {
+          const name = url.searchParams.get("name") ?? "";
+          const id = url.searchParams.get("id");
+          return sendJson(response, 200, await adapter.query(name, id ? [id] : []));
+        }
+        return sendJson(response, 404, { error: "not_found" });
       },
     });
     ctx.registerApp({
-      id: PLUGIN_ID,
+      id: "airkit-audit",
       name: "AirKit Audit",
       description: "Metadata-only local audit and evidence gaps",
-      url: PAGE_PATH,
+      url: `${backend.url}/?bootstrap=${encodeURIComponent(bootstrapToken)}`,
     });
 
     async function getClient() {
@@ -72,6 +94,25 @@ export default {
     }
   },
 };
+
+function randomToken() {
+  return randomBytes(24).toString("base64url");
+}
+
+function readCookie(header, name) {
+  if (typeof header !== "string") return "";
+  for (const part of header.split(";")) {
+    const index = part.indexOf("=");
+    if (index < 0 || part.slice(0, index).trim() !== name) continue;
+    return decodeURIComponent(part.slice(index + 1).trim());
+  }
+  return "";
+}
+
+function sendJson(response, status, body) {
+  response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+  response.end(JSON.stringify(body));
+}
 
 const AUDIT_PAGE_HTML = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">

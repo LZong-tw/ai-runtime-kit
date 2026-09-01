@@ -211,6 +211,27 @@ its own `fallback` with `provider` and `model`; that provider follows the same
 Anthropic Messages and local-model validation, and AirKit binds it to its own
 managed CCR ID. Families without an override inherit the shared fallback and
 its `maxContinuationTurns`.
+
+For provider transport failures that should be retried only for a narrowly
+identified request class, `transportFallbacks` may declare an explicit model
+mapping:
+
+```json
+{
+  "from": { "provider": "oneportal", "model": "gpt-5.6-luna" },
+  "to": { "provider": "oneportal", "model": "deepseek-v4-flash" },
+  "statuses": [499, 500, 502, 503, 504],
+  "scope": "classifier",
+  "timeoutMs": 30000
+}
+```
+
+`scope` defaults to `all`; `classifier` matches AirKit's auto-mode security
+classifier marker only. Supported statuses are 401, 408, 429, 499, 500, 502,
+503, and 504. `timeoutMs` bounds each attempt from 1,000 through 120,000 ms.
+Transport fallback is disabled for ordinary requests when the entry is scoped
+to `classifier`, and it never changes the caller's primary route unless the
+configured status or timeout condition occurs.
 Removed Advisor bridge fields such as `advisor.model` and
 `advisor.fallbackModel` are rejected with a migration error; their replacement
 is either the shared `fallback` section or `advisor.fallback`.

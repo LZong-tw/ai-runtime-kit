@@ -1311,6 +1311,52 @@ test("unused native-first server-tool definitions keep a GPT request on its exec
   assert.equal(JSON.parse(response.body).content[0].text, "executor response");
 });
 
+test("compatibility moves Claude Code mid-history system hooks to the top-level system", async () => {
+  const calls = [];
+  const fixture = await createPluginFixture({
+    coreClient: {
+      async requestMessage(body) {
+        calls.push(structuredClone(body));
+        return message({ content: [{ type: "text", text: "stable response" }] });
+      },
+    },
+  });
+  const body = {
+    model: "executor-model",
+    max_tokens: 512,
+    stream: false,
+    system: [{ type: "text", text: "original system" }],
+    messages: [
+      { role: "user", content: "first request" },
+      { role: "assistant", content: [{ type: "text", text: "interrupted" }] },
+      { role: "system", content: "UserPromptSubmit hook additional context" },
+      { role: "assistant", content: [{ type: "text", text: "continued" }] },
+      { role: "user", content: "second request" },
+    ],
+    tools: [{ type: "web_search_20260318", name: "web_search" }],
+  };
+  const response = createRecordingResponse();
+
+  await fixture.messages.handler(
+    createPluginRequest(Buffer.from(JSON.stringify(body))),
+    response,
+    fixture.helpers,
+  );
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].system, [
+    { type: "text", text: "original system" },
+    { type: "text", text: "UserPromptSubmit hook additional context" },
+  ]);
+  assert.deepEqual(calls[0].messages, [
+    body.messages[0],
+    body.messages[1],
+    body.messages[3],
+    body.messages[4],
+  ]);
+  assert.ok(response.body.length > 0);
+});
+
 test("unused native-first server-tool definitions still fallback for non-cache-sensitive routes", async () => {
   const executorCalls = [];
   const fallbackCalls = [];
@@ -2830,6 +2876,57 @@ test("raw Web GPT requests carry their explicit OnePortal 401 fallback", async (
     messages: [{ role: "user", content: "keep the Web route when healthy" }],
   });
   assert.deepEqual(forwarded.fallback.statuses, [401]);
+});
+
+test("classifier-only transport fallback carries timeout without changing ordinary Luna requests", async () => {
+  const forwarded = [];
+  const handler = await createPluginHandlers({
+    coreClient: {
+      async forwardRaw(request) {
+        forwarded.push(request);
+      },
+    },
+    pluginConfig: {
+      ...structuredClone(COMPLETE_PLUGIN_CONFIG),
+      transportFallbacks: [{
+        from: { provider: "oneportal", model: "gpt-5.6-luna" },
+        to: { provider: "oneportal", model: "deepseek-v4-flash" },
+        statuses: [500, 504],
+        scope: "classifier",
+        timeoutMs: 30000,
+      }],
+    },
+  });
+  const classifier = Buffer.from(JSON.stringify({
+    model: "oneportal/gpt-5.6-luna",
+    system: [{ type: "text", text: "You are a security monitor for autonomous AI coding agents." }],
+    messages: [{ role: "user", content: "classify" }],
+  }));
+  const ordinary = Buffer.from(JSON.stringify({
+    model: "oneportal/gpt-5.6-luna",
+    messages: [{ role: "user", content: "ordinary" }],
+  }));
+
+  await handler.messages.handler(
+    createPluginRequest(classifier),
+    createRecordingResponse(),
+    { readBody: async () => classifier },
+  );
+  await handler.messages.handler(
+    createPluginRequest(ordinary),
+    createRecordingResponse(),
+    { readBody: async () => ordinary },
+  );
+
+  assert.equal(forwarded.length, 2);
+  assert.deepEqual(JSON.parse(forwarded[0].fallback.body.toString()), {
+    model: "oneportal/deepseek-v4-flash",
+    system: [{ type: "text", text: "You are a security monitor for autonomous AI coding agents." }],
+    messages: [{ role: "user", content: "classify" }],
+  });
+  assert.deepEqual(forwarded[0].fallback.statuses, [500, 504]);
+  assert.equal(forwarded[0].fallback.timeoutMs, 30000);
+  assert.equal(forwarded[1].fallback, undefined);
 });
 
 test("request lifecycle telemetry records a successful raw response with its actual status", async () => {

@@ -9,14 +9,23 @@ Auditd is a collector boundary, not a provider health check and not a
 guarantee that every client is fully observable. Always check the client
 completeness and evidence gaps after enabling it.
 
-## Gateway audit UI
+## Browser audit UI
 
-AirKit can register a gateway-authenticated local app named `AirKit Audit` at
-`/plugins/airkit-audit`. It serves one HTML page plus two gateway-only JSON
-endpoints:
+AirKit registers an `AirKit Audit` app on a loopback-only CCR HTTP backend. The
+app URL contains a per-boot, one-time `bootstrap` value. Opening that URL
+exchanges the value for an HttpOnly, SameSite session cookie; the bootstrap
+value is then invalid and is never written into the page or browser storage.
+The backend serves:
 
-- `GET /plugins/airkit-audit/api/status`
-- `GET /plugins/airkit-audit/api/query?name=<query>[&id=<request-id>]`
+- `GET /` (bootstrap or existing session)
+- `GET /api/status`
+- `GET /api/query?name=<query>[&id=<request-id>]`
+
+The CCR browser management page cannot open plugin apps because its
+`openPluginApp` bridge is Electron-only. Use the AirKit Audit app entry from a
+CCR Electron client, or the runtime's app URL when a local launcher exposes it;
+do not paste a CCR gateway key into a URL. Direct navigation to the old
+`/plugins/airkit-audit` gateway path is no longer supported.
 
 The UI contract is intentionally narrower than the SQLite schema. It projects
 metadata only, always returns `metadata_only: true` and `payload_included:

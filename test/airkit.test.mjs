@@ -953,7 +953,7 @@ test("CCR compatibility migrates the catalog plugin into adapter metadata and pr
       enabled: true,
       module: join(dirname(fileURLToPath(import.meta.url)), "../src/audit/ccr-plugin.mjs"),
       surfaces: { apps: true, gateway: true, provider: false },
-      permissions: ["trusted-code", "apps", "gateway-routes"],
+      permissions: ["trusted-code", "apps", "http-backends"],
       config: {},
     },
   ]);
@@ -1025,7 +1025,7 @@ test("a non-compatibility profile removes a stale compatibility gateway route", 
       enabled: true,
       module: join(dirname(fileURLToPath(import.meta.url)), "../src/audit/ccr-plugin.mjs"),
       surfaces: { apps: true, gateway: true, provider: false },
-      permissions: ["trusted-code", "apps", "gateway-routes"],
+      permissions: ["trusted-code", "apps", "http-backends"],
       config: {},
     },
   ]);
@@ -3491,6 +3491,175 @@ test("subagent status line accepts Claude Code native task ids and token counts"
     }, env);
     assert.match(waiting, /waiting for first event/);
     assert.match(waiting, /99 tokens/);
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+test("subagent status line distinguishes parent Agent launch states before child events", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-parent-state-"));
+  const parentTranscript = join(pluginData, "parent.jsonl");
+  const env = { CLAUDE_PLUGIN_DATA: join(pluginData, "plugin-data") };
+  const records = [
+    {
+      type: "assistant",
+      message: { content: [{
+        type: "tool_use",
+        id: "call-m1",
+        name: "Agent",
+        input: { description: "Explore M1 trust gaps" },
+      }] },
+    },
+    {
+      type: "user",
+      message: { content: [{
+        type: "tool_result",
+        tool_use_id: "call-m1",
+        is_error: true,
+        content: "claude-sonnet-5[1m] is temporarily unavailable (timed out), so auto mode cannot determine the safety of Agent right now.",
+      }] },
+    },
+    {
+      type: "assistant",
+      message: { content: [{
+        type: "tool_use",
+        id: "call-m2",
+        name: "Agent",
+        input: { description: "Explore M2 validation" },
+      }] },
+    },
+    {
+      type: "assistant",
+      message: { content: [{
+        type: "tool_use",
+        id: "call-m3",
+        name: "Agent",
+        input: { description: "Explore M3 topology" },
+      }] },
+    },
+    {
+      type: "user",
+      message: { content: [{
+        type: "tool_result",
+        tool_use_id: "call-m3",
+        content: "Async agent launched successfully.",
+      }] },
+    },
+  ];
+
+  try {
+    await writeFile(parentTranscript, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`);
+    const [denied, initializing, running] = await renderSubagentStatusLine({
+      session_id: "parent-state-session",
+      transcript_path: parentTranscript,
+      tasks: [
+        { id: "task-m1", name: "Explore M1 trust gaps", status: "running", tokenCount: 0 },
+        { id: "task-m2", name: "Explore M2 validation", status: "running", tokenCount: 0 },
+        { id: "task-m3", name: "Explore M3 topology", status: "running", tokenCount: 0 },
+      ],
+    }, env);
+
+    assert.match(denied, /launch denied: auto mode safety check unavailable/);
+    assert.match(denied, /status: launch-denied/);
+    assert.match(initializing, /initializing: waiting for Agent launch authorization/);
+    assert.match(initializing, /status: initializing/);
+    assert.match(running, /running: waiting for child event/);
+    assert.match(running, /status: running/);
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+test("subagent lifecycle accepts Claude Code agent transcript path fields", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-lifecycle-schema-"));
+  const childTranscript = join(pluginData, "child.jsonl");
+  const env = { CLAUDE_PLUGIN_DATA: pluginData };
+
+  try {
+    await processSubagentObservabilityHook({
+      hook_event_name: "SubagentStart",
+      session_id: "schema-parent",
+      agent_id: "schema-child",
+      agent_type: "schema-child-task",
+    }, env);
+    await writeFile(childTranscript, `${JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "schema child progress" }] },
+    })}\n`);
+    await processSubagentObservabilityHook({
+      hook_event_name: "SubagentStop",
+      session_id: "schema-parent",
+      agent_id: "schema-child",
+      agent_type: "schema-child-task",
+      agent_transcript_path: childTranscript,
+    }, env);
+
+    const [row] = await renderSubagentStatusLine({
+      session_id: "schema-parent",
+      tasks: [{ id: "schema-child", name: "schema-child-task", status: "completed" }],
+    }, env);
+    assert.match(row, /schema child progress/);
+    assert.doesNotMatch(row, /waiting for first event/);
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+test("subagent identity wins over colliding generic labels", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-identity-label-"));
+  const env = { CLAUDE_PLUGIN_DATA: pluginData };
+
+  try {
+    for (const child of ["child-a", "child-b", "child-c"]) {
+      const transcriptPath = join(pluginData, `${child}.jsonl`);
+      await writeFile(transcriptPath, `${JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "text", text: `${child} progress` }] },
+      })}\n`);
+      await processSubagentObservabilityHook({
+        hook_event_name: "PostToolUse",
+        session_id: "identity-label-parent",
+        agent_id: child,
+        agent_type: "Explore",
+        transcript_path: transcriptPath,
+      }, env);
+    }
+
+    const [row] = await renderSubagentStatusLine({
+      session_id: "identity-label-parent",
+      tasks: [{ id: "child-b", agent_id: "logical-task-id", name: "Explore", status: "running" }],
+    }, env);
+    assert.match(row, /child-b progress/);
+    assert.doesNotMatch(row, /ambiguous child transcript/);
+    assert.doesNotMatch(row, /child-a progress|child-c progress/);
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+test("parent Agent launch state survives a transcript larger than the tail window", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-parent-large-"));
+  const parentTranscript = join(pluginData, "parent.jsonl");
+  const env = { CLAUDE_PLUGIN_DATA: join(pluginData, "plugin-data") };
+  const launch = {
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id: "call-large", name: "Agent", input: { description: "large parent task" } }] },
+  };
+  const launchResult = {
+    type: "user",
+    message: { content: [{ type: "tool_result", tool_use_id: "call-large", content: "Async agent launched successfully." }] },
+  };
+  const filler = { type: "assistant", message: { content: [{ type: "text", text: "x".repeat(2_000) }] } };
+
+  try {
+    await writeFile(parentTranscript, `${JSON.stringify(launch)}\n${JSON.stringify(launchResult)}\n${Array.from({ length: 180 }, () => JSON.stringify(filler)).join("\n")}\n`);
+    const [row] = await renderSubagentStatusLine({
+      session_id: "large-parent-session",
+      transcript_path: parentTranscript,
+      tasks: [{ id: "large-task", name: "large parent task", status: "running", tokenCount: 1 }],
+    }, env);
+    assert.match(row, /running: waiting for child event/);
+    assert.doesNotMatch(row, /waiting for first event/);
   } finally {
     await rm(pluginData, { force: true, recursive: true });
   }
