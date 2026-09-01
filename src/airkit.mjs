@@ -1507,7 +1507,12 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
       await middleware?.close();
       throw error;
     }
-    childStatus = await monitorChildLifecycle(middleware, child);
+    childStatus = await monitorChildLifecycle(middleware, child, {
+      backgroundHostDetector: options.backgroundHostDetector,
+      backgroundMiddlewareGraceMs: options.backgroundMiddlewareGraceMs,
+      preserveForBackground: options.preserveMiddlewareForBackground !== false,
+      stderr: options.stderr ?? process.stderr,
+    });
   }
 
   if (options.externalClient === true) {
@@ -3938,24 +3943,32 @@ function spawnCommandSync(command, args = [], options = {}) {
   });
 }
 
-async function monitorChildLifecycle(middleware, child) {
+const DEFAULT_BACKGROUND_MIDDLEWARE_GRACE_MS = 30 * 60 * 1_000;
+
+async function monitorChildLifecycle(middleware, child, options = {}) {
   let closePromise = null;
   const close = () => {
     closePromise ??= Promise.resolve().then(() => middleware?.close());
     return closePromise;
   };
-  if (Number.isInteger(child?.status)) {
+  const finish = async (status) => {
+    if (await shouldPreserveMiddlewareForBackground(middleware, options)) {
+      deferMiddlewareClose(middleware, options);
+      return status;
+    }
     await close();
-    return child.status;
+    return status;
+  };
+  if (Number.isInteger(child?.status)) {
+    return finish(child.status);
   }
   if (typeof child?.once !== "function") {
-    await close();
-    return 0;
+    return finish(0);
   }
   return new Promise((resolve, reject) => {
     child.once("exit", (code, signal) => {
-      void close().then(
-        () => resolve(Number.isInteger(code) ? code : signal ? 1 : 0),
+      void finish(Number.isInteger(code) ? code : signal ? 1 : 0).then(
+        resolve,
         reject,
       );
     });
@@ -3963,6 +3976,70 @@ async function monitorChildLifecycle(middleware, child) {
       void close().then(() => reject(error), reject);
     });
   });
+}
+
+async function shouldPreserveMiddlewareForBackground(middleware, options) {
+  if (!middleware || options.preserveForBackground !== true) return false;
+  const detector = options.backgroundHostDetector ?? detectBackgroundClaudeHost;
+  try {
+    return await detector(middleware.origin);
+  } catch {
+    return false;
+  }
+}
+
+function deferMiddlewareClose(middleware, options) {
+  const graceMs = options.backgroundMiddlewareGraceMs ?? DEFAULT_BACKGROUND_MIDDLEWARE_GRACE_MS;
+  if (!Number.isInteger(graceMs) || graceMs < 1_000) {
+    options.stderr?.write?.("airkit: invalid background middleware grace period; closing adapter\n");
+    void middleware.close().catch(() => {});
+    return;
+  }
+  options.stderr?.write?.(
+    `airkit: background Claude host detected for ${middleware.origin}; keeping compatibility adapter alive while it remains active (checking every ${Math.max(1, Math.round(graceMs / 60_000))} minutes)\n`,
+  );
+  const detector = options.backgroundHostDetector ?? detectBackgroundClaudeHost;
+  const checkHost = async () => {
+    let stillActive = false;
+    try {
+      stillActive = await detector(middleware.origin);
+    } catch {
+      // A failed process inspection must not keep a compatibility listener alive.
+    }
+    if (!stillActive) {
+      await middleware.close().catch(() => {});
+      return;
+    }
+    const nextCheck = setTimeout(() => { void checkHost(); }, graceMs);
+    nextCheck.unref?.();
+  };
+  const timer = setTimeout(() => { void checkHost(); }, graceMs);
+  timer.unref?.();
+}
+
+function detectBackgroundClaudeHost(adapterOrigin) {
+  const result = spawnSync("ps", ["eww", "-axo", "pid=,command="], { encoding: "utf8" });
+  if (result.status !== 0 || typeof result.stdout !== "string") return false;
+  let endpoint;
+  try {
+    endpoint = new URL(adapterOrigin).origin;
+  } catch {
+    return false;
+  }
+  return result.stdout
+    .split(/\r?\n/)
+    .some((line) => backgroundHostUsesAdapter(line, endpoint));
+}
+
+export function backgroundHostUsesAdapter(commandLine, adapterOrigin) {
+  if (typeof commandLine !== "string" || typeof adapterOrigin !== "string") return false;
+  return commandLine.includes("--bg-pty-host")
+    && /(?:^|\/|\s)claude(?:\s|$)/.test(commandLine)
+    // Claude Code carries launch settings on the background host command line;
+    // macOS `ps eww` does not necessarily render those values as environment
+    // assignments. The loopback origin is per-launch, so matching it here is
+    // still narrower than retaining an adapter for an unrelated background host.
+    && commandLine.includes(adapterOrigin);
 }
 
 function sourceShellSnippet(path, functionNames) {
