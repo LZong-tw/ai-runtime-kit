@@ -4,6 +4,10 @@ import { validateShieldPolicyBundle } from "./policy-bundle.mjs";
 
 const ALLOWED_ACTIONS = new Set(["allow", "block", "require_approval", "redact"]);
 const DECISION_FIELDS = ["action", "approvalEligible", "reasonCodes", "redactions"];
+const POLICY_INPUT_FIELDS = ["destinationClass", "interactive", "lane", "pathClasses", "piiFindings", "repositoryClass", "secretFindings"];
+const LANES = new Set(["subscription", "managed"]);
+const REPOSITORY_CLASSES = new Set(["public", "internal", "restricted", "unknown"]);
+const PATH_CLASSES = new Set(["source", "environment", "terraform_state", "credential_store", "production_config", "unknown"]);
 
 export async function loadShieldPolicy({ bundle, publicKey, opa = { loadPolicy: loadOpaPolicy } } = {}) {
   const validated = validateShieldPolicyBundle(bundle, { publicKey });
@@ -59,10 +63,30 @@ export function assertShieldDecision(value) {
   return freezeDecision(value);
 }
 
+export function assertShieldPolicyInput(value) {
+  if (!isPlainObject(value) || !hasExactKeys(value, POLICY_INPUT_FIELDS)
+    || !LANES.has(value.lane) || !LANES.has(value.destinationClass)
+    || typeof value.interactive !== "boolean" || !REPOSITORY_CLASSES.has(value.repositoryClass)
+    || !Array.isArray(value.pathClasses) || value.pathClasses.length > 32
+    || value.pathClasses.some((pathClass) => !PATH_CLASSES.has(pathClass))) {
+    throw new Error("shield policy input is invalid");
+  }
+  return Object.freeze({
+    lane: value.lane,
+    destinationClass: value.destinationClass,
+    interactive: value.interactive,
+    repositoryClass: value.repositoryClass,
+    pathClasses: freezeClassList(value.pathClasses),
+    secretFindings: freezeFindings(value.secretFindings),
+    piiFindings: freezeFindings(value.piiFindings),
+  });
+}
+
 async function evaluateShieldDecision(evaluator, input) {
   let results;
+  const policyInput = assertShieldPolicyInput(input);
   try {
-    results = await evaluator.evaluate(input);
+    results = await evaluator.evaluate(policyInput);
   } catch {
     throw new Error("shield policy evaluation failed");
   }
@@ -92,4 +116,40 @@ function freezeDecision(value) {
 
 function sameDecision(actual, expected) {
   return JSON.stringify(actual) === JSON.stringify(expected);
+}
+
+function freezeClassList(value) {
+  if (!Array.isArray(value) || value.some((pathClass) => !PATH_CLASSES.has(pathClass))) {
+    throw new Error("shield policy input is invalid");
+  }
+  const normalized = [...new Set(value)].sort();
+  if (normalized.length !== value.length || normalized.some((pathClass, index) => pathClass !== value[index])) {
+    throw new Error("shield policy input is invalid");
+  }
+  return Object.freeze(normalized);
+}
+
+function freezeFindings(value) {
+  if (!Array.isArray(value) || value.length > 512) throw new Error("shield policy input is invalid");
+  let previous = "";
+  const findings = value.map((finding) => {
+    if (!isPlainObject(finding) || !hasExactKeys(finding, ["category", "count"])
+      || typeof finding.category !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(finding.category)
+      || !Number.isInteger(finding.count) || finding.count < 1 || finding.count > 1_000_000
+      || finding.category <= previous) {
+      throw new Error("shield policy input is invalid");
+    }
+    previous = finding.category;
+    return Object.freeze({ category: finding.category, count: finding.count });
+  });
+  return Object.freeze(findings);
+}
+
+function hasExactKeys(value, expected) {
+  const keys = Object.keys(value).sort();
+  return keys.length === expected.length && keys.every((key, index) => key === expected[index]);
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 }
