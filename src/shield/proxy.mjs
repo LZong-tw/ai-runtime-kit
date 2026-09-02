@@ -58,6 +58,8 @@ async function handleShieldRequest({ request, response, capability, target, deci
     return;
   }
 
+  const lifecycle = requestLifecycleSignal(request, response);
+  if (lifecycle.signal.aborted) return;
   let inspection;
   try {
     inspection = await readInspection(request);
@@ -70,7 +72,7 @@ async function handleShieldRequest({ request, response, capability, target, deci
     return;
   }
 
-  const lifecycle = requestLifecycleSignal(request, response);
+  if (lifecycle.signal.aborted) return;
   let decision;
   try {
     decision = await decide({
@@ -209,6 +211,7 @@ function requestLifecycleSignal(request, response) {
   response.once("close", () => {
     if (response.writableFinished !== true) abort();
   });
+  if (request.aborted === true || request.destroyed === true || response.destroyed === true) abort();
   return controller;
 }
 
