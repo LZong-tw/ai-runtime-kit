@@ -133,7 +133,7 @@ test("proxy preserves streaming upstream responses", async (t) => {
   assert.equal(await result.text(), "data: first\n\ndata: second\n\n");
 });
 
-test("proxy relays a redirect without contacting its destination", async (t) => {
+test("proxy blocks upstream redirects before a default-following client can leave the fixed origin", async (t) => {
   let secondaryCalls = 0;
   const secondary = await startFixture(t, async (_request, response) => {
     secondaryCalls += 1;
@@ -149,11 +149,11 @@ test("proxy relays a redirect without contacting its destination", async (t) => 
     method: "POST",
     headers: { "x-airkit-shield": CAPABILITY },
     body: "{}",
-    redirect: "manual",
   });
 
-  assert.equal(result.status, 302);
-  assert.equal(result.headers.get("location"), `${secondary.origin}/v1/messages`);
+  assert.equal(result.status, 503);
+  assert.equal(result.headers.get("location"), null);
+  assert.deepEqual(await result.json(), { error: { code: "shield_unavailable" } });
   assert.equal(secondaryCalls, 0);
 });
 
@@ -216,6 +216,48 @@ test("proxy aborts an upstream request when the downstream client disconnects", 
   ]);
   if (!upstreamAborted) upstreamResponse.destroy();
   assert.equal(upstreamAborted, true, "upstream request was not aborted after downstream disconnect");
+});
+
+test("proxy does not forward after a downstream disconnect during decision", async (t) => {
+  let releaseDecision;
+  let notifyDecisionStarted;
+  let observedSignal;
+  let upstreamCalls = 0;
+  const decisionStarted = new Promise((resolve) => { notifyDecisionStarted = resolve; });
+  const upstream = await startFixture(t, async (_request, response) => {
+    upstreamCalls += 1;
+    response.end();
+  });
+  const shield = await startShield(t, {
+    targetOrigin: upstream.origin,
+    decide: ({ signal }) => {
+      observedSignal = signal;
+      notifyDecisionStarted();
+      return new Promise((resolve) => { releaseDecision = () => resolve({ action: "allow" }); });
+    },
+  });
+  const target = new URL(shield.origin);
+  const client = httpRequest({
+    host: target.hostname,
+    port: target.port,
+    method: "POST",
+    path: "/v1/messages",
+    headers: { "content-length": "2", "x-airkit-shield": CAPABILITY },
+  });
+  const clientClosed = new Promise((resolve) => client.once("close", resolve));
+  client.once("error", () => {});
+  client.end("{}");
+
+  await decisionStarted;
+  client.destroy();
+  await clientClosed;
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  const decisionAborted = observedSignal?.aborted === true;
+  releaseDecision();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  assert.equal(decisionAborted, true, "decision did not receive the downstream lifecycle abort");
+  assert.equal(upstreamCalls, 0);
 });
 
 test("decision exceptions are unavailable and diagnostics never contain credentials or body", async (t) => {
