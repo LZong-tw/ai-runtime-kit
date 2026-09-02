@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 
 import { resolveAuditPaths } from "./paths.mjs";
 import { createAuditQueryClient } from "./query.mjs";
@@ -50,6 +51,7 @@ export default {
           if (supplied !== null) {
             if (!bootstrapToken || supplied !== bootstrapToken) return sendJson(response, 410, { error: "bootstrap_expired" });
             bootstrapToken = null;
+            await rm(paths.uiBootstrapPath, { force: true });
             const sessionId = randomToken();
             sessions.set(sessionId, { createdAt: Date.now() });
             response.writeHead(200, {
@@ -76,11 +78,13 @@ export default {
         return sendJson(response, 404, { error: "not_found" });
       },
     });
+    const appUrl = `${backend.url}/?bootstrap=${encodeURIComponent(bootstrapToken)}`;
+    await publishBootstrapUrl(paths.uiBootstrapPath, appUrl);
     ctx.registerApp({
       id: "airkit-audit",
       name: "AirKit Audit",
       description: "Metadata-only local audit and evidence gaps",
-      url: `${backend.url}/?bootstrap=${encodeURIComponent(bootstrapToken)}`,
+      url: appUrl,
     });
 
     async function getClient() {
@@ -97,6 +101,12 @@ export default {
 
 function randomToken() {
   return randomBytes(24).toString("base64url");
+}
+
+async function publishBootstrapUrl(path, url) {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await writeFile(path, `${url}\n`, { encoding: "utf8", mode: 0o600 });
+  await chmod(path, 0o600);
 }
 
 function readCookie(header, name) {

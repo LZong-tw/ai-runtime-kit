@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -41,6 +41,9 @@ test("CCR audit wrapper registers a browser backend and one-time bootstrap app",
     assert.equal(apps.length, 1);
     assert.equal(apps[0].id, "airkit-audit");
     assert.match(apps[0].url, /^http:\/\/127\.0\.0\.1:4567\/\?bootstrap=/);
+    const bootstrapPath = join(root, "ccr-ui-bootstrap-url");
+    assert.equal(await readFile(bootstrapPath, "utf8"), `${apps[0].url}\n`);
+    assert.equal((await stat(bootstrapPath)).mode & 0o777, 0o600);
     assert.equal(backends.length, 1);
     assert.equal(backends[0].id, "airkit-audit-ui");
     assert.equal(backends[0].host, "127.0.0.1");
@@ -58,6 +61,7 @@ test("CCR audit wrapper registers a browser backend and one-time bootstrap app",
     assert.match(pageResponse.headers["set-cookie"], /HttpOnly/i);
     assert.match(pageResponse.body(), /metadata-only local audit view/i);
     assert.doesNotMatch(pageResponse.body(), /api[_-]?key|authorization|bearer|secret|\/Users\//i);
+    await assert.rejects(readFile(bootstrapPath, "utf8"), { code: "ENOENT" });
 
     const replayResponse = responseRecorder();
     await backends[0].handler(

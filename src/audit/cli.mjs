@@ -60,6 +60,10 @@ const AUDIT_COMMANDS = {
   status: (_argv, audit) => audit.status(),
   doctor: (_argv, audit) => audit.doctor(),
   update: (argv, audit) => audit.update({ write: hasFlag(argv, "--write") }),
+  open: async (_argv, audit) => {
+    const { url: _url, ...result } = await audit.open();
+    return result;
+  },
   verify: (_argv, audit) => audit.verify(),
   prune: (argv, audit) => audit.prune({
     write: hasFlag(argv, "--write"),
@@ -214,6 +218,14 @@ async function createDefaultAuditDependencies(dependencies = {}) {
 
     async update({ write = false } = {}) {
       return this.install({ write });
+    },
+
+    async open() {
+      const url = await readAuditUiBootstrapUrl(paths.uiBootstrapPath);
+      if (!url) return { state: "degraded", reason: "audit_ui_not_ready" };
+      const openExternal = dependencies.openExternal ?? openBrowserUrl;
+      await openExternal(url);
+      return { state: "healthy", opened: true, url };
     },
 
     async verify() {
@@ -448,6 +460,7 @@ function renderAuditHelp() {
   audit status
   audit doctor
   audit update [--write]
+  audit open
   audit verify
   audit prune [--write] [--preserve]
   audit export [--format jsonl|csv] [--output path] [--include-payload --decrypt]
@@ -459,6 +472,29 @@ function renderAuditHelp() {
 Options:
   --write    Apply the change instead of previewing it.
 `;
+}
+
+async function readAuditUiBootstrapUrl(path) {
+  let raw;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  try {
+    const url = new URL(raw.trim());
+    if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.pathname !== "/" || !url.searchParams.get("bootstrap")) {
+      return null;
+    }
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+async function openBrowserUrl(url) {
+  await execFileAsync("open", [url]);
 }
 
 function renderAuditResult(command, result = {}) {

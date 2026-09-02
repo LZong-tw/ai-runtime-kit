@@ -22,10 +22,20 @@ The backend serves:
 - `GET /api/query?name=<query>[&id=<request-id>]`
 
 The CCR browser management page cannot open plugin apps because its
-`openPluginApp` bridge is Electron-only. Use the AirKit Audit app entry from a
-CCR Electron client, or the runtime's app URL when a local launcher exposes it;
-do not paste a CCR gateway key into a URL. Direct navigation to the old
-`/plugins/airkit-audit` gateway path is no longer supported.
+`openPluginApp` bridge is Electron-only. The supported browser entry point is:
+
+```bash
+airkit audit open
+```
+
+It opens the current loopback-only UI without printing or persisting its URL in
+the terminal. The underlying bootstrap URL is stored in a `0600` runtime file
+only until the first successful open, then becomes invalid. If `audit open`
+reports `audit_ui_not_ready`, run `airkit audit start`, then restart or update
+the CCR plugin host so it can register a fresh app URL. A CCR Electron client
+can also open the `AirKit Audit` app entry directly. Do not paste a CCR gateway
+key into a URL. Direct navigation to the old `/plugins/airkit-audit` gateway
+path is no longer supported.
 
 The UI contract is intentionally narrower than the SQLite schema. It projects
 metadata only, always returns `metadata_only: true` and `payload_included:

@@ -92,6 +92,25 @@ test("verify dispatches to the injected audit verifier", async () => {
   assert.match(output.text(), /verified: true/);
 });
 
+test("open dispatches to the audit UI launcher without exposing its bootstrap URL", async () => {
+  const output = capture();
+  let opened = 0;
+  const exitCode = await runAuditCli(["open"], {
+    stdout: output.stdout,
+    audit: {
+      async open() {
+        opened += 1;
+        return { state: "healthy", opened: true, url: "http://127.0.0.1:4567/?bootstrap=secret" };
+      },
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(opened, 1);
+  assert.match(output.text(), /opened: true/);
+  assert.equal(output.text().includes("bootstrap="), false);
+});
+
 test("embedded absolute paths inside reason strings are scrubbed to basename-only metadata", async () => {
   const output = capture();
   const exitCode = await runAuditCli(["status"], {

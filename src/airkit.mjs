@@ -2673,7 +2673,7 @@ function renderAirkitHelp() {
 
 Commands:
   connect [--profile <name>] [--mode <mode>] [--port <port>]
-  audit <install|start|stop|status|doctor|update|verify|repo|account|requests|request|sessions|clients|accounts|repos|usage|cache|gaps|query> [options]
+  audit <install|start|stop|status|doctor|update|verify|open|repo|account|requests|request|sessions|clients|accounts|repos|usage|cache|gaps|query> [options]
   runtime check
   runtime update [--write]
   repair codex-takeover [--write]
