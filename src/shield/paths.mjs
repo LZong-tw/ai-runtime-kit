@@ -1,9 +1,10 @@
-import { chmod, lstat, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { chmod, lstat, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 const SHIELD_LABEL = "com.airkit.shield";
-const defaultIo = { chmod, lstat, mkdir, readFile, rename, unlink, writeFile };
+const defaultIo = { chmod, constants, lstat, mkdir, open, readFile, rename, unlink };
 
 export function shieldPaths({ env = process.env, homeDir = homeFromEnv(env), uid = env.AIRKIT_GUI_UID ?? env.UID ?? process.getuid?.(), rootDir, configPath, identityPath, socketPath, launchAgentPath } = {}) {
   const home = absolutePath(homeDir, "homeDir");
@@ -69,6 +70,7 @@ export function assertShieldIdentity(identity) {
 
 export async function writeShieldIdentity({ paths, identity, io = defaultIo } = {}) {
   if (!paths?.rootDir || !paths.identityPath) throw new TypeError("shield identity paths are required");
+  assertWritablePaths(paths);
   const validated = assertShieldIdentity(identity);
   const [homeDir, localDir, stateDir, rootDir] = stateComponents(paths.rootDir);
   const ownerUid = process.getuid?.();
@@ -77,19 +79,45 @@ export async function writeShieldIdentity({ paths, identity, io = defaultIo } = 
   await ensureDirectory(stateDir, io, ownerUid, true);
   await ensureDirectory(rootDir, io, ownerUid, true);
   await assertDirectory(rootDir, io, ownerUid);
-  await io.chmod(paths.rootDir, 0o700);
-  await assertDirectory(rootDir, io, ownerUid);
-  const temporaryPath = `${paths.identityPath}.tmp-${process.pid}-${Date.now()}`;
+  const rootHandle = await openPrivateRoot(rootDir, io, ownerUid);
   try {
-    await io.writeFile(temporaryPath, `${JSON.stringify(validated)}\n`, { flag: "wx", mode: 0o600 });
-    await io.chmod(temporaryPath, 0o600);
+    await rootHandle.chmod(0o700);
     await assertDirectory(rootDir, io, ownerUid);
-    await io.rename(temporaryPath, paths.identityPath);
-  } catch (error) {
-    await io.unlink(temporaryPath, { force: true }).catch(() => {});
-    throw error;
+  const temporaryPath = `${paths.identityPath}.tmp-${process.pid}-${Date.now()}`;
+    try {
+      const fileHandle = await openExclusiveFile(temporaryPath, io);
+      try { await fileHandle.writeFile(`${JSON.stringify(validated)}\n`); await fileHandle.chmod(0o600); }
+      finally { await fileHandle.close(); }
+      await assertDirectory(rootDir, io, ownerUid);
+      await io.rename(temporaryPath, paths.identityPath);
+    } catch (error) {
+      await io.unlink(temporaryPath, { force: true }).catch(() => {});
+      throw error;
+    }
+  } finally {
+    await rootHandle.close();
   }
   return validated;
+}
+
+async function openPrivateRoot(rootDir, io, ownerUid) {
+  const flags = io.constants?.O_RDONLY | io.constants?.O_DIRECTORY | io.constants?.O_NOFOLLOW;
+  const handle = await io.open(rootDir, flags);
+  const entry = await handle.stat();
+  if (entry.isSymbolicLink() || !entry.isDirectory()) { await handle.close(); throw new Error("shield state root must be a real directory"); }
+  if (Number.isInteger(ownerUid) && entry.uid !== ownerUid) { await handle.close(); throw new Error("shield state path has unexpected owner"); }
+  return handle;
+}
+
+async function openExclusiveFile(path, io) {
+  const flags = io.constants?.O_WRONLY | io.constants?.O_CREAT | io.constants?.O_EXCL | io.constants?.O_NOFOLLOW;
+  return io.open(path, flags, 0o600);
+}
+
+function assertWritablePaths(paths) {
+  if (paths.configPath !== join(paths.rootDir, "config.json") || paths.identityPath !== join(paths.rootDir, "identity.json") || paths.socketPath !== join(paths.rootDir, "shield.sock")) {
+    throw new Error("shield paths must use the canonical AirKit Shield state layout");
+  }
 }
 
 async function ensureDirectory(path, io, ownerUid, privateMode) {

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, stat, symlink } from "node:fs/promises";
+import { constants } from "node:fs";
+import { chmod, lstat, mkdir, mkdtemp, open as fsOpen, readFile, rename, rm, stat, symlink, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -101,6 +102,30 @@ test("identity writes reject a state directory owned by another uid", async () =
       },
     };
     await assert.rejects(writeShieldIdentity({ paths, identity, io }), /owner/);
+  } finally {
+    await rm(homeDir, { recursive: true, force: true });
+  }
+});
+
+test("identity writes reject caller paths outside the canonical layout", async () => {
+  const homeDir = await mkdtemp("/tmp/airkit-shield-");
+  const paths = shieldPaths({ homeDir, uid: 501 });
+  try {
+    await assert.rejects(writeShieldIdentity({ paths: { ...paths, identityPath: join(paths.rootDir, "other.json") }, identity }), /canonical/);
+  } finally {
+    await rm(homeDir, { recursive: true, force: true });
+  }
+});
+
+test("identity temporary file uses exclusive no-follow open flags", async () => {
+  const homeDir = await mkdtemp("/tmp/airkit-shield-");
+  const paths = shieldPaths({ homeDir, uid: 501 });
+  const calls = [];
+  try {
+    const io = { chmod, constants, lstat, mkdir, readFile, rename, unlink, open: async (...args) => { calls.push(args); return fsOpen(...args); } };
+    await writeShieldIdentity({ paths, identity, io });
+    assert.ok((calls.at(-1)[1] & constants.O_NOFOLLOW) !== 0);
+    assert.ok((calls.at(-1)[1] & constants.O_EXCL) !== 0);
   } finally {
     await rm(homeDir, { recursive: true, force: true });
   }
