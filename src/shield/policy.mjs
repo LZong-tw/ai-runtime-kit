@@ -5,8 +5,8 @@ import { validateShieldPolicyBundle } from "./policy-bundle.mjs";
 const ALLOWED_ACTIONS = new Set(["allow", "block", "require_approval", "redact"]);
 const DECISION_FIELDS = ["action", "approvalEligible", "reasonCodes", "redactions"];
 
-export async function loadShieldPolicy({ bundle, opa = { loadPolicy: loadOpaPolicy } } = {}) {
-  const validated = validateShieldPolicyBundle(bundle);
+export async function loadShieldPolicy({ bundle, publicKey, opa = { loadPolicy: loadOpaPolicy } } = {}) {
+  const validated = validateShieldPolicyBundle(bundle, { publicKey });
   if (typeof opa?.loadPolicy !== "function") throw new TypeError("shield policy requires an OPA/Wasm evaluator");
   const evaluator = await opa.loadPolicy(validated.wasm);
   if (!evaluator || typeof evaluator.evaluate !== "function") throw new Error("shield policy OPA/Wasm evaluator is invalid");

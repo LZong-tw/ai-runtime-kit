@@ -17,6 +17,8 @@ export function shieldPaths({ env = process.env, homeDir = homeFromEnv(env), uid
     configPath: childPath(configPath ?? join(root, "config.json"), root, "configPath"),
     identityPath: childPath(identityPath ?? join(root, "identity.json"), root, "identityPath"),
     policyStatePath: childPath(join(root, "policy-state.json"), root, "policyStatePath"),
+    policyBundlePath: childPath(join(root, "policy-bundle.json"), root, "policyBundlePath"),
+    policyPublicKeyPath: childPath(join(root, "policy-public.pem"), root, "policyPublicKeyPath"),
     socketPath: childPath(socketPath ?? join(root, "shield.sock"), root, "socketPath"),
     launchAgentPath: launchAgentPath ?? join(home, "Library", "LaunchAgents", `${SHIELD_LABEL}.plist`),
     launchdDomain: `gui/${numericUid(uid)}`,
@@ -186,7 +188,7 @@ function assertWritablePaths(paths) {
   if (!canonicalShieldPaths.has(paths)) {
     throw new Error("shield paths must be a canonical object returned by shieldPaths");
   }
-  if (paths.configPath !== join(paths.rootDir, "config.json") || paths.identityPath !== join(paths.rootDir, "identity.json") || paths.policyStatePath !== join(paths.rootDir, "policy-state.json") || paths.socketPath !== join(paths.rootDir, "shield.sock")) {
+  if (paths.configPath !== join(paths.rootDir, "config.json") || paths.identityPath !== join(paths.rootDir, "identity.json") || paths.policyStatePath !== join(paths.rootDir, "policy-state.json") || paths.policyBundlePath !== join(paths.rootDir, "policy-bundle.json") || paths.policyPublicKeyPath !== join(paths.rootDir, "policy-public.pem") || paths.socketPath !== join(paths.rootDir, "shield.sock")) {
     throw new Error("shield paths must use the canonical AirKit Shield state layout");
   }
 }
