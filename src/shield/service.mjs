@@ -7,6 +7,7 @@ import { readShieldIdentity, shieldPaths } from "./paths.mjs";
 
 const execFileAsync = promisify(execFile);
 export const SHIELD_SERVICE_LABEL = "com.airkit.shield";
+const SUBSCRIPTION_TARGET_ORIGIN = "https://api.anthropic.com";
 
 const defaultIo = { chmod, mkdir, readFile, rename, writeFile };
 
@@ -100,7 +101,7 @@ export async function readShieldConfig({ paths, io = defaultIo } = {}) {
   }
   assertLane(config?.lane);
   if (typeof config.capability !== "string" || config.capability.length < 32) throw new Error("shield configuration capability is missing or invalid");
-  if (typeof config.targetOrigin !== "string" || config.targetOrigin.length === 0) throw new Error("shield configuration target is missing or invalid");
+  const targetOrigin = normalizeShieldTargetOrigin(config.targetOrigin, "shield configuration target");
   if (typeof config.generation !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(config.generation)) {
     throw new Error("shield configuration generation is missing or invalid");
   }
@@ -109,14 +110,14 @@ export async function readShieldConfig({ paths, io = defaultIo } = {}) {
   }
   return {
     capability: config.capability,
-    targetOrigin: config.targetOrigin,
+    targetOrigin,
     lane: config.lane,
     generation: config.generation,
     targetClass: config.lane,
   };
 }
 
-export async function ensureShieldReady({ lane, env = process.env, paths = shieldPaths({ env }), io = defaultIo, inspectService = inspectShieldService, isProcessAlive = defaultIsProcessAlive, probeShield = defaultProbeShield } = {}) {
+export async function ensureShieldReady({ lane, expectedTargetOrigin, env = process.env, paths = shieldPaths({ env }), io = defaultIo, inspectService = inspectShieldService, isProcessAlive = defaultIsProcessAlive, probeShield = defaultProbeShield } = {}) {
   assertLane(lane);
   const identity = await readShieldIdentity({ paths, io });
   if (!identity || !(await isProcessAlive(identity.pid))) {
@@ -128,6 +129,12 @@ export async function ensureShieldReady({ lane, env = process.env, paths = shiel
   const config = await readShieldConfig({ paths, io });
   if (config.lane !== lane || identity.lane !== lane || identity.targetClass !== lane) {
     throw new Error("shield lane mismatch; start the service configured for the requested lane");
+  }
+  const expectedOrigin = lane === "subscription"
+    ? SUBSCRIPTION_TARGET_ORIGIN
+    : normalizeShieldTargetOrigin(expectedTargetOrigin, "shield managed expected target");
+  if (config.targetOrigin !== expectedOrigin) {
+    throw new Error("shield target origin mismatch; restart the service with the expected fixed target");
   }
   if (config.generation !== identity.generation) throw new Error("shield configuration generation mismatch; restart the shield service");
   if (config.capability !== identity.capability) throw new Error("shield capability generation mismatch; restart the shield service");
@@ -172,6 +179,27 @@ export function buildShieldChildEnv(ready, env = process.env) {
 
 function assertLane(lane) {
   if (lane !== "subscription" && lane !== "managed") throw new Error("shield lane must be subscription or managed");
+}
+
+function normalizeShieldTargetOrigin(value, label) {
+  let target;
+  try {
+    target = new URL(value);
+  } catch {
+    target = null;
+  }
+  if (
+    target === null
+    || (target.protocol !== "http:" && target.protocol !== "https:")
+    || target.username !== ""
+    || target.password !== ""
+    || target.pathname !== "/"
+    || target.search !== ""
+    || target.hash !== ""
+  ) {
+    throw new Error(`${label} origin is missing or invalid`);
+  }
+  return target.origin;
 }
 
 function assertShieldPaths(paths) {

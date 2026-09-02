@@ -1127,6 +1127,7 @@ const LAUNCH_CLEARED_ENV = Object.freeze([
   "CLAUDE_CODE_AUTO_COMPACT_PERCENTAGE",
   "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
   "AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS",
+  "CLAUDE_CODE_OAUTH_TOKEN",
   // Cloud-provider selectors reroute Claude Code away from ANTHROPIC_BASE_URL
   // entirely; one inherited from the shell would bypass the CCR gateway.
   "CLAUDE_CODE_USE_BEDROCK",
@@ -1475,12 +1476,6 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
       options,
       plan,
     });
-    const shieldReady = profileShield?.enabled === true
-      ? await (options.ensureShieldReady ?? ensureShieldReady)({
-        env: launchEnv,
-        lane: profileShield.lane,
-      })
-      : null;
     const middleware = options.plainClaude === true || !managed.compatibility
       ? null
       : await (options.startCompatibilityMiddleware ?? startCompatibilityMiddleware)({
@@ -1491,6 +1486,19 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
         launchInstanceId: options.launchInstanceId ?? null,
         sessionContext: options.sessionContext ?? null,
       });
+    let shieldReady = null;
+    try {
+      if (profileShield?.enabled === true) {
+        shieldReady = await (options.ensureShieldReady ?? ensureShieldReady)({
+          env: launchEnv,
+          expectedTargetOrigin: middleware?.origin ?? gatewayOrigin,
+          lane: profileShield.lane,
+        });
+      }
+    } catch (error) {
+      await middleware?.close();
+      throw error;
+    }
     const compatibilityLaunch = middleware
       ? buildCompatibilityLaunch(managed.compatibility, middleware.origin, gatewayToken)
       : { args: [], env: {} };

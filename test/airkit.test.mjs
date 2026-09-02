@@ -5121,6 +5121,7 @@ test("enabled Shield replaces only the spawned AirClaude endpoint and capability
   const launchEnv = {
     ANTHROPIC_API_BASE_URL: "https://stale-provider.invalid",
     ANTHROPIC_BASE_URL: "https://stale-provider.invalid",
+    CLAUDE_CODE_OAUTH_TOKEN: "subscription-oauth-must-not-reach-managed",
     DEMO_API_KEY: "runtime-secret",
     HOME: configDir,
   };
@@ -5136,6 +5137,7 @@ test("enabled Shield replaces only the spawned AirClaude endpoint and capability
         events.push("shield-ready");
         assert.equal(options.lane, "managed");
         assert.equal(options.env, launchEnv);
+        assert.equal(options.expectedTargetOrigin, "http://127.0.0.1:3456");
         return {
           origin: "http://127.0.0.1:8811",
           capability,
@@ -5160,6 +5162,7 @@ test("enabled Shield replaces only the spawned AirClaude endpoint and capability
       `x-airkit-mode: auto\nx-airkit-shield: ${capability}`,
     );
     assert.equal(spawnCalls[0].env.AIRKIT_SHIELD_CAPABILITY, undefined);
+    assert.equal(spawnCalls[0].env.CLAUDE_CODE_OAUTH_TOKEN, undefined);
     assert.doesNotMatch(spawnCalls[0].args.join(" "), /fixture-capability|gateway-key/);
     assert.doesNotMatch(JSON.stringify(saved), /fixture-capability/);
     assert.doesNotMatch(JSON.stringify(result), /fixture-capability/);
