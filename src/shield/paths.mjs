@@ -1,13 +1,15 @@
-import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 const SHIELD_LABEL = "com.airkit.shield";
-const defaultIo = { chmod, mkdir, readFile, rename, unlink, writeFile };
+const defaultIo = { chmod, lstat, mkdir, readFile, rename, unlink, writeFile };
 
 export function shieldPaths({ env = process.env, homeDir = homeFromEnv(env), uid = env.AIRKIT_GUI_UID ?? env.UID ?? process.getuid?.(), rootDir, configPath, identityPath, socketPath, launchAgentPath } = {}) {
   const home = absolutePath(homeDir, "homeDir");
-  const root = absolutePath(rootDir ?? env.AIRKIT_SHIELD_ROOT_DIR ?? join(home, ".local", "state", "airkit-shield"), "rootDir");
+  const canonicalRoot = join(home, ".local", "state", "airkit-shield");
+  const root = absolutePath(rootDir ?? env.AIRKIT_SHIELD_ROOT_DIR ?? canonicalRoot, "rootDir");
+  if (resolve(root) !== resolve(canonicalRoot)) throw new Error("rootDir must be the canonical AirKit Shield state directory");
   const paths = {
     rootDir: root,
     configPath: childPath(configPath ?? join(root, "config.json"), root, "configPath"),
@@ -68,7 +70,9 @@ export function assertShieldIdentity(identity) {
 export async function writeShieldIdentity({ paths, identity, io = defaultIo } = {}) {
   if (!paths?.rootDir || !paths.identityPath) throw new TypeError("shield identity paths are required");
   const validated = assertShieldIdentity(identity);
+  await rejectSymlinkRoot(paths.rootDir, io);
   await io.mkdir(paths.rootDir, { recursive: true, mode: 0o700 });
+  await rejectSymlinkRoot(paths.rootDir, io);
   await io.chmod(paths.rootDir, 0o700);
   const temporaryPath = `${paths.identityPath}.tmp-${process.pid}-${Date.now()}`;
   try {
@@ -80,6 +84,17 @@ export async function writeShieldIdentity({ paths, identity, io = defaultIo } = 
     throw error;
   }
   return validated;
+}
+
+async function rejectSymlinkRoot(rootDir, io) {
+  try {
+    const rootStat = await io.lstat(rootDir);
+    if (rootStat.isSymbolicLink()) throw new Error("shield state root must not be a symlink");
+    if (!rootStat.isDirectory()) throw new Error("shield state root must be a directory");
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
 }
 
 function childPath(value, root, label) {
