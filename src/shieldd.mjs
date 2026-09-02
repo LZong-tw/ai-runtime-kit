@@ -39,17 +39,22 @@ export async function startShieldDaemon({
   writeIdentity = writeShieldIdentity,
 } = {}) {
   if (!config || !paths) throw new TypeError("shield daemon configuration and paths are required");
+  const destinationClass = resolveDestinationClass(config);
   const provision = await readPolicyBundle({ paths });
   const policy = await loadPolicy({ bundle: provision.bundle, publicKey: provision.publicKey });
   if (!config.gitleaks) throw new Error("shield gitleaks provision is missing");
   const scanner = await createScanner(config.gitleaks);
   if (scanner?.version !== policy.detectorVersions.gitleaks) throw new Error("shield gitleaks version does not match policy metadata");
   const decide = async ({ body }) => {
-    const facts = classifyShieldRequest({ body, launcherContext: config.launcherContext ?? defaultShieldLauncherContext(config.lane) });
+    const launcherContext = {
+      ...(config.launcherContext ?? defaultShieldLauncherContext(destinationClass)),
+      destinationClass,
+    };
+    const facts = classifyShieldRequest({ body, launcherContext });
     const secretScan = await scanner.scan(body);
     const decision = await policy.evaluate({
       lane: config.lane,
-      destinationClass: facts.destinationClass,
+      destinationClass,
       interactive: facts.interactive,
       repositoryClass: facts.repositoryClass,
       pathClasses: facts.pathClasses,
@@ -59,7 +64,7 @@ export async function startShieldDaemon({
     return {
       ...decision,
       lane: config.lane,
-      destinationClass: facts.destinationClass,
+      destinationClass,
       bundleVersion: policy.version,
       detectorVersions: { ...policy.detectorVersions },
     };
@@ -92,6 +97,16 @@ export async function startShieldDaemon({
     throw error;
   }
   return Object.freeze({ shield, policy, scanner });
+}
+
+function resolveDestinationClass(config) {
+  if (config?.lane !== "subscription" && config?.lane !== "managed") {
+    throw new Error("shield configuration lane is invalid");
+  }
+  if (config.targetClass !== undefined && config.targetClass !== config.lane) {
+    throw new Error("shield configuration targetClass must match its lane");
+  }
+  return config.lane;
 }
 
 function parseConfigPath(argv) {
