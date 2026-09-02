@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 
 import { stat } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 
-import { shieldPaths, writeShieldIdentity } from "./shield/paths.mjs";
+import { shieldPaths, writeShieldIdentity, writeShieldPolicyState } from "./shield/paths.mjs";
+import { readShieldPolicyProvision } from "./shield/policy-bundle.mjs";
+import { loadShieldPolicy } from "./shield/policy.mjs";
 import { startShieldProxy } from "./shield/proxy.mjs";
 import { readShieldConfig } from "./shield/service.mjs";
 
@@ -12,23 +15,7 @@ async function main() {
   if (configPath !== paths.configPath) throw new Error("shield daemon config path must be the canonical private configuration path");
   await assertPrivateConfig(configPath);
   const config = await readShieldConfig({ paths });
-  const shield = await startShieldProxy({
-    capability: config.capability,
-    targetOrigin: config.targetOrigin,
-    decide: async () => ({ action: "deny" }),
-  });
-  await writeShieldIdentity({
-    paths,
-    identity: {
-      origin: shield.origin,
-      capability: config.capability,
-      version: 1,
-      pid: process.pid,
-      lane: config.lane,
-      generation: config.generation,
-      targetClass: config.targetClass,
-    },
-  });
+  const { shield } = await startShieldDaemon({ config, paths });
   const stop = async () => {
     await shield.close();
     process.exitCode = 0;
@@ -36,6 +23,49 @@ async function main() {
   process.once("SIGINT", () => { void stop(); });
   process.once("SIGTERM", () => { void stop(); });
   await new Promise(() => {});
+}
+
+export async function startShieldDaemon({
+  config,
+  paths,
+  pid = process.pid,
+  readPolicyBundle = readShieldPolicyProvision,
+  loadPolicy = loadShieldPolicy,
+  writePolicyState = writeShieldPolicyState,
+  startProxy = startShieldProxy,
+  writeIdentity = writeShieldIdentity,
+} = {}) {
+  if (!config || !paths) throw new TypeError("shield daemon configuration and paths are required");
+  const provision = await readPolicyBundle({ paths });
+  const policy = await loadPolicy({ bundle: provision.bundle, publicKey: provision.publicKey });
+  await writePolicyState({ paths, state: { version: policy.version, detectorVersions: policy.detectorVersions } });
+
+  let shield;
+  try {
+    shield = await startProxy({
+      capability: config.capability,
+      targetOrigin: config.targetOrigin,
+      decide: policy.evaluate,
+    });
+    await writeIdentity({
+      paths,
+      identity: {
+        origin: shield.origin,
+        capability: config.capability,
+        version: 1,
+        pid,
+        lane: config.lane,
+        generation: config.generation,
+        targetClass: config.targetClass,
+        policyVersion: policy.version,
+        detectorVersions: policy.detectorVersions,
+      },
+    });
+  } catch (error) {
+    await shield?.close();
+    throw error;
+  }
+  return Object.freeze({ shield, policy });
 }
 
 function parseConfigPath(argv) {
@@ -49,7 +79,9 @@ async function assertPrivateConfig(path) {
   if (typeof process.getuid === "function" && entry.uid !== process.getuid()) throw new Error("shield daemon configuration has unexpected owner");
 }
 
-main().catch(() => {
-  process.stderr.write("AIRKIT_SHIELDD code=AIRKIT_SHIELDD_BOOT_FAILED\n");
-  process.exitCode = 1;
-});
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  main().catch(() => {
+    process.stderr.write("AIRKIT_SHIELDD code=AIRKIT_SHIELDD_BOOT_FAILED\n");
+    process.exitCode = 1;
+  });
+}

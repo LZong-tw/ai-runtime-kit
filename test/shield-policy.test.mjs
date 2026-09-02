@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,11 +9,12 @@ import { shieldPaths } from "../src/shield/paths.mjs";
 import { createShieldPolicyActivation, loadShieldPolicy } from "../src/shield/policy.mjs";
 
 const wasm = Buffer.from("compiled-opa-policy-fixture");
+const compiledWasm = await readFile(new URL("./fixtures/shield-policy.wasm", import.meta.url));
 const keyPair = generateKeyPairSync("ed25519");
 
 test("policy activation only accepts a signed, digest-matched OPA/Wasm bundle", async () => {
   const bundle = signedBundle();
-  const policy = await loadShieldPolicy({ bundle, opa: allowOpa });
+  const policy = await loadTestPolicy({ bundle });
 
   assert.equal(policy.version, "2026.09.02.1");
   assert.deepEqual(policy.detectorVersions, { gitleaks: "8.24.0" });
@@ -24,54 +25,77 @@ test("policy activation only accepts a signed, digest-matched OPA/Wasm bundle", 
 
 test("policy activation rejects unsigned and digest-drifted bundles", async () => {
   await assert.rejects(
-    loadShieldPolicy({ bundle: { ...signedBundle(), signature: undefined }, opa: allowOpa }),
+    loadTestPolicy({ bundle: { ...signedBundle(), signature: undefined } }),
     /signature/i,
   );
   await assert.rejects(
-    loadShieldPolicy({ bundle: { ...signedBundle(), wasm: Buffer.from("drift") }, opa: allowOpa }),
+    loadTestPolicy({ bundle: { ...signedBundle(), wasm: Buffer.from("drift") } }),
     /digest/i,
   );
   await assert.rejects(
-    loadShieldPolicy({ bundle: { ...signedBundle(), signature: Buffer.alloc(64).toString("base64") }, opa: allowOpa }),
+    loadTestPolicy({ bundle: { ...signedBundle(), signature: Buffer.alloc(64).toString("base64") } }),
     /signature/i,
   );
 });
 
 test("policy activation rejects an unsupported OPA ABI and missing self-test", async () => {
   await assert.rejects(
-    loadShieldPolicy({ bundle: signedBundle({ opaAbi: "999" }), opa: allowOpa }),
+    loadTestPolicy({ bundle: signedBundle({ opaAbi: "999" }) }),
     /ABI/i,
   );
   await assert.rejects(
-    loadShieldPolicy({ bundle: signedBundle({ selfTest: undefined }), opa: allowOpa }),
+    loadTestPolicy({ bundle: signedBundle({ selfTest: undefined }) }),
     /self-test/i,
   );
   await assert.rejects(
-    loadShieldPolicy({ bundle: signedBundle({ opaWasmSdkVersion: "0.0.0" }), opa: allowOpa }),
+    loadTestPolicy({ bundle: signedBundle({ opaWasmSdkVersion: "0.0.0" }) }),
     /runtime version/i,
   );
 });
 
 test("policy evaluator rejects unsupported actions and failing self-tests", async () => {
   await assert.rejects(
-    loadShieldPolicy({ bundle: signedBundle(), opa: fakeOpa({ ...allowDecision, action: "allow_all" }) }),
+    loadTestPolicy({ opa: fakeOpa({ ...allowDecision, action: "allow_all" }) }),
     /action/i,
   );
   await assert.rejects(
-    loadShieldPolicy({ bundle: signedBundle(), opa: fakeOpa({ ...allowDecision, action: "block", reasonCodes: ["fixture"] }) }),
+    loadTestPolicy({ opa: fakeOpa({ ...allowDecision, action: "block", reasonCodes: ["fixture"] }) }),
     /self-test/i,
   );
 });
 
 test("a failed replacement activation clears a prior allow evaluator", async () => {
   const activation = createShieldPolicyActivation();
-  await activation.activate({ bundle: signedBundle(), opa: allowOpa });
+  await activation.activate({ bundle: signedBundle(), publicKey: keyPair.publicKey, opa: allowOpa });
   assert.notEqual(activation.current(), null);
   await assert.rejects(
-    activation.activate({ bundle: { ...signedBundle(), wasm: Buffer.from("drift") }, opa: allowOpa }),
+    activation.activate({ bundle: { ...signedBundle(), wasm: Buffer.from("drift") }, publicKey: keyPair.publicKey, opa: allowOpa }),
     /digest/i,
   );
   assert.equal(activation.current(), null);
+});
+
+test("policy trust root is injected independently and must be an Ed25519 public key", async () => {
+  await assert.rejects(
+    loadShieldPolicy({ bundle: { ...signedBundle(), trustedPublicKeys: { attacker: keyPair.publicKey } }, opa: allowOpa }),
+    /public key/i,
+  );
+  await assert.rejects(
+    loadTestPolicy({ publicKey: generateKeyPairSync("rsa", { modulusLength: 2048 }).publicKey }),
+    /Ed25519/i,
+  );
+  await assert.rejects(
+    loadTestPolicy({ publicKey: keyPair.privateKey }),
+    /public key/i,
+  );
+});
+
+test("default OPA SDK evaluates an OPA-compiled Wasm fixture", async () => {
+  const policy = await loadShieldPolicy({
+    bundle: signedBundle({}, compiledWasm),
+    publicKey: keyPair.publicKey,
+  });
+  assert.deepEqual(await policy.evaluate({ lane: "subscription" }), allowDecision);
 });
 
 test("policy state exposes only version and detector versions", async () => {
@@ -110,13 +134,13 @@ function fakeOpa(result) {
   };
 }
 
-function signedBundle(overrides = {}) {
+function signedBundle(overrides = {}, artifact = wasm) {
   const manifest = {
     formatVersion: 1,
     version: "2026.09.02.1",
     opaAbi: "1",
     opaWasmSdkVersion: "1.8.0",
-    wasmSha256: createHash("sha256").update(wasm).digest("hex"),
+    wasmSha256: createHash("sha256").update(artifact).digest("hex"),
     detectorVersions: { gitleaks: "8.24.0" },
     selfTest: { input: { lane: "self-test" }, expected: allowDecision },
     ...overrides,
@@ -124,11 +148,13 @@ function signedBundle(overrides = {}) {
   const signature = sign(null, Buffer.from(canonicalJson(manifest)), keyPair.privateKey).toString("base64");
   return {
     manifest,
-    wasm,
+    wasm: artifact,
     signature,
-    trustedPublicKeys: { "shield-test-key": keyPair.publicKey.export({ format: "pem", type: "spki" }) },
-    signingKeyId: "shield-test-key",
   };
+}
+
+async function loadTestPolicy({ bundle = signedBundle(), publicKey = keyPair.publicKey, opa = allowOpa } = {}) {
+  return loadShieldPolicy({ bundle, publicKey, opa });
 }
 
 function canonicalJson(value) {
