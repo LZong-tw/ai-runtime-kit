@@ -294,7 +294,7 @@ test("daemon composes provisioned Privacy findings and sends only a valid policy
   assert.doesNotMatch(JSON.stringify(decisions[0]), /privacy-raw/);
 });
 
-test("daemon uses the signed OPA policy to redact canonical Privacy findings before upstream forwarding", async (t) => {
+test("daemon uses the signed OPA policy to redact a non-email Privacy finding before upstream forwarding", async (t) => {
   let upstreamBody = null;
   const upstream = createServer((request, response) => {
     const chunks = [];
@@ -309,7 +309,7 @@ test("daemon uses the signed OPA policy to redact canonical Privacy findings bef
   await once(upstream, "listening");
   t.after(() => new Promise((resolve) => upstream.close(resolve)));
   const address = upstream.address();
-  const original = '{"content":"alice@example.com"}';
+  const original = '{"content":"555-0100"}';
   let evaluatedDecision = null;
   const daemon = await startDaemon({
     config: { ...config, targetOrigin: `http://127.0.0.1:${address.port}` },
@@ -321,9 +321,9 @@ test("daemon uses the signed OPA policy to redact canonical Privacy findings bef
       async scan() {
         return {
           status: "ok",
-          findings: [{ label: "email", count: 1 }],
-          redactions: [{ label: "email", count: 1, spans: [{ start: 12, end: 29 }] }],
-          redactedBody: Buffer.from('{"content":"[EMAIL]"}'),
+          findings: [{ label: "phone", count: 1 }],
+          redactions: [{ label: "phone", count: 1, spans: [{ start: 12, end: 20 }] }],
+          redactedBody: Buffer.from('{"content":"[PHONE]"}'),
         };
       },
       close() {},
@@ -350,7 +350,7 @@ test("daemon uses the signed OPA policy to redact canonical Privacy findings bef
 
   assert.equal(evaluatedDecision?.action, "redact");
   assert.equal(response.status, 200);
-  assert.equal(upstreamBody, '{"content":"[EMAIL]"}');
+  assert.equal(upstreamBody, '{"content":"[PHONE]"}');
   assert.notEqual(upstreamBody, original);
 });
 

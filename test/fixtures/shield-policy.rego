@@ -48,7 +48,7 @@ decision := {
   input.repositoryClass == "internal"
   input.destinationClass == "subscription"
   not has_restricted_path
-  not has_pii_redaction
+  not has_pii_findings
 }
 
 decision := {
@@ -60,7 +60,7 @@ decision := {
   count(input.secretFindings) == 0
   input.repositoryClass != "restricted"
   not has_restricted_path
-  has_pii_redaction
+  has_pii_findings
 }
 
 has_restricted_path if {
@@ -68,10 +68,8 @@ has_restricted_path if {
   restricted_path_class(pathClass)
 }
 
-has_pii_redaction if {
-  some finding in input.piiFindings
-  finding.category == "email"
-  finding.count > 0
+has_pii_findings if {
+  count(input.piiFindings) > 0
 }
 
 restricted_path_class("environment")
