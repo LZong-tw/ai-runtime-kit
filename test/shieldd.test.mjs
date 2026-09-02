@@ -103,6 +103,50 @@ test("daemon closes the proxy when publishing the bound identity fails", async (
   assert.deepEqual(calls, ["close"]);
 });
 
+test("daemon normalizes conflicting launcher destination class before policy evaluation", async () => {
+  const policyInputs = [];
+  const proxyDecisions = [];
+  await startShieldDaemon({
+    config: {
+      ...config,
+      launcherContext: { ...config.launcherContext, destinationClass: "managed" },
+    },
+    paths,
+    readPolicyBundle: async () => ({ bundle: {}, publicKey: "pinned-ed25519-public-key" }),
+    loadPolicy: async () => ({
+      ...policy,
+      async evaluate(input) {
+        policyInputs.push(input);
+        return { action: "require_approval", reasonCodes: ["internal_repository_code"], approvalEligible: true, redactions: [] };
+      },
+    }),
+    createScanner: async () => ({ version: "8.24.0", scan: async () => ({ findings: [] }) }),
+    writePolicyState: async () => {},
+    startProxy: async ({ decide }) => {
+      proxyDecisions.push(await decide({ body: Buffer.alloc(0) }));
+      return { origin: "http://127.0.0.1:8811", close: async () => {} };
+    },
+    writeIdentity: async () => {},
+  });
+
+  assert.equal(policyInputs[0].destinationClass, "subscription");
+  assert.equal(proxyDecisions[0].destinationClass, "subscription");
+});
+
+test("daemon rejects a target class that conflicts with its lane before policy activation", async () => {
+  let loaded = false;
+  await assert.rejects(
+    startShieldDaemon({
+      config: { ...config, targetClass: "managed" },
+      paths,
+      readPolicyBundle: async () => ({ bundle: {}, publicKey: "pinned-ed25519-public-key" }),
+      loadPolicy: async () => { loaded = true; return policy; },
+    }),
+    /targetClass must match/i,
+  );
+  assert.equal(loaded, false);
+});
+
 test("proxy requests reach Gitleaks, category-only classification, and policy evaluation", async (t) => {
   const upstream = createServer(async (request, response) => {
     request.resume();
