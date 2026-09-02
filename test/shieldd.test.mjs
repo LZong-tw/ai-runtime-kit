@@ -140,7 +140,7 @@ test("proxy requests reach Gitleaks, category-only classification, and policy ev
     body: '{"content":"fixture-private-key"}',
   });
 
-  assert.equal(response.status, 403);
+  assert.equal(response.status, 503);
   assert.deepEqual(scannerCalls, ['{"content":"fixture-private-key"}']);
   assert.deepEqual(policyInputs, [{
     lane: "subscription",
@@ -154,7 +154,7 @@ test("proxy requests reach Gitleaks, category-only classification, and policy ev
   assert.doesNotMatch(JSON.stringify(policyInputs), /fixture-private-key|aaaa/);
 });
 
-test("missing launcher context becomes unknown category facts instead of a decision 503", async (t) => {
+test("missing launcher context reaches policy facts but fails closed without durable audit", async (t) => {
   const upstream = createServer((request, response) => {
     request.resume();
     response.end('{"ok":true}');
@@ -188,7 +188,7 @@ test("missing launcher context becomes unknown category facts instead of a decis
     body: '{"content":"ordinary"}',
   });
 
-  assert.equal(response.status, 200);
+  assert.equal(response.status, 503);
   assert.deepEqual(policyInputs, [{
     lane: "subscription",
     destinationClass: "subscription",
