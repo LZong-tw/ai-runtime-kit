@@ -31,7 +31,7 @@ import { createPiAuditRuntime } from "./audit/adapters/pi-extension.mjs";
 import { runAuditCli } from "./audit/cli.mjs";
 import { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
 import { runShieldCli } from "./shield/cli.mjs";
-import { buildShieldChildEnv, ensureShieldReady } from "./shield/service.mjs";
+import { buildShieldChildEnv, ensureShieldReady, openShieldApprovalChannel, registerShieldApprovalChannel } from "./shield/service.mjs";
 
 export { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
 export { tailHeadroomSavings } from "./audit/reconcile/headroom.mjs";
@@ -1505,7 +1505,17 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     const spawnCommand = options.spawnCommand ?? spawnCommandAsync;
     const inherited = { ...(options.env ?? process.env) };
     for (const key of plan.launch.clearEnv ?? []) delete inherited[key];
+    let shieldApprovalChannel = null;
     try {
+      if (shieldReady) {
+        shieldApprovalChannel = await (options.openShieldApprovalChannel ?? openShieldApprovalChannel)({
+          approvalBroker: options.shieldApprovalBroker,
+          createApprovalChannel: options.createShieldApprovalChannel,
+        });
+        if (shieldApprovalChannel !== null) {
+          await (options.registerShieldApprovalChannel ?? registerShieldApprovalChannel)({ ready: shieldReady, channel: shieldApprovalChannel });
+        }
+      }
       const childEnv = {
         ...inherited,
         ...plan.launch.env,
@@ -1528,15 +1538,20 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
         stdio: "inherit",
       });
     } catch (error) {
+      await shieldApprovalChannel?.close?.();
       await middleware?.close();
       throw error;
     }
-    childStatus = await monitorChildLifecycle(middleware, child, {
-      backgroundHostDetector: options.backgroundHostDetector,
-      backgroundMiddlewareGraceMs: options.backgroundMiddlewareGraceMs,
-      preserveForBackground: options.preserveMiddlewareForBackground !== false,
-      stderr: options.stderr ?? process.stderr,
-    });
+    try {
+      childStatus = await monitorChildLifecycle(middleware, child, {
+        backgroundHostDetector: options.backgroundHostDetector,
+        backgroundMiddlewareGraceMs: options.backgroundMiddlewareGraceMs,
+        preserveForBackground: options.preserveMiddlewareForBackground !== false,
+        stderr: options.stderr ?? process.stderr,
+      });
+    } finally {
+      await shieldApprovalChannel?.close?.();
+    }
   }
 
   if (options.externalClient === true) {

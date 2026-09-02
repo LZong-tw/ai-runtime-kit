@@ -1,8 +1,9 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { readShieldIdentity, shieldPaths } from "./paths.mjs";
+import { readShieldIdentity, readShieldPolicyState, shieldPaths } from "./paths.mjs";
 import { provisionShieldAssets } from "./provision.mjs";
+import { installShieldPolicyProvision } from "./policy-bundle.mjs";
 import {
   ensureShieldReady,
   inspectShieldService,
@@ -10,6 +11,7 @@ import {
   launchShieldChild,
   startShieldService,
   stopShieldService,
+  transitionShieldPolicy,
 } from "./service.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -39,6 +41,7 @@ const SHIELD_COMMANDS = Object.freeze({
   stop: (_argv, shield) => shield.stop(),
   status: (_argv, shield) => shield.status(),
   doctor: (_argv, shield) => shield.doctor(),
+  policy: (argv, shield) => argv[0] === "status" ? shield.policyStatus() : shield.policyInstall(parsePolicyInstall(argv)),
   privacy: (argv, shield) => shield.privacyProvision(parsePrivacyProvision(argv)),
   launch: (argv, shield) => {
     const launch = parseLaunch(argv);
@@ -80,6 +83,20 @@ async function createDefaultShieldDependencies(dependencies) {
         paths,
       });
       return { state: write ? "degraded" : "preview", write, provisioned: write };
+    },
+    async policyInstall({ bundlePath, publicKeyPath, write }) {
+      const { loadShieldPolicy } = await import("./policy.mjs");
+      const preview = await installShieldPolicyProvision({ bundlePath, publicKeyPath, paths, loadPolicy });
+      if (!write) return { state: "preview", version: preview.version, detectorVersions: preview.detectorVersions, write: false, restarted: false };
+      const result = await transitionShieldPolicy({
+        ...common,
+        installPolicy: () => installShieldPolicyProvision({ bundlePath, publicKeyPath, write: true, paths, loadPolicy }),
+      });
+      return { state: "degraded", version: result.version, detectorVersions: result.detectorVersions, write: true };
+    },
+    async policyStatus() {
+      const state = await readShieldPolicyState({ paths, io: dependencies.io });
+      return state ? { state: "healthy", version: state.version, detectorVersions: state.detectorVersions } : { state: "stopped", installed: false };
     },
     async launch({ lane, command, args }) {
       const ready = await ensureShieldReady({ lane, env, paths, io: dependencies.io, inspectService: dependencies.inspectService, isProcessAlive: dependencies.isProcessAlive, probeShield: dependencies.probeShield });
@@ -128,8 +145,26 @@ function parsePrivacyProvision(argv) {
   return { bundlePath: values["--bundle"], gitleaksPath: values["--gitleaks"], write };
 }
 
+function parsePolicyInstall(argv) {
+  if (argv[0] !== "install") throw new Error("usage: shield policy install --bundle /absolute/policy-bundle --public-key /absolute/policy-public-key [--write]");
+  const write = argv.includes("--write");
+  const names = ["--bundle", "--public-key"];
+  const values = Object.fromEntries(names.map((name) => [name, null]));
+  for (let index = 1; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (token === "--write") continue;
+    if (!names.includes(token) || values[token] !== null || typeof argv[index + 1] !== "string" || argv[index + 1].startsWith("--")) {
+      throw new Error("usage: shield policy install --bundle /absolute/policy-bundle --public-key /absolute/policy-public-key [--write]");
+    }
+    values[token] = argv[index + 1];
+    index += 1;
+  }
+  if (!values["--bundle"] || !values["--public-key"]) throw new Error("usage: shield policy install --bundle /absolute/policy-bundle --public-key /absolute/policy-public-key [--write]");
+  return { bundlePath: values["--bundle"], publicKeyPath: values["--public-key"], write };
+}
+
 function renderShieldHelp() {
-  return `Commands:\n  shield install [--write]\n  shield start\n  shield stop\n  shield status\n  shield doctor\n  shield privacy provision --bundle /absolute/privacy-manifest --gitleaks /absolute/gitleaks [--write]\n  shield launch --lane subscription|managed -- command [args...]\n`;
+  return `Commands:\n  shield install [--write]\n  shield start\n  shield stop\n  shield status\n  shield doctor\n  shield policy <status|install --bundle /absolute/policy-bundle --public-key /absolute/policy-public-key [--write]>\n  shield privacy provision --bundle /absolute/privacy-manifest --gitleaks /absolute/gitleaks [--write]\n  shield launch --lane subscription|managed -- command [args...]\n`;
 }
 
 function renderShieldResult(command, result = {}) {

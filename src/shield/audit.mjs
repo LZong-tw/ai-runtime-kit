@@ -29,6 +29,14 @@ export function createShieldDecisionRecorder({ client = null, spool = null, mast
   }
 
   return Object.freeze({
+    async isReady() {
+      if (!spool) return client !== null;
+      try {
+        return (await spool.stats())?.atCapacity !== true;
+      } catch {
+        return false;
+      }
+    },
     async recordShieldDecision(decision) {
       const event = buildShieldDecisionEvent(decision, { now });
       if (client) {

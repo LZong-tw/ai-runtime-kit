@@ -1,5 +1,8 @@
 import { createHash, createPrivateKey, createPublicKey, KeyObject, verify } from "node:crypto";
 import { lstat, readFile } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
+
+import { invalidateShieldPolicyBinding, writeShieldPolicyProvision } from "./paths.mjs";
 
 export const SHIELD_POLICY_FORMAT_VERSION = 1;
 export const SHIELD_OPA_WASM_SDK_VERSION = "1.8.0";
@@ -65,6 +68,27 @@ export async function readShieldPolicyProvision({ paths, io = { lstat, readFile 
     bundle: Object.freeze({ manifest: stored.manifest, signature: stored.signature, wasm: decodeArtifact(stored.wasm) }),
     publicKey,
   });
+}
+
+export async function installShieldPolicyProvision({ bundlePath, publicKeyPath, write = false, paths, io = { lstat, readFile }, stateIo, loadPolicy } = {}) {
+  if (typeof bundlePath !== "string" || !isAbsolute(bundlePath) || resolve(bundlePath) !== bundlePath
+    || typeof publicKeyPath !== "string" || !isAbsolute(publicKeyPath) || resolve(publicKeyPath) !== publicKeyPath) {
+    throw new Error("shield policy source paths must be canonical and absolute");
+  }
+  const [bundleText, publicKey] = await Promise.all([readPrivatePolicyFile(bundlePath, io), readPrivatePolicyFile(publicKeyPath, io)]);
+  let stored;
+  try { stored = JSON.parse(bundleText); } catch { throw new Error("shield policy bundle is invalid JSON"); }
+  if (!stored || typeof stored !== "object" || Array.isArray(stored) || Object.keys(stored).length !== 3 || !Object.hasOwn(stored, "manifest") || !Object.hasOwn(stored, "signature") || !Object.hasOwn(stored, "wasm")) {
+    throw new Error("shield policy bundle is malformed");
+  }
+  const bundle = Object.freeze({ manifest: stored.manifest, signature: stored.signature, wasm: decodeArtifact(stored.wasm) });
+  if (typeof loadPolicy !== "function") throw new TypeError("shield policy installer requires a loader");
+  const policy = await loadPolicy({ bundle, publicKey });
+  if (write) {
+    await invalidateShieldPolicyBinding({ paths, io: stateIo });
+    await writeShieldPolicyProvision({ paths, bundleText, publicKey, io: stateIo });
+  }
+  return Object.freeze({ version: policy.version, detectorVersions: policy.detectorVersions, write });
 }
 
 export function canonicalJson(value) {

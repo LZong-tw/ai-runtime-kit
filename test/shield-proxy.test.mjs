@@ -1,12 +1,19 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer, request as httpRequest } from "node:http";
+import { createServer as createNetServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 
 import { startShieldProxy } from "../src/shield/proxy.mjs";
+import { createApprovalBroker } from "../src/shield/approval.mjs";
+import { approvalChannelRegistration, createApprovalChannel } from "../src/shield/approval-channel.mjs";
 
 const CAPABILITY = "c".repeat(32);
+const CONTROL_CAPABILITY = "d".repeat(32);
 
 test("proxy forwards only after allow and never emits OAuth", async (t) => {
   const events = [];
@@ -101,12 +108,28 @@ test("readiness probe authenticates the live loopback listener without policy or
   assert.equal(upstreamCalls, 0);
 });
 
+test("readiness probe fails closed when durable audit storage is unavailable", async (t) => {
+  const upstream = await startFixture(t, async (_request, response) => response.end());
+  const shield = await startShield(t, {
+    targetOrigin: upstream.origin,
+    decide: async () => ({ action: "deny" }),
+    isReady: async () => false,
+  });
+
+  const ready = await fetch(`${shield.origin}/_airkit/shield/ready`, {
+    headers: { "x-airkit-shield": CAPABILITY },
+  });
+
+  assert.equal(ready.status, 503);
+  assert.deepEqual(await ready.json(), { error: { code: "shield_unavailable" } });
+});
+
 test("proxy has a loopback listener and refuses malformed fixed targets", async (t) => {
   const upstream = await startFixture(t, async (_request, response) => response.end());
   const shield = await startShield(t, { targetOrigin: upstream.origin, decide: async () => ({ action: "deny" }) });
   assert.equal(new URL(shield.origin).hostname, "127.0.0.1");
   await assert.rejects(
-    startShieldProxy({ capability: CAPABILITY, targetOrigin: "https://user:password@example.test", decide: async () => ({ action: "deny" }) }),
+    startShieldProxy({ capability: CAPABILITY, controlCapability: CONTROL_CAPABILITY, targetOrigin: "https://user:password@example.test", decide: async () => ({ action: "deny" }) }),
     /target origin/i,
   );
 });
@@ -515,9 +538,89 @@ test("proxy scopes approval with evaluated lane, destination, and policy version
   assert.doesNotMatch(JSON.stringify(terminal), /body-secret|digest/);
 });
 
+test("proxy obtains one approval through the launcher-registered private channel and ignores channel headers upstream", async (t) => {
+  let upstreamHeaders = null;
+  const upstream = await startFixture(t, async (request, response) => {
+    upstreamHeaders = request.headers;
+    request.resume();
+    response.end('{"ok":true}');
+  });
+  const directory = await mkdtemp(join(tmpdir(), "airkit-shield-approval-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const channel = await createApprovalChannel({
+    directory,
+    capability: "a".repeat(32),
+    broker: createApprovalBroker({ tty: { interactive: true, write() {}, prompt: async () => "y" } }),
+  });
+  t.after(() => channel.close());
+  const shield = await startShield(t, {
+    targetOrigin: upstream.origin,
+    decide: async () => ({ action: "require_approval", reasonCodes: ["internal-subscription"], lane: "subscription", destinationClass: "subscription", bundleVersion: "policy-1", detectorVersions: { gitleaks: "8", privacy: "1" } }),
+  });
+  await registerApprovalChannel(shield, channel);
+  const headers = { "x-airkit-shield": CAPABILITY };
+  assert.equal((await fetch(`${shield.origin}/v1/messages`, { method: "POST", headers, body: '{"content":"ordinary"}' })).status, 200);
+  assert.equal((await fetch(`${shield.origin}/v1/messages`, { method: "POST", headers, body: '{"content":"ordinary"}' })).status, 403);
+  assert.equal(upstreamHeaders["x-airkit-shield-approval"], undefined);
+  assert.equal(upstreamHeaders["x-airkit-shield-approval-socket"], undefined);
+});
+
+test("proxy blocks a client-spoofed approval socket even when it reports approval", async (t) => {
+  let upstreamCalls = 0;
+  const upstream = await startFixture(t, (_request, response) => { upstreamCalls += 1; response.end(); });
+  const directory = await mkdtemp(join(tmpdir(), "airkit-shield-approval-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const channel = await createApprovalChannel({
+    directory,
+    capability: "a".repeat(32),
+    broker: createApprovalBroker({ tty: { interactive: true, write() {}, prompt: async () => "n" } }),
+  });
+  t.after(() => channel.close());
+  const attacker = createNetServer((socket) => socket.end('{"approved":true}'));
+  const attackerSocket = join(directory, "attacker.sock");
+  await new Promise((resolve) => attacker.listen(attackerSocket, resolve));
+  t.after(() => new Promise((resolve) => attacker.close(resolve)));
+  const shield = await startShield(t, {
+    targetOrigin: upstream.origin,
+    decide: async () => ({ action: "require_approval", reasonCodes: ["internal-subscription"], lane: "subscription", destinationClass: "subscription", bundleVersion: "policy-1", detectorVersions: { gitleaks: "8", privacy: "1" } }),
+  });
+  const normalTransportRegistration = await fetch(`${shield.origin}/_airkit/shield/approval-channel`, {
+    method: "POST",
+    headers: { "x-airkit-shield": CAPABILITY, "content-type": "application/json" },
+    body: JSON.stringify({ socketPath: attackerSocket, capability: "b".repeat(32) }),
+  });
+  assert.equal(normalTransportRegistration.status, 401);
+  const beforeRegistration = await fetch(`${shield.origin}/v1/messages`, {
+    method: "POST", headers: { "x-airkit-shield": CAPABILITY }, body: '{"content":"ordinary"}',
+  });
+  assert.equal(beforeRegistration.status, 403);
+  await registerApprovalChannel(shield, channel);
+  const response = await fetch(`${shield.origin}/v1/messages`, {
+    method: "POST",
+    headers: {
+      "x-airkit-shield": CAPABILITY,
+      "x-airkit-shield-approval-socket": attackerSocket,
+      "x-airkit-shield-approval": "b".repeat(32),
+    },
+    body: '{"content":"ordinary"}',
+  });
+  assert.equal(response.status, 403);
+  assert.equal(upstreamCalls, 0);
+});
+
+async function registerApprovalChannel(shield, channel) {
+  const response = await fetch(`${shield.origin}/_airkit/shield/approval-channel`, {
+    method: "POST",
+    headers: { "x-airkit-shield-control": CONTROL_CAPABILITY, "content-type": "application/json" },
+    body: JSON.stringify(approvalChannelRegistration(channel)),
+  });
+  assert.equal(response.status, 204);
+}
+
 async function startShield(t, options) {
   const shield = await startShieldProxy({
     capability: CAPABILITY,
+    controlCapability: CONTROL_CAPABILITY,
     ...(options.recordShieldDecision || options.onDecision ? options : { ...options, recordShieldDecision: async () => {} }),
   });
   t.after(() => shield.close());

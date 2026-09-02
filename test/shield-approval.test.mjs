@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { createApprovalBroker } from "../src/shield/approval.mjs";
+import { createApprovalChannel, requestApprovalChannel } from "../src/shield/approval-channel.mjs";
 
 const scope = Object.freeze({
   requestId: "request-1",
@@ -71,6 +75,29 @@ test("expired grants cannot be consumed", async () => {
   clock.advance(11);
   assert.equal(broker.consume(grant, scope), false);
   assert.equal(grant.consumed, false);
+});
+
+test("launcher-owned approval channel consumes a capability once and never exposes a grant", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "airkit-shield-approval-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const broker = createApprovalBroker({
+    tty: { interactive: true, write() {}, prompt: async () => "y" },
+    clock: fixedClock(),
+  });
+  const channel = await createApprovalChannel({ broker, directory, capability: "c".repeat(32) });
+  t.after(() => channel.close());
+  assert.equal(await requestApprovalChannel({ ...channel, scope }), true);
+  assert.equal(await requestApprovalChannel({ ...channel, scope }), false, "channel capability is one-time");
+  assert.doesNotMatch(JSON.stringify(channel), /request-1|aaaaaaaa/);
+});
+
+test("launcher-owned approval channel blocks headless and mismatched capabilities", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "airkit-shield-approval-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const channel = await createApprovalChannel({ broker: createApprovalBroker({ tty: null, clock: fixedClock() }), directory, capability: "c".repeat(32) });
+  t.after(() => channel.close());
+  assert.equal(await requestApprovalChannel({ ...channel, scope }), false);
+  assert.equal(await requestApprovalChannel({ ...channel, capability: "d".repeat(32), scope }), false);
 });
 
 function fixedClock() {

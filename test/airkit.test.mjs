@@ -5117,11 +5117,19 @@ test("enabled Shield replaces only the spawned AirClaude endpoint and capability
   const capability = "fixture-capability-012345678901234567890";
   const events = [];
   const spawnCalls = [];
+  const approvalChannel = {
+    socketPath: "/tmp/airkit-shield-approval-fixture.sock",
+    capability: "a".repeat(32),
+    async close() { events.push("approval-close"); },
+  };
   const saved = [];
   const launchEnv = {
     ANTHROPIC_API_BASE_URL: "https://stale-provider.invalid",
     ANTHROPIC_BASE_URL: "https://stale-provider.invalid",
     CLAUDE_CODE_OAUTH_TOKEN: "subscription-oauth-must-not-reach-managed",
+    AIRKIT_SHIELD_CONTROL_CAPABILITY: "control-must-not-reach-child",
+    AIRKIT_SHIELD_APPROVAL_SOCKET: "/tmp/attacker.sock",
+    ANTHROPIC_CUSTOM_HEADERS: "x-airkit-shield-control: control-must-not-reach-child\nx-airkit-shield-approval: attacker\nx-airkit-mode: auto",
     DEMO_API_KEY: "runtime-secret",
     HOME: configDir,
   };
@@ -5144,6 +5152,15 @@ test("enabled Shield replaces only the spawned AirClaude endpoint and capability
           targetClass: "managed",
         };
       },
+      openShieldApprovalChannel: async () => {
+        events.push("approval-open");
+        return approvalChannel;
+      },
+      registerShieldApprovalChannel: async ({ ready, channel }) => {
+        events.push("approval-register");
+        assert.equal(ready.capability, capability);
+        assert.equal(channel, approvalChannel);
+      },
       env: launchEnv,
       runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
       runtimeVersions: passingRuntimeVersions(),
@@ -5154,7 +5171,7 @@ test("enabled Shield replaces only the spawned AirClaude endpoint and capability
       },
     });
 
-    assert.deepEqual(events, ["gateway-ready", "shield-ready", "spawn"]);
+    assert.deepEqual(events, ["gateway-ready", "shield-ready", "approval-open", "approval-register", "spawn", "approval-close"]);
     assert.equal(spawnCalls[0].env.ANTHROPIC_API_BASE_URL, "http://127.0.0.1:8811");
     assert.equal(spawnCalls[0].env.ANTHROPIC_BASE_URL, "http://127.0.0.1:8811");
     assert.equal(
@@ -5162,10 +5179,13 @@ test("enabled Shield replaces only the spawned AirClaude endpoint and capability
       `x-airkit-mode: auto\nx-airkit-shield: ${capability}`,
     );
     assert.equal(spawnCalls[0].env.AIRKIT_SHIELD_CAPABILITY, undefined);
+    assert.equal(spawnCalls[0].env.AIRKIT_SHIELD_CONTROL_CAPABILITY, undefined);
+    assert.equal(spawnCalls[0].env.AIRKIT_SHIELD_APPROVAL_SOCKET, undefined);
     assert.equal(spawnCalls[0].env.CLAUDE_CODE_OAUTH_TOKEN, undefined);
     assert.doesNotMatch(spawnCalls[0].args.join(" "), /fixture-capability|gateway-key/);
     assert.doesNotMatch(JSON.stringify(saved), /fixture-capability/);
     assert.doesNotMatch(JSON.stringify(result), /fixture-capability/);
+    assert.doesNotMatch(JSON.stringify(result), /approval-fixture|aaaaaaaa/);
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }
