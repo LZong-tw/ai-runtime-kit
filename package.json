@@ -38,7 +38,7 @@
   ],
   "scripts": {
     "precheck": "node --check src/audit/event.mjs",
-    "check": "node --check src/airkit.mjs && node --check scripts/verify-audit-core.mjs && node --check scripts/verify-audit-clients.mjs && node --check scripts/capture-codex-audit-contract.mjs && node --check scripts/capture-pi-audit-contract.mjs && node --check src/audit/ccr-plugin.mjs && node --check src/audit/cli.mjs && node --check src/audit/claude-hook-runtime.mjs && node --check src/audit/correlation.mjs && node --check src/audit/crypto.mjs && node --check src/audit/daemon.mjs && node --check src/audit/export.mjs && node --check src/audit/keychain.mjs && node --check src/audit/migrations.mjs && node --check src/audit/paths.mjs && node --check src/audit/pricing.mjs && node --check src/audit/query.mjs && node --check src/audit/redaction.mjs && node --check src/audit/reconcile/codex.mjs && node --check src/audit/reconcile/headroom.mjs && node --check src/audit/registry.mjs && node --check src/audit/retention.mjs && node --check src/audit/reveal-export.mjs && node --check src/audit/reveal.mjs && node --check src/audit/service.mjs && node --check src/audit/spool.mjs && node --check src/audit/store.mjs && node --check src/audit/transport.mjs && node --check src/auditd.mjs && node --check src/audit/claude-hook.mjs && node --check src/audit/reconcile/ccr.mjs && node --check src/audit/reconcile/claude-code.mjs && node --check src/audit/reconcile/opencode.mjs && node --check src/shield/cli.mjs && node --check src/shield/service.mjs && node --check src/shieldd.mjs",
+    "check": "node --check src/airkit.mjs && node --check scripts/verify-audit-core.mjs && node --check scripts/verify-audit-clients.mjs && node --check scripts/capture-codex-audit-contract.mjs && node --check scripts/capture-pi-audit-contract.mjs && node --check src/audit/ccr-plugin.mjs && node --check src/audit/cli.mjs && node --check src/audit/claude-hook-runtime.mjs && node --check src/audit/correlation.mjs && node --check src/audit/crypto.mjs && node --check src/audit/daemon.mjs && node --check src/audit/export.mjs && node --check src/audit/keychain.mjs && node --check src/audit/migrations.mjs && node --check src/audit/paths.mjs && node --check src/audit/pricing.mjs && node --check src/audit/query.mjs && node --check src/audit/redaction.mjs && node --check src/audit/reconcile/codex.mjs && node --check src/audit/reconcile/headroom.mjs && node --check src/audit/registry.mjs && node --check src/audit/retention.mjs && node --check src/audit/reveal-export.mjs && node --check src/audit/reveal.mjs && node --check src/audit/service.mjs && node --check src/audit/spool.mjs && node --check src/audit/store.mjs && node --check src/audit/transport.mjs && node --check src/auditd.mjs && node --check src/audit/claude-hook.mjs && node --check src/audit/reconcile/ccr.mjs && node --check src/audit/reconcile/claude-code.mjs && node --check src/audit/reconcile/opencode.mjs && node --check src/shield/cli.mjs && node --check src/shield/paths.mjs && node --check src/shield/policy-bundle.mjs && node --check src/shield/policy.mjs && node --check src/shield/service.mjs && node --check src/shieldd.mjs",
     "pack:check": "npm pack --dry-run",
     "test": "node --test",
     "verify:ccr3:e2e": "node scripts/verify-ccr3-e2e.mjs",
@@ -50,5 +50,8 @@
     "node": ">=22.13.0"
   },
   "license": "MIT",
-  "author": "LZong, Lim, Un-tiong <lzong.tw@gmail.com>"
+  "author": "LZong, Lim, Un-tiong <lzong.tw@gmail.com>",
+  "dependencies": {
+    "@open-policy-agent/opa-wasm": "1.8.0"
+  }
 }

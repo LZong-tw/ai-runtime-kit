@@ -16,6 +16,7 @@ export function shieldPaths({ env = process.env, homeDir = homeFromEnv(env), uid
     rootDir: root,
     configPath: childPath(configPath ?? join(root, "config.json"), root, "configPath"),
     identityPath: childPath(identityPath ?? join(root, "identity.json"), root, "identityPath"),
+    policyStatePath: childPath(join(root, "policy-state.json"), root, "policyStatePath"),
     socketPath: childPath(socketPath ?? join(root, "shield.sock"), root, "socketPath"),
     launchAgentPath: launchAgentPath ?? join(home, "Library", "LaunchAgents", `${SHIELD_LABEL}.plist`),
     launchdDomain: `gui/${numericUid(uid)}`,
@@ -48,6 +49,26 @@ export async function readShieldIdentity({ paths, io = defaultIo } = {}) {
   return assertShieldIdentity(identity);
 }
 
+export async function readShieldPolicyState({ paths, io = defaultIo } = {}) {
+  if (!paths?.policyStatePath) throw new TypeError("shield policy state paths are required");
+  assertCanonicalPolicyStatePath(paths);
+  let contents;
+  try {
+    await assertPrivateRegularFile(paths.policyStatePath, io);
+    contents = await io.readFile(paths.policyStatePath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  let state;
+  try {
+    state = JSON.parse(contents);
+  } catch {
+    throw new Error("shield policy state is invalid JSON");
+  }
+  return assertShieldPolicyState(state);
+}
+
 export function assertShieldIdentity(identity) {
   let url;
   try { url = new URL(identity?.origin ?? ""); } catch { url = null; }
@@ -68,6 +89,10 @@ export function assertShieldIdentity(identity) {
   if (typeof identity.generation !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(identity.generation)) {
     throw new Error("shield identity generation is missing or invalid");
   }
+  if (typeof identity.policyVersion !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(identity.policyVersion)) {
+    throw new Error("shield identity policy version is missing or invalid");
+  }
+  const detectorVersions = assertDetectorVersions(identity.detectorVersions, "shield identity");
   return {
     origin: url.origin,
     capability: identity.capability,
@@ -76,7 +101,22 @@ export function assertShieldIdentity(identity) {
     lane: identity.lane,
     generation: identity.generation,
     targetClass: identity.targetClass,
+    policyVersion: identity.policyVersion,
+    detectorVersions,
   };
+}
+
+export function assertShieldPolicyState(state) {
+  if (!state || typeof state !== "object" || Array.isArray(state)) throw new Error("shield policy state is invalid");
+  const keys = Object.keys(state).sort();
+  if (keys.length !== 2 || keys[0] !== "detectorVersions" || keys[1] !== "version") {
+    throw new Error("shield policy state contains unsupported fields");
+  }
+  if (typeof state.version !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(state.version)) {
+    throw new Error("shield policy state version is invalid");
+  }
+  const detectorVersions = assertDetectorVersions(state.detectorVersions, "shield policy state");
+  return Object.freeze({ version: state.version, detectorVersions });
 }
 
 export async function writeShieldIdentity({ paths, identity, io = defaultIo } = {}) {
@@ -90,6 +130,13 @@ export async function writeShieldConfig({ paths, config, io = defaultIo } = {}) 
   if (!paths?.rootDir || !paths.configPath) throw new TypeError("shield configuration paths are required");
   if (!config || typeof config !== "object" || Array.isArray(config)) throw new TypeError("shield configuration must be an object");
   await writePrivateShieldState({ paths, path: paths.configPath, value: config, io });
+}
+
+export async function writeShieldPolicyState({ paths, state, io = defaultIo } = {}) {
+  if (!paths?.rootDir || !paths.policyStatePath) throw new TypeError("shield policy state paths are required");
+  const validated = assertShieldPolicyState(state);
+  await writePrivateShieldState({ paths, path: paths.policyStatePath, value: validated, io });
+  return validated;
 }
 
 async function writePrivateShieldState({ paths, path, value, io }) {
@@ -139,9 +186,24 @@ function assertWritablePaths(paths) {
   if (!canonicalShieldPaths.has(paths)) {
     throw new Error("shield paths must be a canonical object returned by shieldPaths");
   }
-  if (paths.configPath !== join(paths.rootDir, "config.json") || paths.identityPath !== join(paths.rootDir, "identity.json") || paths.socketPath !== join(paths.rootDir, "shield.sock")) {
+  if (paths.configPath !== join(paths.rootDir, "config.json") || paths.identityPath !== join(paths.rootDir, "identity.json") || paths.policyStatePath !== join(paths.rootDir, "policy-state.json") || paths.socketPath !== join(paths.rootDir, "shield.sock")) {
     throw new Error("shield paths must use the canonical AirKit Shield state layout");
   }
+}
+
+function assertCanonicalPolicyStatePath(paths) {
+  if (!canonicalShieldPaths.has(paths) || paths.policyStatePath !== join(paths.rootDir, "policy-state.json")) {
+    throw new Error("shield policy state paths must use the canonical AirKit Shield state layout");
+  }
+}
+
+async function assertPrivateRegularFile(path, io) {
+  const entry = await io.lstat(path);
+  if (entry.isSymbolicLink()) throw new Error("shield policy state must not be a symlink");
+  if (!entry.isFile()) throw new Error("shield policy state must be a regular file");
+  if ((entry.mode & 0o077) !== 0) throw new Error("shield policy state must be private");
+  const ownerUid = process.getuid?.();
+  if (Number.isInteger(ownerUid) && entry.uid !== ownerUid) throw new Error("shield policy state has unexpected owner");
 }
 
 async function ensureDirectory(path, io, ownerUid, privateMode) {
@@ -182,6 +244,18 @@ function absolutePath(value, label) {
 function numericUid(value) {
   if (!/^\d+$/.test(String(value ?? ""))) throw new Error("uid must be a numeric macOS user id");
   return String(value);
+}
+
+function assertDetectorVersions(value, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} detector versions are invalid`);
+  const result = {};
+  for (const [name, version] of Object.entries(value)) {
+    if (!/^[A-Za-z0-9._-]{1,128}$/.test(name) || typeof version !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(version)) {
+      throw new Error(`${label} detector versions are invalid`);
+    }
+    result[name] = version;
+  }
+  return Object.freeze(result);
 }
 
 function homeFromEnv(env) { return typeof env?.HOME === "string" && env.HOME.length > 0 ? env.HOME : homedir(); }

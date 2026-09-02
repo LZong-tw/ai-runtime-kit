@@ -5,7 +5,7 @@ import { chmod, lstat, mkdir, open, readFile, rename, unlink, writeFile } from "
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { readShieldIdentity, shieldPaths, writeShieldConfig } from "./paths.mjs";
+import { readShieldIdentity, readShieldPolicyState, shieldPaths, writeShieldConfig } from "./paths.mjs";
 
 const execFileAsync = promisify(execFile);
 export const SHIELD_SERVICE_LABEL = "com.airkit.shield";
@@ -161,10 +161,22 @@ export async function ensureShieldReady({ lane, expectedTargetOrigin, env = proc
   }
   if (config.generation !== identity.generation) throw new Error("shield configuration generation mismatch; restart the shield service");
   if (config.capability !== identity.capability) throw new Error("shield capability generation mismatch; restart the shield service");
+  const policyState = await readShieldPolicyState({ paths, io });
+  if (!policyState) throw new Error("shield policy state is missing; install a valid policy before launch");
+  if (identity.policyVersion !== policyState.version) throw new Error("shield policy version mismatch; restart the shield service");
+  if (!sameDetectorVersions(identity.detectorVersions, policyState.detectorVersions)) {
+    throw new Error("shield detector version mismatch; restart the shield service");
+  }
   if (!(await probeShield(identity.origin, identity.capability))) {
     throw new Error("shield listener readiness probe failed; restart the shield service");
   }
-  return { origin: identity.origin, capability: identity.capability, targetClass: identity.targetClass };
+  return {
+    origin: identity.origin,
+    capability: identity.capability,
+    targetClass: identity.targetClass,
+    policyVersion: identity.policyVersion,
+    detectorVersions: identity.detectorVersions,
+  };
 }
 
 export async function launchShieldChild({ command, args = [], ready, env = process.env, spawnChild = spawn } = {}) {
@@ -226,7 +238,7 @@ function normalizeShieldTargetOrigin(value, label) {
 }
 
 function assertShieldPaths(paths) {
-  if (!paths?.rootDir || !paths.configPath || !paths.identityPath || !paths.launchAgentPath || !paths.launchdDomain || !paths.launchdTarget) {
+  if (!paths?.rootDir || !paths.configPath || !paths.identityPath || !paths.policyStatePath || !paths.launchAgentPath || !paths.launchdDomain || !paths.launchdTarget) {
     throw new TypeError("shield service paths are required");
   }
   if (!/^gui\/\d+$/.test(paths.launchdDomain) || paths.launchdTarget !== `${paths.launchdDomain}/${SHIELD_SERVICE_LABEL}`) {
@@ -235,9 +247,16 @@ function assertShieldPaths(paths) {
   if (!isAbsolute(paths.launchAgentPath) || basename(paths.launchAgentPath) !== `${SHIELD_SERVICE_LABEL}.plist`) {
     throw new Error("paths.launchAgentPath must be the absolute shield plist path");
   }
-  if (!isAbsolute(paths.rootDir) || paths.configPath !== resolve(paths.rootDir, "config.json") || paths.identityPath !== resolve(paths.rootDir, "identity.json")) {
+  if (!isAbsolute(paths.rootDir) || paths.configPath !== resolve(paths.rootDir, "config.json") || paths.identityPath !== resolve(paths.rootDir, "identity.json") || paths.policyStatePath !== resolve(paths.rootDir, "policy-state.json")) {
     throw new Error("shield service paths must use the canonical shield state layout");
   }
+}
+
+function sameDetectorVersions(actual, expected) {
+  const actualEntries = Object.entries(actual).sort(([left], [right]) => left.localeCompare(right));
+  const expectedEntries = Object.entries(expected).sort(([left], [right]) => left.localeCompare(right));
+  return actualEntries.length === expectedEntries.length
+    && actualEntries.every(([name, version], index) => name === expectedEntries[index][0] && version === expectedEntries[index][1]);
 }
 
 async function ensurePathDrift(plan, io) {
