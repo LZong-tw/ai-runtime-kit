@@ -70,6 +70,7 @@ async function handleShieldRequest({ request, response, capability, target, deci
     return;
   }
 
+  const lifecycle = requestLifecycleSignal(request, response);
   let decision;
   try {
     decision = await decide({
@@ -77,6 +78,7 @@ async function handleShieldRequest({ request, response, capability, target, deci
       path,
       bytes: inspection.bytes,
       body: inspection.body,
+      signal: lifecycle.signal,
     });
   } catch {
     await finish(response, onDecision, startedAt, { action: "unavailable", reason: "decision_failed", bytes: inspection.bytes, status: 503, code: "shield_unavailable" });
@@ -86,8 +88,8 @@ async function handleShieldRequest({ request, response, capability, target, deci
     await finish(response, onDecision, startedAt, { action: "blocked", reason: "denied", bytes: inspection.bytes, status: 403, code: "shield_blocked" });
     return;
   }
+  if (lifecycle.signal.aborted) return;
 
-  const lifecycle = requestLifecycleSignal(request, response);
   try {
     const upstream = await fetch(new URL(path, target), {
       method: request.method,
@@ -96,6 +98,11 @@ async function handleShieldRequest({ request, response, capability, target, deci
       redirect: "manual",
       signal: lifecycle.signal,
     });
+    if (upstream.status >= 300 && upstream.status < 400) {
+      await discardResponse(upstream);
+      await finish(response, onDecision, startedAt, { action: "unavailable", reason: "upstream_redirect", bytes: inspection.bytes, status: 503, code: "shield_unavailable" });
+      return;
+    }
     writeUpstreamHeaders(response, upstream);
     await streamResponse(upstream, response, lifecycle.signal);
     await emitDecision(onDecision, decisionEvent("allow", "allowed", inspection.bytes, startedAt));
@@ -106,6 +113,10 @@ async function handleShieldRequest({ request, response, capability, target, deci
       response.destroy();
     }
   }
+}
+
+async function discardResponse(upstream) {
+  try { await upstream.body?.cancel(); } catch {}
 }
 
 function assertCapability(capability) {
