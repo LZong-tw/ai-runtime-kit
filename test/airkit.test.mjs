@@ -263,7 +263,7 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
       assert.equal(candidate.name, expectedIdentity.name);
       assert.deepEqual(candidate.publishConfig, expectedIdentity.publishConfig);
       assert.deepEqual(candidate.repository, expectedIdentity.repository);
-      assert.equal(candidate.dependencies, undefined);
+      assert.deepEqual(candidate.dependencies, { "@open-policy-agent/opa-wasm": "1.8.0" });
     }
     assert.equal(exportedPackage.version, packageJson.version);
     for (const document of ["README.md", "CLAUDE.md"]) {

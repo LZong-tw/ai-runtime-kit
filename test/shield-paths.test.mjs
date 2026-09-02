@@ -21,6 +21,8 @@ const identity = {
   lane: "subscription",
   generation: "generation-1",
   targetClass: "subscription",
+  policyVersion: "2026.09.02.1",
+  detectorVersions: { gitleaks: "8.24.0" },
 };
 
 test("Shield identity is private and loopback-only", () => {
@@ -45,6 +47,7 @@ test("identity rejects missing capability", async () => {
 test("identity binds a launch lane and configuration generation", () => {
   assert.throws(() => assertShieldIdentity({ ...identity, lane: "managed" }), /targetClass.*lane/i);
   assert.throws(() => assertShieldIdentity({ ...identity, generation: "" }), /generation/i);
+  assert.throws(() => assertShieldIdentity({ ...identity, policyVersion: "" }), /policy version/i);
 });
 
 test("missing identity is reported as null", async () => {

@@ -23,6 +23,7 @@ import { startShieldProxy } from "../src/shield/proxy.mjs";
 
 const capability = "c".repeat(32);
 const generation = "generation-1";
+const policyState = { version: "2026.09.02.1", detectorVersions: { gitleaks: "8.24.0" } };
 
 function fixture(homeDir = "/tmp/airkit-shield-service-home") {
   const paths = shieldPaths({ homeDir, uid: 501 });
@@ -109,7 +110,7 @@ test("stale identity blocks shield launch", async () => {
   try {
     await writeShieldIdentity({
       paths,
-      identity: { origin: "http://127.0.0.1:8811", capability, version: 1, pid: 42, lane: "subscription", generation, targetClass: "subscription" },
+      identity: { origin: "http://127.0.0.1:8811", capability, version: 1, pid: 42, lane: "subscription", generation, targetClass: "subscription", policyVersion: policyState.version, detectorVersions: policyState.detectorVersions },
     });
     await assert.rejects(
       ensureShieldReady({ lane: "subscription", paths, isProcessAlive: async () => false }),
@@ -144,6 +145,8 @@ test("lane and configuration generation mismatches reject readiness before probi
     lane: "subscription",
     generation,
     targetClass: "subscription",
+    policyVersion: policyState.version,
+    detectorVersions: policyState.detectorVersions,
   };
   const io = shieldStateIo(paths, {
     identity,
@@ -174,6 +177,8 @@ test("readiness binds subscription and managed lanes to the expected target orig
     version: 1,
     pid: 42,
     generation,
+    policyVersion: policyState.version,
+    detectorVersions: policyState.detectorVersions,
   };
   const readyOptions = {
     paths,
@@ -218,6 +223,8 @@ test("launchd PID mismatch and failed authenticated listener probe reject readin
     lane: "managed",
     generation,
     targetClass: "managed",
+    policyVersion: policyState.version,
+    detectorVersions: policyState.detectorVersions,
   };
   const io = shieldStateIo(paths, {
     identity,
@@ -244,6 +251,8 @@ test("readiness returns only after the active identity answers the capability pr
     lane: "subscription",
     generation,
     targetClass: "subscription",
+    policyVersion: policyState.version,
+    detectorVersions: policyState.detectorVersions,
   };
   const probes = [];
   const ready = await ensureShieldReady({
@@ -262,7 +271,41 @@ test("readiness returns only after the active identity answers the capability pr
   });
 
   assert.deepEqual(probes, [{ origin: identity.origin, capability }]);
-  assert.deepEqual(ready, { origin: identity.origin, capability, targetClass: "subscription" });
+  assert.deepEqual(ready, {
+    origin: identity.origin,
+    capability,
+    targetClass: "subscription",
+    policyVersion: policyState.version,
+    detectorVersions: policyState.detectorVersions,
+  });
+});
+
+test("readiness rejects a daemon identity bound to a stale policy transition before probing", async () => {
+  const { paths } = fixture();
+  const identity = {
+    origin: "http://127.0.0.1:8811",
+    capability,
+    version: 1,
+    pid: 42,
+    lane: "subscription",
+    generation,
+    targetClass: "subscription",
+    policyVersion: "2026.09.01.1",
+    detectorVersions: policyState.detectorVersions,
+  };
+  let probes = 0;
+  await assert.rejects(
+    ensureShieldReady({
+      lane: "subscription",
+      paths,
+      io: shieldStateIo(paths, { identity, config: { capability, targetOrigin: "https://api.anthropic.com", lane: "subscription", generation } }),
+      inspectService: async () => ({ loaded: true, active: true, pid: 42 }),
+      isProcessAlive: async () => true,
+      probeShield: async () => { probes += 1; return true; },
+    }),
+    /policy version mismatch/i,
+  );
+  assert.equal(probes, 0);
 });
 
 test("start refuses launchd plist path drift before mutating the job", async () => {
@@ -480,11 +523,23 @@ test("airkit shield install preview exits zero, names the service, and performs 
   assert.deepEqual(calls, []);
 });
 
-function shieldStateIo(paths, { identity, config }) {
+function shieldStateIo(paths, { identity, config, state = policyState }) {
   return {
+    async lstat(path) {
+      if (path === paths.policyStatePath) {
+        return {
+          uid: process.getuid?.(),
+          mode: 0o600,
+          isFile: () => true,
+          isSymbolicLink: () => false,
+        };
+      }
+      throw new Error(`unexpected fixture stat path: ${path}`);
+    },
     async readFile(path) {
       if (path === paths.identityPath) return `${JSON.stringify(identity)}\n`;
       if (path === paths.configPath) return `${JSON.stringify(config)}\n`;
+      if (path === paths.policyStatePath) return `${JSON.stringify(state)}\n`;
       throw new Error(`unexpected fixture path: ${path}`);
     },
   };
