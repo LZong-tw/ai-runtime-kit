@@ -9,6 +9,14 @@ Auditd is a collector boundary, not a provider health check and not a
 guarantee that every client is fully observable. Always check the client
 completeness and evidence gaps after enabling it.
 
+Audit is also not Sensitive Egress Shield enforcement. Shield Phase 1 is
+disabled by default and currently supplies only a fail-closed loopback transport
+foundation; it has no production content policy, redaction, or approval flow.
+Audit events can be evidence for a later enforcement policy, but neither a
+healthy audit daemon nor an audit UI row proves that sensitive data was blocked
+or redacted. See the Shield section in [`install.md`](install.md) for its
+coverage and bypass boundary.
+
 ## Browser audit UI
 
 AirKit registers an `AirKit Audit` app on a loopback-only CCR HTTP backend. The

@@ -15,6 +15,48 @@ state, and secret values live outside this repo and must not be copied into git.
 - Verify tools with command checks instead of assuming how they were installed.
 - Run `doctor --profile` after writing files and after any manual repair.
 
+## Sensitive Egress Shield Phase 1
+
+Shield Phase 1 is a loopback-only, fail-closed transport foundation for
+AirKit-managed launches. It is **disabled by default**. It has no selectable
+production allow policy and therefore does not currently scan, redact, approve,
+or enforce sensitive-data decisions. It is not ready to be enabled or marketed
+as protection for source code, prompts, credentials, or other data. Policy
+enforcement is a later phase.
+
+The lifecycle commands are available for inspection:
+
+```bash
+airkit shield install
+airkit shield status
+airkit shield doctor
+```
+
+`install` is preview-only. After reviewing the listed per-user LaunchAgent and
+private state paths, the explicit write form installs the service:
+
+```bash
+airkit shield install --write
+airkit shield start
+airkit shield status
+```
+
+Stop it without deleting its private state with `airkit shield stop`. Its
+child-only launch contract is:
+
+```bash
+airkit shield launch --lane subscription -- command claude
+airkit shield launch --lane managed -- command airclaude
+```
+
+These examples describe the runtime contract, not a recommendation to enable
+Phase 1. The command validates a fresh authenticated loopback identity before
+spawning the child and does not print its capability. It covers only
+AirKit-managed entrypoints. A bare `command claude` bypasses AirKit and Shield.
+`claude-sub` remains direct subscription OAuth by default; it uses this path
+only when `AIRKIT_SHIELD_SUBSCRIPTION=1` is explicitly set. Audit evidence is
+observability, not Shield enforcement.
+
 ## Prerequisites To Verify
 
 Run these from the repo root:

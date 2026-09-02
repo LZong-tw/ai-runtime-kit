@@ -10,6 +10,8 @@ keeps machine state outside git, and verifies the installed launch path.
   [`docs/install.md`](docs/install.md)
 - Local audit daemon, audit UI, exports, retention, client completeness, and
   gap interpretation: [`docs/audit.md`](docs/audit.md)
+- Sensitive Egress Shield Phase 1 lifecycle, coverage, and its deliberately
+  disabled transport-only boundary: [`docs/install.md`](docs/install.md)
 - Launch-path, routing, statusline, Headroom/cache evidence, and completion
   guard lessons: [`docs/runtime-lessons.md`](docs/runtime-lessons.md)
 - External-client adapter flow for Pi and OpenCode: the `Pi and OpenCode`
@@ -110,6 +112,31 @@ session cookie. It shows the same metadata-only projections and service status
 without turning the audit store into a payload browser. See
 [`docs/audit.md`](docs/audit.md) for the UI surface, safe export path, gated
 reveal flow, and gap interpretation rules.
+
+## Sensitive Egress Shield (Phase 1)
+
+AirKit includes a **disabled-by-default** local Shield transport foundation for
+AirKit-managed Claude launches. Phase 1 is intentionally not a data-protection
+feature: its daemon fails closed because it has no selectable production
+allow-all policy, and it does not yet scan, redact, approve, or enforce content
+decisions. Those capabilities are deferred to later phases. Do not enable or
+describe this phase as a way to protect source code, prompts, credentials, or
+other sensitive data.
+
+Inspect its lifecycle without changing machine state:
+
+```bash
+airkit shield install
+airkit shield status
+airkit shield doctor
+```
+
+`airkit shield install --write` installs its per-user service only after you
+review the preview. `airkit shield start` and `airkit shield stop` control that
+service; `airkit shield launch --lane subscription|managed -- command [args...]`
+is the child-only loopback transport entrypoint used by supported launchers.
+See [`docs/install.md`](docs/install.md) for the full boundary. The audit
+service records evidence; it is not Shield enforcement.
 
 ## Pi and OpenCode
 
