@@ -1,4 +1,5 @@
 import { createAuditEvent } from "../audit/event.mjs";
+import { encryptAuditValue } from "../audit/crypto.mjs";
 
 const ACTIONS = new Set(["allow", "block", "redact", "require_approval", "unavailable", "unauthorized"]);
 const LANES = new Set(["managed", "subscription", "unknown"]);
@@ -20,8 +21,9 @@ export function buildShieldDecisionEvent(decision, { now = () => new Date() } = 
   });
 }
 
-export function createShieldDecisionRecorder({ client = null, spool = null, now } = {}) {
+export function createShieldDecisionRecorder({ client = null, spool = null, masterKey = null, now } = {}) {
   if (client !== null && typeof client?.send !== "function") throw new TypeError("shield audit client is invalid");
+  if (client !== null && (masterKey === null || masterKey === undefined)) throw new TypeError("shield audit transport requires a master key");
   if (spool !== null && (typeof spool?.stats !== "function" || typeof spool?.enqueue !== "function")) {
     throw new TypeError("shield audit spool is invalid");
   }
@@ -31,7 +33,7 @@ export function createShieldDecisionRecorder({ client = null, spool = null, now 
       const event = buildShieldDecisionEvent(decision, { now });
       if (client) {
         try {
-          const ack = await client.send(event);
+          const ack = await client.send(encryptShieldDecisionEvent(event, masterKey));
           if (ack?.status === "committed" || ack?.status === "duplicate") return Object.freeze({ durable: "ack" });
         } catch {
           // A trusted encrypted spool may provide the only durable fallback.
@@ -49,6 +51,18 @@ export function createShieldDecisionRecorder({ client = null, spool = null, now 
         throw unavailable();
       }
     },
+  });
+}
+
+function encryptShieldDecisionEvent(event, masterKey) {
+  return Object.freeze({
+    event_id: event.event_id,
+    encrypted: encryptAuditValue({
+      masterKey,
+      purpose: "request-evidence/v1",
+      identity: event.event_id,
+      plaintext: Buffer.from(JSON.stringify(event), "utf8"),
+    }),
   });
 }
 

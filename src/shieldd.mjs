@@ -47,7 +47,7 @@ export async function startShieldDaemon({
   const decide = async ({ body }) => {
     const facts = classifyShieldRequest({ body, launcherContext: config.launcherContext ?? defaultShieldLauncherContext(config.lane) });
     const secretScan = await scanner.scan(body);
-    return policy.evaluate({
+    const decision = await policy.evaluate({
       lane: config.lane,
       destinationClass: facts.destinationClass,
       interactive: facts.interactive,
@@ -56,6 +56,13 @@ export async function startShieldDaemon({
       secretFindings: secretScan.findings,
       piiFindings: [],
     });
+    return {
+      ...decision,
+      lane: config.lane,
+      destinationClass: facts.destinationClass,
+      bundleVersion: policy.version,
+      detectorVersions: { ...policy.detectorVersions },
+    };
   };
   await writePolicyState({ paths, state: { version: policy.version, detectorVersions: policy.detectorVersions } });
 
