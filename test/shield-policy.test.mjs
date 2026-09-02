@@ -18,7 +18,7 @@ test("policy activation only accepts a signed, digest-matched OPA/Wasm bundle", 
 
   assert.equal(policy.version, "2026.09.02.1");
   assert.deepEqual(policy.detectorVersions, { gitleaks: "8.24.0" });
-  assert.deepEqual(await policy.evaluate({ lane: "subscription" }), allowDecision);
+  assert.deepEqual(await policy.evaluate(policyInput), allowDecision);
   assert.equal(Object.isFrozen(policy), true);
   assert.equal(Object.isFrozen(policy.detectorVersions), true);
 });
@@ -95,7 +95,52 @@ test("default OPA SDK evaluates an OPA-compiled Wasm fixture", async () => {
     bundle: signedBundle({}, compiledWasm),
     publicKey: keyPair.publicKey,
   });
-  assert.deepEqual(await policy.evaluate({ lane: "subscription" }), allowDecision);
+  assert.deepEqual(await policy.evaluate(policyInput), allowDecision);
+});
+
+test("policy passes bounded detector and classifier facts to OPA without a JavaScript allow path", async () => {
+  const policy = await loadTestPolicy({ opa: detectorOpa });
+  const decision = await policy.evaluate({
+    ...policyInput,
+    repositoryClass: "restricted",
+    pathClasses: ["terraform_state"],
+    secretFindings: [{ category: "private-key", count: 1 }],
+  });
+
+  assert.deepEqual(decision, {
+    action: "block",
+    reasonCodes: ["confirmed-secret"],
+    approvalEligible: false,
+    redactions: [],
+  });
+  await assert.rejects(
+    policy.evaluate({ ...policyInput, secretFindings: [{ category: "private-key", count: 1, raw: "fixture-secret" }] }),
+    /input/i,
+  );
+});
+
+test("OPA owns restricted-data blocks and internal subscription approval decisions", async () => {
+  const policy = await loadTestPolicy({ opa: detectorOpa });
+
+  assert.deepEqual(await policy.evaluate({
+    ...policyInput,
+    repositoryClass: "restricted",
+    pathClasses: ["terraform_state"],
+  }), {
+    action: "block",
+    reasonCodes: ["restricted-data"],
+    approvalEligible: false,
+    redactions: [],
+  });
+  assert.deepEqual(await policy.evaluate({
+    ...policyInput,
+    repositoryClass: "internal",
+  }), {
+    action: "require_approval",
+    reasonCodes: ["internal-subscription"],
+    approvalEligible: true,
+    redactions: [],
+  });
 });
 
 test("policy state exposes only version and detector versions", async () => {
@@ -123,7 +168,41 @@ const allowDecision = {
   redactions: [],
 };
 
+const policyInput = {
+  lane: "subscription",
+  destinationClass: "subscription",
+  interactive: false,
+  repositoryClass: "public",
+  pathClasses: ["source"],
+  secretFindings: [],
+  piiFindings: [],
+};
+
+const blockDecision = {
+  action: "block",
+  reasonCodes: ["confirmed-secret"],
+  approvalEligible: false,
+  redactions: [],
+};
+
 const allowOpa = fakeOpa(allowDecision);
+
+const detectorOpa = {
+  async loadPolicy() {
+    return {
+      evaluate(input) {
+        if (input.secretFindings.length > 0) return [{ result: blockDecision }];
+        if (input.pathClasses.includes("terraform_state")) {
+          return [{ result: { action: "block", reasonCodes: ["restricted-data"], approvalEligible: false, redactions: [] } }];
+        }
+        if (input.repositoryClass === "internal" && input.destinationClass === "subscription") {
+          return [{ result: { action: "require_approval", reasonCodes: ["internal-subscription"], approvalEligible: true, redactions: [] } }];
+        }
+        return [{ result: allowDecision }];
+      },
+    };
+  },
+};
 
 function fakeOpa(result) {
   return {
@@ -142,7 +221,7 @@ function signedBundle(overrides = {}, artifact = wasm) {
     opaWasmSdkVersion: "1.8.0",
     wasmSha256: createHash("sha256").update(artifact).digest("hex"),
     detectorVersions: { gitleaks: "8.24.0" },
-    selfTest: { input: { lane: "self-test" }, expected: allowDecision },
+    selfTest: { input: policyInput, expected: allowDecision },
     ...overrides,
   };
   const signature = sign(null, Buffer.from(canonicalJson(manifest)), keyPair.privateKey).toString("base64");
