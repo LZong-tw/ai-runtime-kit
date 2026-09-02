@@ -260,6 +260,31 @@ test("proxy does not forward after a downstream disconnect during decision", asy
   assert.equal(upstreamCalls, 0);
 });
 
+test("proxy does not forward when the downstream disconnects as inspection completes", async (t) => {
+  let upstreamCalls = 0;
+  const upstream = await startFixture(t, async (_request, response) => {
+    upstreamCalls += 1;
+    response.end();
+  });
+  const shield = await startShield(t, { targetOrigin: upstream.origin, decide: async () => ({ action: "allow" }) });
+  const target = new URL(shield.origin);
+  const client = httpRequest({
+    host: target.hostname,
+    port: target.port,
+    method: "POST",
+    path: "/v1/messages",
+    headers: { "content-length": "2", "x-airkit-shield": CAPABILITY },
+  });
+  const clientClosed = new Promise((resolve) => client.once("close", resolve));
+  client.once("error", () => {});
+  client.end("{}");
+  setImmediate(() => client.destroy());
+
+  await clientClosed;
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(upstreamCalls, 0);
+});
+
 test("decision exceptions are unavailable and diagnostics never contain credentials or body", async (t) => {
   let upstreamCalls = 0;
   const events = [];
