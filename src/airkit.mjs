@@ -30,6 +30,7 @@ import { buildContextObservability } from "./context-observability.mjs";
 import { createPiAuditRuntime } from "./audit/adapters/pi-extension.mjs";
 import { runAuditCli } from "./audit/cli.mjs";
 import { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
+import { runShieldCli } from "./shield/cli.mjs";
 
 export { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
 export { tailHeadroomSavings } from "./audit/reconcile/headroom.mjs";
@@ -924,6 +925,7 @@ export async function exportOssRelease({ outDir }) {
   await mkdir(join(outDir, "src"), { recursive: true });
   await mkdir(join(outDir, "src", "audit"), { recursive: true });
   await mkdir(join(outDir, "src", "compat"), { recursive: true });
+  await mkdir(join(outDir, "src", "shield"), { recursive: true });
   await mkdir(join(outDir, "native"), { recursive: true });
   await mkdir(join(outDir, "profiles"), { recursive: true });
   await mkdir(join(outDir, "scripts"), { recursive: true });
@@ -943,6 +945,9 @@ export async function exportOssRelease({ outDir }) {
   await copyDirectory(join(here, "audit"), join(outDir, "src", "audit"));
   await copyFile(join(here, "auditd.mjs"), join(outDir, "src", "auditd.mjs"));
   await chmod(join(outDir, "src", "auditd.mjs"), 0o755);
+  await copyDirectory(join(here, "shield"), join(outDir, "src", "shield"));
+  await copyFile(join(here, "shieldd.mjs"), join(outDir, "src", "shieldd.mjs"));
+  await chmod(join(outDir, "src", "shieldd.mjs"), 0o755);
   await copyDirectory(join(repoRoot, "native"), join(outDir, "native"));
   for (const module of [
     "activity.mjs",
@@ -1999,6 +2004,7 @@ function publicPackage(version) {
       airpi: "src/airpi.mjs",
       airoc: "src/airoc.mjs",
       "airkit-auditd": "src/auditd.mjs",
+      "airkit-shieldd": "src/shieldd.mjs",
     },
     files: [
       "CLAUDE.md",
@@ -2047,6 +2053,10 @@ export async function runCli(argv = process.argv.slice(2), options = {}) {
 
   if (command === "audit") {
     return runAuditCli([subcommand, ...rest].filter((arg) => arg !== undefined), { ...options, stdout });
+  }
+
+  if (command === "shield") {
+    return runShieldCli([subcommand, ...rest].filter((arg) => arg !== undefined), { ...options, stdout });
   }
 
   if (command === "runtime" && subcommand === "check") {
@@ -2674,6 +2684,7 @@ function renderAirkitHelp() {
 Commands:
   connect [--profile <name>] [--mode <mode>] [--port <port>]
   audit <install|start|stop|status|doctor|update|verify|open|repo|account|requests|request|sessions|clients|accounts|repos|usage|cache|gaps|query> [options]
+  shield <install|start|stop|status|doctor|launch> [options]
   runtime check
   runtime update [--write]
   repair codex-takeover [--write]

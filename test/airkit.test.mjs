@@ -225,12 +225,16 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
     assert.deepEqual(exportedPackage.files, expectedFiles);
     assert.equal(packageJson.bin["airkit-auditd"], "src/auditd.mjs");
     assert.equal(exportedPackage.bin["airkit-auditd"], "src/auditd.mjs");
+    assert.equal(packageJson.bin["airkit-shieldd"], "src/shieldd.mjs");
+    assert.equal(exportedPackage.bin["airkit-shieldd"], "src/shieldd.mjs");
     const exportedAirPi = await readFile(join(outDir, "src", "airpi.mjs"), "utf8");
     assert.equal(exportedAirPi.includes("runAirPiCli()") || exportedAirPi.includes("runExternalClientCli(\"pi\")"), true);
     assert.equal((await readFile(join(outDir, "src", "airoc.mjs"), "utf8")).includes("runExternalClientCli(\"opencode\")"), true);
     assert.equal((await readFile(join(outDir, "src", "audit", "service.mjs"), "utf8")).includes("installAuditService"), true);
     assert.equal((await readFile(join(outDir, "src", "audit", "cli.mjs"), "utf8")).includes("runAuditCli"), true);
     assert.equal((await readFile(join(outDir, "src", "auditd.mjs"), "utf8")).includes("createAuditDaemon"), true);
+    assert.equal((await readFile(join(outDir, "src", "shield", "cli.mjs"), "utf8")).includes("runShieldCli"), true);
+    assert.equal((await readFile(join(outDir, "src", "shieldd.mjs"), "utf8")).includes("startShieldProxy"), true);
     assert.equal((await readFile(join(outDir, "native", "airkit-audit-auth.swift"), "utf8")).includes("import"), true);
     assert.equal((await readFile(join(outDir, "src", "subagent-observability.mjs"), "utf8")).includes("runSubagentStatusLine"), true);
     for (const candidate of [packageJson, exportedPackage]) {
