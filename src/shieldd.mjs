@@ -1,16 +1,17 @@
 #!/usr/bin/env node
 
-import { readFile, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 
 import { shieldPaths, writeShieldIdentity } from "./shield/paths.mjs";
 import { startShieldProxy } from "./shield/proxy.mjs";
+import { readShieldConfig } from "./shield/service.mjs";
 
 async function main() {
   const configPath = parseConfigPath(process.argv.slice(2));
   const paths = shieldPaths({ env: process.env });
   if (configPath !== paths.configPath) throw new Error("shield daemon config path must be the canonical private configuration path");
   await assertPrivateConfig(configPath);
-  const config = await readShieldConfig(configPath);
+  const config = await readShieldConfig({ paths });
   const shield = await startShieldProxy({
     capability: config.capability,
     targetOrigin: config.targetOrigin,
@@ -18,7 +19,15 @@ async function main() {
   });
   await writeShieldIdentity({
     paths,
-    identity: { origin: shield.origin, capability: config.capability, version: 1, pid: process.pid, targetClass: "loopback" },
+    identity: {
+      origin: shield.origin,
+      capability: config.capability,
+      version: 1,
+      pid: process.pid,
+      lane: config.lane,
+      generation: config.generation,
+      targetClass: config.targetClass,
+    },
   });
   const stop = async () => {
     await shield.close();
@@ -38,19 +47,6 @@ async function assertPrivateConfig(path) {
   const entry = await stat(path);
   if (!entry.isFile() || (entry.mode & 0o077) !== 0) throw new Error("shield daemon configuration must be a private regular file");
   if (typeof process.getuid === "function" && entry.uid !== process.getuid()) throw new Error("shield daemon configuration has unexpected owner");
-}
-
-async function readShieldConfig(path) {
-  let config;
-  try {
-    config = JSON.parse(await readFile(path, "utf8"));
-  } catch {
-    throw new Error("shield daemon configuration is invalid");
-  }
-  if (!config || typeof config.capability !== "string" || typeof config.targetOrigin !== "string") {
-    throw new Error("shield daemon configuration is incomplete");
-  }
-  return config;
 }
 
 main().catch(() => {

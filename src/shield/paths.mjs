@@ -60,13 +60,21 @@ export function assertShieldIdentity(identity) {
   if (!(Number.isInteger(identity.version) || (typeof identity.version === "string" && identity.version.length > 0))) {
     throw new Error("shield identity version is missing or invalid");
   }
-  if (!Number.isInteger(identity.pid) || identity.pid < 0) throw new Error("shield identity pid is missing or invalid");
-  if (identity.targetClass !== "loopback") throw new Error("shield identity targetClass must be loopback");
+  if (!Number.isInteger(identity.pid) || identity.pid < 1) throw new Error("shield identity pid is missing or invalid");
+  if (identity.lane !== "subscription" && identity.lane !== "managed") {
+    throw new Error("shield identity lane must be subscription or managed");
+  }
+  if (identity.targetClass !== identity.lane) throw new Error("shield identity targetClass must match its lane");
+  if (typeof identity.generation !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(identity.generation)) {
+    throw new Error("shield identity generation is missing or invalid");
+  }
   return {
     origin: url.origin,
     capability: identity.capability,
     version: identity.version,
     pid: identity.pid,
+    lane: identity.lane,
+    generation: identity.generation,
     targetClass: identity.targetClass,
   };
 }

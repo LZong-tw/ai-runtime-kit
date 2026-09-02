@@ -17,7 +17,9 @@ const identity = {
   capability,
   version: 1,
   pid: 42,
-  targetClass: "loopback",
+  lane: "subscription",
+  generation: "generation-1",
+  targetClass: "subscription",
 };
 
 test("Shield identity is private and loopback-only", () => {
@@ -37,6 +39,11 @@ test("identity rejects missing capability", async () => {
   const paths = shieldPaths({ homeDir: "/tmp/home", uid: 501 });
   const io = { async readFile() { return '{"origin":"http://127.0.0.1:8811"}'; } };
   await assert.rejects(readShieldIdentity({ paths, io }), /capability/);
+});
+
+test("identity binds a launch lane and configuration generation", () => {
+  assert.throws(() => assertShieldIdentity({ ...identity, lane: "managed" }), /targetClass.*lane/i);
+  assert.throws(() => assertShieldIdentity({ ...identity, generation: "" }), /generation/i);
 });
 
 test("missing identity is reported as null", async () => {

@@ -28,6 +28,7 @@ export async function runShieldCli(argv = [], dependencies = {}) {
   if (!handler) throw new Error(`unknown shield command: ${argv.join(" ") || "(none)"}`);
   const result = await handler(rest, shield);
   stdout.write(renderShieldResult(command, result));
+  if (Number.isInteger(result?.exitCode)) return result.exitCode;
   return EXIT_CODES[result?.state] ?? EXIT_CODES.blocked;
 }
 
@@ -52,7 +53,7 @@ async function createDefaultShieldDependencies(dependencies) {
   return {
     async install({ write }) {
       const service = await installShieldService({ ...common, write });
-      return { state: write ? "degraded" : "stopped", write, service: { planned: true } };
+      return { state: write ? "degraded" : "preview", exitCode: write ? 1 : 0, write, service: { label: service.label, planned: true } };
     },
     async start() {
       await startShieldService(common);
@@ -69,8 +70,8 @@ async function createDefaultShieldDependencies(dependencies) {
       return { ...(await shieldStatus({ paths, io: dependencies.io, runLaunchctl: dependencies.runLaunchctl })), checked: true };
     },
     async launch({ lane, command, args }) {
-      const ready = await ensureShieldReady({ lane, env, paths, io: dependencies.io, inspectService: dependencies.inspectService, isProcessAlive: dependencies.isProcessAlive });
-      const outcome = await launchShieldChild({ command, args, ready, env, spawnChild: dependencies.spawnChild });
+      const ready = await ensureShieldReady({ lane, env, paths, io: dependencies.io, inspectService: dependencies.inspectService, isProcessAlive: dependencies.isProcessAlive, probeShield: dependencies.probeShield });
+      const outcome = await launchShieldChild({ command, args, ready: { ...ready, lane }, env, spawnChild: dependencies.spawnChild });
       return { state: outcome.code === 0 ? "healthy" : "degraded", launched: true, exitCode: outcome.code ?? 1 };
     },
   };
@@ -80,8 +81,8 @@ async function shieldStatus({ paths, io, runLaunchctl }) {
   const service = await inspectShieldService({ paths, io, runLaunchctl });
   try {
     const identity = await readShieldIdentity({ paths, io });
-    if (!identity) return { state: service.loaded ? "degraded" : "stopped", service, identity: { present: false } };
-    return { state: service.loaded ? "healthy" : "degraded", service, identity: { present: true } };
+    if (!identity) return { state: service.active ? "degraded" : "stopped", service, identity: { present: false } };
+    return { state: service.active && service.pid === identity.pid ? "healthy" : "degraded", service, identity: { present: true } };
   } catch {
     return { state: "blocked", service, identity: { present: false, valid: false } };
   }
