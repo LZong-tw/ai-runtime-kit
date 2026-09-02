@@ -132,6 +132,49 @@ test("lane and configuration generation mismatches reject readiness before probi
   assert.deepEqual(probes, []);
 });
 
+test("readiness binds subscription and managed lanes to the expected target origin", async () => {
+  const { paths } = fixture();
+  const probes = [];
+  const baseIdentity = {
+    origin: "http://127.0.0.1:8811",
+    capability,
+    version: 1,
+    pid: 42,
+    generation,
+  };
+  const readyOptions = {
+    paths,
+    inspectService: async () => ({ loaded: true, active: true, pid: 42 }),
+    isProcessAlive: async () => true,
+    probeShield: async (...args) => probes.push(args),
+  };
+
+  await assert.rejects(
+    ensureShieldReady({
+      ...readyOptions,
+      lane: "subscription",
+      io: shieldStateIo(paths, {
+        identity: { ...baseIdentity, lane: "subscription", targetClass: "subscription" },
+        config: { capability, targetOrigin: "https://managed.example", lane: "subscription", generation },
+      }),
+    }),
+    /shield target origin mismatch/,
+  );
+  await assert.rejects(
+    ensureShieldReady({
+      ...readyOptions,
+      expectedTargetOrigin: "http://127.0.0.1:4599/",
+      lane: "managed",
+      io: shieldStateIo(paths, {
+        identity: { ...baseIdentity, lane: "managed", targetClass: "managed" },
+        config: { capability, targetOrigin: "http://127.0.0.1:3456", lane: "managed", generation },
+      }),
+    }),
+    /shield target origin mismatch/,
+  );
+  assert.deepEqual(probes, []);
+});
+
 test("launchd PID mismatch and failed authenticated listener probe reject readiness", async () => {
   const { paths } = fixture();
   const identity = {
@@ -153,7 +196,7 @@ test("launchd PID mismatch and failed authenticated listener probe reject readin
     /PID mismatch/i,
   );
   await assert.rejects(
-    ensureShieldReady({ lane: "managed", paths, io, inspectService: async () => ({ loaded: true, active: true, pid: 42 }), isProcessAlive: async () => true, probeShield: async () => false }),
+    ensureShieldReady({ expectedTargetOrigin: "https://managed.example", lane: "managed", paths, io, inspectService: async () => ({ loaded: true, active: true, pid: 42 }), isProcessAlive: async () => true, probeShield: async () => false }),
     /listener.*readiness/i,
   );
 });
@@ -222,6 +265,7 @@ test("AirKit keeps capability out of argv and injects Claude's Shield transport 
       ANTHROPIC_API_BASE_URL: "https://stale-provider.invalid",
       ANTHROPIC_BASE_URL: "https://stale-provider.invalid",
       ANTHROPIC_CUSTOM_HEADERS: "x-tenant: fixture\nX-AirKit-Shield: stale-capability",
+      CLAUDE_CODE_OAUTH_TOKEN: "subscription-oauth-sentinel",
       PATH: "/usr/bin",
     },
     spawnChild(command, args, options) {
@@ -239,6 +283,7 @@ test("AirKit keeps capability out of argv and injects Claude's Shield transport 
     `x-tenant: fixture\nx-airkit-shield: ${capability}`,
   );
   assert.equal(calls[0].options.env.AIRKIT_SHIELD_CAPABILITY, undefined);
+  assert.equal(calls[0].options.env.CLAUDE_CODE_OAUTH_TOKEN, "subscription-oauth-sentinel");
   assert.equal(calls[0].args.includes(capability), false);
   assert.equal(calls[0].options.stdio, "inherit");
 });
