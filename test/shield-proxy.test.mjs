@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createServer, request as httpRequest } from "node:http";
 import { test } from "node:test";
+import { gzipSync } from "node:zlib";
 
 import { startShieldProxy } from "../src/shield/proxy.mjs";
 
@@ -130,6 +131,91 @@ test("proxy preserves streaming upstream responses", async (t) => {
   assert.equal(result.status, 200);
   assert.equal(result.headers.get("content-type"), "text/event-stream");
   assert.equal(await result.text(), "data: first\n\ndata: second\n\n");
+});
+
+test("proxy relays a redirect without contacting its destination", async (t) => {
+  let secondaryCalls = 0;
+  const secondary = await startFixture(t, async (_request, response) => {
+    secondaryCalls += 1;
+    response.end("must not be contacted");
+  });
+  const upstream = await startFixture(t, async (_request, response) => {
+    response.writeHead(302, { location: `${secondary.origin}/v1/messages` });
+    response.end();
+  });
+  const shield = await startShield(t, { targetOrigin: upstream.origin, decide: async () => ({ action: "allow" }) });
+
+  const result = await fetch(`${shield.origin}/v1/messages`, {
+    method: "POST",
+    headers: { "x-airkit-shield": CAPABILITY },
+    body: "{}",
+    redirect: "manual",
+  });
+
+  assert.equal(result.status, 302);
+  assert.equal(result.headers.get("location"), `${secondary.origin}/v1/messages`);
+  assert.equal(secondaryCalls, 0);
+});
+
+test("proxy removes stale compression headers after fetch decompression", async (t) => {
+  const body = '{"type":"message","content":[]}';
+  const compressed = gzipSync(body);
+  const upstream = await startFixture(t, async (_request, response) => {
+    response.writeHead(200, {
+      "content-encoding": "gzip",
+      "content-length": String(compressed.byteLength),
+      "content-type": "application/json",
+    });
+    response.end(compressed);
+  });
+  const shield = await startShield(t, { targetOrigin: upstream.origin, decide: async () => ({ action: "allow" }) });
+
+  const result = await fetch(`${shield.origin}/v1/messages`, {
+    method: "POST",
+    headers: { "x-airkit-shield": CAPABILITY },
+    body: "{}",
+  });
+
+  assert.equal(result.headers.get("content-encoding"), null);
+  assert.equal(result.headers.get("content-length"), null);
+  assert.equal(await result.text(), body);
+});
+
+test("proxy aborts an upstream request when the downstream client disconnects", async (t) => {
+  let notifyStarted;
+  let notifyClosed;
+  let upstreamResponse;
+  const upstreamStarted = new Promise((resolve) => { notifyStarted = resolve; });
+  const upstreamClosed = new Promise((resolve) => { notifyClosed = resolve; });
+  const upstream = await startFixture(t, async (request, response) => {
+    await readBody(request);
+    upstreamResponse = response;
+    response.once("close", notifyClosed);
+    notifyStarted();
+    await once(response, "close");
+  });
+  const shield = await startShield(t, { targetOrigin: upstream.origin, decide: async () => ({ action: "allow" }) });
+  const target = new URL(shield.origin);
+  const client = httpRequest({
+    host: target.hostname,
+    port: target.port,
+    method: "POST",
+    path: "/v1/messages",
+    headers: { "content-length": "2", "x-airkit-shield": CAPABILITY },
+  });
+  const clientClosed = new Promise((resolve) => client.once("close", resolve));
+  client.once("error", () => {});
+  client.end("{}");
+
+  await upstreamStarted;
+  client.destroy();
+  await clientClosed;
+  const upstreamAborted = await Promise.race([
+    upstreamClosed.then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), 250)),
+  ]);
+  if (!upstreamAborted) upstreamResponse.destroy();
+  assert.equal(upstreamAborted, true, "upstream request was not aborted after downstream disconnect");
 });
 
 test("decision exceptions are unavailable and diagnostics never contain credentials or body", async (t) => {

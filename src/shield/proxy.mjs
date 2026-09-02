@@ -1,5 +1,4 @@
 import { timingSafeEqual } from "node:crypto";
-import { once } from "node:events";
 import { createServer } from "node:http";
 
 const INSPECTION_MAX_BYTES = 1_048_576;
@@ -88,14 +87,17 @@ async function handleShieldRequest({ request, response, capability, target, deci
     return;
   }
 
+  const lifecycle = requestLifecycleSignal(request, response);
   try {
     const upstream = await fetch(new URL(path, target), {
       method: request.method,
       headers: forwardHeaders(request.headers),
       body: request.method === "GET" || request.method === "HEAD" ? undefined : inspection.body,
+      redirect: "manual",
+      signal: lifecycle.signal,
     });
     writeUpstreamHeaders(response, upstream);
-    await streamResponse(upstream, response);
+    await streamResponse(upstream, response, lifecycle.signal);
     await emitDecision(onDecision, decisionEvent("allow", "allowed", inspection.bytes, startedAt));
   } catch {
     if (!response.headersSent) {
@@ -169,20 +171,55 @@ function forwardHeaders(headers) {
 function writeUpstreamHeaders(response, upstream) {
   const headers = {};
   for (const [name, value] of upstream.headers) {
-    if (!INTERNAL_HEADERS.has(name.toLowerCase())) headers[name] = value;
+    const normalized = name.toLowerCase();
+    if (normalized !== "content-encoding" && normalized !== "content-length" && !INTERNAL_HEADERS.has(normalized)) headers[name] = value;
   }
   response.writeHead(upstream.status, headers);
 }
 
-async function streamResponse(upstream, response) {
+async function streamResponse(upstream, response, signal) {
   if (upstream.body === null) {
     response.end();
     return;
   }
   for await (const chunk of upstream.body) {
-    if (!response.write(chunk)) await once(response, "drain");
+    if (!response.write(chunk)) await waitForDrain(response, signal);
   }
   response.end();
+}
+
+function requestLifecycleSignal(request, response) {
+  const controller = new AbortController();
+  const abort = () => {
+    if (!controller.signal.aborted) controller.abort();
+  };
+  request.once("aborted", abort);
+  request.once("error", abort);
+  response.once("close", () => {
+    if (response.writableFinished !== true) abort();
+  });
+  return controller;
+}
+
+function waitForDrain(response, signal) {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      response.off("drain", onDrain);
+      response.off("close", onClose);
+      response.off("error", onError);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const onDrain = () => { cleanup(); resolve(); };
+    const onClose = () => { cleanup(); reject(new Error("shield downstream closed")); };
+    const onError = () => { cleanup(); reject(new Error("shield downstream failed")); };
+    const onAbort = () => { cleanup(); reject(signal.reason ?? new Error("shield downstream aborted")); };
+    response.once("drain", onDrain);
+    response.once("close", onClose);
+    response.once("error", onError);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+    else if (response.destroyed) onClose();
+  });
 }
 
 async function finish(response, onDecision, startedAt, { action, reason, bytes, status, code }) {
