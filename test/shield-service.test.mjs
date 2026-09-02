@@ -9,6 +9,7 @@ import { runCli } from "../src/airkit.mjs";
 import { runShieldCli } from "../src/shield/cli.mjs";
 import {
   ensureShieldReady,
+  inspectShieldService,
   installShieldService,
   launchShieldChild,
   planShieldService,
@@ -18,6 +19,7 @@ import {
 import { shieldPaths, writeShieldIdentity } from "../src/shield/paths.mjs";
 
 const capability = "c".repeat(32);
+const generation = "generation-1";
 
 function fixture(homeDir = "/tmp/airkit-shield-service-home") {
   const paths = shieldPaths({ homeDir, uid: 501 });
@@ -72,7 +74,7 @@ test("stale identity blocks shield launch", async () => {
   try {
     await writeShieldIdentity({
       paths,
-      identity: { origin: "http://127.0.0.1:8811", capability, version: 1, pid: 42, targetClass: "loopback" },
+      identity: { origin: "http://127.0.0.1:8811", capability, version: 1, pid: 42, lane: "subscription", generation, targetClass: "subscription" },
     });
     await assert.rejects(
       ensureShieldReady({ lane: "subscription", paths, isProcessAlive: async () => false }),
@@ -81,6 +83,108 @@ test("stale identity blocks shield launch", async () => {
   } finally {
     await rm(homeDir, { recursive: true, force: true });
   }
+});
+
+test("launchd inspection reports only a running service PID as active", async () => {
+  const { paths } = fixture();
+  const service = await inspectShieldService({
+    paths,
+    io: { async readFile() { return "plist"; } },
+    runLaunchctl: async () => ({ ok: true, stdout: "state = running\npid = 4242\n" }),
+  });
+
+  assert.equal(service.loaded, true);
+  assert.equal(service.active, true);
+  assert.equal(service.pid, 4242);
+});
+
+test("lane and configuration generation mismatches reject readiness before probing", async () => {
+  const { paths } = fixture();
+  const probes = [];
+  const identity = {
+    origin: "http://127.0.0.1:8811",
+    capability,
+    version: 1,
+    pid: 42,
+    lane: "subscription",
+    generation,
+    targetClass: "subscription",
+  };
+  const io = shieldStateIo(paths, {
+    identity,
+    config: { capability, targetOrigin: "https://api.anthropic.com", lane: "subscription", generation },
+  });
+  const options = {
+    paths,
+    io,
+    inspectService: async () => ({ loaded: true, active: true, pid: 42 }),
+    isProcessAlive: async () => true,
+    probeShield: async (...args) => probes.push(args),
+  };
+
+  await assert.rejects(ensureShieldReady({ ...options, lane: "managed" }), /lane mismatch/i);
+  await assert.rejects(
+    ensureShieldReady({ ...options, lane: "subscription", io: shieldStateIo(paths, { identity: { ...identity, generation: "old-generation" }, config: { capability, targetOrigin: "https://api.anthropic.com", lane: "subscription", generation } }) }),
+    /generation mismatch/i,
+  );
+  assert.deepEqual(probes, []);
+});
+
+test("launchd PID mismatch and failed authenticated listener probe reject readiness", async () => {
+  const { paths } = fixture();
+  const identity = {
+    origin: "http://127.0.0.1:8811",
+    capability,
+    version: 1,
+    pid: 42,
+    lane: "managed",
+    generation,
+    targetClass: "managed",
+  };
+  const io = shieldStateIo(paths, {
+    identity,
+    config: { capability, targetOrigin: "https://managed.example", lane: "managed", generation },
+  });
+
+  await assert.rejects(
+    ensureShieldReady({ lane: "managed", paths, io, inspectService: async () => ({ loaded: true, active: true, pid: 41 }), isProcessAlive: async () => true, probeShield: async () => true }),
+    /PID mismatch/i,
+  );
+  await assert.rejects(
+    ensureShieldReady({ lane: "managed", paths, io, inspectService: async () => ({ loaded: true, active: true, pid: 42 }), isProcessAlive: async () => true, probeShield: async () => false }),
+    /listener.*readiness/i,
+  );
+});
+
+test("readiness returns only after the active identity answers the capability probe", async () => {
+  const { paths } = fixture();
+  const identity = {
+    origin: "http://127.0.0.1:8811",
+    capability,
+    version: 1,
+    pid: 42,
+    lane: "subscription",
+    generation,
+    targetClass: "subscription",
+  };
+  const probes = [];
+  const ready = await ensureShieldReady({
+    lane: "subscription",
+    paths,
+    io: shieldStateIo(paths, {
+      identity,
+      config: { capability, targetOrigin: "https://api.anthropic.com", lane: "subscription", generation },
+    }),
+    inspectService: async () => ({ loaded: true, active: true, pid: 42 }),
+    isProcessAlive: async () => true,
+    probeShield: async (origin, receivedCapability) => {
+      probes.push({ origin, capability: receivedCapability });
+      return true;
+    },
+  });
+
+  assert.deepEqual(probes, [{ origin: identity.origin, capability }]);
+  assert.deepEqual(ready, { origin: identity.origin, capability, targetClass: "subscription" });
 });
 
 test("start refuses launchd plist path drift before mutating the job", async () => {
@@ -105,13 +209,13 @@ test("shield stop only unloads its own job and preserves shield state", async ()
   assert.deepEqual(calls, [["bootout", paths.launchdTarget]]);
 });
 
-test("shield launch passes identity only through the child environment", async () => {
+test("AirKit keeps capability out of its argv while the trusted child inherits it and owns its output", async () => {
   const calls = [];
   const child = new EventEmitter();
   const outcome = launchShieldChild({
     command: "/usr/bin/env",
     args: ["true"],
-    ready: { origin: "http://127.0.0.1:8811", capability, targetClass: "loopback" },
+    ready: { origin: "http://127.0.0.1:8811", capability, lane: "subscription", targetClass: "subscription" },
     env: { PATH: "/usr/bin" },
     spawnChild(command, args, options) {
       calls.push({ command, args, options });
@@ -124,6 +228,7 @@ test("shield launch passes identity only through the child environment", async (
   assert.equal(calls[0].options.env.AIRKIT_SHIELD_ORIGIN, "http://127.0.0.1:8811");
   assert.equal(calls[0].options.env.AIRKIT_SHIELD_CAPABILITY, capability);
   assert.equal(calls[0].args.includes(capability), false);
+  assert.equal(calls[0].options.stdio, "inherit");
 });
 
 test("shield status never displays capability or target metadata", async () => {
@@ -184,3 +289,33 @@ test("airkit routes shield commands before catalog loading", async () => {
   assert.equal(code, 0);
   assert.match(output.value(), /state: healthy/);
 });
+
+test("airkit shield install preview exits zero, names the service, and performs no mutation", async () => {
+  const { paths, options } = fixture();
+  const output = capture();
+  const calls = [];
+  const io = new Proxy({}, { get: () => async (...args) => calls.push(args) });
+  const code = await runCli(["shield", "install"], {
+    stdout: output.stdout,
+    paths,
+    nodePath: options.nodePath,
+    daemonPath: options.daemonPath,
+    io,
+    runLaunchctl: async (args) => calls.push(args),
+    catalogPath: "/does/not/exist.json",
+  });
+
+  assert.equal(code, 0);
+  assert.match(output.value(), /com\.airkit\.shield/);
+  assert.deepEqual(calls, []);
+});
+
+function shieldStateIo(paths, { identity, config }) {
+  return {
+    async readFile(path) {
+      if (path === paths.identityPath) return `${JSON.stringify(identity)}\n`;
+      if (path === paths.configPath) return `${JSON.stringify(config)}\n`;
+      throw new Error(`unexpected fixture path: ${path}`);
+    },
+  };
+}

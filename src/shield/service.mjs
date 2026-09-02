@@ -83,24 +83,66 @@ export async function inspectShieldService({ paths, io = defaultIo, runLaunchctl
   assertShieldPaths(paths);
   const installed = await io.readFile(paths.launchAgentPath, "utf8").then(() => true, () => false);
   const printed = await launch(runLaunchctl, ["print", paths.launchdTarget], true);
-  return { label: SHIELD_SERVICE_LABEL, installed, loaded: printed.ok, stale: installed && !printed.ok };
+  const state = /^\s*state = (\S+)\s*$/m.exec(printed.stdout ?? "")?.[1] ?? null;
+  const pidValue = /^\s*pid = (\d+)\s*$/m.exec(printed.stdout ?? "")?.[1];
+  const pid = pidValue === undefined ? null : Number(pidValue);
+  const active = printed.ok && state === "running" && Number.isInteger(pid) && pid > 0;
+  return { label: SHIELD_SERVICE_LABEL, installed, loaded: printed.ok, active, pid, state, stale: installed && !active };
 }
 
-export async function ensureShieldReady({ lane, env = process.env, paths = shieldPaths({ env }), io = defaultIo, inspectService = inspectShieldService, isProcessAlive = defaultIsProcessAlive } = {}) {
+export async function readShieldConfig({ paths, io = defaultIo } = {}) {
+  assertShieldPaths(paths);
+  let config;
+  try {
+    config = JSON.parse(await io.readFile(paths.configPath, "utf8"));
+  } catch {
+    throw new Error("shield configuration is missing or invalid");
+  }
+  assertLane(config?.lane);
+  if (typeof config.capability !== "string" || config.capability.length < 32) throw new Error("shield configuration capability is missing or invalid");
+  if (typeof config.targetOrigin !== "string" || config.targetOrigin.length === 0) throw new Error("shield configuration target is missing or invalid");
+  if (typeof config.generation !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(config.generation)) {
+    throw new Error("shield configuration generation is missing or invalid");
+  }
+  if (config.targetClass !== undefined && config.targetClass !== config.lane) {
+    throw new Error("shield configuration targetClass must match its lane");
+  }
+  return {
+    capability: config.capability,
+    targetOrigin: config.targetOrigin,
+    lane: config.lane,
+    generation: config.generation,
+    targetClass: config.lane,
+  };
+}
+
+export async function ensureShieldReady({ lane, env = process.env, paths = shieldPaths({ env }), io = defaultIo, inspectService = inspectShieldService, isProcessAlive = defaultIsProcessAlive, probeShield = defaultProbeShield } = {}) {
   assertLane(lane);
   const identity = await readShieldIdentity({ paths, io });
   if (!identity || !(await isProcessAlive(identity.pid))) {
     throw new Error("shield identity is stale; start the shield service and try again");
   }
   const service = await inspectService({ paths, io });
-  if (!service.loaded) throw new Error("shield identity is stale; shield service is not loaded");
+  if (!service.loaded || !service.active) throw new Error("shield identity is stale; shield service is not actively running");
+  if (service.pid !== identity.pid) throw new Error("shield service PID mismatch; restart the shield service and try again");
+  const config = await readShieldConfig({ paths, io });
+  if (config.lane !== lane || identity.lane !== lane || identity.targetClass !== lane) {
+    throw new Error("shield lane mismatch; start the service configured for the requested lane");
+  }
+  if (config.generation !== identity.generation) throw new Error("shield configuration generation mismatch; restart the shield service");
+  if (config.capability !== identity.capability) throw new Error("shield capability generation mismatch; restart the shield service");
+  if (!(await probeShield(identity.origin, identity.capability))) {
+    throw new Error("shield listener readiness probe failed; restart the shield service");
+  }
   return { origin: identity.origin, capability: identity.capability, targetClass: identity.targetClass };
 }
 
 export async function launchShieldChild({ command, args = [], ready, env = process.env, spawnChild = spawn } = {}) {
   if (typeof command !== "string" || command.length === 0 || command.includes("\0")) throw new Error("shield launch command is required");
   if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string" || arg.includes("\0"))) throw new Error("shield launch arguments must be strings");
-  if (!ready?.origin || !ready?.capability || ready.targetClass !== "loopback") throw new Error("shield launch requires a fresh loopback identity");
+  if (!ready?.origin || !ready?.capability || ready.targetClass !== ready.lane || (ready.lane !== "subscription" && ready.lane !== "managed")) {
+    throw new Error("shield launch requires a fresh lane-bound loopback identity");
+  }
   const child = spawnChild(command, args, {
     env: { ...env, AIRKIT_SHIELD_ORIGIN: ready.origin, AIRKIT_SHIELD_CAPABILITY: ready.capability },
     shell: false,
@@ -146,10 +188,24 @@ async function launch(runLaunchctl, args, tolerateFailure) {
 
 async function defaultLaunchctl(args) {
   try {
-    await execFileAsync("launchctl", args);
-    return { ok: true, status: 0 };
+    const result = await execFileAsync("launchctl", args);
+    return { ok: true, status: 0, stdout: result.stdout, stderr: result.stderr };
   } catch (error) {
     return { ok: false, status: error.code, stderr: error.stderr ?? error.message };
+  }
+}
+
+async function defaultProbeShield(origin, capability) {
+  try {
+    const response = await fetch(new URL("/_airkit/shield/ready", origin), {
+      headers: { "x-airkit-shield": capability },
+      redirect: "manual",
+      signal: AbortSignal.timeout(1_000),
+    });
+    await response.body?.cancel();
+    return response.status === 204;
+  } catch {
+    return false;
   }
 }
 

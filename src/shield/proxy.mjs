@@ -51,6 +51,13 @@ async function handleShieldRequest({ request, response, capability, target, deci
     return;
   }
 
+  if (request.method === "GET" && request.url === "/_airkit/shield/ready") {
+    request.resume();
+    response.writeHead(204, { "cache-control": "no-store" });
+    response.end();
+    return;
+  }
+
   const path = safeMessagesPath(request.url);
   if (path === null) {
     request.resume();

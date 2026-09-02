@@ -71,6 +71,34 @@ test("authentication and decision failure never contact upstream", async (t) => 
   assert.equal(upstreamCalls, 0);
 });
 
+test("readiness probe authenticates the live loopback listener without policy or upstream access", async (t) => {
+  let decisions = 0;
+  let upstreamCalls = 0;
+  const upstream = await startFixture(t, async (_request, response) => {
+    upstreamCalls += 1;
+    response.end();
+  });
+  const shield = await startShield(t, {
+    targetOrigin: upstream.origin,
+    decide: async () => {
+      decisions += 1;
+      return { action: "deny" };
+    },
+  });
+
+  const ready = await fetch(`${shield.origin}/_airkit/shield/ready`, {
+    headers: { "x-airkit-shield": CAPABILITY },
+  });
+  const unauthorized = await fetch(`${shield.origin}/_airkit/shield/ready`, {
+    headers: { "x-airkit-shield": "x".repeat(32) },
+  });
+
+  assert.equal(ready.status, 204);
+  assert.equal(unauthorized.status, 401);
+  assert.equal(decisions, 0);
+  assert.equal(upstreamCalls, 0);
+});
+
 test("proxy has a loopback listener and refuses malformed fixed targets", async (t) => {
   const upstream = await startFixture(t, async (_request, response) => response.end());
   const shield = await startShield(t, { targetOrigin: upstream.origin, decide: async () => ({ action: "deny" }) });
