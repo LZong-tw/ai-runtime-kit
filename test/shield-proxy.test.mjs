@@ -378,6 +378,57 @@ test("proxy durably records the policy action and reason before its first upstre
   assert.doesNotMatch(JSON.stringify(terminal), /body-secret|digest|\/v1\/messages/);
 });
 
+test("proxy forwards only a newly validated policy redaction buffer and never persists either body", async (t) => {
+  const original = '{"content":"privacy-raw-sentinel-must-not-escape"}';
+  const redacted = Buffer.from('{"content":"[EMAIL]"}');
+  let upstreamBody = null;
+  let terminal = null;
+  const upstream = await startFixture(t, async (request, response) => {
+    upstreamBody = await readBody(request);
+    response.end("ok");
+  });
+  const shield = await startShield(t, {
+    targetOrigin: upstream.origin,
+    decide: async () => ({
+      action: "redact",
+      redactedBody: redacted,
+      transformCount: 1,
+      reasonCodes: ["pii_email_redacted"],
+      lane: "subscription",
+      destinationClass: "subscription",
+      bundleVersion: "2026.09.02.4",
+      detectorVersions: { privacy: "privacy-1", gitleaks: "8.24.0" },
+    }),
+    recordShieldDecision: async (decision) => { terminal = decision; },
+  });
+
+  const response = await fetch(`${shield.origin}/v1/messages`, {
+    method: "POST",
+    headers: { "x-airkit-shield": CAPABILITY, "content-type": "application/json" },
+    body: original,
+  });
+  assert.equal(response.status, 200);
+  assert.equal(upstreamBody, redacted.toString("utf8"));
+  assert.equal(redacted.toString("utf8"), '{"content":"[EMAIL]"}');
+  assert.equal(terminal.action, "redact");
+  assert.equal(terminal.transformCount, 1);
+  assert.doesNotMatch(JSON.stringify(terminal), /privacy-raw|\[EMAIL\]/);
+});
+
+test("proxy blocks malformed redaction instead of forwarding the original request", async (t) => {
+  let upstreamCalls = 0;
+  const upstream = await startFixture(t, async (_request, response) => { upstreamCalls += 1; response.end("wrong"); });
+  const shield = await startShield(t, {
+    targetOrigin: upstream.origin,
+    decide: async () => ({ action: "redact", redactedBody: Buffer.from("not json"), transformCount: 1 }),
+  });
+  const response = await fetch(`${shield.origin}/v1/messages`, {
+    method: "POST", headers: { "x-airkit-shield": CAPABILITY }, body: '{"content":"privacy-raw-sentinel-must-not-escape"}',
+  });
+  assert.equal(response.status, 503);
+  assert.equal(upstreamCalls, 0);
+});
+
 test("approval and audit unavailability block before upstream fetch with generic responses", async (t) => {
   let upstreamCalls = 0;
   const upstream = await startFixture(t, async (_request, response) => {

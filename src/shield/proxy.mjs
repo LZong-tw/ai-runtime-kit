@@ -97,7 +97,17 @@ async function handleShieldRequest({ request, response, capability, target, deci
     return;
   }
   const auditDecision = buildDecisionMetadata(decision, startedAt);
+  let forwardBody = inspection.body;
   let permitted = decision?.action === "allow";
+  if (decision?.action === "redact") {
+    const redactedBody = validateRedactedBody(decision.redactedBody);
+    if (redactedBody === null) {
+      await finish(response, { status: 503, code: "shield_unavailable" });
+      return;
+    }
+    forwardBody = redactedBody;
+    permitted = true;
+  }
   if (decision?.action === "require_approval") {
     permitted = await approveRequest({ approvalBroker, decision, inspection, auditDecision, signal: lifecycle.signal });
     auditDecision.override = permitted;
@@ -118,7 +128,7 @@ async function handleShieldRequest({ request, response, capability, target, deci
     const upstream = await fetch(new URL(path, target), {
       method: request.method,
       headers: forwardHeaders(request.headers),
-      body: request.method === "GET" || request.method === "HEAD" ? undefined : inspection.body,
+      body: request.method === "GET" || request.method === "HEAD" ? undefined : forwardBody,
       redirect: "manual",
       signal: lifecycle.signal,
     });
@@ -322,6 +332,13 @@ function safeVersionMap(value) {
   const entries = Object.entries(value);
   if (entries.length > 32 || entries.some(([name, version]) => safeIdentifier(name) === null || safeIdentifier(version) === null)) return {};
   return Object.fromEntries(entries);
+}
+
+function validateRedactedBody(value) {
+  if (!(Buffer.isBuffer(value) || value instanceof Uint8Array) || value.byteLength === 0 || value.byteLength > INSPECTION_MAX_BYTES) return null;
+  const body = Buffer.from(value);
+  try { JSON.parse(body.toString("utf8")); } catch { return null; }
+  return body;
 }
 
 function listenLoopback(server, port) {
