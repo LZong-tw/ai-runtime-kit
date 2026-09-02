@@ -38,6 +38,21 @@ test("policy activation rejects unsigned and digest-drifted bundles", async () =
   );
 });
 
+test("policy activation requires both Gitleaks and Privacy detector versions", async () => {
+  await assert.rejects(
+    loadTestPolicy({ bundle: signedBundle({ detectorVersions: { gitleaks: "8.24.0" } }) }),
+    /detector versions/i,
+  );
+  await assert.rejects(
+    loadTestPolicy({ bundle: signedBundle({ detectorVersions: { privacy: "privacy-1" } }) }),
+    /detector versions/i,
+  );
+  await assert.rejects(
+    loadTestPolicy({ bundle: signedBundle({ detectorVersions: { gitleaks: "8.24.0", privacy: "privacy-1", extra: "1" } }) }),
+    /detector versions/i,
+  );
+});
+
 test("policy activation rejects an unsupported OPA ABI and missing self-test", async () => {
   await assert.rejects(
     loadTestPolicy({ bundle: signedBundle({ opaAbi: "999" }) }),
@@ -121,6 +136,10 @@ test("default OPA SDK evaluates an OPA-compiled Wasm fixture", async () => {
   assert.deepEqual(await policy.evaluate({
     ...policyInput,
     piiFindings: [{ category: "email", count: 1 }],
+  }), redactDecision);
+  assert.deepEqual(await policy.evaluate({
+    ...policyInput,
+    piiFindings: [{ category: "phone", count: 1 }],
   }), redactDecision);
 });
 
