@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, stat, symlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, stat, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -69,5 +69,39 @@ test("identity writes reject a pre-existing symlink state root", async () => {
   } finally {
     await rm(homeDir, { recursive: true, force: true });
     await rm(targetDir, { recursive: true, force: true });
+  }
+});
+
+test("identity writes reject a symlink in the canonical ancestor chain", async () => {
+  const homeDir = await mkdtemp("/tmp/airkit-shield-");
+  const targetDir = await mkdtemp("/tmp/airkit-shield-target-");
+  const paths = shieldPaths({ homeDir, uid: 501 });
+  try {
+    await mkdir(join(homeDir, ".local"), { recursive: true });
+    await symlink(targetDir, join(homeDir, ".local", "state"));
+    await assert.rejects(writeShieldIdentity({ paths, identity }), /symlink/);
+  } finally {
+    await rm(homeDir, { recursive: true, force: true });
+    await rm(targetDir, { recursive: true, force: true });
+  }
+});
+
+test("identity writes reject a state directory owned by another uid", async () => {
+  const homeDir = await mkdtemp("/tmp/airkit-shield-");
+  const paths = shieldPaths({ homeDir, uid: 501 });
+  const realLstat = lstat;
+  try {
+    const io = {
+      mkdir,
+      chmod,
+      lstat: async (path) => {
+        const entry = await realLstat(path);
+        if (path === paths.rootDir) return { uid: 999, isSymbolicLink: () => entry.isSymbolicLink(), isDirectory: () => entry.isDirectory() };
+        return entry;
+      },
+    };
+    await assert.rejects(writeShieldIdentity({ paths, identity, io }), /owner/);
+  } finally {
+    await rm(homeDir, { recursive: true, force: true });
   }
 });
