@@ -4,10 +4,12 @@ import { stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 import { shieldPaths, writeShieldIdentity, writeShieldPolicyState } from "./shield/paths.mjs";
+import { classifyShieldRequest } from "./shield/classify.mjs";
+import { createGitleaksScanner } from "./shield/gitleaks.mjs";
 import { readShieldPolicyProvision } from "./shield/policy-bundle.mjs";
 import { loadShieldPolicy } from "./shield/policy.mjs";
 import { startShieldProxy } from "./shield/proxy.mjs";
-import { readShieldConfig } from "./shield/service.mjs";
+import { defaultShieldLauncherContext, readShieldConfig } from "./shield/service.mjs";
 
 async function main() {
   const configPath = parseConfigPath(process.argv.slice(2));
@@ -31,6 +33,7 @@ export async function startShieldDaemon({
   pid = process.pid,
   readPolicyBundle = readShieldPolicyProvision,
   loadPolicy = loadShieldPolicy,
+  createScanner = createGitleaksScanner,
   writePolicyState = writeShieldPolicyState,
   startProxy = startShieldProxy,
   writeIdentity = writeShieldIdentity,
@@ -38,6 +41,22 @@ export async function startShieldDaemon({
   if (!config || !paths) throw new TypeError("shield daemon configuration and paths are required");
   const provision = await readPolicyBundle({ paths });
   const policy = await loadPolicy({ bundle: provision.bundle, publicKey: provision.publicKey });
+  if (!config.gitleaks) throw new Error("shield gitleaks provision is missing");
+  const scanner = await createScanner(config.gitleaks);
+  if (scanner?.version !== policy.detectorVersions.gitleaks) throw new Error("shield gitleaks version does not match policy metadata");
+  const decide = async ({ body }) => {
+    const facts = classifyShieldRequest({ body, launcherContext: config.launcherContext ?? defaultShieldLauncherContext(config.lane) });
+    const secretScan = await scanner.scan(body);
+    return policy.evaluate({
+      lane: config.lane,
+      destinationClass: facts.destinationClass,
+      interactive: facts.interactive,
+      repositoryClass: facts.repositoryClass,
+      pathClasses: facts.pathClasses,
+      secretFindings: secretScan.findings,
+      piiFindings: [],
+    });
+  };
   await writePolicyState({ paths, state: { version: policy.version, detectorVersions: policy.detectorVersions } });
 
   let shield;
@@ -45,7 +64,7 @@ export async function startShieldDaemon({
     shield = await startProxy({
       capability: config.capability,
       targetOrigin: config.targetOrigin,
-      decide: policy.evaluate,
+      decide,
     });
     await writeIdentity({
       paths,
@@ -65,7 +84,7 @@ export async function startShieldDaemon({
     await shield?.close();
     throw error;
   }
-  return Object.freeze({ shield, policy });
+  return Object.freeze({ shield, policy, scanner });
 }
 
 function parseConfigPath(argv) {

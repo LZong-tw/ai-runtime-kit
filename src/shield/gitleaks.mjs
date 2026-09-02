@@ -20,7 +20,10 @@ export async function createGitleaksScanner({ executable, sha256, ruleBundle, ru
     args: scanArguments(provision.ruleBundle),
     input: Buffer.from("-----BEGIN PRIVATE KEY-----\nAIRKIT_SHIELD_SEMANTIC_SENTINEL\n-----END PRIVATE KEY-----\n"),
   });
-  if (parseFindings(selfTestResult).length === 0) throw new Error("shield gitleaks semantic self-test failed");
+  const selfTestFindings = parseFindings(selfTestResult);
+  if (selfTestFindings.length !== 1 || selfTestFindings[0].category !== "private-key" || selfTestFindings[0].count !== 1) {
+    throw new Error("shield gitleaks semantic self-test failed");
+  }
 
   return Object.freeze({
     version,

@@ -85,6 +85,18 @@ test("scanner fails closed without returning raw child output", async () => {
   });
 });
 
+test("semantic probe requires the provisioned private-key category and count", async () => {
+  await assert.rejects(createGitleaksScanner({
+    executable,
+    sha256: sha256(executableBytes),
+    ruleBundle: { path: rulesPath, sha256: sha256(rulesBytes), version: "airkit-rules-1", commandProfile },
+    io: fixtureIo(),
+    run: async (request) => request.args[0] === "version"
+      ? { code: 0, stdout: "8.24.0\n", stderr: "" }
+      : report("terraform-state"),
+  }), /semantic self-test/i);
+});
+
 function fixtureIo({ executableLink = false, owner = process.getuid?.(), readError } = {}) {
   return {
     async lstat(path) {
