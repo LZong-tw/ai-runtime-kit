@@ -31,6 +31,7 @@ import { createPiAuditRuntime } from "./audit/adapters/pi-extension.mjs";
 import { runAuditCli } from "./audit/cli.mjs";
 import { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
 import { runShieldCli } from "./shield/cli.mjs";
+import { buildShieldChildEnv, ensureShieldReady } from "./shield/service.mjs";
 
 export { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
 export { tailHeadroomSavings } from "./audit/reconcile/headroom.mjs";
@@ -1400,6 +1401,7 @@ async function prepareManagedGateway({ plan, managed, currentConfig, ccrClient, 
 
 export async function prepareLaunch(catalog, profileName, options = {}) {
   const plan = buildLaunchPlan(catalog, profileName, options);
+  const profileShield = findProfile(catalog, profileName).shield;
   const rendered = renderProfile(catalog, profileName, {
     configDir: plan.configDir,
     ccrConfigPath: plan.files.ccrConfig,
@@ -1473,6 +1475,12 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
       options,
       plan,
     });
+    const shieldReady = profileShield?.enabled === true
+      ? await (options.ensureShieldReady ?? ensureShieldReady)({
+        env: launchEnv,
+        lane: profileShield.lane,
+      })
+      : null;
     const middleware = options.plainClaude === true || !managed.compatibility
       ? null
       : await (options.startCompatibilityMiddleware ?? startCompatibilityMiddleware)({
@@ -1490,22 +1498,25 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     const inherited = { ...(options.env ?? process.env) };
     for (const key of plan.launch.clearEnv ?? []) delete inherited[key];
     try {
+      const childEnv = {
+        ...inherited,
+        ...plan.launch.env,
+        ...compatibilityLaunch.env,
+        ...(middleware
+          ? gatewayBaseUrlEnv(middleware.origin)
+          : plan.launch.gatewayPinned
+            ? {}
+            : gatewayBaseUrlEnv(gatewayOrigin)),
+        ANTHROPIC_AUTH_TOKEN: gatewayToken,
+      };
       child = spawnCommand(plan.launch.command, [
         ...plan.launch.args,
         ...compatibilityLaunch.args,
         ...plan.launch.userArgs,
       ], {
-        env: {
-          ...inherited,
-          ...plan.launch.env,
-          ...compatibilityLaunch.env,
-          ...(middleware
-            ? gatewayBaseUrlEnv(middleware.origin)
-            : plan.launch.gatewayPinned
-              ? {}
-              : gatewayBaseUrlEnv(gatewayOrigin)),
-          ANTHROPIC_AUTH_TOKEN: gatewayToken,
-        },
+        env: shieldReady
+          ? buildShieldChildEnv({ ...shieldReady, lane: profileShield.lane }, childEnv)
+          : childEnv,
         stdio: "inherit",
       });
     } catch (error) {
@@ -1711,8 +1722,29 @@ function validateCatalog(catalog) {
     }
     if (profile.ccr) validateCcr(profile.name, profile.ccr);
     validateLaunch(profile);
+    validateShield(profile);
     validateShell(profile);
     validateManagedFiles(profile);
+  }
+}
+
+function validateShield(profile) {
+  const shield = profile.shield;
+  if (shield === undefined) return;
+  if (!isPlainObject(shield)) {
+    throw new Error(`profile "${profile.name}" shield must be an object`);
+  }
+  const supportedFields = new Set(["enabled", "lane"]);
+  for (const field of Object.keys(shield)) {
+    if (!supportedFields.has(field)) {
+      throw new Error(`profile "${profile.name}" shield contains unsupported field: ${field}`);
+    }
+  }
+  if (typeof shield.enabled !== "boolean") {
+    throw new Error(`profile "${profile.name}" shield.enabled must be a boolean`);
+  }
+  if (shield.lane !== "managed") {
+    throw new Error(`profile "${profile.name}" shield.lane must be managed`);
   }
 }
 

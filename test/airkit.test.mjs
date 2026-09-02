@@ -84,6 +84,28 @@ test("catalog rejects invalid proactive compaction policy", async () => {
   }
 });
 
+test("Shield profile schema rejects malformed declarations", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-invalid-shield-profile-"));
+  const cases = [
+    [null, /profile "launch-example" shield must be an object/],
+    [{ enabled: "false", lane: "managed" }, /shield.enabled must be a boolean/],
+    [{ enabled: false, lane: "subscription" }, /shield.lane must be managed/],
+    [{ enabled: false, lane: "managed", extra: true }, /shield contains unsupported field: extra/],
+  ];
+
+  try {
+    for (const [index, [shield, expected]] of cases.entries()) {
+      const catalog = launchCatalog();
+      catalog.profiles[0].shield = shield;
+      const catalogPath = join(root, `${index}.json`);
+      await writeFile(catalogPath, `${JSON.stringify(catalog)}\n`);
+      await assert.rejects(loadCatalog(catalogPath, { includeLocal: false }), expected);
+    }
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
 test("isolated verifier restarts management-only before trusting persisted dangerous Codex state", async () => {
   assert.equal(ccrVerifier.isSupportedCcrVersion("3.0.18"), true);
   assert.equal(ccrVerifier.isSupportedCcrVersion("3.0.17"), false);
@@ -5055,6 +5077,92 @@ test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves
       ANTHROPIC_BASE_URL: "http://127.0.0.1:3456",
       ANTHROPIC_AUTH_TOKEN: "gateway-key-from-helper",
     });
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("enabled Shield blocks before AirClaude spawn when preflight fails", async () => {
+  const catalog = launchCatalog();
+  catalog.profiles[0].shield = { enabled: true, lane: "managed" };
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-shield-blocked-launch-"));
+  const spawnCalls = [];
+
+  try {
+    await assert.rejects(
+      prepareLaunch(catalog, "launch-example", {
+        ccrClient: ccrTestClient([]),
+        commandExists: async () => true,
+        configDir,
+        ensureShieldReady: async () => {
+          throw new Error("shield unavailable");
+        },
+        env: { DEMO_API_KEY: "runtime-secret", HOME: configDir },
+        runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
+        runtimeVersions: passingRuntimeVersions(),
+        spawnCommand: (...args) => spawnCalls.push(args),
+      }),
+      /shield unavailable/,
+    );
+    assert.deepEqual(spawnCalls, []);
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("enabled Shield replaces only the spawned AirClaude endpoint and capability", async () => {
+  const catalog = launchCatalog();
+  catalog.profiles[0].shield = { enabled: true, lane: "managed" };
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-shield-enabled-launch-"));
+  const capability = "fixture-capability-012345678901234567890";
+  const events = [];
+  const spawnCalls = [];
+  const saved = [];
+  const launchEnv = {
+    ANTHROPIC_API_BASE_URL: "https://stale-provider.invalid",
+    ANTHROPIC_BASE_URL: "https://stale-provider.invalid",
+    DEMO_API_KEY: "runtime-secret",
+    HOME: configDir,
+  };
+  const ccrClient = ccrTestClient(saved);
+  ccrClient.ensureGateway = async () => events.push("gateway-ready");
+
+  try {
+    const result = await prepareLaunch(catalog, "launch-example", {
+      ccrClient,
+      commandExists: async () => true,
+      configDir,
+      ensureShieldReady: async (options) => {
+        events.push("shield-ready");
+        assert.equal(options.lane, "managed");
+        assert.equal(options.env, launchEnv);
+        return {
+          origin: "http://127.0.0.1:8811",
+          capability,
+          targetClass: "managed",
+        };
+      },
+      env: launchEnv,
+      runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
+      runtimeVersions: passingRuntimeVersions(),
+      spawnCommand: (command, args, options) => {
+        events.push("spawn");
+        spawnCalls.push({ args, command, env: options.env });
+        return { status: 0 };
+      },
+    });
+
+    assert.deepEqual(events, ["gateway-ready", "shield-ready", "spawn"]);
+    assert.equal(spawnCalls[0].env.ANTHROPIC_API_BASE_URL, "http://127.0.0.1:8811");
+    assert.equal(spawnCalls[0].env.ANTHROPIC_BASE_URL, "http://127.0.0.1:8811");
+    assert.equal(
+      spawnCalls[0].env.ANTHROPIC_CUSTOM_HEADERS,
+      `x-airkit-mode: auto\nx-airkit-shield: ${capability}`,
+    );
+    assert.equal(spawnCalls[0].env.AIRKIT_SHIELD_CAPABILITY, undefined);
+    assert.doesNotMatch(spawnCalls[0].args.join(" "), /fixture-capability|gateway-key/);
+    assert.doesNotMatch(JSON.stringify(saved), /fixture-capability/);
+    assert.doesNotMatch(JSON.stringify(result), /fixture-capability/);
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }
