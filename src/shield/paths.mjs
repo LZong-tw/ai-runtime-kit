@@ -19,6 +19,7 @@ export function shieldPaths({ env = process.env, homeDir = homeFromEnv(env), uid
     policyStatePath: childPath(join(root, "policy-state.json"), root, "policyStatePath"),
     policyBundlePath: childPath(join(root, "policy-bundle.json"), root, "policyBundlePath"),
     policyPublicKeyPath: childPath(join(root, "policy-public.pem"), root, "policyPublicKeyPath"),
+    assetsProvisionPath: childPath(join(root, "assets-provision.json"), root, "assetsProvisionPath"),
     socketPath: childPath(socketPath ?? join(root, "shield.sock"), root, "socketPath"),
     launchAgentPath: launchAgentPath ?? join(home, "Library", "LaunchAgents", `${SHIELD_LABEL}.plist`),
     launchdDomain: `gui/${numericUid(uid)}`,
@@ -141,6 +142,29 @@ export async function writeShieldPolicyState({ paths, state, io = defaultIo } = 
   return validated;
 }
 
+export async function readShieldAssetsProvision({ paths, io = defaultIo } = {}) {
+  if (!paths?.assetsProvisionPath) throw new TypeError("shield asset provision paths are required");
+  assertCanonicalAssetsProvisionPath(paths);
+  let contents;
+  try {
+    await assertPrivateRegularFile(paths.assetsProvisionPath, io);
+    contents = await io.readFile(paths.assetsProvisionPath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  let state;
+  try { state = JSON.parse(contents); } catch { throw new Error("shield asset provision is invalid JSON"); }
+  return assertShieldAssetsProvision(state);
+}
+
+export async function writeShieldAssetsProvision({ paths, state, io = defaultIo } = {}) {
+  if (!paths?.rootDir || !paths.assetsProvisionPath) throw new TypeError("shield asset provision paths are required");
+  const validated = assertShieldAssetsProvision(state);
+  await writePrivateShieldState({ paths, path: paths.assetsProvisionPath, value: validated, io });
+  return validated;
+}
+
 async function writePrivateShieldState({ paths, path, value, io }) {
   assertWritablePaths(paths);
   const [homeDir, localDir, stateDir, rootDir] = stateComponents(paths.rootDir);
@@ -188,7 +212,7 @@ function assertWritablePaths(paths) {
   if (!canonicalShieldPaths.has(paths)) {
     throw new Error("shield paths must be a canonical object returned by shieldPaths");
   }
-  if (paths.configPath !== join(paths.rootDir, "config.json") || paths.identityPath !== join(paths.rootDir, "identity.json") || paths.policyStatePath !== join(paths.rootDir, "policy-state.json") || paths.policyBundlePath !== join(paths.rootDir, "policy-bundle.json") || paths.policyPublicKeyPath !== join(paths.rootDir, "policy-public.pem") || paths.socketPath !== join(paths.rootDir, "shield.sock")) {
+  if (paths.configPath !== join(paths.rootDir, "config.json") || paths.identityPath !== join(paths.rootDir, "identity.json") || paths.policyStatePath !== join(paths.rootDir, "policy-state.json") || paths.policyBundlePath !== join(paths.rootDir, "policy-bundle.json") || paths.policyPublicKeyPath !== join(paths.rootDir, "policy-public.pem") || paths.assetsProvisionPath !== join(paths.rootDir, "assets-provision.json") || paths.socketPath !== join(paths.rootDir, "shield.sock")) {
     throw new Error("shield paths must use the canonical AirKit Shield state layout");
   }
 }
@@ -198,6 +222,51 @@ function assertCanonicalPolicyStatePath(paths) {
     throw new Error("shield policy state paths must use the canonical AirKit Shield state layout");
   }
 }
+
+function assertCanonicalAssetsProvisionPath(paths) {
+  if (!canonicalShieldPaths.has(paths) || paths.assetsProvisionPath !== join(paths.rootDir, "assets-provision.json")) {
+    throw new Error("shield asset provision paths must use the canonical AirKit Shield state layout");
+  }
+}
+
+export function assertShieldAssetsProvision(state) {
+  if (!isPlainObject(state) || !exactKeys(state, ["bundle", "gitleaks", "privacy", "version"]) || state.version !== 1
+    || !isPlainObject(state.bundle) || !exactKeys(state.bundle, ["path", "sha256", "version"])
+    || !isPlainObject(state.gitleaks) || !exactKeys(state.gitleaks, ["path", "sha256"])
+    || !isPlainObject(state.privacy) || !exactKeys(state.privacy, ["path", "sha256", "version", "worker"])
+    || !isPlainObject(state.privacy.worker) || !exactKeys(state.privacy.worker, ["args", "command", "sha256"])) {
+    throw new Error("shield asset provision is invalid");
+  }
+  assertAssetReference(state.bundle, "shield policy bundle");
+  assertAssetReference(state.gitleaks, "shield gitleaks");
+  assertAssetReference(state.privacy, "shield privacy bundle");
+  if (!safePath(state.privacy.worker.command) || !/^[a-f0-9]{64}$/.test(state.privacy.worker.sha256)
+    || !Array.isArray(state.privacy.worker.args) || !state.privacy.worker.args.every((argument) => typeof argument === "string" && argument.length > 0 && argument.length <= 256)) {
+    throw new Error("shield privacy worker reference is invalid");
+  }
+  return Object.freeze({
+    version: state.version,
+    bundle: Object.freeze({ version: state.bundle.version, sha256: state.bundle.sha256, path: state.bundle.path }),
+    gitleaks: Object.freeze({ sha256: state.gitleaks.sha256, path: state.gitleaks.path }),
+    privacy: Object.freeze({
+      version: state.privacy.version,
+      sha256: state.privacy.sha256,
+      path: state.privacy.path,
+      worker: Object.freeze({ command: state.privacy.worker.command, args: Object.freeze([...state.privacy.worker.args]), sha256: state.privacy.worker.sha256 }),
+    }),
+  });
+}
+
+function assertAssetReference(value, label) {
+  if (!safeIdentifier(value.version ?? "reference") || !safePath(value.path) || !/^[a-f0-9]{64}$/.test(value.sha256)) {
+    throw new Error(`${label} reference is invalid`);
+  }
+}
+
+function safeIdentifier(value) { return typeof value === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(value); }
+function safePath(value) { return typeof value === "string" && isAbsolute(value) && resolve(value) === value; }
+function isPlainObject(value) { return value !== null && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype; }
+function exactKeys(value, expected) { const keys = Object.keys(value).sort(); return keys.length === expected.length && keys.every((key, index) => key === expected[index]); }
 
 async function assertPrivateRegularFile(path, io) {
   const entry = await io.lstat(path);
