@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 
-import { createPrivacyFilter, runPrivacyWorkerSelfTest } from "../src/shield/privacy.mjs";
+import { createPrivacyFilter, isVerifiedRedaction, runPrivacyWorkerSelfTest } from "../src/shield/privacy.mjs";
 
 const sentinel = "privacy-raw-sentinel-must-not-escape";
 const provision = {
@@ -11,6 +11,7 @@ const provision = {
     worker: { command: "/opt/airkit/privacy-worker", args: ["--stdio"], sha256: "a".repeat(64) },
   },
 };
+const validateWorker = async () => {};
 
 test("persistent privacy worker health-checks then returns a validated redacted JSON buffer", async (t) => {
   const worker = fakeWorker((message, emit) => {
@@ -20,31 +21,74 @@ test("persistent privacy worker health-checks then returns a validated redacted 
       redactedBody: Buffer.from('{"content":"[EMAIL]"}').toString("base64"),
     });
   });
-  const filter = await createPrivacyFilter({ provision, spawnWorker: () => worker });
+  const filter = await createPrivacyFilter({ provision, spawnWorker: () => worker, validateWorker });
   t.after(() => filter.close());
 
   const result = await filter.scan(Buffer.from(`{"content":"${sentinel}"}`));
   assert.equal(result.status, "ok");
   assert.deepEqual(result.findings, [{ label: "email", count: 1 }]);
   assert.deepEqual(result.redactedBody, Buffer.from('{"content":"[EMAIL]"}'));
-  assert.notEqual(result.redactedBody, Buffer.from('{"content":"[EMAIL]"}'));
+  assert.equal(result.redactedBody.equals(Buffer.from(`{"content":"${sentinel}"}`)), false);
   assert.doesNotMatch(JSON.stringify(result), new RegExp(sentinel));
   assert.equal(worker.messages.filter((entry) => entry.type === "health").length, 1);
   assert.equal(worker.messages.filter((entry) => entry.type === "scan").length, 1);
 });
 
+test("privacy worker assets are revalidated immediately before each worker spawn", async () => {
+  let validations = 0;
+  let spawns = 0;
+  await assert.rejects(
+    createPrivacyFilter({
+      provision,
+      validateWorker: async () => { validations += 1; throw new Error("digest changed"); },
+      spawnWorker: () => { spawns += 1; return fakeWorker(() => {}); },
+    }),
+    /worker unavailable/i,
+  );
+  assert.equal(validations, 1);
+  assert.equal(spawns, 0);
+});
+
+test("runtime redaction proof requires every reported privacy span to be absent from replacement JSON", () => {
+  const original = Buffer.from('{"content":"alice@example.com"}');
+  const span = { start: 12, end: 29 };
+  const result = {
+    status: "ok",
+    findings: [{ label: "email", count: 1 }],
+    redactions: [{ label: "email", count: 1, spans: [span] }],
+    redactedBody: Buffer.from('{"content":"[EMAIL]"}'),
+  };
+  assert.equal(isVerifiedRedaction({ original, result }), true);
+  assert.equal(isVerifiedRedaction({ original, result: { ...result, redactedBody: Buffer.from('{"content":"alice@example.com (reviewed)"}') } }), false);
+  assert.equal(isVerifiedRedaction({ original, result: { ...result, redactions: [{ label: "email", count: 1, spans: [] }] } }), false);
+});
+
 test("privacy provision self-test requires deterministic supported-label redaction", async () => {
   const goodWorker = fakeWorker((message, emit) => {
     if (message.type === "health") emit(health(message));
-    if (message.type === "scan") emit({ type: "scan", id: message.id, status: "ok", findings: [{ label: "email", count: 1 }], redactedBody: Buffer.from('{"content":"[EMAIL]"}').toString("base64") });
+    if (message.type === "scan") emit({ type: "scan", id: message.id, status: "ok", findings: [{ label: "email", count: 1 }], redactions: [{ label: "email", count: 1, spans: [{ start: 12, end: 47 }] }], redactedBody: Buffer.from('{"content":"[EMAIL]"}').toString("base64") });
   });
-  assert.deepEqual(await runPrivacyWorkerSelfTest(provision, { spawnWorker: () => goodWorker }), { version: "privacy-1" });
+  assert.deepEqual(await runPrivacyWorkerSelfTest(provision, { spawnWorker: () => goodWorker, validateWorker }), { version: "privacy-1" });
 
   const inadequateWorker = fakeWorker((message, emit) => {
     if (message.type === "health") emit(health(message));
     if (message.type === "scan") emit({ type: "scan", id: message.id, status: "ok", findings: [] });
   });
-  await assert.rejects(runPrivacyWorkerSelfTest(provision, { spawnWorker: () => inadequateWorker }), /self-test failed/i);
+  await assert.rejects(runPrivacyWorkerSelfTest(provision, { spawnWorker: () => inadequateWorker, validateWorker }), /self-test failed/i);
+});
+
+test("privacy self-test rejects unchanged or category-incomplete replacement bodies", async () => {
+  const unchangedWorker = fakeWorker((message, emit) => {
+    if (message.type === "health") emit(health(message));
+    if (message.type === "scan") emit({ type: "scan", id: message.id, status: "ok", findings: [{ label: "email", count: 1 }], redactions: [{ label: "email", count: 1, spans: [{ start: 12, end: 47 }] }], redactedBody: Buffer.from('{"content":"AIRKIT_PRIVACY_PROTOCOL_PROBE_EMAIL"}').toString("base64") });
+  });
+  await assert.rejects(runPrivacyWorkerSelfTest(provision, { spawnWorker: () => unchangedWorker, validateWorker }), /self-test failed/i);
+
+  const incompleteWorker = fakeWorker((message, emit) => {
+    if (message.type === "health") emit(health(message));
+    if (message.type === "scan") emit({ type: "scan", id: message.id, status: "ok", findings: [{ label: "email", count: 1 }], redactions: [], redactedBody: Buffer.from('{"content":"[EMAIL]"}').toString("base64") });
+  });
+  await assert.rejects(runPrivacyWorkerSelfTest(provision, { spawnWorker: () => incompleteWorker, validateWorker }), /self-test failed/i);
 });
 
 test("privacy worker timeout, exit, malformed reply, unknown labels, and oversized output fail closed without raw data", async (t) => {
@@ -59,7 +103,7 @@ test("privacy worker timeout, exit, malformed reply, unknown labels, and oversiz
 
   for (const fixture of cases) {
     const worker = fakeWorker(fixture.handler);
-    const filter = await createPrivacyFilter({ provision, spawnWorker: () => worker, timeoutMs: 5 });
+    const filter = await createPrivacyFilter({ provision, spawnWorker: () => worker, validateWorker, timeoutMs: 5 });
     t.after(() => filter.close());
     const result = await filter.scan(Buffer.from(`{"content":"${sentinel}"}`));
     assert.equal(result.status, fixture.expected, fixture.name);

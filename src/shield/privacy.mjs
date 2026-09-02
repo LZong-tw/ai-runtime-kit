@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { lstat, readFile, realpath } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
 
 const PROTOCOL = "airkit-privacy-ndjson-v1";
 const MAX_BODY_BYTES = 1_048_576;
@@ -7,10 +9,13 @@ const MAX_FRAME_BYTES = 1_048_576;
 const DEFAULT_TIMEOUT_MS = 2_000;
 const KNOWN_LABELS = new Set(["address", "credit-card", "email", "ip-address", "person", "phone", "ssn", "token"]);
 
-export async function createPrivacyFilter({ provision, spawnWorker = defaultSpawnWorker, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+export async function createPrivacyFilter({ provision, spawnWorker = defaultSpawnWorker, validateWorker = validatePrivacyWorkerAsset, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   const privacy = assertPrivacyProvision(provision);
   if (typeof spawnWorker !== "function") throw new TypeError("shield privacy worker launcher is required");
+  if (typeof validateWorker !== "function") throw new TypeError("shield privacy worker validator is required");
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) throw new TypeError("shield privacy worker timeout is invalid");
+
+  try { await validateWorker(privacy.worker); } catch { throw new Error("shield privacy worker unavailable"); }
 
   let worker;
   try {
@@ -41,8 +46,9 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
   worker.once?.("exit", failWorker);
   worker.stdout.on("data", (chunk) => {
     if (closed) return;
-    const next = Buffer.concat([remainder, Buffer.from(chunk)]);
-    if (next.byteLength > MAX_FRAME_BYTES + 1) { failWorker(); return; }
+    const incomingBytes = Buffer.isBuffer(chunk) || chunk instanceof Uint8Array ? chunk.byteLength : Buffer.byteLength(chunk);
+    if (incomingBytes > MAX_FRAME_BYTES || remainder.byteLength > MAX_FRAME_BYTES - incomingBytes) { failWorker(); return; }
+    const next = Buffer.concat([remainder, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
     const lines = next.toString("utf8").split("\n");
     remainder = Buffer.from(lines.pop() ?? "");
     if (remainder.byteLength > MAX_FRAME_BYTES) { failWorker(); return; }
@@ -87,11 +93,12 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
   });
 }
 
-export async function runPrivacyWorkerSelfTest(provision, { spawnWorker = defaultSpawnWorker, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
-  const filter = await createPrivacyFilter({ provision, spawnWorker, timeoutMs });
+export async function runPrivacyWorkerSelfTest(provision, { spawnWorker = defaultSpawnWorker, validateWorker = validatePrivacyWorkerAsset, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  const filter = await createPrivacyFilter({ provision, spawnWorker, validateWorker, timeoutMs });
   try {
-    const result = await filter.scan(Buffer.from('{"content":"AIRKIT_PRIVACY_PROTOCOL_PROBE_EMAIL"}'));
-    if (result.status !== "ok" || !Buffer.isBuffer(result.redactedBody) || !result.findings.some((finding) => finding.label === "email")) {
+    const original = Buffer.from('{"content":"AIRKIT_PRIVACY_PROTOCOL_PROBE_EMAIL"}');
+    const result = await filter.scan(original);
+    if (!isVerifiedRedaction({ original, result }) || !result.findings.some((finding) => finding.label === "email") || result.redactedBody.includes("AIRKIT_PRIVACY_PROTOCOL_PROBE_EMAIL")) {
       throw new Error("shield privacy worker self-test failed");
     }
     return Object.freeze({ version: filter.version });
@@ -133,12 +140,55 @@ function normalizeScanReply(reply) {
     findings.push(Object.freeze({ label: finding.label, count: finding.count }));
   }
   const result = { status: "ok", findings: Object.freeze(findings) };
+  if (reply.redactions !== undefined) {
+    const redactions = normalizeRedactions(reply.redactions);
+    if (redactions === null) return unavailable();
+    result.redactions = redactions;
+  }
   if (reply.redactedBody !== undefined) {
     const redactedBody = decodeRedactedBody(reply.redactedBody);
     if (redactedBody === null) return unavailable();
     result.redactedBody = redactedBody;
   }
   return Object.freeze(result);
+}
+
+function normalizeRedactions(value) {
+  if (!Array.isArray(value) || value.length > 128) return null;
+  const result = [];
+  for (const entry of value) {
+    if (!isPlainObject(entry) || !KNOWN_LABELS.has(entry.label) || !Number.isInteger(entry.count) || entry.count < 1 || entry.count > 1024) return null;
+    const spans = entry.spans === undefined ? undefined : normalizeSpans(entry.spans, entry.count);
+    if (spans === null) return null;
+    result.push(Object.freeze({ label: entry.label, count: entry.count, ...(spans === undefined ? {} : { spans }) }));
+  }
+  return Object.freeze(result);
+}
+
+function normalizeSpans(value, count) {
+  if (!Array.isArray(value) || value.length !== count) return null;
+  const spans = [];
+  for (const span of value) {
+    if (!isPlainObject(span) || !Number.isInteger(span.start) || !Number.isInteger(span.end) || span.start < 0 || span.end <= span.start || span.end > MAX_BODY_BYTES) return null;
+    spans.push(Object.freeze({ start: span.start, end: span.end }));
+  }
+  return Object.freeze(spans);
+}
+
+export function isVerifiedRedaction({ original, result } = {}) {
+  if (!validBody(original) || result?.status !== "ok" || !Buffer.isBuffer(result.redactedBody) || result.redactedBody.equals(Buffer.from(original))) return false;
+  if (!Array.isArray(result.findings) || !Array.isArray(result.redactions)) return false;
+  const counts = new Map();
+  for (const redaction of result.redactions) {
+    if (!Array.isArray(redaction.spans) || redaction.spans.length !== redaction.count) return false;
+    for (const span of redaction.spans) {
+      if (!Number.isInteger(span.start) || !Number.isInteger(span.end) || span.start < 0 || span.end <= span.start || span.end > original.byteLength) return false;
+      const originalValue = Buffer.from(original).subarray(span.start, span.end);
+      if (result.redactedBody.includes(originalValue)) return false;
+    }
+    counts.set(redaction.label, (counts.get(redaction.label) ?? 0) + redaction.count);
+  }
+  return result.findings.every((finding) => counts.get(finding.label) >= finding.count);
 }
 
 function decodeRedactedBody(value) {
@@ -158,6 +208,23 @@ function assertPrivacyProvision(provision) {
     throw new TypeError("shield privacy provision is invalid");
   }
   return Object.freeze({ version: privacy.version, worker: Object.freeze({ command: privacy.worker.command, args: Object.freeze([...privacy.worker.args]), sha256: privacy.worker.sha256 }) });
+}
+
+export async function validatePrivacyWorkerAsset(worker, { io = { lstat, readFile, realpath } } = {}) {
+  if (!isPlainObject(worker) || !isAbsolute(worker.command) || resolve(worker.command) !== worker.command || !/^[a-f0-9]{64}$/.test(worker.sha256 ?? "")) {
+    throw new Error("shield privacy worker provision is invalid");
+  }
+  let entry;
+  let canonicalPath;
+  let bytes;
+  try { [entry, canonicalPath, bytes] = await Promise.all([io.lstat(worker.command), io.realpath(worker.command), io.readFile(worker.command)]); }
+  catch { throw new Error("shield privacy worker validation failed"); }
+  if (canonicalPath !== worker.command || entry.isSymbolicLink?.() || !entry.isFile?.() || (entry.mode & 0o022) !== 0 || (entry.mode & 0o100) === 0
+    || (typeof process.getuid === "function" && entry.uid !== process.getuid())
+    || createHash("sha256").update(bytes).digest("hex") !== worker.sha256) {
+    throw new Error("shield privacy worker validation failed");
+  }
+  return Object.freeze({ command: worker.command, sha256: worker.sha256 });
 }
 
 function validBody(body) { return (Buffer.isBuffer(body) || body instanceof Uint8Array) && body.byteLength <= MAX_BODY_BYTES; }
