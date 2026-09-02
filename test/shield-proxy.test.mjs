@@ -416,6 +416,54 @@ test("approval and audit unavailability block before upstream fetch with generic
   assert.equal(upstreamCalls, 0);
 });
 
+test("proxy scopes approval with evaluated lane, destination, and policy versions", async (t) => {
+  let upstreamCalls = 0;
+  let approvalScope;
+  let terminal;
+  const upstream = await startFixture(t, async (_request, response) => {
+    upstreamCalls += 1;
+    response.end("ok");
+  });
+  const grant = {};
+  const shield = await startShield(t, {
+    targetOrigin: upstream.origin,
+    approvalBroker: {
+      async request(scope) { approvalScope = scope; return grant; },
+      consume(receivedGrant, scope) { return receivedGrant === grant && scope === approvalScope; },
+    },
+    decide: async () => ({
+      action: "require_approval",
+      reasonCodes: ["internal_repository_code"],
+      lane: "subscription",
+      destinationClass: "subscription",
+      bundleVersion: "2026.09.02.2",
+      detectorVersions: { gitleaks: "8.24.0" },
+    }),
+    recordShieldDecision: async (decision) => { terminal = decision; },
+  });
+
+  const result = await fetch(`${shield.origin}/v1/messages`, {
+    method: "POST", headers: { "x-airkit-shield": CAPABILITY }, body: "body-secret",
+  });
+  assert.equal(result.status, 200);
+  assert.equal(upstreamCalls, 1);
+  assert.deepEqual({
+    bundleVersion: approvalScope.bundleVersion,
+    destinationClass: approvalScope.destinationClass,
+    reasonCodes: approvalScope.reasonCodes,
+  }, {
+    bundleVersion: "2026.09.02.2",
+    destinationClass: "subscription",
+    reasonCodes: ["internal_repository_code"],
+  });
+  assert.match(approvalScope.digest, /^[a-f0-9]{64}$/);
+  assert.equal(terminal.lane, "subscription");
+  assert.equal(terminal.destinationClass, "subscription");
+  assert.equal(terminal.bundleVersion, "2026.09.02.2");
+  assert.deepEqual(terminal.detectorVersions, { gitleaks: "8.24.0" });
+  assert.doesNotMatch(JSON.stringify(terminal), /body-secret|digest/);
+});
+
 async function startShield(t, options) {
   const shield = await startShieldProxy({
     capability: CAPABILITY,

@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 import { buildShieldDecisionEvent, createShieldDecisionRecorder } from "../src/shield/audit.mjs";
+import { decryptAuditValue } from "../src/audit/crypto.mjs";
+import { createEncryptedSpool } from "../src/audit/spool.mjs";
+
+const MASTER_KEY = Buffer.alloc(32, 9);
 
 const decision = Object.freeze({
   requestId: "request-1",
@@ -26,25 +33,38 @@ test("shield decision builder admits only metadata allowlist", () => {
   assert.doesNotMatch(JSON.stringify(event), /sentinel-secret/);
 });
 
-test("durable recorder resolves only after audit daemon ACK", async () => {
+test("durable recorder sends an encrypted transport envelope and waits for audit daemon ACK", async () => {
   const sent = [];
   const recorder = createShieldDecisionRecorder({
-    client: { send: async (event) => { sent.push(event); return { status: "committed" }; } },
+    masterKey: MASTER_KEY,
+    client: { send: async (envelope) => { sent.push(envelope); return { status: "committed" }; } },
     now: () => new Date("2026-09-02T00:00:00.000Z"),
   });
   const result = await recorder.recordShieldDecision(decision);
   assert.equal(result.durable, "ack");
   assert.equal(sent.length, 1);
+  assert.deepEqual(Object.keys(sent[0]).sort(), ["encrypted", "event_id"]);
+  assert.equal(sent[0].event_id.length > 0, true);
+  assert.doesNotMatch(JSON.stringify(sent[0]), /request-1|policy_allow/);
+  const plaintext = decryptAuditValue({
+    masterKey: MASTER_KEY,
+    purpose: "request-evidence/v1",
+    identity: sent[0].event_id,
+    encrypted: sent[0].encrypted,
+  });
+  assert.deepEqual(JSON.parse(plaintext.toString("utf8")).payload, { shield_decision: decision });
 });
 
 test("audit transport failure and full spool fail closed", async () => {
   const unavailable = createShieldDecisionRecorder({
+    masterKey: MASTER_KEY,
     client: { send: async () => { throw new Error("raw-secret must not escape"); } },
   });
   await assert.rejects(unavailable.recordShieldDecision(decision), /shield audit is unavailable/);
 
   let enqueued = false;
   const full = createShieldDecisionRecorder({
+    masterKey: MASTER_KEY,
     client: { send: async () => { throw new Error("audit daemon unavailable"); } },
     spool: {
       stats: async () => ({ atCapacity: true }),
@@ -55,16 +75,23 @@ test("audit transport failure and full spool fail closed", async () => {
   assert.equal(enqueued, false);
 });
 
-test("encrypted spool capacity is a durable fallback after a daemon failure", async () => {
-  const enqueued = [];
+test("encrypted spool capacity is a durable fallback after a daemon failure", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-shield-audit-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const spool = createEncryptedSpool({
+    paths: { rootDir: root, spoolDir: join(root, "spool") },
+    masterKey: MASTER_KEY,
+  });
   const recorder = createShieldDecisionRecorder({
+    masterKey: MASTER_KEY,
     client: { send: async () => { throw new Error("audit daemon unavailable"); } },
-    spool: {
-      stats: async () => ({ atCapacity: false }),
-      enqueue: async (event) => { enqueued.push(event); return { event: { event_id: event.event_id } }; },
-    },
+    spool,
   });
   const result = await recorder.recordShieldDecision(decision);
   assert.equal(result.durable, "spool");
-  assert.equal(enqueued.length, 1);
+  const entries = await spool.entries();
+  assert.equal(entries.length, 1);
+  assert.deepEqual(entries[0].event.payload, { shield_decision: decision });
+  const records = await Promise.all((await readdir(join(root, "spool"))).map((name) => readFile(join(root, "spool", name), "utf8")));
+  assert.doesNotMatch(records.join(""), /request-1|policy_allow/);
 });

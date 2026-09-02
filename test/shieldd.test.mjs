@@ -66,6 +66,10 @@ test("daemon activates validated policy before proxy readiness and publishes its
     reasonCodes: ["fixture"],
     approvalEligible: false,
     redactions: [],
+    lane: "subscription",
+    destinationClass: "subscription",
+    bundleVersion: "2026.09.02.2",
+    detectorVersions: { gitleaks: "8.24.0" },
   });
   assert.deepEqual(calls.map(([name]) => name), ["bundle", "policy", "scanner", "state", "proxy", "identity"]);
   assert.deepEqual(calls.at(-1)[1].identity, {
