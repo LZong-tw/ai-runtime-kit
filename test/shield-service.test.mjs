@@ -55,6 +55,21 @@ test("shield install previews without launchctl mutation", async () => {
   assert.deepEqual(Object.keys(plan.plist.EnvironmentVariables), []);
 });
 
+test("shield privacy provision is preview-first and keeps asset references out of CLI output", async () => {
+  const output = capture();
+  const calls = [];
+  const code = await runShieldCli(["privacy", "provision", "--bundle", "/private/privacy.json", "--gitleaks", "/private/gitleaks"], {
+    stdout: output.stdout,
+    shield: {
+      async privacyProvision(request) { calls.push(request); return { state: "preview", write: request.write }; },
+    },
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(calls, [{ bundlePath: "/private/privacy.json", gitleaksPath: "/private/gitleaks", write: false }]);
+  assert.match(output.value(), /privacy/);
+  assert.doesNotMatch(output.value(), /private/);
+});
+
 test("shield install writes a private plist only with --write semantics", async () => {
   const homeDir = await mkdtemp(join(tmpdir(), "airkit-shield-service-"));
   const { options, paths } = fixture(homeDir);

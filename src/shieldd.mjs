@@ -3,11 +3,12 @@
 import { stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
-import { shieldPaths, writeShieldIdentity, writeShieldPolicyState } from "./shield/paths.mjs";
+import { readShieldAssetsProvision, shieldPaths, writeShieldIdentity, writeShieldPolicyState } from "./shield/paths.mjs";
 import { classifyShieldRequest } from "./shield/classify.mjs";
 import { createGitleaksScanner } from "./shield/gitleaks.mjs";
 import { readShieldPolicyProvision } from "./shield/policy-bundle.mjs";
 import { loadShieldPolicy } from "./shield/policy.mjs";
+import { createPrivacyFilter, isVerifiedRedaction } from "./shield/privacy.mjs";
 import { startShieldProxy } from "./shield/proxy.mjs";
 import { defaultShieldLauncherContext, readShieldConfig } from "./shield/service.mjs";
 
@@ -32,8 +33,10 @@ export async function startShieldDaemon({
   paths,
   pid = process.pid,
   readPolicyBundle = readShieldPolicyProvision,
+  readAssetsProvision = readShieldAssetsProvision,
   loadPolicy = loadShieldPolicy,
   createScanner = createGitleaksScanner,
+  createPrivacy = createPrivacyFilter,
   writePolicyState = writeShieldPolicyState,
   startProxy = startShieldProxy,
   writeIdentity = writeShieldIdentity,
@@ -42,9 +45,17 @@ export async function startShieldDaemon({
   const destinationClass = resolveDestinationClass(config);
   const provision = await readPolicyBundle({ paths });
   const policy = await loadPolicy({ bundle: provision.bundle, publicKey: provision.publicKey });
+  const assets = await readAssetsProvision({ paths });
+  if (!assets) throw new Error("shield asset provision is missing");
   if (!config.gitleaks) throw new Error("shield gitleaks provision is missing");
+  assertGitleaksAsset(config.gitleaks, assets.gitleaks);
   const scanner = await createScanner(config.gitleaks);
   if (scanner?.version !== policy.detectorVersions.gitleaks) throw new Error("shield gitleaks version does not match policy metadata");
+  const privacy = await createPrivacy({ provision: assets });
+  if (privacy?.version !== policy.detectorVersions.privacy) {
+    privacy?.close?.();
+    throw new Error("shield privacy version does not match policy metadata");
+  }
   const decide = async ({ body }) => {
     const launcherContext = {
       ...(config.launcherContext ?? defaultShieldLauncherContext(destinationClass)),
@@ -52,6 +63,8 @@ export async function startShieldDaemon({
     };
     const facts = classifyShieldRequest({ body, launcherContext });
     const secretScan = await scanner.scan(body);
+    const privacyScan = await privacy.scan(body);
+    if (privacyScan.status !== "ok") throw new Error("shield privacy worker unavailable");
     const decision = await policy.evaluate({
       lane: config.lane,
       destinationClass,
@@ -59,20 +72,24 @@ export async function startShieldDaemon({
       repositoryClass: facts.repositoryClass,
       pathClasses: facts.pathClasses,
       secretFindings: secretScan.findings,
-      piiFindings: [],
+      piiFindings: privacyScan.findings,
     });
+    if (decision.action === "redact" && !isVerifiedRedaction({ original: body, result: privacyScan })) {
+      throw new Error("shield privacy redaction is invalid");
+    }
     return {
       ...decision,
       lane: config.lane,
       destinationClass,
       bundleVersion: policy.version,
       detectorVersions: { ...policy.detectorVersions },
+      ...(decision.action === "redact" ? { redactedBody: privacyScan.redactedBody, transformCount: privacyScan.redactions.reduce((total, item) => total + item.count, 0) } : {}),
     };
   };
-  await writePolicyState({ paths, state: { version: policy.version, detectorVersions: policy.detectorVersions } });
 
   let shield;
   try {
+    await writePolicyState({ paths, state: { version: policy.version, detectorVersions: policy.detectorVersions } });
     shield = await startProxy({
       capability: config.capability,
       targetOrigin: config.targetOrigin,
@@ -94,9 +111,18 @@ export async function startShieldDaemon({
     });
   } catch (error) {
     await shield?.close();
+    privacy.close?.();
     throw error;
   }
-  return Object.freeze({ shield, policy, scanner });
+  const proxy = shield;
+  shield = Object.freeze({ ...proxy, close: async () => { await proxy.close(); privacy.close?.(); } });
+  return Object.freeze({ shield, policy, scanner, privacy });
+}
+
+function assertGitleaksAsset(gitleaks, asset) {
+  if (!asset || gitleaks.executable !== asset.path || gitleaks.sha256 !== asset.sha256) {
+    throw new Error("shield gitleaks asset provision does not match configuration");
+  }
 }
 
 function resolveDestinationClass(config) {

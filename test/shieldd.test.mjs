@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { once } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { createServer } from "node:http";
 import test from "node:test";
 
 import { startShieldDaemon } from "../src/shieldd.mjs";
+import { createPrivacyFilter } from "../src/shield/privacy.mjs";
+import { startShieldProxy } from "../src/shield/proxy.mjs";
 
 const config = {
   capability: "c".repeat(32),
@@ -28,7 +30,7 @@ const paths = {
 
 const policy = {
   version: "2026.09.02.2",
-  detectorVersions: { gitleaks: "8.24.0" },
+  detectorVersions: { gitleaks: "8.24.0", privacy: "privacy-1" },
   async evaluate() {
     return { action: "block", reasonCodes: ["fixture"], approvalEligible: false, redactions: [] };
   },
@@ -36,7 +38,7 @@ const policy = {
 
 test("daemon activates validated policy before proxy readiness and publishes its identity binding", async () => {
   const calls = [];
-  const daemon = await startShieldDaemon({
+  const daemon = await startDaemon({
     config,
     paths,
     pid: 4242,
@@ -69,7 +71,7 @@ test("daemon activates validated policy before proxy readiness and publishes its
     lane: "subscription",
     destinationClass: "subscription",
     bundleVersion: "2026.09.02.2",
-    detectorVersions: { gitleaks: "8.24.0" },
+    detectorVersions: { gitleaks: "8.24.0", privacy: "privacy-1" },
   });
   assert.deepEqual(calls.map(([name]) => name), ["bundle", "policy", "scanner", "state", "proxy", "identity"]);
   assert.deepEqual(calls.at(-1)[1].identity, {
@@ -88,7 +90,7 @@ test("daemon activates validated policy before proxy readiness and publishes its
 test("daemon closes the proxy when publishing the bound identity fails", async () => {
   const calls = [];
   await assert.rejects(
-    startShieldDaemon({
+    startDaemon({
       config,
       paths,
       readPolicyBundle: async () => ({ bundle: {}, publicKey: "pinned-ed25519-public-key" }),
@@ -106,7 +108,7 @@ test("daemon closes the proxy when publishing the bound identity fails", async (
 test("daemon normalizes conflicting launcher destination class before policy evaluation", async () => {
   const policyInputs = [];
   const proxyDecisions = [];
-  await startShieldDaemon({
+  await startDaemon({
     config: {
       ...config,
       launcherContext: { ...config.launcherContext, destinationClass: "managed" },
@@ -136,7 +138,7 @@ test("daemon normalizes conflicting launcher destination class before policy eva
 test("daemon rejects a target class that conflicts with its lane before policy activation", async () => {
   let loaded = false;
   await assert.rejects(
-    startShieldDaemon({
+    startDaemon({
       config: { ...config, targetClass: "managed" },
       paths,
       readPolicyBundle: async () => ({ bundle: {}, publicKey: "pinned-ed25519-public-key" }),
@@ -159,7 +161,7 @@ test("proxy requests reach Gitleaks, category-only classification, and policy ev
   const address = upstream.address();
   const scannerCalls = [];
   const policyInputs = [];
-  const daemon = await startShieldDaemon({
+  const daemon = await startDaemon({
     config: { ...config, targetOrigin: `http://127.0.0.1:${address.port}` },
     paths,
     readPolicyBundle: async () => ({ bundle: {}, publicKey: "pinned-ed25519-public-key" }),
@@ -213,7 +215,7 @@ test("missing launcher context reaches policy facts but fails closed without dur
   const address = upstream.address();
   const policyInputs = [];
   const { launcherContext: _launcherContext, ...configWithoutContext } = config;
-  const daemon = await startShieldDaemon({
+  const daemon = await startDaemon({
     config: { ...configWithoutContext, targetOrigin: `http://127.0.0.1:${address.port}` },
     paths,
     readPolicyBundle: async () => ({ bundle: {}, publicKey: "pinned-ed25519-public-key" }),
@@ -247,3 +249,118 @@ test("missing launcher context reaches policy facts but fails closed without dur
     piiFindings: [],
   }]);
 });
+
+test("daemon composes provisioned Privacy findings and sends only a valid policy redaction to the proxy", async () => {
+  const policyInputs = [];
+  const decisions = [];
+  await startDaemon({
+    config,
+    paths,
+    readPolicyBundle: async () => ({ bundle: {}, publicKey: "pinned-ed25519-public-key" }),
+    readAssetsProvision: async () => assetsProvision(),
+    createPrivacy: async () => ({
+      version: "privacy-1",
+      async scan() {
+        return { status: "ok", findings: [{ label: "email", count: 1 }], redactions: [{ label: "email", count: 1, spans: [{ start: 12, end: 47 }] }], redactedBody: Buffer.from('{"content":"[EMAIL]"}') };
+      },
+      close() {},
+    }),
+    createScanner: async () => ({ version: "8.24.0", scan: async () => ({ findings: [] }) }),
+    loadPolicy: async () => ({
+      version: "2026.09.02.4",
+      detectorVersions: { gitleaks: "8.24.0", privacy: "privacy-1" },
+      async evaluate(input) {
+        policyInputs.push(input);
+        return { action: "redact", reasonCodes: ["pii_email_redacted"], approvalEligible: false, redactions: [] };
+      },
+    }),
+    writePolicyState: async () => {},
+    startProxy: async ({ decide }) => {
+      decisions.push(await decide({ body: Buffer.from('{"content":"privacy-raw-sentinel-must-not-escape"}') }));
+      return { origin: "http://127.0.0.1:8811", close: async () => {} };
+    },
+    writeIdentity: async () => {},
+  });
+
+  assert.deepEqual(policyInputs[0].piiFindings, [{ label: "email", count: 1 }]);
+  assert.equal(decisions[0].action, "redact");
+  assert.deepEqual(decisions[0].redactedBody, Buffer.from('{"content":"[EMAIL]"}'));
+  assert.doesNotMatch(JSON.stringify(decisions[0]), /privacy-raw/);
+});
+
+test("daemon blocks every privacy worker failure before a real upstream fetch", async (t) => {
+  const failures = [
+    { name: "unknown", handle(message, reply) { if (message.type === "health") reply(privacyHealth(message)); else reply({ type: "scan", id: message.id, status: "unknown" }); } },
+    { name: "timeout", handle(message, reply) { if (message.type === "health") reply(privacyHealth(message)); } },
+    { name: "malformed", handle(message, reply, worker) { if (message.type === "health") reply(privacyHealth(message)); else worker.stdout.emit("data", "not-json\n"); } },
+    { name: "exit", handle(message, reply, worker) { if (message.type === "health") reply(privacyHealth(message)); else worker.emit("exit", 1); } },
+    { name: "oversized", handle(message, reply, worker) { if (message.type === "health") reply(privacyHealth(message)); else worker.stdout.emit("data", "x".repeat(1_048_577)); } },
+  ];
+  for (const failure of failures) {
+    let upstreamCalls = 0;
+    const upstream = createServer((request, response) => { upstreamCalls += 1; request.resume(); response.end("wrong"); });
+    upstream.listen(0, "127.0.0.1");
+    await once(upstream, "listening");
+    t.after(() => new Promise((resolve) => upstream.close(resolve)));
+    const address = upstream.address();
+    const daemon = await startDaemon({
+      config: { ...config, targetOrigin: `http://127.0.0.1:${address.port}` },
+      paths,
+      readPolicyBundle: async () => ({ bundle: {}, publicKey: "pinned-ed25519-public-key" }),
+      readAssetsProvision: async () => assetsProvision(),
+      createPrivacy: async ({ provision }) => createPrivacyFilter({
+        provision,
+        spawnWorker: () => fakePrivacyWorker(failure.handle),
+        validateWorker: async () => {},
+        timeoutMs: 50,
+      }),
+      createScanner: async () => ({ version: "8.24.0", scan: async () => ({ findings: [] }) }),
+      loadPolicy: async () => ({ version: "2026.09.02.4", detectorVersions: { gitleaks: "8.24.0", privacy: "privacy-1" }, async evaluate() { return { action: "allow", reasonCodes: [], redactions: [] }; } }),
+      writePolicyState: async () => {},
+      startProxy: async (options) => startShieldProxy({ ...options, recordShieldDecision: async () => {} }),
+      writeIdentity: async () => {},
+    });
+    const response = await fetch(`${daemon.shield.origin}/v1/messages`, { method: "POST", headers: { "x-airkit-shield": config.capability }, body: '{"content":"privacy-raw-sentinel-must-not-escape"}' });
+    assert.equal(response.status, 503, failure.name);
+    assert.equal(upstreamCalls, 0, failure.name);
+    await daemon.shield.close();
+    await new Promise((resolve) => upstream.close(resolve));
+  }
+});
+
+function assetsProvision() {
+  return {
+    version: 1,
+    bundle: { version: "policy-1", sha256: "a".repeat(64), path: "/opt/airkit/policy.json" },
+    gitleaks: { sha256: "b".repeat(64), path: "/opt/airkit/gitleaks" },
+    privacy: { version: "privacy-1", sha256: "c".repeat(64), path: "/opt/airkit/privacy.json", worker: { command: "/opt/airkit/privacy-worker", args: ["--stdio"], sha256: "d".repeat(64) } },
+  };
+}
+
+function privacyHealth(message) {
+  return { type: "health", id: message.id, protocol: "airkit-privacy-ndjson-v1", version: "privacy-1" };
+}
+
+function fakePrivacyWorker(handle) {
+  const worker = new EventEmitter();
+  worker.stdout = new EventEmitter();
+  worker.stderr = new EventEmitter();
+  worker.stdin = {
+    write(chunk) {
+      const message = JSON.parse(String(chunk).trim());
+      handle(message, (reply) => worker.stdout.emit("data", `${JSON.stringify(reply)}\n`), worker);
+      return true;
+    },
+    end() {},
+  };
+  worker.kill = () => worker.emit("exit", 0);
+  return worker;
+}
+
+function startDaemon(options) {
+  return startShieldDaemon({
+    readAssetsProvision: async () => assetsProvision(),
+    createPrivacy: async () => ({ version: "privacy-1", async scan() { return { status: "ok", findings: [], redactions: [] }; }, close() {} }),
+    ...options,
+  });
+}
