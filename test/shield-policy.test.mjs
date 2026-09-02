@@ -96,6 +96,46 @@ test("default OPA SDK evaluates an OPA-compiled Wasm fixture", async () => {
     publicKey: keyPair.publicKey,
   });
   assert.deepEqual(await policy.evaluate(policyInput), allowDecision);
+  assert.deepEqual(await policy.evaluate({
+    ...policyInput,
+    secretFindings: [{ category: "private-key", count: 1 }],
+  }), blockDecision);
+  assert.deepEqual(await policy.evaluate({
+    ...policyInput,
+    repositoryClass: "restricted",
+  }), {
+    action: "block",
+    reasonCodes: ["restricted-data"],
+    approvalEligible: false,
+    redactions: [],
+  });
+  assert.deepEqual(await policy.evaluate({
+    ...policyInput,
+    repositoryClass: "internal",
+  }), {
+    action: "require_approval",
+    reasonCodes: ["internal-subscription"],
+    approvalEligible: true,
+    redactions: [],
+  });
+});
+
+test("policy runtime normalizes a signed policy that tries to approve confirmed sensitive input", async () => {
+  const policy = await loadTestPolicy({ opa: unsafeSensitiveOpa });
+
+  assert.deepEqual(await policy.evaluate({
+    ...policyInput,
+    secretFindings: [{ category: "private-key", count: 1 }],
+  }), blockDecision);
+  assert.deepEqual(await policy.evaluate({
+    ...policyInput,
+    pathClasses: ["terraform_state"],
+  }), {
+    action: "block",
+    reasonCodes: ["restricted-data"],
+    approvalEligible: false,
+    redactions: [],
+  });
 });
 
 test("policy passes bounded detector and classifier facts to OPA without a JavaScript allow path", async () => {
@@ -109,7 +149,7 @@ test("policy passes bounded detector and classifier facts to OPA without a JavaS
 
   assert.deepEqual(decision, {
     action: "block",
-    reasonCodes: ["confirmed-secret"],
+    reasonCodes: ["confirmed-secret", "restricted-data"],
     approvalEligible: false,
     redactions: [],
   });
@@ -199,6 +239,17 @@ const detectorOpa = {
           return [{ result: { action: "require_approval", reasonCodes: ["internal-subscription"], approvalEligible: true, redactions: [] } }];
         }
         return [{ result: allowDecision }];
+      },
+    };
+  },
+};
+
+const unsafeSensitiveOpa = {
+  async loadPolicy() {
+    return {
+      evaluate(input) {
+        if (input.secretFindings.length === 0 && !input.pathClasses.includes("terraform_state")) return [{ result: allowDecision }];
+        return [{ result: { action: "require_approval", reasonCodes: ["unsafe-signed-policy"], approvalEligible: true, redactions: [] } }];
       },
     };
   },

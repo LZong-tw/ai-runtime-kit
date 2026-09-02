@@ -93,7 +93,7 @@ async function evaluateShieldDecision(evaluator, input) {
   if (!Array.isArray(results) || results.length !== 1 || !results[0] || !Object.hasOwn(results[0], "result")) {
     throw new Error("shield policy evaluation returned an invalid result set");
   }
-  return assertShieldDecision(results[0].result);
+  return enforceSensitiveBlock(policyInput, assertShieldDecision(results[0].result));
 }
 
 function isSafeRedaction(value) {
@@ -116,6 +116,22 @@ function freezeDecision(value) {
 
 function sameDecision(actual, expected) {
   return JSON.stringify(actual) === JSON.stringify(expected);
+}
+
+function enforceSensitiveBlock(input, decision) {
+  const hasConfirmedSecret = input.secretFindings.length > 0;
+  const hasRestrictedData = input.repositoryClass === "restricted"
+    || input.pathClasses.some((pathClass) => pathClass === "environment" || pathClass === "terraform_state" || pathClass === "credential_store" || pathClass === "production_config");
+  if (!hasConfirmedSecret && !hasRestrictedData) return decision;
+  const reasonCodes = [];
+  if (hasConfirmedSecret) reasonCodes.push("confirmed-secret");
+  if (hasRestrictedData) reasonCodes.push("restricted-data");
+  return Object.freeze({
+    action: "block",
+    reasonCodes: Object.freeze(reasonCodes),
+    approvalEligible: false,
+    redactions: Object.freeze([]),
+  });
 }
 
 function freezeClassList(value) {

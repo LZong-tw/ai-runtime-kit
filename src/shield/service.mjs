@@ -6,10 +6,12 @@ import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { readShieldIdentity, readShieldPolicyState, shieldPaths, writeShieldConfig } from "./paths.mjs";
+import { classifyShieldRequest } from "./classify.mjs";
 
 const execFileAsync = promisify(execFile);
 export const SHIELD_SERVICE_LABEL = "com.airkit.shield";
 const SUBSCRIPTION_TARGET_ORIGIN = "https://api.anthropic.com";
+const UNKNOWN_REMOTE_HASH = "0".repeat(64);
 
 const defaultIo = { chmod, constants, lstat, mkdir, open, readFile, rename, unlink, writeFile };
 
@@ -62,6 +64,7 @@ export function createShieldConfig(config = {}) {
   const lane = config.lane ?? "subscription";
   assertLane(lane);
   const targetOrigin = config.targetOrigin ?? (lane === "subscription" ? SUBSCRIPTION_TARGET_ORIGIN : undefined);
+  const launcherContext = config.launcherContext ?? defaultShieldLauncherContext(lane);
   const validated = {
     capability: config.capability ?? randomUUID().replaceAll("-", ""),
     targetOrigin: normalizeShieldTargetOrigin(targetOrigin, "shield configuration target"),
@@ -75,6 +78,9 @@ export function createShieldConfig(config = {}) {
   }
   if (typeof validated.capability !== "string" || validated.capability.length < 32) throw new Error("shield configuration capability is missing or invalid");
   if (!/^[A-Za-z0-9._-]{1,128}$/.test(validated.generation)) throw new Error("shield configuration generation is missing or invalid");
+  assertLauncherContext(launcherContext);
+  if (config.launcherContext !== undefined) validated.launcherContext = launcherContext;
+  if (config.gitleaks !== undefined) validated.gitleaks = config.gitleaks;
   return validated;
 }
 
@@ -131,13 +137,19 @@ export async function readShieldConfig({ paths, io = defaultIo } = {}) {
   if (config.targetClass !== undefined && config.targetClass !== config.lane) {
     throw new Error("shield configuration targetClass must match its lane");
   }
-  return {
+  const result = {
     capability: config.capability,
     targetOrigin,
     lane: config.lane,
     generation: config.generation,
     targetClass: config.lane,
   };
+  if (config.launcherContext !== undefined) {
+    assertLauncherContext(config.launcherContext);
+    result.launcherContext = config.launcherContext;
+  }
+  if (config.gitleaks !== undefined) result.gitleaks = config.gitleaks;
+  return result;
 }
 
 export async function ensureShieldReady({ lane, expectedTargetOrigin, env = process.env, paths = shieldPaths({ env }), io = defaultIo, inspectService = inspectShieldService, isProcessAlive = defaultIsProcessAlive, probeShield = defaultProbeShield } = {}) {
@@ -214,6 +226,19 @@ export function buildShieldChildEnv(ready, env = process.env) {
 
 function assertLane(lane) {
   if (lane !== "subscription" && lane !== "managed") throw new Error("shield lane must be subscription or managed");
+}
+
+export function defaultShieldLauncherContext(lane) {
+  return {
+    repository: { remoteHash: UNKNOWN_REMOTE_HASH, trustClass: "unknown" },
+    pathClasses: ["unknown"],
+    destinationClass: lane,
+    interactive: false,
+  };
+}
+
+function assertLauncherContext(context) {
+  classifyShieldRequest({ body: Buffer.alloc(0), launcherContext: context });
 }
 
 function normalizeShieldTargetOrigin(value, label) {
