@@ -17,7 +17,7 @@ test("policy activation only accepts a signed, digest-matched OPA/Wasm bundle", 
   const policy = await loadTestPolicy({ bundle });
 
   assert.equal(policy.version, "2026.09.02.1");
-  assert.deepEqual(policy.detectorVersions, { gitleaks: "8.24.0" });
+  assert.deepEqual(policy.detectorVersions, { gitleaks: "8.24.0", privacy: "privacy-1" });
   assert.deepEqual(await policy.evaluate(policyInput), allowDecision);
   assert.equal(Object.isFrozen(policy), true);
   assert.equal(Object.isFrozen(policy.detectorVersions), true);
@@ -118,6 +118,10 @@ test("default OPA SDK evaluates an OPA-compiled Wasm fixture", async () => {
     approvalEligible: true,
     redactions: [],
   });
+  assert.deepEqual(await policy.evaluate({
+    ...policyInput,
+    piiFindings: [{ category: "email", count: 1 }],
+  }), redactDecision);
 });
 
 test("policy runtime normalizes a signed policy that tries to approve confirmed sensitive input", async () => {
@@ -190,11 +194,11 @@ test("policy state exposes only version and detector versions", async () => {
     const { readShieldPolicyState, writeShieldPolicyState } = await import("../src/shield/paths.mjs");
     await writeShieldPolicyState({
       paths,
-      state: { version: "2026.09.02.1", detectorVersions: { gitleaks: "8.24.0" } },
+      state: { version: "2026.09.02.1", detectorVersions: { gitleaks: "8.24.0", privacy: "privacy-1" } },
     });
     assert.deepEqual(await readShieldPolicyState({ paths }), {
       version: "2026.09.02.1",
-      detectorVersions: { gitleaks: "8.24.0" },
+      detectorVersions: { gitleaks: "8.24.0", privacy: "privacy-1" },
     });
   } finally {
     await rm(homeDir, { recursive: true, force: true });
@@ -221,6 +225,13 @@ const policyInput = {
 const blockDecision = {
   action: "block",
   reasonCodes: ["confirmed-secret"],
+  approvalEligible: false,
+  redactions: [],
+};
+
+const redactDecision = {
+  action: "redact",
+  reasonCodes: ["pii-redaction"],
   approvalEligible: false,
   redactions: [],
 };
@@ -271,7 +282,7 @@ function signedBundle(overrides = {}, artifact = wasm) {
     opaAbi: "1",
     opaWasmSdkVersion: "1.8.0",
     wasmSha256: createHash("sha256").update(artifact).digest("hex"),
-    detectorVersions: { gitleaks: "8.24.0" },
+    detectorVersions: { gitleaks: "8.24.0", privacy: "privacy-1" },
     selfTest: { input: policyInput, expected: allowDecision },
     ...overrides,
   };

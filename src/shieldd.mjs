@@ -72,7 +72,7 @@ export async function startShieldDaemon({
       repositoryClass: facts.repositoryClass,
       pathClasses: facts.pathClasses,
       secretFindings: secretScan.findings,
-      piiFindings: privacyScan.findings,
+      piiFindings: canonicalPrivacyFindings(privacyScan.findings),
     });
     if (decision.action === "redact" && !isVerifiedRedaction({ original: body, result: privacyScan })) {
       throw new Error("shield privacy redaction is invalid");
@@ -123,6 +123,23 @@ function assertGitleaksAsset(gitleaks, asset) {
   if (!asset || gitleaks.executable !== asset.path || gitleaks.sha256 !== asset.sha256) {
     throw new Error("shield gitleaks asset provision does not match configuration");
   }
+}
+
+function canonicalPrivacyFindings(findings) {
+  if (!Array.isArray(findings) || findings.length > 128) throw new Error("shield privacy findings are invalid");
+  const totals = new Map();
+  for (const finding of findings) {
+    if (!finding || typeof finding !== "object" || Array.isArray(finding)
+      || Object.keys(finding).length !== 2 || typeof finding.label !== "string"
+      || !/^[A-Za-z0-9._-]{1,128}$/.test(finding.label)
+      || !Number.isInteger(finding.count) || finding.count < 1 || finding.count > 1_000_000) {
+      throw new Error("shield privacy findings are invalid");
+    }
+    const count = (totals.get(finding.label) ?? 0) + finding.count;
+    if (count > 1_000_000) throw new Error("shield privacy findings are invalid");
+    totals.set(finding.label, count);
+  }
+  return [...totals].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)).map(([category, count]) => Object.freeze({ category, count }));
 }
 
 function resolveDestinationClass(config) {

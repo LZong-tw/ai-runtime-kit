@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { EventEmitter, once } from "node:events";
+import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import test from "node:test";
 
 import { startShieldDaemon } from "../src/shieldd.mjs";
+import { canonicalJson } from "../src/shield/policy-bundle.mjs";
 import { createPrivacyFilter } from "../src/shield/privacy.mjs";
 import { startShieldProxy } from "../src/shield/proxy.mjs";
 
@@ -27,6 +30,9 @@ const paths = {
   policyBundlePath: "/private/policy.bundle.json",
   policyPublicKeyPath: "/private/policy-public.pem",
 };
+
+const compiledPolicyWasm = await readFile(new URL("./fixtures/shield-policy.wasm", import.meta.url));
+const compiledPolicyKeyPair = generateKeyPairSync("ed25519");
 
 const policy = {
   version: "2026.09.02.2",
@@ -282,10 +288,70 @@ test("daemon composes provisioned Privacy findings and sends only a valid policy
     writeIdentity: async () => {},
   });
 
-  assert.deepEqual(policyInputs[0].piiFindings, [{ label: "email", count: 1 }]);
+  assert.deepEqual(policyInputs[0].piiFindings, [{ category: "email", count: 1 }]);
   assert.equal(decisions[0].action, "redact");
   assert.deepEqual(decisions[0].redactedBody, Buffer.from('{"content":"[EMAIL]"}'));
   assert.doesNotMatch(JSON.stringify(decisions[0]), /privacy-raw/);
+});
+
+test("daemon uses the signed OPA policy to redact canonical Privacy findings before upstream forwarding", async (t) => {
+  let upstreamBody = null;
+  const upstream = createServer((request, response) => {
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      upstreamBody = Buffer.concat(chunks).toString("utf8");
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end('{"ok":true}');
+    });
+  });
+  upstream.listen(0, "127.0.0.1");
+  await once(upstream, "listening");
+  t.after(() => new Promise((resolve) => upstream.close(resolve)));
+  const address = upstream.address();
+  const original = '{"content":"alice@example.com"}';
+  let evaluatedDecision = null;
+  const daemon = await startDaemon({
+    config: { ...config, targetOrigin: `http://127.0.0.1:${address.port}` },
+    paths,
+    readPolicyBundle: async () => signedCompiledPolicyBundle(),
+    readAssetsProvision: async () => assetsProvision(),
+    createPrivacy: async () => ({
+      version: "privacy-1",
+      async scan() {
+        return {
+          status: "ok",
+          findings: [{ label: "email", count: 1 }],
+          redactions: [{ label: "email", count: 1, spans: [{ start: 12, end: 29 }] }],
+          redactedBody: Buffer.from('{"content":"[EMAIL]"}'),
+        };
+      },
+      close() {},
+    }),
+    createScanner: async () => ({ version: "8.24.0", scan: async () => ({ findings: [] }) }),
+    writePolicyState: async () => {},
+    writeIdentity: async () => {},
+    startProxy: async (options) => startShieldProxy({
+      ...options,
+      recordShieldDecision: async () => {},
+      decide: async (request) => {
+        evaluatedDecision = await options.decide(request);
+        return evaluatedDecision;
+      },
+    }),
+  });
+  t.after(() => daemon.shield.close());
+
+  const response = await fetch(`${daemon.shield.origin}/v1/messages`, {
+    method: "POST",
+    headers: { "x-airkit-shield": config.capability },
+    body: original,
+  });
+
+  assert.equal(evaluatedDecision?.action, "redact");
+  assert.equal(response.status, 200);
+  assert.equal(upstreamBody, '{"content":"[EMAIL]"}');
+  assert.notEqual(upstreamBody, original);
 });
 
 test("daemon blocks every privacy worker failure before a real upstream fetch", async (t) => {
@@ -355,6 +421,37 @@ function fakePrivacyWorker(handle) {
   };
   worker.kill = () => worker.emit("exit", 0);
   return worker;
+}
+
+function signedCompiledPolicyBundle() {
+  const manifest = {
+    formatVersion: 1,
+    version: "2026.09.02.5",
+    opaAbi: "1",
+    opaWasmSdkVersion: "1.8.0",
+    wasmSha256: createHash("sha256").update(compiledPolicyWasm).digest("hex"),
+    detectorVersions: { gitleaks: "8.24.0", privacy: "privacy-1" },
+    selfTest: {
+      input: {
+        lane: "subscription",
+        destinationClass: "subscription",
+        interactive: false,
+        repositoryClass: "public",
+        pathClasses: ["source"],
+        secretFindings: [],
+        piiFindings: [],
+      },
+      expected: { action: "allow", reasonCodes: [], approvalEligible: false, redactions: [] },
+    },
+  };
+  return {
+    bundle: {
+      manifest,
+      wasm: compiledPolicyWasm,
+      signature: sign(null, Buffer.from(canonicalJson(manifest)), compiledPolicyKeyPair.privateKey).toString("base64"),
+    },
+    publicKey: compiledPolicyKeyPair.publicKey,
+  };
 }
 
 function startDaemon(options) {
