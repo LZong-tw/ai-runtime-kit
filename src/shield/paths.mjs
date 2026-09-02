@@ -70,14 +70,20 @@ export function assertShieldIdentity(identity) {
 export async function writeShieldIdentity({ paths, identity, io = defaultIo } = {}) {
   if (!paths?.rootDir || !paths.identityPath) throw new TypeError("shield identity paths are required");
   const validated = assertShieldIdentity(identity);
-  await rejectSymlinkRoot(paths.rootDir, io);
-  await io.mkdir(paths.rootDir, { recursive: true, mode: 0o700 });
-  await rejectSymlinkRoot(paths.rootDir, io);
+  const [homeDir, localDir, stateDir, rootDir] = stateComponents(paths.rootDir);
+  const ownerUid = process.getuid?.();
+  await ensureDirectory(homeDir, io, ownerUid, false);
+  await ensureDirectory(localDir, io, ownerUid, true);
+  await ensureDirectory(stateDir, io, ownerUid, true);
+  await ensureDirectory(rootDir, io, ownerUid, true);
+  await assertDirectory(rootDir, io, ownerUid);
   await io.chmod(paths.rootDir, 0o700);
+  await assertDirectory(rootDir, io, ownerUid);
   const temporaryPath = `${paths.identityPath}.tmp-${process.pid}-${Date.now()}`;
   try {
     await io.writeFile(temporaryPath, `${JSON.stringify(validated)}\n`, { flag: "wx", mode: 0o600 });
     await io.chmod(temporaryPath, 0o600);
+    await assertDirectory(rootDir, io, ownerUid);
     await io.rename(temporaryPath, paths.identityPath);
   } catch (error) {
     await io.unlink(temporaryPath, { force: true }).catch(() => {});
@@ -86,15 +92,28 @@ export async function writeShieldIdentity({ paths, identity, io = defaultIo } = 
   return validated;
 }
 
-async function rejectSymlinkRoot(rootDir, io) {
+async function ensureDirectory(path, io, ownerUid, privateMode) {
   try {
-    const rootStat = await io.lstat(rootDir);
-    if (rootStat.isSymbolicLink()) throw new Error("shield state root must not be a symlink");
-    if (!rootStat.isDirectory()) throw new Error("shield state root must be a directory");
+    await assertDirectory(path, io, ownerUid);
   } catch (error) {
-    if (error?.code === "ENOENT") return;
-    throw error;
+    if (error?.code !== "ENOENT") throw error;
+    await io.mkdir(path, { mode: privateMode ? 0o700 : 0o755 });
+    await assertDirectory(path, io, ownerUid);
+    if (privateMode) await io.chmod(path, 0o700);
   }
+}
+
+async function assertDirectory(path, io, ownerUid) {
+  const entry = await io.lstat(path);
+  if (entry.isSymbolicLink()) throw new Error("shield state path must not be a symlink");
+  if (!entry.isDirectory()) throw new Error("shield state path must be a directory");
+  if (Number.isInteger(ownerUid) && entry.uid !== ownerUid) throw new Error("shield state path has unexpected owner");
+}
+
+function stateComponents(rootDir) {
+  const stateDir = dirname(rootDir);
+  const localDir = dirname(stateDir);
+  return [dirname(localDir), localDir, stateDir, rootDir];
 }
 
 function childPath(value, root, label) {
