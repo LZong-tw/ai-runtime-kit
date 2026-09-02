@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 
-import { stat } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { stat, readFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import { readShieldAssetsProvision, shieldPaths, writeShieldIdentity, writeShieldPolicyState } from "./shield/paths.mjs";
 import { classifyShieldRequest } from "./shield/classify.mjs";
@@ -11,6 +14,13 @@ import { loadShieldPolicy } from "./shield/policy.mjs";
 import { createPrivacyFilter, isVerifiedRedaction } from "./shield/privacy.mjs";
 import { startShieldProxy } from "./shield/proxy.mjs";
 import { defaultShieldLauncherContext, readShieldConfig } from "./shield/service.mjs";
+import { createShieldDecisionRecorder } from "./shield/audit.mjs";
+import { createMasterKeyProvider } from "./audit/keychain.mjs";
+import { resolveAuditPaths } from "./audit/paths.mjs";
+import { createEncryptedSpool } from "./audit/spool.mjs";
+import { createAuditClient } from "./audit/transport.mjs";
+
+const execFileAsync = promisify(execFile);
 
 async function main() {
   const configPath = parseConfigPath(process.argv.slice(2));
@@ -37,6 +47,7 @@ export async function startShieldDaemon({
   loadPolicy = loadShieldPolicy,
   createScanner = createGitleaksScanner,
   createPrivacy = createPrivacyFilter,
+  createDecisionRecorder = createDefaultDecisionRecorder,
   writePolicyState = writeShieldPolicyState,
   startProxy = startShieldProxy,
   writeIdentity = writeShieldIdentity,
@@ -55,6 +66,11 @@ export async function startShieldDaemon({
   if (privacy?.version !== policy.detectorVersions.privacy) {
     privacy?.close?.();
     throw new Error("shield privacy version does not match policy metadata");
+  }
+  const recorder = await createDecisionRecorder({ config, paths, policy, assets });
+  if (typeof recorder?.recordShieldDecision !== "function") {
+    privacy.close?.();
+    throw new Error("shield audit recorder is unavailable");
   }
   const decide = async ({ body }) => {
     const launcherContext = {
@@ -92,8 +108,11 @@ export async function startShieldDaemon({
     await writePolicyState({ paths, state: { version: policy.version, detectorVersions: policy.detectorVersions } });
     shield = await startProxy({
       capability: config.capability,
+      controlCapability: config.controlCapability,
       targetOrigin: config.targetOrigin,
       decide,
+      recordShieldDecision: recorder.recordShieldDecision,
+      isReady: recorder.isReady ?? (() => true),
     });
     await writeIdentity({
       paths,
@@ -117,6 +136,39 @@ export async function startShieldDaemon({
   const proxy = shield;
   shield = Object.freeze({ ...proxy, close: async () => { await proxy.close(); privacy.close?.(); } });
   return Object.freeze({ shield, policy, scanner, privacy });
+}
+
+export async function createDefaultDecisionRecorder({ env = process.env, auditPaths = resolveAuditPaths({ env }), readCapability = readFile, masterKeyProvider, createClient = createAuditClient, createSpool = createEncryptedSpool } = {}) {
+  const capabilityPath = env.AIRKIT_AUDIT_CAPABILITY_FILE ?? join(auditPaths.rootDir, "capability");
+  const capability = (await readCapability(capabilityPath, "utf8")).trim();
+  if (!/^[A-Za-z0-9._-]{32,512}$/.test(capability)) throw new Error("shield audit capability is unavailable");
+  const provider = masterKeyProvider ?? createRuntimeMasterKeyProvider(env);
+  const masterKey = await provider.get();
+  const spool = createSpool({ paths: auditPaths, masterKey });
+  const state = await spool.stats();
+  if (state?.atCapacity === true) throw new Error("shield audit spool is at capacity");
+  const client = createClient({ socketPath: env.AIRKIT_AUDIT_SOCKET_PATH ?? auditPaths.socketPath, capability, timeoutMs: 750 });
+  return createShieldDecisionRecorder({ client, spool, masterKey });
+}
+
+function createRuntimeMasterKeyProvider(env) {
+  const repoRoot = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
+  const keychainHelperPath = env.AIRKIT_AUDIT_KEYCHAIN_HELPER ?? join(repoRoot, "native", "airkit-audit-keychain.swift");
+  return createMasterKeyProvider({
+    env,
+    keychainHelperPath,
+    runSecurity: (request) => runCommand(env.AIRKIT_SECURITY_PATH ?? "security", request),
+    runKeychainHelper: (request) => runCommand(env.AIRKIT_SWIFT_PATH ?? "swift", request),
+  });
+}
+
+async function runCommand(command, request) {
+  try {
+    const result = await execFileAsync(command, request?.args ?? [], { input: request?.input, timeout: 10_000, maxBuffer: 4 * 1024 });
+    return { status: 0, stdout: result.stdout, stderr: result.stderr };
+  } catch (error) {
+    return { status: typeof error?.code === "number" ? error.code : 1, stdout: error?.stdout ?? "", stderr: error?.stderr ?? "" };
+  }
 }
 
 function assertGitleaksAsset(gitleaks, asset) {

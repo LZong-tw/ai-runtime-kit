@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,13 +17,15 @@ import {
   readShieldConfig,
   startShieldService,
   stopShieldService,
+  transitionShieldPolicy,
 } from "../src/shield/service.mjs";
-import { shieldPaths, writeShieldIdentity } from "../src/shield/paths.mjs";
+import { invalidateShieldPolicyBinding, shieldPaths, writeShieldConfig, writeShieldIdentity, writeShieldPolicyState } from "../src/shield/paths.mjs";
 import { startShieldProxy } from "../src/shield/proxy.mjs";
+import { installShieldPolicyProvision } from "../src/shield/policy-bundle.mjs";
 
 const capability = "c".repeat(32);
 const generation = "generation-1";
-const policyState = { version: "2026.09.02.1", detectorVersions: { gitleaks: "8.24.0" } };
+const policyState = { version: "2026.09.02.1", detectorVersions: { gitleaks: "8.24.0", privacy: "privacy-1" } };
 
 function fixture(homeDir = "/tmp/airkit-shield-service-home") {
   const paths = shieldPaths({ homeDir, uid: 501 });
@@ -70,6 +72,30 @@ test("shield privacy provision is preview-first and keeps asset references out o
   assert.doesNotMatch(output.value(), /private/);
 });
 
+test("shield policy install is preview-first and hides source paths", async () => {
+  const output = capture();
+  const calls = [];
+  const code = await runShieldCli(["policy", "install", "--bundle", "/private/policy.bundle", "--public-key", "/private/policy.pub"], {
+    stdout: output.stdout,
+    shield: { async policyInstall(request) { calls.push(request); return { state: "preview", version: "2026.09.02.9" }; } },
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(calls, [{ bundlePath: "/private/policy.bundle", publicKeyPath: "/private/policy.pub", write: false }]);
+  assert.match(output.value(), /2026\.09\.02\.9/);
+  assert.doesNotMatch(output.value(), /private/);
+});
+
+test("shield policy status renders only active metadata", async () => {
+  const output = capture();
+  const code = await runShieldCli(["policy", "status"], {
+    stdout: output.stdout,
+    shield: { async policyStatus() { return { state: "healthy", version: "2026.09.02.9", detectorVersions: { gitleaks: "8.24.0", privacy: "privacy-1" } }; } },
+  });
+  assert.equal(code, 0);
+  assert.match(output.value(), /2026\.09\.02\.9/);
+  assert.doesNotMatch(output.value(), /private|path|origin|capability/i);
+});
+
 test("shield install writes a private plist only with --write semantics", async () => {
   const homeDir = await mkdtemp(join(tmpdir(), "airkit-shield-service-"));
   const { options, paths } = fixture(homeDir);
@@ -82,6 +108,7 @@ test("shield install writes a private plist only with --write semantics", async 
     const config = JSON.parse(await readFile(paths.configPath, "utf8"));
     assert.deepEqual(config, {
       capability: config.capability,
+      controlCapability: config.controlCapability,
       targetOrigin: "https://api.anthropic.com",
       lane: "subscription",
       generation: config.generation,
@@ -323,6 +350,158 @@ test("readiness rejects a daemon identity bound to a stale policy transition bef
   assert.equal(probes, 0);
 });
 
+test("policy install quiesces a live old daemon binding until a fresh policy identity is published", async (t) => {
+  const homeDir = await mkdtemp(join(tmpdir(), "airkit-shield-policy-transition-"));
+  t.after(() => rm(homeDir, { recursive: true, force: true }));
+  const paths = shieldPaths({ homeDir, uid: process.getuid?.() ?? 501 });
+  const oldIdentity = {
+    origin: "http://127.0.0.1:8811", capability, version: 1, pid: 42,
+    lane: "subscription", generation, targetClass: "subscription",
+    policyVersion: "2026.09.01.1", detectorVersions: policyState.detectorVersions,
+  };
+  const newState = { version: "2026.09.02.2", detectorVersions: policyState.detectorVersions };
+  await writeShieldConfig({ paths, config: { capability, controlCapability: "d".repeat(32), targetOrigin: "https://api.anthropic.com", lane: "subscription", generation } });
+  await writeShieldIdentity({ paths, identity: oldIdentity });
+  await writeShieldPolicyState({ paths, state: { version: oldIdentity.policyVersion, detectorVersions: oldIdentity.detectorVersions } });
+  const sourceDir = join(homeDir, "policy-source");
+  await mkdir(sourceDir, { mode: 0o700 });
+  const bundlePath = join(sourceDir, "policy.json");
+  const publicKeyPath = join(sourceDir, "policy.pub");
+  await writeFile(bundlePath, JSON.stringify({ manifest: {}, signature: "aGVsbG8=", wasm: "d2FzbQ==" }), { mode: 0o600 });
+  await writeFile(publicKeyPath, "fixture-public-key", { mode: 0o600 });
+  await chmod(bundlePath, 0o600);
+  await chmod(publicKeyPath, 0o600);
+
+  await installShieldPolicyProvision({ bundlePath, publicKeyPath, write: true, paths, loadPolicy: async () => newState });
+
+  let probes = 0;
+  await assert.rejects(
+    ensureShieldReady({
+      lane: "subscription", paths,
+      inspectService: async () => ({ loaded: true, active: true, pid: 42 }),
+      isProcessAlive: async () => true,
+      probeShield: async () => { probes += 1; return true; },
+    }),
+    /identity is stale/i,
+  );
+  assert.equal(probes, 0, "the old live daemon cannot authorize another managed launch");
+
+  await writeShieldPolicyState({ paths, state: newState });
+  await writeShieldIdentity({ paths, identity: { ...oldIdentity, policyVersion: newState.version } });
+  const ready = await ensureShieldReady({
+    lane: "subscription", paths,
+    inspectService: async () => ({ loaded: true, active: true, pid: 42 }),
+    isProcessAlive: async () => true,
+    probeShield: async () => true,
+  });
+  assert.equal(ready.policyVersion, newState.version);
+});
+
+test("policy lifecycle transaction stops a live proxy before activating and binding a replacement", async (t) => {
+  const homeDir = await mkdtemp(join(tmpdir(), "airkit-shield-policy-proxy-transition-"));
+  t.after(() => rm(homeDir, { recursive: true, force: true }));
+  const paths = shieldPaths({ homeDir, uid: process.getuid?.() ?? 501 });
+  const controlCapability = "d".repeat(32);
+  const oldPolicy = { version: "policy-old", detectorVersions: policyState.detectorVersions };
+  const newPolicy = { version: "policy-new", detectorVersions: policyState.detectorVersions };
+  let upstreamCalls = 0;
+  const upstream = await startServer(async (_request, response) => { upstreamCalls += 1; response.end("ok"); });
+  t.after(() => upstream.close());
+  let oldProxy = await startShieldProxy({ capability, controlCapability, targetOrigin: upstream.origin, decide: async () => ({ action: "allow", reasonCodes: ["allow"], lane: "subscription", destinationClass: "subscription", bundleVersion: oldPolicy.version, detectorVersions: oldPolicy.detectorVersions }), recordShieldDecision: async () => {} });
+  const oldIdentity = { origin: oldProxy.origin, capability, version: 1, pid: 777, lane: "subscription", generation, targetClass: "subscription", policyVersion: oldPolicy.version, detectorVersions: oldPolicy.detectorVersions };
+  await writeShieldConfig({ paths, config: { capability, controlCapability, targetOrigin: "https://api.anthropic.com", lane: "subscription", generation } });
+  await writeShieldIdentity({ paths, identity: oldIdentity });
+  await writeShieldPolicyState({ paths, state: oldPolicy });
+  assert.equal((await fetch(`${oldProxy.origin}/v1/messages`, { method: "POST", headers: { "x-airkit-shield": capability }, body: "{}" })).status, 200);
+  let activePid = 777;
+  let replacement = null;
+  const probe = async (origin, receivedCapability) => {
+    try { return (await fetch(`${origin}/_airkit/shield/ready`, { headers: { "x-airkit-shield": receivedCapability } })).status === 204; } catch { return false; }
+  };
+  await transitionShieldPolicy({
+    paths,
+    installPolicy: async () => { await invalidateShieldPolicyBinding({ paths }); return newPolicy; },
+    inspectService: async () => ({ loaded: true, active: activePid > 0, pid: activePid || null }),
+    isProcessAlive: async (pid) => pid === activePid,
+    probeShield: probe,
+    stopService: async () => { await oldProxy.close(); activePid = 0; assert.equal(await probe(oldIdentity.origin, capability), false); },
+    startService: async () => {
+      replacement = await startShieldProxy({ capability, controlCapability, targetOrigin: upstream.origin, decide: async () => ({ action: "allow", reasonCodes: ["allow"], lane: "subscription", destinationClass: "subscription", bundleVersion: newPolicy.version, detectorVersions: newPolicy.detectorVersions }), recordShieldDecision: async () => {} });
+      activePid = 778;
+      await writeShieldPolicyState({ paths, state: newPolicy });
+      await writeShieldIdentity({ paths, identity: { ...oldIdentity, origin: replacement.origin, pid: activePid, policyVersion: newPolicy.version } });
+    },
+  });
+  t.after(() => replacement?.close());
+  assert.equal(upstreamCalls, 1, "the old proxy forwarded only before the transaction");
+  assert.equal((await fetch(`${replacement.origin}/v1/messages`, { method: "POST", headers: { "x-airkit-shield": capability }, body: "{}" })).status, 200);
+  assert.equal(upstreamCalls, 2);
+});
+
+test("policy lifecycle transaction rejects a launchd respawn before installing", async () => {
+  const { paths } = fixture();
+  const identity = { origin: "http://127.0.0.1:8811", capability, version: 1, pid: 42, lane: "subscription", generation, targetClass: "subscription", policyVersion: policyState.version, detectorVersions: policyState.detectorVersions };
+  let inspections = 0;
+  let installs = 0;
+  await assert.rejects(transitionShieldPolicy({
+    paths,
+    io: shieldStateIo(paths, { identity, config: { capability, targetOrigin: "https://api.anthropic.com", lane: "subscription", generation } }),
+    inspectService: async () => ++inspections === 1 ? { loaded: true, active: true, pid: 42 } : { loaded: true, active: true, pid: 43 },
+    stopService: async () => {}, isProcessAlive: async () => false, probeShield: async () => false,
+    installPolicy: async () => { installs += 1; return policyState; },
+  }), /could not stop/i);
+  assert.equal(installs, 0);
+});
+
+test("policy lifecycle transaction rejects an inactive service with a live old identity before install", async () => {
+  const { paths } = fixture();
+  const identity = { origin: "http://127.0.0.1:8811", capability, version: 1, pid: 42, lane: "subscription", generation, targetClass: "subscription", policyVersion: policyState.version, detectorVersions: policyState.detectorVersions };
+  let installs = 0;
+  await assert.rejects(transitionShieldPolicy({
+    paths,
+    io: shieldStateIo(paths, { identity, config: { capability, targetOrigin: "https://api.anthropic.com", lane: "subscription", generation } }),
+    inspectService: async () => ({ loaded: true, active: false, pid: null }),
+    isProcessAlive: async () => true, probeShield: async () => true,
+    installPolicy: async () => { installs += 1; return policyState; },
+  }), /live stale daemon/i);
+  assert.equal(installs, 0);
+});
+
+test("policy lifecycle transaction rejects an inactive service when a dead PID still leaves its old proxy reachable", async () => {
+  const { paths } = fixture();
+  const identity = { origin: "http://127.0.0.1:8811", capability, version: 1, pid: 42, lane: "subscription", generation, targetClass: "subscription", policyVersion: policyState.version, detectorVersions: policyState.detectorVersions };
+  let installs = 0;
+  await assert.rejects(transitionShieldPolicy({
+    paths,
+    io: shieldStateIo(paths, { identity, config: { capability, targetOrigin: "https://api.anthropic.com", lane: "subscription", generation } }),
+    inspectService: async () => ({ loaded: true, active: false, pid: null }),
+    isProcessAlive: async () => false, probeShield: async () => true,
+    installPolicy: async () => { installs += 1; return policyState; },
+  }), /proxy remains reachable/i);
+  assert.equal(installs, 0);
+});
+
+test("readiness rejects an incomplete detector binding before probing", async () => {
+  const { paths } = fixture();
+  const identity = {
+    origin: "http://127.0.0.1:8811", capability, version: 1, pid: 42,
+    lane: "subscription", generation, targetClass: "subscription",
+    policyVersion: policyState.version, detectorVersions: { gitleaks: "8.24.0" },
+  };
+  let probes = 0;
+  await assert.rejects(
+    ensureShieldReady({
+      lane: "subscription", paths,
+      io: shieldStateIo(paths, { identity, config: { capability, targetOrigin: "https://api.anthropic.com", lane: "subscription", generation }, state: { version: policyState.version, detectorVersions: { gitleaks: "8.24.0" } } }),
+      inspectService: async () => ({ loaded: true, active: true, pid: 42 }),
+      isProcessAlive: async () => true,
+      probeShield: async () => { probes += 1; return true; },
+    }),
+    /detector.*privacy/i,
+  );
+  assert.equal(probes, 0);
+});
+
 test("start refuses launchd plist path drift before mutating the job", async () => {
   const { options } = fixture();
   const calls = [];
@@ -420,6 +599,7 @@ test("Shield child environment fails closed without a durable decision recorder"
   const upstreamAddress = upstream.address();
   const shield = await startShieldProxy({
     capability,
+    controlCapability: "d".repeat(32),
     targetOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
     decide: async () => ({ action: "allow" }),
   });
@@ -539,6 +719,7 @@ test("airkit shield install preview exits zero, names the service, and performs 
 });
 
 function shieldStateIo(paths, { identity, config, state = policyState }) {
+  const storedConfig = { ...config, controlCapability: config.controlCapability ?? "d".repeat(32) };
   return {
     async lstat(path) {
       if (path === paths.policyStatePath) {
@@ -553,9 +734,17 @@ function shieldStateIo(paths, { identity, config, state = policyState }) {
     },
     async readFile(path) {
       if (path === paths.identityPath) return `${JSON.stringify(identity)}\n`;
-      if (path === paths.configPath) return `${JSON.stringify(config)}\n`;
+      if (path === paths.configPath) return `${JSON.stringify(storedConfig)}\n`;
       if (path === paths.policyStatePath) return `${JSON.stringify(state)}\n`;
       throw new Error(`unexpected fixture path: ${path}`);
     },
   };
+}
+
+async function startServer(handler) {
+  const server = createServer((request, response) => void handler(request, response));
+  server.listen(0, "127.0.0.1");
+  await new Promise((resolvePromise, reject) => { server.once("listening", resolvePromise); server.once("error", reject); });
+  const address = server.address();
+  return { origin: `http://127.0.0.1:${address.port}`, close: () => new Promise((resolvePromise) => server.close(resolvePromise)) };
 }

@@ -3,10 +3,15 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { mkdtemp, rm } from "node:fs/promises";
+import { createInterface } from "node:readline/promises";
 import { promisify } from "node:util";
 
 import { readShieldIdentity, readShieldPolicyState, shieldPaths, writeShieldConfig } from "./paths.mjs";
 import { classifyShieldRequest } from "./classify.mjs";
+import { createApprovalBroker } from "./approval.mjs";
+import { approvalChannelRegistration, createApprovalChannel } from "./approval-channel.mjs";
 
 const execFileAsync = promisify(execFile);
 export const SHIELD_SERVICE_LABEL = "com.airkit.shield";
@@ -67,6 +72,7 @@ export function createShieldConfig(config = {}) {
   const launcherContext = config.launcherContext ?? defaultShieldLauncherContext(lane);
   const validated = {
     capability: config.capability ?? randomUUID().replaceAll("-", ""),
+    controlCapability: config.controlCapability ?? randomUUID().replaceAll("-", ""),
     targetOrigin: normalizeShieldTargetOrigin(targetOrigin, "shield configuration target"),
     lane,
     generation: config.generation ?? randomUUID(),
@@ -77,6 +83,9 @@ export function createShieldConfig(config = {}) {
     throw new Error("shield subscription configuration must target api.anthropic.com");
   }
   if (typeof validated.capability !== "string" || validated.capability.length < 32) throw new Error("shield configuration capability is missing or invalid");
+  if (typeof validated.controlCapability !== "string" || validated.controlCapability.length < 32 || validated.controlCapability === validated.capability) {
+    throw new Error("shield configuration control capability is missing or invalid");
+  }
   if (!/^[A-Za-z0-9._-]{1,128}$/.test(validated.generation)) throw new Error("shield configuration generation is missing or invalid");
   assertLauncherContext(launcherContext);
   if (config.launcherContext !== undefined) validated.launcherContext = launcherContext;
@@ -109,6 +118,40 @@ export async function stopShieldService({ paths, runLaunchctl = defaultLaunchctl
   return { label: SHIELD_SERVICE_LABEL, stopped: true };
 }
 
+export async function transitionShieldPolicy({ paths, installPolicy, io = defaultIo, runLaunchctl = defaultLaunchctl, inspectService = inspectShieldService, stopService = stopShieldService, startService = startShieldService, isProcessAlive = defaultIsProcessAlive, probeShield = defaultProbeShield, ensureReady = ensureShieldReady } = {}) {
+  if (typeof installPolicy !== "function") throw new TypeError("shield policy transition installer is required");
+  const previous = await readShieldIdentity({ paths, io });
+  const service = await inspectService({ paths, io, runLaunchctl });
+  if (service.active) {
+    if (!previous || service.pid !== previous.pid) throw new Error("shield policy transition cannot quiesce an unbound active daemon");
+    await stopService({ paths, runLaunchctl });
+    const stopped = await inspectService({ paths, io, runLaunchctl });
+    if (stopped.active) throw new Error("shield policy transition could not stop the prior daemon");
+    if (await isProcessAlive(previous.pid)) throw new Error("shield policy transition could not stop the prior daemon");
+    if (await probeShield(previous.origin, previous.capability)) throw new Error("shield policy transition prior proxy remains reachable");
+  } else if (previous) {
+    if (await isProcessAlive(previous.pid)) throw new Error("shield policy transition cannot quiesce a live stale daemon");
+    if (await probeShield(previous.origin, previous.capability)) throw new Error("shield policy transition prior proxy remains reachable");
+  }
+  const installed = await installPolicy();
+  if (!service.active) return installed;
+  await startService({ paths, io, runLaunchctl });
+  const config = await readShieldConfig({ paths, io });
+  const ready = await ensureReady({
+    lane: config.lane,
+    expectedTargetOrigin: config.targetOrigin,
+    paths,
+    io,
+    inspectService,
+    isProcessAlive,
+    probeShield,
+  });
+  if (ready.policyVersion !== installed.version || !sameDetectorVersions(ready.detectorVersions, installed.detectorVersions)) {
+    throw new Error("shield policy transition fresh daemon binding mismatch");
+  }
+  return installed;
+}
+
 export async function inspectShieldService({ paths, io = defaultIo, runLaunchctl = defaultLaunchctl } = {}) {
   assertShieldPaths(paths);
   const installed = await io.readFile(paths.launchAgentPath, "utf8").then(() => true, () => false);
@@ -130,6 +173,9 @@ export async function readShieldConfig({ paths, io = defaultIo } = {}) {
   }
   assertLane(config?.lane);
   if (typeof config.capability !== "string" || config.capability.length < 32) throw new Error("shield configuration capability is missing or invalid");
+  if (typeof config.controlCapability !== "string" || config.controlCapability.length < 32 || config.controlCapability === config.capability) {
+    throw new Error("shield configuration control capability is missing or invalid");
+  }
   const targetOrigin = normalizeShieldTargetOrigin(config.targetOrigin, "shield configuration target");
   if (typeof config.generation !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(config.generation)) {
     throw new Error("shield configuration generation is missing or invalid");
@@ -139,6 +185,7 @@ export async function readShieldConfig({ paths, io = defaultIo } = {}) {
   }
   const result = {
     capability: config.capability,
+    controlCapability: config.controlCapability,
     targetOrigin,
     lane: config.lane,
     generation: config.generation,
@@ -175,6 +222,8 @@ export async function ensureShieldReady({ lane, expectedTargetOrigin, env = proc
   if (config.capability !== identity.capability) throw new Error("shield capability generation mismatch; restart the shield service");
   const policyState = await readShieldPolicyState({ paths, io });
   if (!policyState) throw new Error("shield policy state is missing; install a valid policy before launch");
+  assertCompleteDetectorVersions(identity.detectorVersions);
+  assertCompleteDetectorVersions(policyState.detectorVersions);
   if (identity.policyVersion !== policyState.version) throw new Error("shield policy version mismatch; restart the shield service");
   if (!sameDetectorVersions(identity.detectorVersions, policyState.detectorVersions)) {
     throw new Error("shield detector version mismatch; restart the shield service");
@@ -191,18 +240,45 @@ export async function ensureShieldReady({ lane, expectedTargetOrigin, env = proc
   };
 }
 
-export async function launchShieldChild({ command, args = [], ready, env = process.env, spawnChild = spawn } = {}) {
+export async function launchShieldChild({ command, args = [], ready, env = process.env, spawnChild = spawn, approvalBroker, createApprovalChannel: createChannel = createLauncherApprovalChannel, registerApprovalChannel: registerChannel = registerShieldApprovalChannel } = {}) {
   if (typeof command !== "string" || command.length === 0 || command.includes("\0")) throw new Error("shield launch command is required");
   if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string" || arg.includes("\0"))) throw new Error("shield launch arguments must be strings");
-  const child = spawnChild(command, args, {
-    env: buildShieldChildEnv(ready, env),
-    shell: false,
-    stdio: "inherit",
-  });
-  return await new Promise((resolvePromise, reject) => {
-    child.once("error", reject);
-    child.once("close", (code, signal) => resolvePromise({ code, signal }));
-  });
+  const channel = await openShieldApprovalChannel({ approvalBroker, createApprovalChannel: createChannel });
+  try {
+    if (channel !== null) await registerChannel({ ready, channel });
+    const child = spawnChild(command, args, {
+      env: buildShieldChildEnv(ready, env),
+      shell: false,
+      stdio: "inherit",
+    });
+    return await new Promise((resolvePromise, reject) => {
+      child.once("error", reject);
+      child.once("close", (code, signal) => resolvePromise({ code, signal }));
+    });
+  } finally {
+    await channel?.close?.();
+  }
+}
+
+export async function openShieldApprovalChannel({ approvalBroker, createApprovalChannel: createChannel = createLauncherApprovalChannel } = {}) {
+  return await createChannel({ broker: approvalBroker ?? createApprovalBroker({ tty: defaultApprovalTty() }) });
+}
+
+export async function registerShieldApprovalChannel({ ready, channel, paths, io, fetchImpl = fetch } = {}) {
+  if (!ready?.origin || !ready?.capability || channel === null || channel === undefined) throw new Error("shield approval registration requires a fresh ready identity");
+  const registration = approvalChannelRegistration(channel);
+  const config = await readShieldConfig({ paths: paths ?? shieldPaths(), io });
+  let response;
+  try {
+    response = await fetchImpl(`${ready.origin}/_airkit/shield/approval-channel`, {
+      method: "POST",
+      headers: { "x-airkit-shield-control": config.controlCapability, "content-type": "application/json" },
+      body: JSON.stringify(registration),
+    });
+  } catch {
+    throw new Error("shield approval registration failed");
+  }
+  if (response?.status !== 204) throw new Error("shield approval registration failed");
 }
 
 export function buildShieldChildEnv(ready, env = process.env) {
@@ -215,14 +291,37 @@ export function buildShieldChildEnv(ready, env = process.env) {
   const keptHeaders = String(env.ANTHROPIC_CUSTOM_HEADERS ?? "")
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .filter((line) => line !== "" && !line.toLowerCase().startsWith("x-airkit-shield:"));
-  return {
+    .filter((line) => line !== "" && !/^x-airkit-shield(?:-|:)/i.test(line));
+  const childEnv = {
     ...env,
     ANTHROPIC_API_BASE_URL: ready.origin,
     ANTHROPIC_BASE_URL: ready.origin,
     ANTHROPIC_CUSTOM_HEADERS: [...keptHeaders, `x-airkit-shield: ${ready.capability}`].join("\n"),
   };
+  for (const key of ["AIRKIT_SHIELD_CONTROL_CAPABILITY", "AIRKIT_SHIELD_APPROVAL_CAPABILITY", "AIRKIT_SHIELD_APPROVAL_SOCKET", "AIRKIT_SHIELD_CAPABILITY"]) delete childEnv[key];
+  return childEnv;
 }
+
+async function createLauncherApprovalChannel({ broker }) {
+  if (!isInteractiveApprovalTty()) return null;
+  const directory = await mkdtemp(resolve(tmpdir(), "airkit-shield-approval-"));
+  const channel = await createApprovalChannel({ broker, directory });
+  return Object.freeze({ ...channel, close: async () => { await channel.close(); await rm(directory, { recursive: true, force: true }); } });
+}
+
+function defaultApprovalTty() {
+  if (!isInteractiveApprovalTty()) return null;
+  return Object.freeze({
+    interactive: true,
+    write: (value) => process.stdout.write(value),
+    async prompt() {
+      const reader = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+      try { return await reader.question(""); } finally { reader.close(); }
+    },
+  });
+}
+
+function isInteractiveApprovalTty() { return process.stdin?.isTTY === true && process.stdout?.isTTY === true; }
 
 function assertLane(lane) {
   if (lane !== "subscription" && lane !== "managed") throw new Error("shield lane must be subscription or managed");
@@ -282,6 +381,13 @@ function sameDetectorVersions(actual, expected) {
   const expectedEntries = Object.entries(expected).sort(([left], [right]) => left.localeCompare(right));
   return actualEntries.length === expectedEntries.length
     && actualEntries.every(([name, version], index) => name === expectedEntries[index][0] && version === expectedEntries[index][1]);
+}
+
+function assertCompleteDetectorVersions(value) {
+  if (!value || typeof value !== "object" || Object.keys(value).length !== 2
+    || typeof value.gitleaks !== "string" || typeof value.privacy !== "string") {
+    throw new Error("shield detector binding must include Gitleaks and Privacy");
+  }
 }
 
 async function ensurePathDrift(plan, io) {

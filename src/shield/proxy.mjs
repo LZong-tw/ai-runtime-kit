@@ -1,5 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
+import { readApprovalChannelRegistration, requestApprovalChannel } from "./approval-channel.mjs";
 
 const INSPECTION_MAX_BYTES = 1_048_576;
 const INTERNAL_HEADERS = new Set([
@@ -19,20 +20,25 @@ const INTERNAL_HEADERS = new Set([
   "x-forwarded-proto",
   "x-original-url",
   "x-airkit-shield",
+  "x-airkit-shield-approval",
+  "x-airkit-shield-approval-socket",
 ]);
 
-export async function startShieldProxy({ capability, targetOrigin, decide, approvalBroker = null, recordShieldDecision = null, onDecision = null, port = 0 } = {}) {
+export async function startShieldProxy({ capability, controlCapability, targetOrigin, decide, approvalBroker = null, recordShieldDecision = null, onDecision = null, isReady = null, port = 0 } = {}) {
   assertCapability(capability);
+  assertCapability(controlCapability);
   const target = assertFixedTarget(targetOrigin);
   if (typeof decide !== "function") throw new TypeError("shield proxy decision function is required");
   const record = resolveDecisionRecorder(recordShieldDecision, onDecision);
   if (approvalBroker !== null && (typeof approvalBroker?.request !== "function" || typeof approvalBroker?.consume !== "function")) {
     throw new TypeError("shield proxy approval broker is invalid");
   }
+  if (isReady !== null && typeof isReady !== "function") throw new TypeError("shield proxy readiness function is invalid");
   assertPort(port);
 
+  const approvalRegistration = { channel: null };
   const server = createServer((request, response) => {
-    void handleShieldRequest({ request, response, capability, target, decide, approvalBroker, recordShieldDecision: record });
+    void handleShieldRequest({ request, response, capability, controlCapability, target, decide, approvalBroker, recordShieldDecision: record, isReady, approvalRegistration });
   });
   await listenLoopback(server, port);
   const address = server.address();
@@ -46,9 +52,10 @@ export async function startShieldProxy({ capability, targetOrigin, decide, appro
   };
 }
 
-async function handleShieldRequest({ request, response, capability, target, decide, approvalBroker, recordShieldDecision }) {
+async function handleShieldRequest({ request, response, capability, controlCapability, target, decide, approvalBroker, recordShieldDecision, isReady, approvalRegistration }) {
   const startedAt = Date.now();
-  if (!capabilityMatches(request.headers["x-airkit-shield"], capability)) {
+  const isApprovalRegistration = request.method === "POST" && request.url === "/_airkit/shield/approval-channel";
+  if (!isApprovalRegistration && !capabilityMatches(request.headers["x-airkit-shield"], capability)) {
     request.resume();
     await finish(response, { status: 401, code: "shield_unauthorized" });
     return;
@@ -56,6 +63,32 @@ async function handleShieldRequest({ request, response, capability, target, deci
 
   if (request.method === "GET" && request.url === "/_airkit/shield/ready") {
     request.resume();
+    try {
+      if (isReady !== null && await isReady() !== true) {
+        await finish(response, { status: 503, code: "shield_unavailable" });
+        return;
+      }
+    } catch {
+      await finish(response, { status: 503, code: "shield_unavailable" });
+      return;
+    }
+    response.writeHead(204, { "cache-control": "no-store" });
+    response.end();
+    return;
+  }
+
+  if (isApprovalRegistration) {
+    if (!capabilityMatches(request.headers["x-airkit-shield-control"], controlCapability)) {
+      request.resume();
+      await finish(response, { status: 401, code: "shield_unauthorized" });
+      return;
+    }
+    const channel = await readApprovalRegistration(request);
+    if (channel === null || approvalRegistration.channel !== null) {
+      await finish(response, { status: 403, code: "shield_blocked" });
+      return;
+    }
+    approvalRegistration.channel = channel;
     response.writeHead(204, { "cache-control": "no-store" });
     response.end();
     return;
@@ -109,7 +142,7 @@ async function handleShieldRequest({ request, response, capability, target, deci
     permitted = true;
   }
   if (decision?.action === "require_approval") {
-    permitted = await approveRequest({ approvalBroker, decision, inspection, auditDecision, signal: lifecycle.signal });
+    permitted = await approveRequest({ approvalBroker, approvalChannel: approvalRegistration.channel, decision, inspection, auditDecision, signal: lifecycle.signal });
     auditDecision.override = permitted;
   }
   try {
@@ -145,6 +178,22 @@ async function handleShieldRequest({ request, response, capability, target, deci
     } else if (!response.destroyed) {
       response.destroy();
     }
+  }
+}
+
+async function readApprovalRegistration(request) {
+  const chunks = [];
+  let bytes = 0;
+  try {
+    for await (const chunk of request) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      bytes += buffer.byteLength;
+      if (bytes > 16 * 1024) return null;
+      chunks.push(buffer);
+    }
+    return readApprovalChannelRegistration(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+  } catch {
+    return null;
   }
 }
 
@@ -275,8 +324,8 @@ async function finish(response, { status, code }) {
   }
 }
 
-async function approveRequest({ approvalBroker, decision, inspection, auditDecision, signal }) {
-  if (!approvalBroker || signal.aborted) return false;
+async function approveRequest({ approvalBroker, approvalChannel, decision, inspection, auditDecision, signal }) {
+  if (signal.aborted) return false;
   const scope = {
     requestId: auditDecision.requestId,
     digest: createHash("sha256").update(inspection.body).digest("hex"),
@@ -286,6 +335,8 @@ async function approveRequest({ approvalBroker, decision, inspection, auditDecis
     signal,
   };
   try {
+    if (approvalChannel) return await requestApprovalChannel({ ...approvalChannel, scope });
+    if (!approvalBroker) return false;
     const grant = await approvalBroker.request(scope);
     return grant !== null && approvalBroker.consume(grant, scope) === true;
   } catch {

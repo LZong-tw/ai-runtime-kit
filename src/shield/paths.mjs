@@ -142,6 +142,24 @@ export async function writeShieldPolicyState({ paths, state, io = defaultIo } = 
   return validated;
 }
 
+export async function invalidateShieldPolicyBinding({ paths, io = defaultIo } = {}) {
+  if (!paths?.rootDir || !paths.identityPath || !paths.policyStatePath) throw new TypeError("shield policy binding paths are required");
+  assertWritablePaths(paths);
+  await Promise.all([
+    io.unlink(paths.identityPath, { force: true }),
+    io.unlink(paths.policyStatePath, { force: true }),
+  ]);
+}
+
+export async function writeShieldPolicyProvision({ paths, bundleText, publicKey, io = defaultIo } = {}) {
+  if (!paths?.rootDir || !paths.policyBundlePath || !paths.policyPublicKeyPath) throw new TypeError("shield policy provision paths are required");
+  if (typeof bundleText !== "string" || bundleText.length < 1 || typeof publicKey !== "string" || publicKey.length < 1) {
+    throw new TypeError("shield policy provision is invalid");
+  }
+  await writePrivateShieldState({ paths, path: paths.policyPublicKeyPath, value: publicKey, io, raw: true });
+  await writePrivateShieldState({ paths, path: paths.policyBundlePath, value: bundleText, io, raw: true });
+}
+
 export async function readShieldAssetsProvision({ paths, io = defaultIo } = {}) {
   if (!paths?.assetsProvisionPath) throw new TypeError("shield asset provision paths are required");
   assertCanonicalAssetsProvisionPath(paths);
@@ -165,7 +183,7 @@ export async function writeShieldAssetsProvision({ paths, state, io = defaultIo 
   return validated;
 }
 
-async function writePrivateShieldState({ paths, path, value, io }) {
+async function writePrivateShieldState({ paths, path, value, io, raw = false }) {
   assertWritablePaths(paths);
   const [homeDir, localDir, stateDir, rootDir] = stateComponents(paths.rootDir);
   const ownerUid = process.getuid?.();
@@ -181,7 +199,7 @@ async function writePrivateShieldState({ paths, path, value, io }) {
     const temporaryPath = `${path}.tmp-${process.pid}-${Date.now()}`;
     try {
       const fileHandle = await openExclusiveFile(temporaryPath, io);
-      try { await fileHandle.writeFile(`${JSON.stringify(value)}\n`); await fileHandle.chmod(0o600); }
+      try { await fileHandle.writeFile(raw ? value : `${JSON.stringify(value)}\n`); await fileHandle.chmod(0o600); }
       finally { await fileHandle.close(); }
       await assertDirectory(rootDir, io, ownerUid);
       await io.rename(temporaryPath, path);

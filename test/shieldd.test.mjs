@@ -5,13 +5,14 @@ import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import test from "node:test";
 
-import { startShieldDaemon } from "../src/shieldd.mjs";
+import { createDefaultDecisionRecorder, startShieldDaemon } from "../src/shieldd.mjs";
 import { canonicalJson } from "../src/shield/policy-bundle.mjs";
 import { createPrivacyFilter } from "../src/shield/privacy.mjs";
 import { startShieldProxy } from "../src/shield/proxy.mjs";
 
 const config = {
   capability: "c".repeat(32),
+  controlCapability: "d".repeat(32),
   targetOrigin: "https://api.anthropic.com",
   lane: "subscription",
   generation: "generation-1",
@@ -111,6 +112,64 @@ test("daemon closes the proxy when publishing the bound identity fails", async (
   assert.deepEqual(calls, ["close"]);
 });
 
+test("daemon requires a durable audit recorder before it publishes an identity", async () => {
+  const calls = [];
+  await assert.rejects(
+    startDaemon({
+      config,
+      paths,
+      readPolicyBundle: async () => ({ bundle: {}, publicKey: "pinned-ed25519-public-key" }),
+      loadPolicy: async () => policy,
+      createScanner: async () => ({ version: "8.24.0", scan: async () => ({ findings: [] }) }),
+      createDecisionRecorder: async () => { throw new Error("audit not durable"); },
+      startProxy: async () => { calls.push("proxy"); return { origin: "http://127.0.0.1:8811", close: async () => {} }; },
+      writePolicyState: async () => calls.push("state"),
+      writeIdentity: async () => calls.push("identity"),
+    }),
+    /audit not durable/,
+  );
+  assert.deepEqual(calls, []);
+});
+
+test("daemon passes its durable decision recorder to the protected proxy", async () => {
+  const recorder = { recordShieldDecision: async () => ({ durable: "ack" }) };
+  let proxyOptions = null;
+  await startDaemon({
+    config,
+    paths,
+    readPolicyBundle: async () => ({ bundle: {}, publicKey: "pinned-ed25519-public-key" }),
+    loadPolicy: async () => policy,
+    createScanner: async () => ({ version: "8.24.0", scan: async () => ({ findings: [] }) }),
+    createDecisionRecorder: async () => recorder,
+    writePolicyState: async () => {},
+    startProxy: async (options) => { proxyOptions = options; return { origin: "http://127.0.0.1:8811", close: async () => {} }; },
+    writeIdentity: async () => {},
+  });
+  assert.equal(proxyOptions.recordShieldDecision, recorder.recordShieldDecision);
+});
+
+test("default daemon recorder requires an audit capability, key, and spare encrypted spool", async () => {
+  const recorder = await createDefaultDecisionRecorder({
+    env: { AIRKIT_AUDIT_CAPABILITY_FILE: "/private/audit-capability", AIRKIT_AUDIT_SOCKET_PATH: "/private/audit.sock" },
+    auditPaths: { rootDir: "/private/audit", spoolDir: "/private/audit/spool", socketPath: "/private/audit.sock" },
+    readCapability: async () => "a".repeat(32),
+    masterKeyProvider: { get: async () => Buffer.alloc(32, 7) },
+    createClient: (options) => ({ async send() { return { status: "committed", event_id: "ignored" }; }, options }),
+    createSpool: () => ({ async stats() { return { atCapacity: false }; }, async enqueue() { throw new Error("not reached"); } }),
+  });
+  assert.equal(typeof recorder.recordShieldDecision, "function");
+  await assert.rejects(
+    createDefaultDecisionRecorder({
+      env: { AIRKIT_AUDIT_CAPABILITY_FILE: "/private/audit-capability" },
+      auditPaths: { rootDir: "/private/audit", spoolDir: "/private/audit/spool", socketPath: "/private/audit.sock" },
+      readCapability: async () => "a".repeat(32),
+      masterKeyProvider: { get: async () => Buffer.alloc(32, 7) },
+      createSpool: () => ({ async stats() { return { atCapacity: true }; } }),
+    }),
+    /spool is at capacity/i,
+  );
+});
+
 test("daemon normalizes conflicting launcher destination class before policy evaluation", async () => {
   const policyInputs = [];
   const proxyDecisions = [];
@@ -196,7 +255,7 @@ test("proxy requests reach Gitleaks, category-only classification, and policy ev
     body: '{"content":"fixture-private-key"}',
   });
 
-  assert.equal(response.status, 503);
+  assert.equal(response.status, 403);
   assert.deepEqual(scannerCalls, ['{"content":"fixture-private-key"}']);
   assert.deepEqual(policyInputs, [{
     lane: "subscription",
@@ -210,7 +269,7 @@ test("proxy requests reach Gitleaks, category-only classification, and policy ev
   assert.doesNotMatch(JSON.stringify(policyInputs), /fixture-private-key|aaaa/);
 });
 
-test("missing launcher context reaches policy facts but fails closed without durable audit", async (t) => {
+test("missing launcher context reaches policy facts and forwards only after durable audit", async (t) => {
   const upstream = createServer((request, response) => {
     request.resume();
     response.end('{"ok":true}');
@@ -244,7 +303,7 @@ test("missing launcher context reaches policy facts but fails closed without dur
     body: '{"content":"ordinary"}',
   });
 
-  assert.equal(response.status, 503);
+  assert.equal(response.status, 200);
   assert.deepEqual(policyInputs, [{
     lane: "subscription",
     destinationClass: "subscription",
@@ -458,6 +517,7 @@ function startDaemon(options) {
   return startShieldDaemon({
     readAssetsProvision: async () => assetsProvision(),
     createPrivacy: async () => ({ version: "privacy-1", async scan() { return { status: "ok", findings: [], redactions: [] }; }, close() {} }),
+    createDecisionRecorder: async () => ({ recordShieldDecision: async () => ({ durable: "ack" }) }),
     ...options,
   });
 }
