@@ -14,6 +14,7 @@ import {
   installShieldService,
   launchShieldChild,
   planShieldService,
+  readShieldConfig,
   startShieldService,
   stopShieldService,
 } from "../src/shield/service.mjs";
@@ -60,6 +61,17 @@ test("shield install writes a private plist only with --write semantics", async 
   try {
     await installShieldService({ ...options, write: true, runLaunchctl: async (args) => { calls.push(args); return { ok: true }; } });
     assert.equal((await stat(paths.launchAgentPath)).mode & 0o777, 0o600);
+    assert.equal(await stat(paths.configPath).then(() => true, () => false), true);
+    assert.equal((await stat(paths.configPath)).mode & 0o777, 0o600);
+    const config = JSON.parse(await readFile(paths.configPath, "utf8"));
+    assert.deepEqual(config, {
+      capability: config.capability,
+      targetOrigin: "https://api.anthropic.com",
+      lane: "subscription",
+      generation: config.generation,
+      targetClass: "subscription",
+    });
+    assert.deepEqual(await readShieldConfig({ paths }), config);
     assert.match(await readFile(paths.launchAgentPath, "utf8"), /<string>--config<\/string>/);
     assert.deepEqual(calls, [
       ["bootstrap", paths.launchdDomain, paths.launchAgentPath],
@@ -68,6 +80,27 @@ test("shield install writes a private plist only with --write semantics", async 
   } finally {
     await rm(homeDir, { recursive: true, force: true });
   }
+});
+
+test("shield start refuses an uninstalled service without provisioning state", async () => {
+  const { options } = fixture();
+  const calls = [];
+  const missing = Object.assign(new Error("missing"), { code: "ENOENT" });
+  await assert.rejects(
+    startShieldService({
+      ...options,
+      io: {
+        async readFile() { throw missing; },
+        async mkdir(...args) { calls.push(["mkdir", ...args]); },
+        async writeFile(...args) { calls.push(["writeFile", ...args]); },
+        async chmod(...args) { calls.push(["chmod", ...args]); },
+        async rename(...args) { calls.push(["rename", ...args]); },
+      },
+      runLaunchctl: async (args) => { calls.push(["launchctl", ...args]); return { ok: true }; },
+    }),
+    /shield install --write/i,
+  );
+  assert.deepEqual(calls, []);
 });
 
 test("stale identity blocks shield launch", async () => {

@@ -8,6 +8,7 @@ import {
   assertShieldIdentity,
   readShieldIdentity,
   shieldPaths,
+  writeShieldConfig,
   writeShieldIdentity,
 } from "../src/shield/paths.mjs";
 
@@ -60,6 +61,26 @@ test("identity writes use a private directory and atomic 0600 replacement", asyn
     assert.equal((await stat(paths.rootDir)).mode & 0o777, 0o700);
     assert.equal((await stat(paths.identityPath)).mode & 0o777, 0o600);
     assert.deepEqual(JSON.parse(await readFile(paths.identityPath, "utf8")), identity);
+  } finally {
+    await rm(homeDir, { recursive: true, force: true });
+  }
+});
+
+test("Shield configuration writes use managed private state and atomic 0600 replacement", async () => {
+  const homeDir = await mkdtemp("/tmp/airkit-shield-");
+  const paths = shieldPaths({ homeDir, uid: 501 });
+  const config = {
+    capability,
+    targetOrigin: "https://api.anthropic.com",
+    lane: "subscription",
+    generation: "generation-1",
+    targetClass: "subscription",
+  };
+  try {
+    await writeShieldConfig({ paths, config });
+    assert.equal((await stat(paths.rootDir)).mode & 0o777, 0o700);
+    assert.equal((await stat(paths.configPath)).mode & 0o777, 0o600);
+    assert.deepEqual(JSON.parse(await readFile(paths.configPath, "utf8")), config);
   } finally {
     await rm(homeDir, { recursive: true, force: true });
   }
