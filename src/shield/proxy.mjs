@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 
 const INSPECTION_MAX_BYTES = 1_048_576;
@@ -21,15 +21,18 @@ const INTERNAL_HEADERS = new Set([
   "x-airkit-shield",
 ]);
 
-export async function startShieldProxy({ capability, targetOrigin, decide, onDecision = async () => {}, port = 0 } = {}) {
+export async function startShieldProxy({ capability, targetOrigin, decide, approvalBroker = null, recordShieldDecision = null, onDecision = null, port = 0 } = {}) {
   assertCapability(capability);
   const target = assertFixedTarget(targetOrigin);
   if (typeof decide !== "function") throw new TypeError("shield proxy decision function is required");
-  if (typeof onDecision !== "function") throw new TypeError("shield proxy decision observer must be a function");
+  const record = resolveDecisionRecorder(recordShieldDecision, onDecision);
+  if (approvalBroker !== null && (typeof approvalBroker?.request !== "function" || typeof approvalBroker?.consume !== "function")) {
+    throw new TypeError("shield proxy approval broker is invalid");
+  }
   assertPort(port);
 
   const server = createServer((request, response) => {
-    void handleShieldRequest({ request, response, capability, target, decide, onDecision });
+    void handleShieldRequest({ request, response, capability, target, decide, approvalBroker, recordShieldDecision: record });
   });
   await listenLoopback(server, port);
   const address = server.address();
@@ -43,11 +46,11 @@ export async function startShieldProxy({ capability, targetOrigin, decide, onDec
   };
 }
 
-async function handleShieldRequest({ request, response, capability, target, decide, onDecision }) {
+async function handleShieldRequest({ request, response, capability, target, decide, approvalBroker, recordShieldDecision }) {
   const startedAt = Date.now();
   if (!capabilityMatches(request.headers["x-airkit-shield"], capability)) {
     request.resume();
-    await finish(response, onDecision, startedAt, { action: "unauthorized", reason: "invalid_capability", bytes: 0, status: 401, code: "shield_unauthorized" });
+    await finish(response, { status: 401, code: "shield_unauthorized" });
     return;
   }
 
@@ -61,7 +64,7 @@ async function handleShieldRequest({ request, response, capability, target, deci
   const path = safeMessagesPath(request.url);
   if (path === null) {
     request.resume();
-    await finish(response, onDecision, startedAt, { action: "blocked", reason: "invalid_path", bytes: 0, status: 403, code: "shield_blocked" });
+    await finish(response, { status: 403, code: "shield_blocked" });
     return;
   }
 
@@ -71,11 +74,11 @@ async function handleShieldRequest({ request, response, capability, target, deci
   try {
     inspection = await readInspection(request);
   } catch {
-    await finish(response, onDecision, startedAt, { action: "unavailable", reason: "request_failed", bytes: 0, status: 503, code: "shield_unavailable" });
+    await finish(response, { status: 503, code: "shield_unavailable" });
     return;
   }
   if (inspection.tooLarge) {
-    await finish(response, onDecision, startedAt, { action: "blocked", reason: "inspection_too_large", bytes: inspection.bytes, status: 403, code: "shield_blocked" });
+    await finish(response, { status: 403, code: "shield_blocked" });
     return;
   }
 
@@ -90,11 +93,23 @@ async function handleShieldRequest({ request, response, capability, target, deci
       signal: lifecycle.signal,
     });
   } catch {
-    await finish(response, onDecision, startedAt, { action: "unavailable", reason: "decision_failed", bytes: inspection.bytes, status: 503, code: "shield_unavailable" });
+    await finish(response, { status: 503, code: "shield_unavailable" });
     return;
   }
-  if (decision?.action !== "allow") {
-    await finish(response, onDecision, startedAt, { action: "blocked", reason: "denied", bytes: inspection.bytes, status: 403, code: "shield_blocked" });
+  const auditDecision = buildDecisionMetadata(decision, startedAt);
+  let permitted = decision?.action === "allow";
+  if (decision?.action === "require_approval") {
+    permitted = await approveRequest({ approvalBroker, decision, inspection, auditDecision, signal: lifecycle.signal });
+    auditDecision.override = permitted;
+  }
+  try {
+    await recordShieldDecision(auditDecision);
+  } catch {
+    await finish(response, { status: 503, code: "shield_unavailable" });
+    return;
+  }
+  if (!permitted) {
+    await finish(response, { status: 403, code: "shield_blocked" });
     return;
   }
   if (lifecycle.signal.aborted) return;
@@ -109,15 +124,14 @@ async function handleShieldRequest({ request, response, capability, target, deci
     });
     if (upstream.status >= 300 && upstream.status < 400) {
       await discardResponse(upstream);
-      await finish(response, onDecision, startedAt, { action: "unavailable", reason: "upstream_redirect", bytes: inspection.bytes, status: 503, code: "shield_unavailable" });
+      await finish(response, { status: 503, code: "shield_unavailable" });
       return;
     }
     writeUpstreamHeaders(response, upstream);
     await streamResponse(upstream, response, lifecycle.signal);
-    await emitDecision(onDecision, decisionEvent("allow", "allowed", inspection.bytes, startedAt));
   } catch {
     if (!response.headersSent) {
-      await finish(response, onDecision, startedAt, { action: "unavailable", reason: "upstream_failed", bytes: inspection.bytes, status: 503, code: "shield_unavailable" });
+      await finish(response, { status: 503, code: "shield_unavailable" });
     } else if (!response.destroyed) {
       response.destroy();
     }
@@ -243,8 +257,7 @@ function waitForDrain(response, signal) {
   });
 }
 
-async function finish(response, onDecision, startedAt, { action, reason, bytes, status, code }) {
-  await emitDecision(onDecision, decisionEvent(action, reason, bytes, startedAt));
+async function finish(response, { status, code }) {
   if (!response.headersSent) {
     const body = Buffer.from(JSON.stringify({ error: { code } }));
     response.writeHead(status, { "content-type": "application/json", "content-length": String(body.byteLength) });
@@ -252,12 +265,63 @@ async function finish(response, onDecision, startedAt, { action, reason, bytes, 
   }
 }
 
-function decisionEvent(action, reason, bytes, startedAt) {
-  return { action, reason, bytes, elapsedMs: Math.max(0, Date.now() - startedAt) };
+async function approveRequest({ approvalBroker, decision, inspection, auditDecision, signal }) {
+  if (!approvalBroker || signal.aborted) return false;
+  const scope = {
+    requestId: auditDecision.requestId,
+    digest: createHash("sha256").update(inspection.body).digest("hex"),
+    bundleVersion: auditDecision.bundleVersion,
+    destinationClass: auditDecision.destinationClass,
+    reasonCodes: auditDecision.reasonCodes,
+    signal,
+  };
+  try {
+    const grant = await approvalBroker.request(scope);
+    return grant !== null && approvalBroker.consume(grant, scope) === true;
+  } catch {
+    return false;
+  }
 }
 
-async function emitDecision(onDecision, event) {
-  try { await onDecision(event); } catch {}
+function buildDecisionMetadata(decision, startedAt) {
+  const action = decision?.action;
+  const reasonCodes = validReasonCodes(decision?.reasonCodes)
+    ? [...decision.reasonCodes]
+    : [action === "allow" ? "policy_allow" : "policy_blocked"];
+  return {
+    requestId: safeIdentifier(decision?.requestId) ?? randomUUID(),
+    lane: decision?.lane === "managed" || decision?.lane === "subscription" ? decision.lane : "unknown",
+    destinationClass: decision?.destinationClass === "managed" || decision?.destinationClass === "subscription" ? decision.destinationClass : "unknown",
+    bundleVersion: safeIdentifier(decision?.bundleVersion) ?? "unknown",
+    detectorVersions: safeVersionMap(decision?.detectorVersions),
+    action: action === "allow" || action === "block" || action === "redact" || action === "require_approval" ? action : "block",
+    reasonCodes,
+    transformCount: Number.isInteger(decision?.transformCount) && decision.transformCount >= 0 ? decision.transformCount : 0,
+    override: false,
+    elapsedMs: Math.max(0, Date.now() - startedAt),
+  };
+}
+
+function resolveDecisionRecorder(recordShieldDecision, onDecision) {
+  const record = recordShieldDecision ?? onDecision;
+  if (typeof record !== "function") return async () => { throw new Error("shield audit is unavailable"); };
+  return record;
+}
+
+function validReasonCodes(value) {
+  return Array.isArray(value) && value.length > 0 && value.length <= 32
+    && value.every((code) => typeof code === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(code));
+}
+
+function safeIdentifier(value) {
+  return typeof value === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(value) ? value : null;
+}
+
+function safeVersionMap(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return {};
+  const entries = Object.entries(value);
+  if (entries.length > 32 || entries.some(([name, version]) => safeIdentifier(name) === null || safeIdentifier(version) === null)) return {};
+  return Object.fromEntries(entries);
 }
 
 function listenLoopback(server, port) {

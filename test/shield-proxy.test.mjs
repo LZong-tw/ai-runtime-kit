@@ -40,7 +40,9 @@ test("proxy forwards only after allow and never emits OAuth", async (t) => {
 
   assert.equal(result.status, 200);
   assert.equal(await result.text(), '{"type":"message"}');
-  assert.deepEqual(events, [{ action: "allow", reason: "allowed", bytes: 25, elapsedMs: events[0].elapsedMs }]);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].action, "allow");
+  assert.deepEqual(events[0].reasonCodes, ["policy_allow"]);
   assert.equal(Number.isInteger(events[0].elapsedMs), true);
   assert.doesNotMatch(JSON.stringify(events), /oauth-secret|cookie-secret|body-secret|target-switch-secret/);
 });
@@ -338,12 +340,87 @@ test("decision exceptions are unavailable and diagnostics never contain credenti
   assert.equal(result.status, 503);
   assert.deepEqual(await result.json(), { error: { code: "shield_unavailable" } });
   assert.equal(upstreamCalls, 0);
-  assert.deepEqual(events, [{ action: "unavailable", reason: "decision_failed", bytes: 11, elapsedMs: events[0].elapsedMs }]);
+  assert.deepEqual(events, []);
   assert.doesNotMatch(JSON.stringify(events), /oauth-secret|cookie-secret|body-secret/);
 });
 
+test("proxy durably records the policy action and reason before its first upstream fetch", async (t) => {
+  const terminal = [];
+  let upstreamCalls = 0;
+  const upstream = await startFixture(t, async (_request, response) => {
+    upstreamCalls += 1;
+    assert.equal(terminal.length, 1, "audit gate must precede upstream fetch");
+    response.end("ok");
+  });
+  const shield = await startShield(t, {
+    targetOrigin: upstream.origin,
+    decide: async () => ({
+      action: "allow",
+      reasonCodes: ["policy_allow"],
+      lane: "subscription",
+      destinationClass: "subscription",
+      bundleVersion: "2026.09.02",
+      detectorVersions: { gitleaks: "8.24.3" },
+    }),
+    recordShieldDecision: async (decision) => terminal.push(decision),
+  });
+
+  const result = await fetch(`${shield.origin}/v1/messages`, {
+    method: "POST",
+    headers: { "x-airkit-shield": CAPABILITY },
+    body: "body-secret",
+  });
+  assert.equal(result.status, 200);
+  assert.equal(upstreamCalls, 1);
+  assert.equal(terminal.length, 1);
+  assert.equal(terminal[0].action, "allow");
+  assert.deepEqual(terminal[0].reasonCodes, ["policy_allow"]);
+  assert.doesNotMatch(JSON.stringify(terminal), /body-secret|digest|\/v1\/messages/);
+});
+
+test("approval and audit unavailability block before upstream fetch with generic responses", async (t) => {
+  let upstreamCalls = 0;
+  const upstream = await startFixture(t, async (_request, response) => {
+    upstreamCalls += 1;
+    response.end();
+  });
+  const requireApproval = () => ({
+    action: "require_approval",
+    reasonCodes: ["internal_repository_code"],
+    lane: "subscription",
+    destinationClass: "subscription",
+    bundleVersion: "2026.09.02",
+    detectorVersions: { gitleaks: "8.24.3" },
+  });
+  const headless = await startShield(t, {
+    targetOrigin: upstream.origin,
+    decide: async () => requireApproval(),
+    recordShieldDecision: async () => {},
+  });
+  const denied = await fetch(`${headless.origin}/v1/messages`, {
+    method: "POST", headers: { "x-airkit-shield": CAPABILITY }, body: "body-secret",
+  });
+  assert.equal(denied.status, 403);
+  assert.deepEqual(await denied.json(), { error: { code: "shield_blocked" } });
+
+  const auditDown = await startShield(t, {
+    targetOrigin: upstream.origin,
+    decide: async () => ({ ...requireApproval(), action: "allow", reasonCodes: ["policy_allow"] }),
+    recordShieldDecision: async () => { throw new Error("audit secret/path/body"); },
+  });
+  const unavailable = await fetch(`${auditDown.origin}/v1/messages`, {
+    method: "POST", headers: { "x-airkit-shield": CAPABILITY }, body: "body-secret",
+  });
+  assert.equal(unavailable.status, 503);
+  assert.deepEqual(await unavailable.json(), { error: { code: "shield_unavailable" } });
+  assert.equal(upstreamCalls, 0);
+});
+
 async function startShield(t, options) {
-  const shield = await startShieldProxy({ capability: CAPABILITY, ...options });
+  const shield = await startShieldProxy({
+    capability: CAPABILITY,
+    ...(options.recordShieldDecision || options.onDecision ? options : { ...options, recordShieldDecision: async () => {} }),
+  });
   t.after(() => shield.close());
   return shield;
 }

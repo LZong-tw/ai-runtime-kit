@@ -389,7 +389,7 @@ test("Shield launch rejects a capability that cannot be represented as one custo
   assert.equal(spawnCalls, 0);
 });
 
-test("Shield child environment authenticates a request through the loopback proxy", async () => {
+test("Shield child environment fails closed without a durable decision recorder", async () => {
   let upstreamCalls = 0;
   const upstream = createServer((request, response) => {
     upstreamCalls += 1;
@@ -435,9 +435,9 @@ test("Shield child environment authenticates a request through the loopback prox
       method: "POST",
     });
 
-    assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), { ok: true });
-    assert.equal(upstreamCalls, 1);
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { error: { code: "shield_unavailable" } });
+    assert.equal(upstreamCalls, 0);
   } finally {
     await shield.close();
     await new Promise((resolvePromise) => upstream.close(resolvePromise));
