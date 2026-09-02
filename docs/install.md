@@ -42,19 +42,22 @@ airkit shield status
 ```
 
 Stop it without deleting its private state with `airkit shield stop`. Its
-child-only launch contract is:
+subscription child-only launch contract is:
 
 ```bash
-airkit shield launch --lane subscription -- command claude
-airkit shield launch --lane managed -- command airclaude
+airkit shield launch --lane subscription -- command claude [args...]
 ```
 
-These examples describe the runtime contract, not a recommendation to enable
-Phase 1. The command validates a fresh authenticated loopback identity before
-spawning the child and does not print its capability. It covers only
-AirKit-managed entrypoints. A bare `command claude` bypasses AirKit and Shield.
-`claude-sub` remains direct subscription OAuth by default; it uses this path
-only when `AIRKIT_SHIELD_SUBSCRIPTION=1` is explicitly set. Audit evidence is
+The managed `shield launch --lane managed -- command [args...]` form is an
+AirKit runtime and diagnostic contract, not a command to manually wrap
+`airclaude`. If a future profile explicitly enables managed Shield, normal
+`airclaude ...` launches perform the managed preflight and child wiring
+automatically. These contracts do not recommend enabling Phase 1. Shield
+validates a fresh authenticated loopback identity before spawning a child and
+does not print its capability. It covers only AirKit-managed entrypoints. A
+bare `command claude` bypasses AirKit and Shield. `claude-sub` remains direct
+subscription OAuth by default; it uses the subscription form only when
+`AIRKIT_SHIELD_SUBSCRIPTION=1` is explicitly set. Audit evidence is
 observability, not Shield enforcement.
 
 ## Prerequisites To Verify
