@@ -12,6 +12,10 @@ export function resolveAuditPaths({ env = process.env, overrides = {} } = {}) {
     overrides.querySocketPath ?? join(rootDir, "auditd-query.sock"),
     "querySocketPath",
   );
+  const uiBootstrapPath = normalizeAbsolutePath(
+    overrides.uiBootstrapPath ?? join(rootDir, "ccr-ui-bootstrap-url"),
+    "uiBootstrapPath",
+  );
   const homeDir = normalizeAbsolutePath(overrides.homeDir ?? homeFromEnv(env), "homeDir");
   const launchAgentPath = normalizeAbsolutePath(
     overrides.launchAgentPath ?? join(homeDir, "Library", "LaunchAgents", "com.airkit.auditd.plist"),
@@ -31,6 +35,7 @@ export function resolveAuditPaths({ env = process.env, overrides = {} } = {}) {
     spoolDir,
     socketPath,
     querySocketPath,
+    uiBootstrapPath,
     homeDir,
     launchAgentPath,
     launchdDomain: `gui/${uid}`,

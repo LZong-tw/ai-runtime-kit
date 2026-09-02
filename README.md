@@ -104,11 +104,12 @@ check the reported completeness for the actual client/session. The complete
 security boundary, supported client lanes, exports, retention, and known
 coverage limits are documented in [`docs/audit.md`](docs/audit.md).
 
-AirKit can also register a loopback-only local audit UI with a one-time
-bootstrap token and HttpOnly session cookie. It shows the same metadata-only
-projections and service status without turning the audit store into a payload
-browser. See [`docs/audit.md`](docs/audit.md) for the UI surface, safe export
-path, gated reveal flow, and gap interpretation rules.
+AirKit can also register a loopback-only local audit UI. Open it with
+`airkit audit open`; it uses a one-time local bootstrap URL and an HttpOnly
+session cookie. It shows the same metadata-only projections and service status
+without turning the audit store into a payload browser. See
+[`docs/audit.md`](docs/audit.md) for the UI surface, safe export path, gated
+reveal flow, and gap interpretation rules.
 
 ## Pi and OpenCode
 
