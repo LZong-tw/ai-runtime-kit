@@ -109,11 +109,46 @@ test("identity writes reject a state directory owned by another uid", async () =
 
 test("identity writes reject caller paths outside the canonical layout", async () => {
   const homeDir = await mkdtemp("/tmp/airkit-shield-");
-  const paths = shieldPaths({ homeDir, uid: 501 });
+  const identityPath = join(homeDir, ".local", "state", "airkit-shield", "other.json");
+  const paths = shieldPaths({ homeDir, uid: 501, identityPath });
   try {
-    await assert.rejects(writeShieldIdentity({ paths: { ...paths, identityPath: join(paths.rootDir, "other.json") }, identity }), /canonical/);
+    await assert.rejects(writeShieldIdentity({ paths, identity }), /canonical/);
   } finally {
     await rm(homeDir, { recursive: true, force: true });
+  }
+});
+
+test("identity writes reject a complete forged paths object rooted outside AirKit state", async () => {
+  const homeDir = await mkdtemp("/tmp/airkit-shield-");
+  const externalHome = await mkdtemp("/tmp/airkit-shield-forged-");
+  const canonicalPaths = shieldPaths({ homeDir, uid: 501 });
+  const forgedRoot = join(externalHome, ".local", "state", "airkit-shield");
+  const forgedPaths = {
+    rootDir: forgedRoot,
+    configPath: join(forgedRoot, "config.json"),
+    identityPath: join(forgedRoot, "identity.json"),
+    socketPath: join(forgedRoot, "shield.sock"),
+    launchAgentPath: canonicalPaths.launchAgentPath,
+    launchdDomain: canonicalPaths.launchdDomain,
+    launchdTarget: canonicalPaths.launchdTarget,
+  };
+  try {
+    const writeError = await writeShieldIdentity({ paths: forgedPaths, identity }).then(
+      () => null,
+      (error) => error,
+    );
+    const externalIdentityExists = await lstat(forgedPaths.identityPath).then(
+      () => true,
+      (error) => {
+        if (error?.code === "ENOENT") return false;
+        throw error;
+      },
+    );
+    assert.equal(externalIdentityExists, false, "writer must not create identity files outside canonical AirKit state");
+    assert.match(writeError?.message ?? "", /shieldPaths/);
+  } finally {
+    await rm(homeDir, { recursive: true, force: true });
+    await rm(externalHome, { recursive: true, force: true });
   }
 });
 

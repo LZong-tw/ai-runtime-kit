@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 const SHIELD_LABEL = "com.airkit.shield";
 const defaultIo = { chmod, constants, lstat, mkdir, open, readFile, rename, unlink };
+const canonicalShieldPaths = new WeakSet();
 
 export function shieldPaths({ env = process.env, homeDir = homeFromEnv(env), uid = env.AIRKIT_GUI_UID ?? env.UID ?? process.getuid?.(), rootDir, configPath, identityPath, socketPath, launchAgentPath } = {}) {
   const home = absolutePath(homeDir, "homeDir");
@@ -24,7 +25,9 @@ export function shieldPaths({ env = process.env, homeDir = homeFromEnv(env), uid
     throw new Error("launchAgentPath must be under homeDir/Library/LaunchAgents");
   }
   paths.launchdTarget = `${paths.launchdDomain}/${SHIELD_LABEL}`;
-  return Object.freeze(paths);
+  Object.freeze(paths);
+  canonicalShieldPaths.add(paths);
+  return paths;
 }
 
 export async function readShieldIdentity({ paths, io = defaultIo } = {}) {
@@ -115,6 +118,9 @@ async function openExclusiveFile(path, io) {
 }
 
 function assertWritablePaths(paths) {
+  if (!canonicalShieldPaths.has(paths)) {
+    throw new Error("shield paths must be a canonical object returned by shieldPaths");
+  }
   if (paths.configPath !== join(paths.rootDir, "config.json") || paths.identityPath !== join(paths.rootDir, "identity.json") || paths.socketPath !== join(paths.rootDir, "shield.sock")) {
     throw new Error("shield paths must use the canonical AirKit Shield state layout");
   }
