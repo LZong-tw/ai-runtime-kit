@@ -140,11 +140,8 @@ export async function ensureShieldReady({ lane, env = process.env, paths = shiel
 export async function launchShieldChild({ command, args = [], ready, env = process.env, spawnChild = spawn } = {}) {
   if (typeof command !== "string" || command.length === 0 || command.includes("\0")) throw new Error("shield launch command is required");
   if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string" || arg.includes("\0"))) throw new Error("shield launch arguments must be strings");
-  if (!ready?.origin || !ready?.capability || ready.targetClass !== ready.lane || (ready.lane !== "subscription" && ready.lane !== "managed")) {
-    throw new Error("shield launch requires a fresh lane-bound loopback identity");
-  }
   const child = spawnChild(command, args, {
-    env: { ...env, AIRKIT_SHIELD_ORIGIN: ready.origin, AIRKIT_SHIELD_CAPABILITY: ready.capability },
+    env: buildShieldChildEnv(ready, env),
     shell: false,
     stdio: "inherit",
   });
@@ -152,6 +149,25 @@ export async function launchShieldChild({ command, args = [], ready, env = proce
     child.once("error", reject);
     child.once("close", (code, signal) => resolvePromise({ code, signal }));
   });
+}
+
+export function buildShieldChildEnv(ready, env = process.env) {
+  if (!ready?.origin || !ready?.capability || ready.targetClass !== ready.lane || (ready.lane !== "subscription" && ready.lane !== "managed")) {
+    throw new Error("shield launch requires a fresh lane-bound loopback identity");
+  }
+  if (/[\r\n]/.test(ready.capability)) {
+    throw new Error("shield capability cannot be represented as an HTTP header");
+  }
+  const keptHeaders = String(env.ANTHROPIC_CUSTOM_HEADERS ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== "" && !line.toLowerCase().startsWith("x-airkit-shield:"));
+  return {
+    ...env,
+    ANTHROPIC_API_BASE_URL: ready.origin,
+    ANTHROPIC_BASE_URL: ready.origin,
+    ANTHROPIC_CUSTOM_HEADERS: [...keptHeaders, `x-airkit-shield: ${ready.capability}`].join("\n"),
+  };
 }
 
 function assertLane(lane) {

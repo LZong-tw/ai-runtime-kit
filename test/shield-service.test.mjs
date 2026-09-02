@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -17,6 +18,7 @@ import {
   stopShieldService,
 } from "../src/shield/service.mjs";
 import { shieldPaths, writeShieldIdentity } from "../src/shield/paths.mjs";
+import { startShieldProxy } from "../src/shield/proxy.mjs";
 
 const capability = "c".repeat(32);
 const generation = "generation-1";
@@ -209,14 +211,19 @@ test("shield stop only unloads its own job and preserves shield state", async ()
   assert.deepEqual(calls, [["bootout", paths.launchdTarget]]);
 });
 
-test("AirKit keeps capability out of its argv while the trusted child inherits it and owns its output", async () => {
+test("AirKit keeps capability out of argv and injects Claude's Shield transport environment", async () => {
   const calls = [];
   const child = new EventEmitter();
   const outcome = launchShieldChild({
     command: "/usr/bin/env",
     args: ["true"],
     ready: { origin: "http://127.0.0.1:8811", capability, lane: "subscription", targetClass: "subscription" },
-    env: { PATH: "/usr/bin" },
+    env: {
+      ANTHROPIC_API_BASE_URL: "https://stale-provider.invalid",
+      ANTHROPIC_BASE_URL: "https://stale-provider.invalid",
+      ANTHROPIC_CUSTOM_HEADERS: "x-tenant: fixture\nX-AirKit-Shield: stale-capability",
+      PATH: "/usr/bin",
+    },
     spawnChild(command, args, options) {
       calls.push({ command, args, options });
       queueMicrotask(() => child.emit("close", 0, null));
@@ -225,10 +232,95 @@ test("AirKit keeps capability out of its argv while the trusted child inherits i
   });
   assert.deepEqual(await outcome, { code: 0, signal: null });
   assert.deepEqual(calls[0].args, ["true"]);
-  assert.equal(calls[0].options.env.AIRKIT_SHIELD_ORIGIN, "http://127.0.0.1:8811");
-  assert.equal(calls[0].options.env.AIRKIT_SHIELD_CAPABILITY, capability);
+  assert.equal(calls[0].options.env.ANTHROPIC_API_BASE_URL, "http://127.0.0.1:8811");
+  assert.equal(calls[0].options.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:8811");
+  assert.equal(
+    calls[0].options.env.ANTHROPIC_CUSTOM_HEADERS,
+    `x-tenant: fixture\nx-airkit-shield: ${capability}`,
+  );
+  assert.equal(calls[0].options.env.AIRKIT_SHIELD_CAPABILITY, undefined);
   assert.equal(calls[0].args.includes(capability), false);
   assert.equal(calls[0].options.stdio, "inherit");
+});
+
+test("Shield launch rejects a capability that cannot be represented as one custom header", async () => {
+  let spawnCalls = 0;
+
+  await assert.rejects(
+    launchShieldChild({
+      command: "/usr/bin/env",
+      args: ["true"],
+      ready: {
+        origin: "http://127.0.0.1:8811",
+        capability: `${capability}\nx-escape: injected`,
+        lane: "subscription",
+        targetClass: "subscription",
+      },
+      spawnChild() {
+        spawnCalls += 1;
+        const child = new EventEmitter();
+        queueMicrotask(() => child.emit("close", 0, null));
+        return child;
+      },
+    }),
+    /shield capability cannot be represented as an HTTP header/,
+  );
+  assert.equal(spawnCalls, 0);
+});
+
+test("Shield child environment authenticates a request through the loopback proxy", async () => {
+  let upstreamCalls = 0;
+  const upstream = createServer((request, response) => {
+    upstreamCalls += 1;
+    request.resume();
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end('{"ok":true}');
+  });
+  upstream.listen(0, "127.0.0.1");
+  await new Promise((resolvePromise, reject) => {
+    upstream.once("listening", resolvePromise);
+    upstream.once("error", reject);
+  });
+  const upstreamAddress = upstream.address();
+  const shield = await startShieldProxy({
+    capability,
+    targetOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
+    decide: async () => ({ action: "allow" }),
+  });
+  const calls = [];
+  const child = new EventEmitter();
+
+  try {
+    const outcome = launchShieldChild({
+      command: "/usr/bin/env",
+      args: ["true"],
+      ready: { origin: shield.origin, capability, lane: "subscription", targetClass: "subscription" },
+      env: {},
+      spawnChild(command, args, options) {
+        calls.push({ command, args, options });
+        queueMicrotask(() => child.emit("close", 0, null));
+        return child;
+      },
+    });
+    assert.deepEqual(await outcome, { code: 0, signal: null });
+    const childEnv = calls[0].options.env;
+    const headers = Object.fromEntries(childEnv.ANTHROPIC_CUSTOM_HEADERS.split("\n").map((line) => {
+      const separator = line.indexOf(":");
+      return [line.slice(0, separator), line.slice(separator + 1).trim()];
+    }));
+    const response = await fetch(`${childEnv.ANTHROPIC_BASE_URL}/v1/messages`, {
+      body: "{}",
+      headers,
+      method: "POST",
+    });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true });
+    assert.equal(upstreamCalls, 1);
+  } finally {
+    await shield.close();
+    await new Promise((resolvePromise) => upstream.close(resolvePromise));
+  }
 });
 
 test("shield status never displays capability or target metadata", async () => {
