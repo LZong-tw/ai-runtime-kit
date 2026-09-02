@@ -81,8 +81,19 @@ export function assertShieldIdentity(identity) {
 
 export async function writeShieldIdentity({ paths, identity, io = defaultIo } = {}) {
   if (!paths?.rootDir || !paths.identityPath) throw new TypeError("shield identity paths are required");
-  assertWritablePaths(paths);
   const validated = assertShieldIdentity(identity);
+  await writePrivateShieldState({ paths, path: paths.identityPath, value: validated, io });
+  return validated;
+}
+
+export async function writeShieldConfig({ paths, config, io = defaultIo } = {}) {
+  if (!paths?.rootDir || !paths.configPath) throw new TypeError("shield configuration paths are required");
+  if (!config || typeof config !== "object" || Array.isArray(config)) throw new TypeError("shield configuration must be an object");
+  await writePrivateShieldState({ paths, path: paths.configPath, value: config, io });
+}
+
+async function writePrivateShieldState({ paths, path, value, io }) {
+  assertWritablePaths(paths);
   const [homeDir, localDir, stateDir, rootDir] = stateComponents(paths.rootDir);
   const ownerUid = process.getuid?.();
   await ensureDirectory(homeDir, io, ownerUid, false);
@@ -94,13 +105,13 @@ export async function writeShieldIdentity({ paths, identity, io = defaultIo } = 
   try {
     await rootHandle.chmod(0o700);
     await assertDirectory(rootDir, io, ownerUid);
-  const temporaryPath = `${paths.identityPath}.tmp-${process.pid}-${Date.now()}`;
+    const temporaryPath = `${path}.tmp-${process.pid}-${Date.now()}`;
     try {
       const fileHandle = await openExclusiveFile(temporaryPath, io);
-      try { await fileHandle.writeFile(`${JSON.stringify(validated)}\n`); await fileHandle.chmod(0o600); }
+      try { await fileHandle.writeFile(`${JSON.stringify(value)}\n`); await fileHandle.chmod(0o600); }
       finally { await fileHandle.close(); }
       await assertDirectory(rootDir, io, ownerUid);
-      await io.rename(temporaryPath, paths.identityPath);
+      await io.rename(temporaryPath, path);
     } catch (error) {
       await io.unlink(temporaryPath, { force: true }).catch(() => {});
       throw error;
@@ -108,7 +119,6 @@ export async function writeShieldIdentity({ paths, identity, io = defaultIo } = 
   } finally {
     await rootHandle.close();
   }
-  return validated;
 }
 
 async function openPrivateRoot(rootDir, io, ownerUid) {

@@ -1,15 +1,17 @@
 import { execFile, spawn } from "node:child_process";
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { constants } from "node:fs";
+import { chmod, lstat, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { readShieldIdentity, shieldPaths } from "./paths.mjs";
+import { readShieldIdentity, shieldPaths, writeShieldConfig } from "./paths.mjs";
 
 const execFileAsync = promisify(execFile);
 export const SHIELD_SERVICE_LABEL = "com.airkit.shield";
 const SUBSCRIPTION_TARGET_ORIGIN = "https://api.anthropic.com";
 
-const defaultIo = { chmod, mkdir, readFile, rename, writeFile };
+const defaultIo = { chmod, constants, lstat, mkdir, open, readFile, rename, unlink, writeFile };
 
 export function planShieldService({ paths, nodePath, daemonPath } = {}) {
   assertShieldPaths(paths);
@@ -44,6 +46,8 @@ export function planShieldService({ paths, nodePath, daemonPath } = {}) {
 export async function installShieldService({ write = false, io = defaultIo, runLaunchctl = defaultLaunchctl, ...options } = {}) {
   const plan = planShieldService(options);
   if (!write) return plan;
+  const config = createShieldConfig(options.config);
+  await writeShieldConfig({ paths: options.paths, config, io });
   await io.mkdir(dirname(plan.plistPath), { recursive: true, mode: 0o700 });
   const temporaryPath = `${plan.plistPath}.tmp-${process.pid}`;
   await io.writeFile(temporaryPath, plan.plistXml, { mode: 0o600 });
@@ -52,6 +56,26 @@ export async function installShieldService({ write = false, io = defaultIo, runL
   await launch(runLaunchctl, ["bootstrap", plan.domain, plan.plistPath], true);
   await launch(runLaunchctl, ["kickstart", "-k", plan.target], false);
   return { ...plan, written: true };
+}
+
+export function createShieldConfig(config = {}) {
+  const lane = config.lane ?? "subscription";
+  assertLane(lane);
+  const targetOrigin = config.targetOrigin ?? (lane === "subscription" ? SUBSCRIPTION_TARGET_ORIGIN : undefined);
+  const validated = {
+    capability: config.capability ?? randomUUID().replaceAll("-", ""),
+    targetOrigin: normalizeShieldTargetOrigin(targetOrigin, "shield configuration target"),
+    lane,
+    generation: config.generation ?? randomUUID(),
+    targetClass: config.targetClass ?? lane,
+  };
+  if (validated.targetClass !== lane) throw new Error("shield configuration targetClass must match its lane");
+  if (lane === "subscription" && validated.targetOrigin !== SUBSCRIPTION_TARGET_ORIGIN) {
+    throw new Error("shield subscription configuration must target api.anthropic.com");
+  }
+  if (typeof validated.capability !== "string" || validated.capability.length < 32) throw new Error("shield configuration capability is missing or invalid");
+  if (!/^[A-Za-z0-9._-]{1,128}$/.test(validated.generation)) throw new Error("shield configuration generation is missing or invalid");
+  return validated;
 }
 
 export async function startShieldService(options = {}) {
@@ -65,8 +89,7 @@ export async function startShieldService(options = {}) {
     else throw error;
   }
   if (missing) {
-    await installShieldService({ ...rest, io, runLaunchctl, write: true });
-    return { ...plan, started: true };
+    throw new Error("shield service is not installed; run 'airkit shield install --write' before start");
   }
   await ensurePathDrift(plan, io);
   await launch(runLaunchctl, ["bootstrap", plan.domain, plan.plistPath], true);
