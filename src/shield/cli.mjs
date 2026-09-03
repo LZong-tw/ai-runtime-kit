@@ -5,6 +5,7 @@ import { readShieldAssetsProvision, readShieldIdentity, readShieldPolicyState, s
 import { provisionShieldAssets } from "./provision.mjs";
 import { installShieldPolicyProvision, readShieldPolicyProvision } from "./policy-bundle.mjs";
 import { readShieldOperationalStatus } from "./operational-status.mjs";
+import { hasBackgroundClaudeHost, scheduleBackgroundHostRelease } from "./background-host.mjs";
 import {
   ensureShieldReady,
   createShieldDestinationLease,
@@ -151,10 +152,27 @@ async function createDefaultShieldDependencies(dependencies) {
         leaseTimer.unref?.();
       }
       let outcome;
-      try { outcome = await launchChild({ command, args, ready, env, spawnChild: dependencies.spawnChild }); }
-      finally {
+      let leaseRetained = false;
+      let leaseReleased = false;
+      const releaseLease = async () => {
+        if (leaseReleased) return;
+        leaseReleased = true;
         stopLeaseTimer();
-        if (targetOrigin) await revokeLease({ ready, paths: lanePaths, io: dependencies.io }).catch(() => {});
+        await revokeLease({ ready, paths: lanePaths, io: dependencies.io }).catch(() => {});
+      };
+      try {
+        outcome = await launchChild({ command, args, ready, env, spawnChild: dependencies.spawnChild });
+        if (targetOrigin && await hasBackgroundClaudeHost(targetOrigin, dependencies.backgroundHostDetector)) {
+          leaseRetained = scheduleBackgroundHostRelease(targetOrigin, {
+            detector: dependencies.backgroundHostDetector,
+            graceMs: dependencies.backgroundMiddlewareGraceMs,
+            setTimeoutFn: dependencies.backgroundSetTimeout,
+            onReleased: releaseLease,
+          });
+        }
+      }
+      finally {
+        if (targetOrigin && !leaseRetained) await releaseLease();
       }
       return { state: outcome.code === 0 ? "healthy" : "degraded", launched: true, exitCode: outcome.code ?? 1 };
     },

@@ -730,6 +730,74 @@ test("subscription target launch renews its lease until its foreground child exi
   assert.deepEqual(cleared, [intervals[0].timer]);
 });
 
+test("subscription target launch retains its lease while a matching background host remains", async () => {
+  const intervals = [];
+  const checks = [];
+  const cleared = [];
+  const events = [];
+  let active = true;
+  await runShieldCli(["launch", "--lane", "subscription", "--target", "http://127.0.0.1:8804", "--", "echo", "ok"], {
+    stdout: capture().stdout,
+    ensureShieldReady: async () => ({ origin: "http://127.0.0.1:8811", capability: "a".repeat(32), lane: "subscription", targetClass: "subscription" }),
+    createShieldDestinationLease: async ({ ready }) => ({ ...ready, capability: "b".repeat(32) }),
+    renewShieldDestinationLease: async () => events.push("renew"),
+    revokeShieldDestinationLease: async () => events.push("revoke"),
+    shieldLeaseSetInterval: (callback) => {
+      const timer = { unref() {} };
+      intervals.push({ callback, timer });
+      return timer;
+    },
+    shieldLeaseClearInterval: (timer) => cleared.push(timer),
+    backgroundHostDetector: async (origin) => {
+      assert.equal(origin, "http://127.0.0.1:8804");
+      return active;
+    },
+    backgroundMiddlewareGraceMs: 1_000,
+    backgroundSetTimeout: (callback) => {
+      checks.push(callback);
+      return { unref() {} };
+    },
+    launchShieldChild: async () => ({ code: 0 }),
+  });
+  assert.equal(intervals.length, 1);
+  assert.equal(checks.length, 1);
+  assert.deepEqual(events, []);
+  await intervals[0].callback();
+  assert.deepEqual(events, ["renew"]);
+  active = false;
+  await checks[0]();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, ["renew", "revoke"]);
+  assert.deepEqual(cleared, [intervals[0].timer]);
+});
+
+test("sequential interactive Shield children unregister each approval channel before the next launch", async () => {
+  const ready = { origin: "http://127.0.0.1:8811", capability: "c".repeat(32), lane: "subscription", targetClass: "subscription" };
+  const events = [];
+  const channels = [
+    { socketPath: "/tmp/approval-one.sock", capability: "a".repeat(32), async close() { events.push("close:one"); } },
+    { socketPath: "/tmp/approval-two.sock", capability: "b".repeat(32), async close() { events.push("close:two"); } },
+  ];
+  for (const channel of channels) {
+    await launchShieldChild({
+      command: "echo",
+      ready,
+      createApprovalChannel: async () => channel,
+      registerApprovalChannel: async ({ channel: registered }) => events.push(`register:${registered.socketPath}`),
+      unregisterApprovalChannel: async () => events.push("unregister"),
+      spawnChild: () => {
+        const child = new EventEmitter();
+        queueMicrotask(() => child.emit("close", 0, null));
+        return child;
+      },
+    });
+  }
+  assert.deepEqual(events, [
+    "register:/tmp/approval-one.sock", "unregister", "close:one",
+    "register:/tmp/approval-two.sock", "unregister", "close:two",
+  ]);
+});
+
 test("shield install applies lifecycle only with --write", async () => {
   const calls = [];
   const output = capture();
