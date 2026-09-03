@@ -8,6 +8,7 @@ export function createDecisionCache({ clock = () => Date.now(), ttlMs = 30_000, 
   const entries = new Map();
   const inflight = new Map();
   let transition = null;
+  let generation = 0;
 
   const keyFor = (value) => {
     const input = validateKey(value);
@@ -36,25 +37,28 @@ export function createDecisionCache({ clock = () => Date.now(), ttlMs = 30_000, 
   };
 
   return Object.freeze({
-    get: read,
     set: write,
     async getOrCompute(value, compute) {
       if (typeof compute !== "function") throw new TypeError("shield decision cache compute is required");
       const hit = read(value);
-      if (hit) return hit;
+      if (hit) return result(hit, "cache_hit");
       const key = keyFor(value);
       let pending = inflight.get(key);
-      if (!pending) {
-        pending = Promise.resolve().then(compute).then((decision) => {
+      if (pending) return result(await pending, "coalesced");
+      const computeGeneration = generation;
+      pending = Promise.resolve().then(compute).then((decision) => {
           if (keyFor(decision) !== key) throw new Error("shield decision cache computed identity mismatch");
+          if (computeGeneration !== generation) throw new Error("shield decision cache computation was invalidated");
           return write(decision);
-        }).finally(() => inflight.delete(key));
-        inflight.set(key, pending);
-      }
-      return cloneDecision(await pending);
+        }).finally(() => {
+          if (inflight.get(key) === pending) inflight.delete(key);
+        });
+      inflight.set(key, pending);
+      return result(await pending, "evaluated");
     },
     invalidateTransition(value) {
       transition = stableVersion(value);
+      generation += 1;
       entries.clear();
       inflight.clear();
     },
@@ -100,4 +104,8 @@ function stableVersion(value) {
 
 function cloneDecision(value) {
   return Object.freeze({ ...value, detectorVersions: { ...value.detectorVersions }, reasonCodes: [...value.reasonCodes], body: Buffer.from(value.body) });
+}
+
+function result(decision, source) {
+  return Object.freeze({ decision: cloneDecision(decision), source });
 }

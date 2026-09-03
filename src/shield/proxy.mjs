@@ -185,8 +185,7 @@ async function handleShieldRequest({ request, response, capability, controlCapab
 async function cachedDecision({ decisionCache, decisionContext, body, evaluate }) {
   const requestDigest = createHash("sha256").update(body).digest("hex");
   const key = { ...decisionContext, requestDigest };
-  const prior = decisionCache.get(key);
-  const cached = prior ?? await decisionCache.getOrCompute(key, async () => {
+  const result = await decisionCache.getOrCompute(key, async () => {
     const decision = await evaluate();
     const redactedBody = decision?.action === "redact" ? validateRedactedBody(decision.redactedBody) : Buffer.alloc(0);
     if (redactedBody === null) throw new Error("shield decision redaction is invalid");
@@ -196,6 +195,10 @@ async function cachedDecision({ decisionCache, decisionContext, body, evaluate }
       : [action === "allow" ? "policy_allow" : "policy_blocked"];
     return { ...key, action, reasonCodes, transformCount: decision?.transformCount ?? 0, body: redactedBody };
   });
+  if (!result || typeof result !== "object" || !["evaluated", "cache_hit", "coalesced"].includes(result.source)) {
+    throw new Error("shield decision cache result provenance is invalid");
+  }
+  const cached = result.decision;
   return {
     action: cached.action,
     reasonCodes: cached.reasonCodes,
@@ -205,7 +208,7 @@ async function cachedDecision({ decisionCache, decisionContext, body, evaluate }
     destinationClass: decisionContext.destinationClass,
     bundleVersion: decisionContext.policyVersion,
     detectorVersions: decisionContext.detectorVersions,
-    decisionSource: prior === null ? "evaluated" : "cache_hit",
+    decisionSource: result.source,
   };
 }
 
@@ -386,7 +389,9 @@ function buildDecisionMetadata(decision, startedAt) {
     action: action === "allow" || action === "block" || action === "redact" || action === "require_approval" ? action : "block",
     reasonCodes,
     transformCount: Number.isInteger(decision?.transformCount) && decision.transformCount >= 0 ? decision.transformCount : 0,
-    decisionSource: decision?.decisionSource === "cache_hit" ? "cache_hit" : "evaluated",
+    decisionSource: ["evaluated", "cache_hit", "coalesced"].includes(decision?.decisionSource)
+      ? decision.decisionSource
+      : "evaluated",
     override: false,
     elapsedMs: Math.max(0, Date.now() - startedAt),
   };

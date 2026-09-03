@@ -42,7 +42,7 @@ const MAX_CANONICAL_PAYLOAD_BYTES = 64 * 1024;
 const SHIELD_EVENT_KINDS = new Set(["shield_decision", "shield_policy_transition"]);
 const SHIELD_ACTIONS = new Set(["allow", "block", "redact", "require_approval", "unavailable", "unauthorized", "transition"]);
 const SHIELD_LANES = new Set(["managed", "subscription", "unknown"]);
-const SHIELD_DECISION_SOURCES = new Set(["evaluated", "cache_hit"]);
+const SHIELD_DECISION_SOURCES = new Set(["evaluated", "cache_hit", "coalesced"]);
 const SHIELD_PAYLOAD_KEYS = [
   "lane", "destination_class", "policy_version", "gitleaks_version", "privacy_version",
   "action", "reasons", "transform_count", "decision_source", "override", "elapsed_ms",
