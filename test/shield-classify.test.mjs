@@ -53,7 +53,7 @@ test("rejects unbounded bodies and untrusted classifier categories", () => {
     interactive: false,
   };
 
-  assert.throws(() => classifyShieldRequest({ body: Buffer.alloc(256 * 1024 + 1), launcherContext }), /body/i);
+  assert.throws(() => classifyShieldRequest({ body: Buffer.alloc(1_048_576 + 1), launcherContext }), /body/i);
   assert.throws(() => classifyShieldRequest({ body: Buffer.alloc(0), launcherContext: { ...launcherContext, repository: { remoteHash, trustClass: "private" } } }), /launcher context/i);
   assert.throws(() => classifyShieldRequest({ body: Buffer.alloc(0), launcherContext: { ...launcherContext, destinationClass: "https://provider.test" } }), /launcher context/i);
 });

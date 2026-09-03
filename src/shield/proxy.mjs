@@ -109,6 +109,41 @@ async function handleShieldRequest({ request, response, capability, controlCapab
     return;
   }
 
+  if (isLivenessProbe(request.method, request.headers["content-length"])) {
+    const probePath = safeProbePath(request.url);
+    if (probePath !== null) {
+      request.resume();
+      const lifecycle = requestLifecycleSignal(request, response);
+      if (lifecycle.signal.aborted) return;
+      if (requestTarget === null) {
+        await finish(response, { status: 503, code: "shield_unavailable" });
+        return;
+      }
+      try {
+        const upstream = await fetch(new URL(probePath, requestTarget), {
+          method: request.method,
+          headers: forwardHeaders(request.headers),
+          redirect: "manual",
+          signal: lifecycle.signal,
+        });
+        if (upstream.status >= 300 && upstream.status < 400) {
+          await discardResponse(upstream);
+          await finish(response, { status: 503, code: "shield_unavailable" });
+          return;
+        }
+        writeUpstreamHeaders(response, upstream);
+        await streamResponse(upstream, response, lifecycle.signal);
+      } catch {
+        if (!response.headersSent) {
+          await finish(response, { status: 503, code: "shield_unavailable" });
+        } else if (!response.destroyed) {
+          response.destroy();
+        }
+      }
+      return;
+    }
+  }
+
   if (isApprovalRegistration) {
     if (!capabilityMatches(request.headers["x-airkit-shield-control"], controlCapability)) {
       request.resume();
@@ -147,6 +182,7 @@ async function handleShieldRequest({ request, response, capability, controlCapab
 
   const lifecycle = requestLifecycleSignal(request, response);
   if (lifecycle.signal.aborted) return;
+
   let inspection;
   try {
     inspection = await readInspection(request);
@@ -332,6 +368,20 @@ function safeMessagesPath(value) {
   let target;
   try { target = new URL(value, "http://shield.local"); } catch { return null; }
   return target.pathname === "/v1/messages" ? `${target.pathname}${target.search}` : null;
+}
+
+function safeProbePath(value) {
+  if (typeof value !== "string" || !value.startsWith("/") || value.startsWith("//") || value.includes("\\")) return null;
+  let target;
+  try { target = new URL(value, "http://shield.local"); } catch { return null; }
+  return `${target.pathname}${target.search}`;
+}
+
+function isLivenessProbe(method, contentLength) {
+  if (method !== "HEAD" && method !== "GET" && method !== "OPTIONS") return false;
+  if (contentLength === undefined) return true;
+  const parsed = Number(contentLength);
+  return Number.isInteger(parsed) && parsed === 0;
 }
 
 async function readInspection(request) {

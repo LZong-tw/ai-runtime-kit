@@ -1,4 +1,4 @@
-const MAX_BODY_BYTES = 256 * 1024;
+const MAX_BODY_BYTES = 1_048_576;
 const REPOSITORY_CLASSES = new Set(["public", "internal", "restricted", "unknown"]);
 const PATH_CLASSES = new Set(["source", "environment", "terraform_state", "credential_store", "production_config", "unknown"]);
 const DESTINATION_CLASSES = new Set(["subscription", "managed"]);

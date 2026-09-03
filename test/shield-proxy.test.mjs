@@ -224,6 +224,63 @@ test("oversized inspection is blocked before contacting upstream", async (t) => 
   assert.equal(upstreamCalls, 0);
 });
 
+test("zero-body liveness probes forward to upstream without a policy decision", async (t) => {
+  let upstreamCalls = 0;
+  let seenMethod = null;
+  let seenPath = null;
+  let decisions = 0;
+  const upstream = await startFixture(t, async (request, response) => {
+    upstreamCalls += 1;
+    seenMethod = request.method;
+    seenPath = request.url;
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end('{"ok":true}');
+  });
+  const shield = await startShield(t, {
+    targetOrigin: upstream.origin,
+    decide: async () => { decisions += 1; return { action: "allow" }; },
+  });
+
+  const head = await fetch(`${shield.origin}/api/hello`, {
+    method: "HEAD",
+    headers: { "x-airkit-shield": CAPABILITY },
+  });
+  assert.equal(head.status, 200);
+  assert.equal(seenMethod, "HEAD");
+  assert.equal(seenPath, "/api/hello");
+
+  const get = await fetch(`${shield.origin}/api/hello`, {
+    method: "GET",
+    headers: { "x-airkit-shield": CAPABILITY, "content-length": "0" },
+  });
+  assert.equal(get.status, 200);
+
+  assert.equal(upstreamCalls, 2);
+  assert.equal(decisions, 0, "liveness probes must not invoke the decision function");
+});
+
+test("a body-carrying request runs the policy pipeline instead of the probe path", async (t) => {
+  let upstreamCalls = 0;
+  let decisions = 0;
+  const upstream = await startFixture(t, async (_request, response) => {
+    upstreamCalls += 1;
+    response.end();
+  });
+  const shield = await startShield(t, {
+    targetOrigin: upstream.origin,
+    decide: async () => { decisions += 1; return { action: "allow" }; },
+  });
+
+  const postWithBody = await fetch(`${shield.origin}/v1/messages`, {
+    method: "POST",
+    headers: { "x-airkit-shield": CAPABILITY, "content-type": "application/json" },
+    body: '{"prompt":"hello"}',
+  });
+  assert.equal(postWithBody.status, 200);
+  assert.equal(decisions, 1, "a request that carries a body is not a liveness probe");
+  assert.equal(upstreamCalls, 1);
+});
+
 test("proxy rejects compressed request bodies before inspection or forwarding", async (t) => {
   let upstreamCalls = 0;
   let decisions = 0;
