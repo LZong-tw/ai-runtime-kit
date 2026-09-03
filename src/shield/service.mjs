@@ -511,9 +511,16 @@ async function ensurePathDrift(plan, io) {
   if (existing !== plan.plistXml) throw new Error(`shield launch plist path drift detected: ${plan.plistPath}`);
 }
 
+// launchctl reports an already-bootstrapped service as "Bootstrap failed: 5:
+// Input/output error" rather than saying so, which made `shield start` fail on
+// every service `install --write` had already loaded. Tolerating it is safe
+// because the kickstart that follows is not tolerated: a service that genuinely
+// failed to bootstrap still raises there.
+const TOLERATED_LAUNCHCTL_FAILURES = /already (loaded|bootstrapped)|could not find service|no such process|Bootstrap failed: 5:/i;
+
 async function launch(runLaunchctl, args, tolerateFailure) {
   const result = await runLaunchctl(args);
-  if (result?.ok === false && !(tolerateFailure && /already (loaded|bootstrapped)|could not find service|no such process/i.test(result.stderr ?? ""))) {
+  if (result?.ok === false && !(tolerateFailure && TOLERATED_LAUNCHCTL_FAILURES.test(result.stderr ?? ""))) {
     throw new Error(`launchctl ${args[0]} failed: ${result.stderr ?? "unknown error"}`);
   }
   return { ok: result?.ok !== false, ...result };

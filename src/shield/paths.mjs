@@ -157,10 +157,13 @@ export async function writeShieldPolicyState({ paths, state, io = defaultIo } = 
 export async function invalidateShieldPolicyBinding({ paths, io = defaultIo } = {}) {
   if (!paths?.rootDir || !paths.identityPath || !paths.policyStatePath) throw new TypeError("shield policy binding paths are required");
   assertWritablePaths(paths);
-  await Promise.all([
-    io.unlink(paths.identityPath, { force: true }),
-    io.unlink(paths.policyStatePath, { force: true }),
-  ]);
+  // unlink has no `force` option — only rm does — so an absent binding threw
+  // ENOENT and made the first policy install on a fresh lane impossible.
+  const clear = async (path) => {
+    try { await io.unlink(path, { force: true }); }
+    catch (error) { if (error?.code !== "ENOENT") throw error; }
+  };
+  await Promise.all([clear(paths.identityPath), clear(paths.policyStatePath)]);
 }
 
 export async function writeShieldPolicyProvision({ paths, bundleText, publicKey, io = defaultIo } = {}) {
