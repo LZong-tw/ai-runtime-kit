@@ -6,6 +6,7 @@ import { test } from "node:test";
 
 import {
   assertShieldIdentity,
+  invalidateShieldPolicyBinding,
   readShieldIdentity,
   shieldPaths,
   writeShieldConfig,
@@ -192,6 +193,20 @@ test("identity writes reject a complete forged paths object rooted outside AirKi
   } finally {
     await rm(homeDir, { recursive: true, force: true });
     await rm(externalHome, { recursive: true, force: true });
+  }
+});
+
+test("policy binding invalidation succeeds on a lane that has never bound one", async () => {
+  const homeDir = await mkdtemp("/tmp/airkit-shield-");
+  const paths = shieldPaths({ homeDir, uid: 501 });
+  try {
+    await mkdir(paths.rootDir, { recursive: true, mode: 0o700 });
+    await invalidateShieldPolicyBinding({ paths });
+    await writeShieldIdentity({ paths, identity });
+    await invalidateShieldPolicyBinding({ paths });
+    await assert.rejects(stat(paths.identityPath), /ENOENT/);
+  } finally {
+    await rm(homeDir, { recursive: true, force: true });
   }
 });
 

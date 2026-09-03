@@ -145,6 +145,28 @@ test("shield install writes a private plist only with --write semantics", async 
   }
 });
 
+test("shield start tolerates a service install already bootstrapped but still requires a live kickstart", async () => {
+  const homeDir = await mkdtemp(join(tmpdir(), "airkit-shield-restart-"));
+  const { options, paths } = fixture(homeDir);
+  try {
+    await installShieldService({ ...options, write: true, runLaunchctl: async () => ({ ok: true }) });
+    const alreadyLoaded = { ok: false, status: 5, stdout: "", stderr: "Bootstrap failed: 5: Input/output error\n" };
+    const calls = [];
+    await startShieldService({
+      ...options,
+      runLaunchctl: async (args) => { calls.push(args[0]); return args[0] === "bootstrap" ? alreadyLoaded : { ok: true }; },
+    });
+    assert.deepEqual(calls, ["bootstrap", "kickstart"]);
+    await assert.rejects(
+      startShieldService({ ...options, runLaunchctl: async () => alreadyLoaded }),
+      /launchctl kickstart failed/i,
+    );
+    assert.ok(paths.launchAgentPath);
+  } finally {
+    await rm(homeDir, { recursive: true, force: true });
+  }
+});
+
 test("shield start refuses an uninstalled service without provisioning state", async () => {
   const { options } = fixture();
   const calls = [];
