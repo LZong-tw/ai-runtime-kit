@@ -724,6 +724,51 @@ test("shield lifecycle commands pass the selected lane without sharing subscript
   await assert.rejects(runShieldCli(["doctor", "--lane", "invalid"], { shield: {} }), /usage: shield doctor/i);
 });
 
+test("managed install parses through the CLI and binds same-lane verified provisions", async () => {
+  const home = await mkdtemp(join(tmpdir(), "airkit-shield-cli-"));
+  const calls = [];
+  try {
+    await runShieldCli(["install", "--lane", "managed"], {
+      env: { HOME: home }, stdout: capture().stdout,
+      readShieldAssetsProvision: async ({ paths }) => { calls.push(["assets", paths.lane]); return { gitleaks: { path: "/opt/gitleaks", sha256: "a".repeat(64) } }; },
+      readShieldPolicyProvision: async ({ paths }) => { calls.push(["policy", paths.lane]); return { bundle: {}, publicKey: "key" }; },
+      loadShieldPolicy: async () => ({ version: "policy-1" }),
+      installShieldService: async ({ paths, config, write }) => { calls.push(["install", paths.lane, config.gitleaks.executable, write]); return { label: paths.serviceLabel }; },
+    });
+    assert.deepEqual(calls, [["assets", "managed"], ["policy", "managed"], ["install", "managed", "/opt/gitleaks", false]]);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("managed policy privacy and install CLI sequence stays in one lane", async () => {
+  const home = await mkdtemp(join(tmpdir(), "airkit-shield-cli-sequence-"));
+  const calls = [];
+  const dependencies = {
+    env: { HOME: home }, stdout: capture().stdout,
+    installShieldPolicyProvision: async ({ paths, write }) => { calls.push(["policy", paths.lane, write]); return { version: "p", detectorVersions: {} }; },
+    provisionShieldAssets: async ({ paths, write }) => { calls.push(["privacy", paths.lane, write]); return {}; },
+    readShieldAssetsProvision: async () => ({ gitleaks: { path: "/opt/gitleaks", sha256: "a".repeat(64) } }),
+    readShieldPolicyProvision: async () => ({ bundle: {}, publicKey: "key" }), loadShieldPolicy: async () => ({}),
+    installShieldService: async ({ paths }) => { calls.push(["install", paths.lane]); return { label: paths.serviceLabel }; },
+  };
+  try {
+    await runShieldCli(["policy", "install", "--bundle", "/tmp/p", "--public-key", "/tmp/k", "--lane", "managed"], dependencies);
+    await runShieldCli(["privacy", "provision", "--bundle", "/tmp/privacy", "--gitleaks", "/tmp/g", "--lane", "managed"], dependencies);
+    await runShieldCli(["install", "--lane", "managed"], dependencies);
+    assert.deepEqual(calls, [["policy", "managed", undefined], ["privacy", "managed", false], ["install", "managed"]]);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("managed status and doctor CLI commands preserve their lane", async () => {
+  const calls = [];
+  const shield = {
+    async status(options) { calls.push(["status", options.lane]); return { state: "stopped" }; },
+    async doctor(options) { calls.push(["doctor", options.lane]); return { state: "stopped" }; },
+  };
+  await runShieldCli(["status", "--lane", "managed"], { shield, stdout: capture().stdout });
+  await runShieldCli(["doctor", "--lane", "managed"], { shield, stdout: capture().stdout });
+  assert.deepEqual(calls, [["status", "managed"], ["doctor", "managed"]]);
+});
+
 test("airkit routes shield commands before catalog loading", async () => {
   const output = capture();
   const code = await runCli(["shield", "status"], {

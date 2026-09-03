@@ -58,6 +58,11 @@ async function createDefaultShieldDependencies(dependencies) {
   const paths = dependencies.paths ?? shieldPaths({ env });
   const nodePath = dependencies.nodePath ?? process.execPath;
   const daemonPath = dependencies.daemonPath ?? resolve(repoRoot, "src", "shieldd.mjs");
+  const readAssets = dependencies.readShieldAssetsProvision ?? readShieldAssetsProvision;
+  const readPolicyProvision = dependencies.readShieldPolicyProvision ?? readShieldPolicyProvision;
+  const installService = dependencies.installShieldService ?? installShieldService;
+  const provisionAssets = dependencies.provisionShieldAssets ?? provisionShieldAssets;
+  const installPolicy = dependencies.installShieldPolicyProvision ?? installShieldPolicyProvision;
   const createDecisionRecorder = dependencies.createDecisionRecorder ?? (async () => {
     const { createDefaultDecisionRecorder } = await import("../shieldd.mjs");
     return createDefaultDecisionRecorder({ env });
@@ -66,13 +71,13 @@ async function createDefaultShieldDependencies(dependencies) {
   return {
     async install({ write, lane }) {
       const lanePaths = shieldPaths({ env, lane });
-      const assets = await readShieldAssetsProvision({ paths: lanePaths, io: dependencies.io });
+      const assets = await readAssets({ paths: lanePaths, io: dependencies.io });
       if (!assets) throw new Error("shield assets are missing; provision Privacy and Gitleaks before install");
-      const { loadShieldPolicy } = await import("./policy.mjs");
-      const provision = await readShieldPolicyProvision({ paths: lanePaths, io: dependencies.io });
+      const { loadShieldPolicy } = dependencies.loadShieldPolicy ? { loadShieldPolicy: dependencies.loadShieldPolicy } : await import("./policy.mjs");
+      const provision = await readPolicyProvision({ paths: lanePaths, io: dependencies.io });
       await loadShieldPolicy(provision);
       const config = { lane, gitleaks: { executable: assets.gitleaks.path, sha256: assets.gitleaks.sha256 } };
-      const service = await installShieldService({ ...common, paths: lanePaths, config, write });
+      const service = await installService({ ...common, paths: lanePaths, config, write });
       return { state: write ? "degraded" : "preview", exitCode: write ? 1 : 0, write, lane, service: { label: service.label, planned: true } };
     },
     async start({ lane }) {
@@ -91,7 +96,7 @@ async function createDefaultShieldDependencies(dependencies) {
     },
     async privacyProvision({ bundlePath, gitleaksPath, lane = "subscription", write }) {
       const lanePaths = shieldPaths({ env, lane });
-      await provisionShieldAssets({
+      await provisionAssets({
         bundlePath: lanePaths.policyBundlePath,
         gitleaksPath,
         privacyBundlePath: bundlePath,
@@ -103,7 +108,7 @@ async function createDefaultShieldDependencies(dependencies) {
     async policyInstall({ bundlePath, publicKeyPath, lane = "subscription", write }) {
       const lanePaths = shieldPaths({ env, lane });
       const { loadShieldPolicy } = await import("./policy.mjs");
-      const preview = await installShieldPolicyProvision({ bundlePath, publicKeyPath, paths: lanePaths, loadPolicy: loadShieldPolicy });
+      const preview = await installPolicy({ bundlePath, publicKeyPath, paths: lanePaths, loadPolicy: loadShieldPolicy });
       if (!write) return { state: "preview", version: preview.version, detectorVersions: preview.detectorVersions, write: false, restarted: false };
       const recorder = await createDecisionRecorder();
       if (typeof recorder?.recordShieldPolicyTransition !== "function") {
@@ -112,7 +117,7 @@ async function createDefaultShieldDependencies(dependencies) {
       const result = await transitionShieldPolicy({
         ...common,
         paths: lanePaths,
-        installPolicy: () => installShieldPolicyProvision({ bundlePath, publicKeyPath, write: true, paths: lanePaths, loadPolicy: loadShieldPolicy }),
+        installPolicy: () => installPolicy({ bundlePath, publicKeyPath, write: true, paths: lanePaths, loadPolicy: loadShieldPolicy }),
         recordShieldPolicyTransition: recorder.recordShieldPolicyTransition,
       });
       return { state: "degraded", version: result.version, detectorVersions: result.detectorVersions, write: true };
@@ -216,7 +221,7 @@ function parsePolicyInstall(argv) {
 }
 
 function renderShieldHelp() {
-  return `Commands:\n  shield install [--lane subscription|managed] [--write]\n  shield start\n  shield stop\n  shield status\n  shield doctor\n  shield policy <status|install --bundle /absolute/policy-bundle --public-key /absolute/policy-public-key [--write]>\n  shield privacy provision --bundle /absolute/privacy-manifest --gitleaks /absolute/gitleaks [--write]\n  shield launch --lane subscription|managed -- command [args...]\n`;
+  return `Commands:\n  shield install [--lane subscription|managed] [--write]\n  shield start [--lane subscription|managed]\n  shield stop [--lane subscription|managed]\n  shield status [--lane subscription|managed]\n  shield doctor [--lane subscription|managed]\n  shield policy <status [--lane subscription|managed]|install --bundle /absolute/policy-bundle --public-key /absolute/policy-public-key [--lane subscription|managed] [--write]>\n  shield privacy provision --bundle /absolute/privacy-manifest --gitleaks /absolute/gitleaks [--lane subscription|managed] [--write]\n  shield launch --lane subscription|managed -- command [args...]\n`;
 }
 
 function renderShieldResult(command, result = {}) {

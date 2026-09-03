@@ -10,7 +10,8 @@ const SHIELD_COMMANDS = [
   "shield stop",
   "shield status",
   "shield doctor",
-  "shield privacy provision --bundle /absolute/privacy-manifest --gitleaks /absolute/gitleaks [--write]",
+  "shield policy <status [--lane subscription|managed]|install --bundle /absolute/policy-bundle --public-key /absolute/policy-public-key [--lane subscription|managed] [--write]>",
+  "shield privacy provision --bundle /absolute/privacy-manifest --gitleaks /absolute/gitleaks [--lane subscription|managed] [--write]",
   "shield launch --lane subscription|managed -- command [args...]",
 ];
 

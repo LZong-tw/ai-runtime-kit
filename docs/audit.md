@@ -9,13 +9,13 @@ Auditd is a collector boundary, not a provider health check and not a
 guarantee that every client is fully observable. Always check the client
 completeness and evidence gaps after enabling it.
 
-Audit is also not Sensitive Egress Shield enforcement. Shield Phase 1 is
-disabled by default and currently supplies only a fail-closed loopback transport
-foundation; it has no production content policy, redaction, or approval flow.
-Audit events can be evidence for a later enforcement policy, but neither a
-healthy audit daemon nor an audit UI row proves that sensitive data was blocked
-or redacted. See the Shield section in [`install.md`](install.md) for its
-coverage and bypass boundary.
+Audit is not itself Sensitive Egress Shield enforcement. Shield is disabled by
+default, and enforcement applies only to its declared, explicitly enabled
+launcher lanes. When such a lane is enabled, Shield requires a metadata-only
+Audit acknowledgement or encrypted-spool capacity before forwarding. Neither a
+healthy audit daemon nor an Audit UI row proves that a direct or undeclared
+client was intercepted, blocked, or redacted. See the Shield section in
+[`install.md`](install.md) for provisioning, coverage, and bypass boundaries.
 
 ## Browser audit UI
 
