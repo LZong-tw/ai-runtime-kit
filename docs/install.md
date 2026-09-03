@@ -46,12 +46,13 @@ lane without deleting its private state with
 `airkit shield stop --lane managed`.
 
 Normal managed launches are wired by `airclaude`; do not manually nest it under
-`shield launch`. For each launch, AirKit registers a fresh loopback middleware
-destination as a one-use lease and revokes it when the child finishes. The
-child receives only a request capability; destination, control capability, and
-provider credentials are not handed to it. This is not a security boundary
-between mutually untrusted same-UID processes, which remain under the same
-operating-system user trust boundary.
+`shield launch`. For each launch, AirKit makes a one-time control registration
+for fresh loopback middleware and revokes it when the child finishes. The child
+receives only a bounded, renewable session capability; destination, control
+capability, and provider credentials are not handed to it. This is not a
+security boundary between mutually untrusted same-UID processes, which remain
+under the same operating-system user trust boundary. A Headroom marker is
+shape-validated declarative launcher telemetry, not an authenticated identity.
 
 Subscription launchers remain feature-off by default. When
 `AIRKIT_SHIELD_SUBSCRIPTION=1` is explicitly set, both `claude-sub` and the
