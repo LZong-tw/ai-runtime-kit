@@ -24,7 +24,7 @@ const INTERNAL_HEADERS = new Set([
   "x-airkit-shield-approval-socket",
 ]);
 
-export async function startShieldProxy({ capability, controlCapability, targetOrigin, decide, approvalBroker = null, recordShieldDecision = null, onDecision = null, isReady = null, port = 0 } = {}) {
+export async function startShieldProxy({ capability, controlCapability, targetOrigin, decide, decisionCache = null, decisionContext = null, approvalBroker = null, recordShieldDecision = null, onDecision = null, isReady = null, port = 0 } = {}) {
   assertCapability(capability);
   assertCapability(controlCapability);
   const target = assertFixedTarget(targetOrigin);
@@ -36,9 +36,13 @@ export async function startShieldProxy({ capability, controlCapability, targetOr
   if (isReady !== null && typeof isReady !== "function") throw new TypeError("shield proxy readiness function is invalid");
   assertPort(port);
 
+  if ((decisionCache === null) !== (decisionContext === null)) throw new TypeError("shield decision cache and identity must be configured together");
+  if (decisionCache !== null && (typeof decisionCache.getOrCompute !== "function" || !validDecisionContext(decisionContext))) {
+    throw new TypeError("shield decision cache configuration is invalid");
+  }
   const approvalRegistration = { channel: null };
   const server = createServer((request, response) => {
-    void handleShieldRequest({ request, response, capability, controlCapability, target, decide, approvalBroker, recordShieldDecision: record, isReady, approvalRegistration });
+    void handleShieldRequest({ request, response, capability, controlCapability, target, decide, decisionCache, decisionContext, approvalBroker, recordShieldDecision: record, isReady, approvalRegistration });
   });
   await listenLoopback(server, port);
   const address = server.address();
@@ -52,7 +56,7 @@ export async function startShieldProxy({ capability, controlCapability, targetOr
   };
 }
 
-async function handleShieldRequest({ request, response, capability, controlCapability, target, decide, approvalBroker, recordShieldDecision, isReady, approvalRegistration }) {
+async function handleShieldRequest({ request, response, capability, controlCapability, target, decide, decisionCache, decisionContext, approvalBroker, recordShieldDecision, isReady, approvalRegistration }) {
   const startedAt = Date.now();
   const isApprovalRegistration = request.method === "POST" && request.url === "/_airkit/shield/approval-channel";
   if (!isApprovalRegistration && !capabilityMatches(request.headers["x-airkit-shield"], capability)) {
@@ -118,13 +122,10 @@ async function handleShieldRequest({ request, response, capability, controlCapab
   if (lifecycle.signal.aborted) return;
   let decision;
   try {
-    decision = await decide({
-      method: request.method ?? "GET",
-      path,
-      bytes: inspection.bytes,
-      body: inspection.body,
-      signal: lifecycle.signal,
-    });
+    const evaluate = async () => await decide({ method: request.method ?? "GET", path, bytes: inspection.bytes, body: inspection.body, signal: lifecycle.signal });
+    decision = decisionCache === null
+      ? await evaluate()
+      : await cachedDecision({ decisionCache, decisionContext, body: inspection.body, evaluate });
   } catch {
     await finish(response, { status: 503, code: "shield_unavailable" });
     return;
@@ -179,6 +180,31 @@ async function handleShieldRequest({ request, response, capability, controlCapab
       response.destroy();
     }
   }
+}
+
+async function cachedDecision({ decisionCache, decisionContext, body, evaluate }) {
+  const requestDigest = createHash("sha256").update(body).digest("hex");
+  const key = { ...decisionContext, requestDigest };
+  const cached = await decisionCache.getOrCompute(key, async () => {
+    const decision = await evaluate();
+    const redactedBody = decision?.action === "redact" ? validateRedactedBody(decision.redactedBody) : Buffer.alloc(0);
+    if (redactedBody === null) throw new Error("shield decision redaction is invalid");
+    const action = decision?.action;
+    const reasonCodes = validReasonCodes(decision?.reasonCodes)
+      ? decision.reasonCodes
+      : [action === "allow" ? "policy_allow" : "policy_blocked"];
+    return { ...key, action, reasonCodes, transformCount: decision?.transformCount ?? 0, body: redactedBody };
+  });
+  return {
+    action: cached.action,
+    reasonCodes: cached.reasonCodes,
+    transformCount: cached.transformCount,
+    ...(cached.action === "redact" ? { redactedBody: cached.body } : {}),
+    lane: decisionContext.lane,
+    destinationClass: decisionContext.destinationClass,
+    bundleVersion: decisionContext.policyVersion,
+    detectorVersions: decisionContext.detectorVersions,
+  };
 }
 
 async function readApprovalRegistration(request) {
@@ -372,6 +398,15 @@ function resolveDecisionRecorder(recordShieldDecision, onDecision) {
 function validReasonCodes(value) {
   return Array.isArray(value) && value.length > 0 && value.length <= 32
     && value.every((code) => typeof code === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(code));
+}
+
+function validDecisionContext(value) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    && (value.lane === "managed" || value.lane === "subscription")
+    && value.destinationClass === value.lane
+    && safeIdentifier(value.policyVersion) !== null
+    && safeVersionMap(value.detectorVersions) !== null
+    && Object.keys(safeVersionMap(value.detectorVersions)).length > 0;
 }
 
 function safeIdentifier(value) {

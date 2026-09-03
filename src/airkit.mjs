@@ -31,6 +31,7 @@ import { createPiAuditRuntime } from "./audit/adapters/pi-extension.mjs";
 import { runAuditCli } from "./audit/cli.mjs";
 import { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
 import { runShieldCli } from "./shield/cli.mjs";
+import { resolveShieldLauncher } from "./shield/launchers.mjs";
 import { buildShieldChildEnv, ensureShieldReady, openShieldApprovalChannel, registerShieldApprovalChannel } from "./shield/service.mjs";
 
 export { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
@@ -1192,10 +1193,17 @@ function profileGatewayEndpoint(ccrConfig) {
 
 export function buildLaunchPlan(catalog, profileName, options = {}) {
   const profile = findProfile(catalog, profileName);
+  const shield = resolveProfileShield(profile, { enabled: options.shieldEnabled });
   const configDir = resolve(options.configDir ?? defaultConfigDir());
   const templateVars = profileTemplateVars(profile, configDir);
   const launch = resolveLaunchConfig(profile, templateVars);
   const mode = resolveLaunchMode(profile, launch, options.mode);
+  const shieldLauncher = resolveShieldLauncher({
+    launcher: options.launcher ?? "airclaude",
+    mode,
+    headroom: String(options.launcher ?? "airclaude").startsWith("hr-"),
+    ...(shield ? { providerOverride: shield.lane } : {}),
+  });
   const ccrConfig = applyLaunchModeOverlay(buildCcrConfig(catalog, profileName, { configDir }), profile, mode, templateVars);
   assertCcr3Compatible(ccrConfig);
   const compatibility = resolveConfiguredCompatibility(ccrConfig);
@@ -1249,6 +1257,8 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
 
   return {
     profile: basePlan.profile,
+    ...(shield ? { shield } : {}),
+    shieldLauncher,
     mode,
     configDir,
     files: basePlan.files,
@@ -1402,7 +1412,7 @@ async function prepareManagedGateway({ plan, managed, currentConfig, ccrClient, 
 
 export async function prepareLaunch(catalog, profileName, options = {}) {
   const plan = buildLaunchPlan(catalog, profileName, options);
-  const profileShield = findProfile(catalog, profileName).shield;
+  const profileShield = plan.shield;
   const rendered = renderProfile(catalog, profileName, {
     configDir: plan.configDir,
     ccrConfigPath: plan.files.ccrConfig,
@@ -1489,10 +1499,13 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     let shieldReady = null;
     try {
       if (profileShield?.enabled === true) {
+        if (plan.shieldLauncher.coverage !== "protected" || plan.shieldLauncher.clientLane !== profileShield.lane) {
+          throw new Error("shield launcher disposition does not match the profile lane");
+        }
         shieldReady = await (options.ensureShieldReady ?? ensureShieldReady)({
           env: launchEnv,
           expectedTargetOrigin: middleware?.origin ?? gatewayOrigin,
-          lane: profileShield.lane,
+          lane: plan.shieldLauncher.clientLane,
         });
       }
     } catch (error) {
@@ -1533,7 +1546,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
         ...plan.launch.userArgs,
       ], {
         env: shieldReady
-          ? buildShieldChildEnv({ ...shieldReady, lane: profileShield.lane }, childEnv)
+          ? buildShieldChildEnv({ ...shieldReady, lane: plan.shieldLauncher.clientLane }, childEnv)
           : childEnv,
         stdio: "inherit",
       });
@@ -1769,6 +1782,13 @@ function validateShield(profile) {
   if (shield.lane !== "managed") {
     throw new Error(`profile "${profile.name}" shield.lane must be managed`);
   }
+}
+
+export function resolveProfileShield(profile, { enabled } = {}) {
+  const shield = profile?.shield;
+  if (shield === undefined) return null;
+  if (enabled !== undefined && typeof enabled !== "boolean") throw new TypeError("profile Shield override must be a boolean");
+  return Object.freeze({ ...shield, ...(enabled === undefined ? {} : { enabled }) });
 }
 
 function validateLaunch(profile) {
