@@ -117,6 +117,11 @@ async function childMetadataLabels(transcriptPath) {
   }
 }
 
+// A statusline suffix may only ever be a per-lane Shield protection enum. The
+// sink enforces the whole shape so no caller can widen it into a channel for a
+// token, cost, capability, path, origin or request body.
+const STATUSLINE_SUFFIX = /^ \u00b7 Shield(?: (?:subscription|managed):(?:protected|blocked|unavailable)){2}$/;
+
 function collectAgentLabels(value, labels, depth = 0) {
   if (!value || typeof value !== "object" || depth > 6 || labels.size >= 8) return;
   if (Array.isArray(value)) {
@@ -133,14 +138,15 @@ function collectAgentLabels(value, labels, depth = 0) {
   for (const child of Object.values(value)) collectAgentLabels(child, labels, depth + 1);
 }
 
-export async function runSubagentStatusLine({ env = process.env, input = process.stdin, output = process.stdout } = {}) {
+export async function runSubagentStatusLine({ env = process.env, input = process.stdin, output = process.stdout, statuslineSuffix = "" } = {}) {
   const value = await readJsonInput(input);
   if (!value) return;
   const rows = await renderSubagentStatusLine(value, env);
+  const suffix = typeof statuslineSuffix === "string" && STATUSLINE_SUFFIX.test(statuslineSuffix) ? statuslineSuffix : "";
   for (const [index, content] of rows.entries()) {
     const task = Array.isArray(value.tasks) ? value.tasks[index] : null;
     if (task && typeof task.id === "string" && task.id.length > 0) {
-      output.write(`${JSON.stringify({ id: task.id, content })}\n`);
+      output.write(`${JSON.stringify({ id: task.id, content: `${content}${suffix}` })}\n`);
     }
   }
 }

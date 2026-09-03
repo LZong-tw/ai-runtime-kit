@@ -502,6 +502,79 @@ test("policy lifecycle transaction rejects an inactive service when a dead PID s
   assert.equal(installs, 0);
 });
 
+test("offline policy transition durably records its replacement before returning", async () => {
+  const { paths } = fixture();
+  const recorded = [];
+  const installed = { version: "2026.09.03.1", detectorVersions: policyState.detectorVersions };
+  const result = await transitionShieldPolicy({
+    paths,
+    io: { readFile: async () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); } },
+    installPolicy: async () => installed,
+    inspectService: async () => ({ active: false }),
+    isProcessAlive: async () => { throw new Error("offline transition must not probe a process"); },
+    probeShield: async () => { throw new Error("offline transition must not probe a proxy"); },
+    startService: async () => { throw new Error("offline transition must not start the daemon"); },
+    ensureReady: async () => { throw new Error("offline transition must not bind a daemon"); },
+    recordShieldPolicyTransition: async (event) => { recorded.push(event); return { durable: "ack" }; },
+  });
+  assert.equal(result, installed);
+  assert.deepEqual(recorded, [{
+    requestId: recorded[0].requestId,
+    lane: "subscription", destinationClass: "subscription", bundleVersion: "2026.09.03.1",
+    detectorVersions: policyState.detectorVersions, action: "transition", reasonCodes: ["policy_replaced"],
+    transformCount: 0, override: false, elapsedMs: 0,
+  }]);
+  assert.match(recorded[0].requestId, /^policy-[0-9a-f]{32}$/);
+});
+
+test("offline policy transition fails closed when the durable recorder rejects", async () => {
+  const { paths } = fixture();
+  await assert.rejects(transitionShieldPolicy({
+    paths,
+    io: { readFile: async () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); } },
+    installPolicy: async () => ({ version: "2026.09.03.1", detectorVersions: policyState.detectorVersions }),
+    inspectService: async () => ({ active: false }),
+    recordShieldPolicyTransition: async () => { throw new Error("audit spool is unavailable"); },
+  }), /audit spool is unavailable/);
+});
+
+test("policy install --write reaches the durable recorder on an inactive lane", async () => {
+  const home = await mkdtemp(join(tmpdir(), "airkit-shield-offline-policy-"));
+  const recorded = [];
+  try {
+    const code = await runShieldCli(["policy", "install", "--bundle", "/tmp/p", "--public-key", "/tmp/k", "--write"], {
+      env: { HOME: home },
+      stdout: capture().stdout,
+      runLaunchctl: async () => ({ ok: false, stdout: "", stderr: "could not find service" }),
+      installShieldPolicyProvision: async () => ({ version: "2026.09.03.1", detectorVersions: policyState.detectorVersions }),
+      createDecisionRecorder: async () => ({
+        recordShieldPolicyTransition: async (event) => { recorded.push(event); return { durable: "ack" }; },
+      }),
+    });
+    assert.equal(code, 1);
+    assert.equal(recorded.length, 1);
+    assert.equal(recorded[0].action, "transition");
+    assert.equal(recorded[0].lane, "subscription");
+    assert.equal(recorded[0].destinationClass, "subscription");
+    assert.deepEqual(recorded[0].reasonCodes, ["policy_replaced"]);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("policy install --write refuses to replace policy without a durable recorder", async () => {
+  const home = await mkdtemp(join(tmpdir(), "airkit-shield-offline-policy-norecorder-"));
+  let installs = 0;
+  try {
+    await assert.rejects(runShieldCli(["policy", "install", "--bundle", "/tmp/p", "--public-key", "/tmp/k", "--write"], {
+      env: { HOME: home },
+      stdout: capture().stdout,
+      runLaunchctl: async () => ({ ok: false, stdout: "", stderr: "could not find service" }),
+      installShieldPolicyProvision: async ({ write }) => { if (write) installs += 1; return { version: "v", detectorVersions: {} }; },
+      createDecisionRecorder: async () => ({}),
+    }), /audit recorder is unavailable/);
+    assert.equal(installs, 0);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
 test("readiness rejects an incomplete detector binding before probing", async () => {
   const { paths } = fixture();
   const identity = {

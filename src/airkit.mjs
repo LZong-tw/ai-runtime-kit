@@ -40,7 +40,7 @@ export { tailHeadroomSavings } from "./audit/reconcile/headroom.mjs";
 export { correlateObservations, buildCacheCohorts } from "./audit/correlation.mjs";
 export { resolveProviderAccountIdentity, resolveRepositoryIdentity } from "./audit/registry.mjs";
 export { createAuditUiAdapter, queryAuditUi, statusAuditUi } from "./audit/ui-contract.mjs";
-export { readShieldStatuslineState, shieldStatuslineState } from "./shield/statusline-state.mjs";
+export { readShieldStatuslineState, runShieldStatusline, shieldStatuslineState, shieldStatuslineSuffix } from "./shield/statusline-state.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");

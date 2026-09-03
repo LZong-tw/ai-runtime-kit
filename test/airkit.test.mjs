@@ -39,9 +39,11 @@ import {
   prepareExternalClient,
   prepareLaunch,
   assertInteractiveResumeLaunch,
+  readShieldStatuslineState,
   runExternalClientCli,
   runAirclaudeCli,
   runCli,
+  shieldStatuslineSuffix,
   updateProfile,
 } from "../src/airkit.mjs";
 
@@ -3346,6 +3348,43 @@ test("subagent observability projects child transcript progress without raw tool
   }
 });
 
+test("subagent statusline appends only a Shield lane protection suffix", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-suffix-"));
+  const env = { CLAUDE_PLUGIN_DATA: pluginData };
+  const payload = { parent_id: "parent-1", tasks: [{ id: "task-1", agent_id: "child-1" }] };
+  const render = async (statuslineSuffix) => {
+    let output = "";
+    await runSubagentStatusLine({
+      env,
+      statuslineSuffix,
+      input: (async function* () { yield JSON.stringify(payload); })(),
+      output: { write(value) { output += value; } },
+    });
+    return JSON.parse(output);
+  };
+
+  try {
+    const [bare] = await renderSubagentStatusLine(payload, env);
+    assert.deepEqual(await render(" \u00b7 Shield subscription:protected managed:blocked"), {
+      id: "task-1",
+      content: `${bare} \u00b7 Shield subscription:protected managed:blocked`,
+    });
+    for (const rejected of [
+      " \u00b7 Shield subscription:protected managed:blocked \u00b7 http://127.0.0.1:8080",
+      "\u00b7 Shield subscription:protected managed:blocked",
+      " \u00b7 Shield subscription:protected",
+      " \u00b7 Shield subscription:protected managed:blocked cost:$4.10",
+      " \u00b7 Shield managed:protected ../../etc/passwd:protected",
+      " \u00b7 tokens: 4096",
+      undefined,
+    ]) {
+      assert.deepEqual(await render(rejected), { id: "task-1", content: bare }, JSON.stringify(rejected ?? null));
+    }
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
 test("subagent observability bounds incremental transcript work and retained projection state", async () => {
   const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-bounded-"));
   const childTranscript = join(pluginData, "child.jsonl");
@@ -4048,6 +4087,31 @@ test("AirClaude renders an additive session plugin for the heartbeat", async () 
     assert.ok(settings);
     assert.ok(statusline);
     await installProfile(catalog, "launch-example", { configDir, force: true, write: true });
+    assert.match(await readFile(statusline.path, "utf8"), /runShieldStatusline/);
+
+    // Matching the generated source only proves the string is there. Run the
+    // entrypoint the way Claude Code runs it, so a module specifier that does
+    // not resolve, or a producer the sink refuses, fails here instead of
+    // shipping. The expected suffix is computed by the producer against the
+    // same environment, so the two ends stay tied to one lane vocabulary.
+    const statuslineHome = await mkdtemp(join(tmpdir(), "airkit-statusline-home-"));
+    try {
+      const statuslineEnv = { ...process.env, HOME: statuslineHome, CLAUDE_PLUGIN_DATA: statuslineHome };
+      const rendered = spawnSync(process.execPath, [statusline.path], {
+        encoding: "utf8",
+        env: statuslineEnv,
+        input: `${JSON.stringify({ parent_id: "parent-1", tasks: [{ id: "task-1", agent_id: "child-1" }] })}\n`,
+      });
+      assert.equal(rendered.status, 0, rendered.stderr);
+      assert.equal(rendered.stderr, "");
+      const row = JSON.parse(rendered.stdout.trim().split("\n")[0]);
+      const expectedSuffix = shieldStatuslineSuffix(await readShieldStatuslineState({ env: statuslineEnv }));
+      assert.equal(row.id, "task-1");
+      assert.ok(row.content.endsWith(expectedSuffix), row.content);
+      assert.ok(row.content.length > expectedSuffix.length, "the suffix is appended to a row, not the whole row");
+    } finally {
+      await rm(statuslineHome, { force: true, recursive: true });
+    }
     const renderedHooks = JSON.parse(await readFile(hooks.path, "utf8")).hooks;
     const renderedSettings = JSON.parse(await readFile(settings.path, "utf8"));
     assert.equal(renderedSettings.subagentStatusLine.command.includes("subagent-statusline.mjs"), true);
