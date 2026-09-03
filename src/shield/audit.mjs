@@ -1,12 +1,20 @@
 import { createAuditEvent } from "../audit/event.mjs";
 import { encryptAuditValue } from "../audit/crypto.mjs";
 
-const ACTIONS = new Set(["allow", "block", "redact", "require_approval", "unavailable", "unauthorized"]);
+const ACTIONS = new Set(["allow", "block", "redact", "require_approval", "unavailable", "unauthorized", "transition"]);
 const LANES = new Set(["managed", "subscription", "unknown"]);
 const DESTINATION_CLASSES = new Set(["managed", "subscription", "unknown"]);
 const DECISION_KEYS = ["action", "bundleVersion", "destinationClass", "detectorVersions", "elapsedMs", "lane", "override", "reasonCodes", "requestId", "transformCount"];
 
 export function buildShieldDecisionEvent(decision, { now = () => new Date() } = {}) {
+  return buildShieldEvent("shield_decision", decision, { now });
+}
+
+export function buildShieldPolicyTransitionEvent(transition, { now = () => new Date() } = {}) {
+  return buildShieldEvent("shield_policy_transition", transition, { now });
+}
+
+function buildShieldEvent(eventKind, decision, { now }) {
   const metadata = assertShieldDecisionMetadata(decision);
   const observedAt = now();
   if (!(observedAt instanceof Date) || Number.isNaN(observedAt.getTime())) throw new TypeError("shield audit clock is invalid");
@@ -15,9 +23,20 @@ export function buildShieldDecisionEvent(decision, { now = () => new Date() } = 
     source_version: "1",
     logical_request_id: metadata.requestId,
     client: "airkit-shield",
-    event_kind: "collector_lifecycle",
+    event_kind: eventKind,
     observed_at: observedAt.toISOString(),
-    payload: { shield_decision: metadata },
+    payload: {
+      lane: metadata.lane,
+      destination_class: metadata.destinationClass,
+      policy_version: metadata.bundleVersion,
+      gitleaks_version: metadata.detectorVersions.gitleaks ?? "unknown",
+      privacy_version: metadata.detectorVersions.privacy ?? "unknown",
+      action: metadata.action,
+      reasons: metadata.reasonCodes,
+      transform_count: metadata.transformCount,
+      override: metadata.override,
+      elapsed_ms: metadata.elapsedMs,
+    },
   });
 }
 

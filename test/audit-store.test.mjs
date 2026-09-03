@@ -95,6 +95,47 @@ function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+test("shield audit events persist only the allowlisted metadata table", async () => {
+  await withRoot(async (paths) => {
+    const store = openTestStore(paths);
+    try {
+      const event = createAuditEvent({
+        event_id: "shield-event-1",
+        source: "airkit-shield",
+        source_version: "1",
+        logical_request_id: "shield-request-1",
+        session_id: "shield-session-1",
+        client: "airkit-shield",
+        event_kind: "shield_decision",
+        payload: {
+          lane: "subscription",
+          destination_class: "subscription",
+          policy_version: "policy-1",
+          gitleaks_version: "8.24.3",
+          privacy_version: "privacy-1",
+          action: "block",
+          reasons: ["confirmed_secret"],
+          transform_count: 0,
+          override: false,
+          elapsed_ms: 8,
+        },
+      });
+      assert.deepEqual(await store.ingestEvent(event), { status: "committed" });
+      assert.deepEqual(store.query("SELECT logical_request_id, lane, action, reasons FROM shield_decisions").map((row) => ({ ...row })), [{
+        logical_request_id: "shield-request-1", lane: "subscription", action: "block", reasons: "confirmed_secret",
+      }]);
+      assert.equal(store.query("SELECT count(*) AS n FROM source_events WHERE event_id = ?", ["shield-event-1"])[0].n, 0);
+      await assert.rejects(store.ingestEvent(createAuditEvent({
+        ...event,
+        event_id: "shield-event-raw",
+        payload: { ...event.payload, headers: { authorization: "shield-raw-sentinel" } },
+      })), /shield metadata/i);
+    } finally {
+      store.close();
+    }
+  });
+});
+
 const APPROVED_SCHEMA_COLUMNS = Object.freeze({
   source_events: [
     "id",

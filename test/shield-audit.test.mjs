@@ -4,7 +4,7 @@ import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { buildShieldDecisionEvent, createShieldDecisionRecorder } from "../src/shield/audit.mjs";
+import { buildShieldDecisionEvent, buildShieldPolicyTransitionEvent, createShieldDecisionRecorder } from "../src/shield/audit.mjs";
 import { decryptAuditValue } from "../src/audit/crypto.mjs";
 import { createEncryptedSpool } from "../src/audit/spool.mjs";
 
@@ -25,12 +25,35 @@ const decision = Object.freeze({
 
 test("shield decision builder admits only metadata allowlist", () => {
   const event = buildShieldDecisionEvent(decision, { now: () => new Date("2026-09-02T00:00:00.000Z") });
-  assert.equal(event.event_kind, "collector_lifecycle");
-  assert.deepEqual(event.payload, { shield_decision: decision });
+  assert.equal(event.event_kind, "shield_decision");
+  assert.deepEqual(event.payload, {
+    lane: "subscription",
+    destination_class: "subscription",
+    policy_version: "2026.09.02",
+    gitleaks_version: "8.24.3",
+    privacy_version: "unknown",
+    action: "allow",
+    reasons: ["policy_allow"],
+    transform_count: 0,
+    override: false,
+    elapsed_ms: 4,
+  });
   for (const forbidden of ["body", "path", "url", "headers", "digest", "span", "prompt", "grant"]) {
     assert.throws(() => buildShieldDecisionEvent({ ...decision, [forbidden]: "sentinel-secret" }), /shield decision/i);
   }
   assert.doesNotMatch(JSON.stringify(event), /sentinel-secret/);
+});
+
+test("shield policy transitions use the same metadata-only event contract", () => {
+  const event = buildShieldPolicyTransitionEvent({
+    ...decision,
+    action: "transition",
+    reasonCodes: ["policy_replaced"],
+  });
+  assert.equal(event.event_kind, "shield_policy_transition");
+  assert.equal(event.payload.action, "transition");
+  assert.equal(event.payload.reasons[0], "policy_replaced");
+  assert.doesNotMatch(JSON.stringify(event), /capability|body|secret/i);
 });
 
 test("durable recorder sends an encrypted transport envelope and waits for audit daemon ACK", async () => {
@@ -52,7 +75,7 @@ test("durable recorder sends an encrypted transport envelope and waits for audit
     identity: sent[0].event_id,
     encrypted: sent[0].encrypted,
   });
-  assert.deepEqual(JSON.parse(plaintext.toString("utf8")).payload, { shield_decision: decision });
+  assert.deepEqual(JSON.parse(plaintext.toString("utf8")).payload, buildShieldDecisionEvent(decision, { now: () => new Date("2026-09-02T00:00:00.000Z") }).payload);
 });
 
 test("audit transport failure and full spool fail closed", async () => {
@@ -91,7 +114,7 @@ test("encrypted spool capacity is a durable fallback after a daemon failure", as
   assert.equal(result.durable, "spool");
   const entries = await spool.entries();
   assert.equal(entries.length, 1);
-  assert.deepEqual(entries[0].event.payload, { shield_decision: decision });
+  assert.deepEqual(entries[0].event.payload, buildShieldDecisionEvent(decision).payload);
   const records = await Promise.all((await readdir(join(root, "spool"))).map((name) => readFile(join(root, "spool", name), "utf8")));
   assert.doesNotMatch(records.join(""), /request-1|policy_allow/);
 });

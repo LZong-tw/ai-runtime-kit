@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createAuditUiAdapter } from "../src/audit/ui-contract.mjs";
+import { createAuditEvent, validateAuditEvent } from "../src/audit/event.mjs";
+import { AUDIT_MIGRATIONS } from "../src/audit/migrations.mjs";
+import { queryAuditStore } from "../src/audit/query.mjs";
+import { createAuditUiAdapter, projectShieldStatus } from "../src/audit/ui-contract.mjs";
 
 test("CCR UI query projection is metadata-only and excludes sensitive fields", async () => {
   const adapter = createAuditUiAdapter({
@@ -84,4 +87,126 @@ test("CCR UI contract rejects unknown or oversized queries without invoking stor
   assert.equal(unknown.error.code, "unknown_query");
   assert.equal(oversized.error.code, "invalid_query_arguments");
   assert.equal(calls, 0);
+});
+
+test("Shield audit accepts only metadata and exposes a static metadata-only query", async () => {
+  const shieldMigration = AUDIT_MIGRATIONS.find((migration) => migration.id === "004_shield_metadata_audit");
+  assert.ok(shieldMigration);
+  assert.match(shieldMigration.statements.join("\n"), /CREATE TABLE IF NOT EXISTS shield_decisions/);
+
+  const event = createAuditEvent({
+    source: "airkit-shield",
+    source_version: "1",
+    logical_request_id: "request-1",
+    session_id: "session-1",
+    client: "airkit-shield",
+    event_kind: "shield_decision",
+    payload: {
+      lane: "subscription",
+      destination_class: "subscription",
+      policy_version: "policy-1",
+      gitleaks_version: "8.24.3",
+      privacy_version: "privacy-1",
+      action: "block",
+      reasons: ["confirmed_secret"],
+      transform_count: 0,
+      override: false,
+      elapsed_ms: 12,
+    },
+  });
+  assert.equal(validateAuditEvent(event).payload.action, "block");
+  assert.throws(() => validateAuditEvent({
+    ...event,
+    payload: { ...event.payload, body: "shield-raw-sentinel", url: "https://secret.invalid", headers: { authorization: "Bearer secret" } },
+  }), /shield metadata/i);
+
+  const calls = [];
+  queryAuditStore({
+    query(sql, params) {
+      calls.push({ sql, params });
+      return [{
+        logical_request_id: "request-1",
+        session_id: "session-1",
+        lane: "subscription",
+        destination_class: "subscription",
+        policy_version: "policy-1",
+        gitleaks_version: "8.24.3",
+        privacy_version: "privacy-1",
+        action: "block",
+        reasons: "confirmed_secret",
+        transform_count: 0,
+        override: 0,
+        elapsed_ms: 12,
+        payload_json: "shield-raw-sentinel",
+      }];
+    },
+  }, "shield_decisions");
+  assert.match(calls[0].sql, /FROM shield_decisions/);
+  assert.doesNotMatch(calls[0].sql, /payload_json|reveal|body|url|header/i);
+});
+
+test("Shield UI and status projections preserve accounting-neutral protection state", async () => {
+  const adapter = createAuditUiAdapter({
+    async query() {
+      return {
+        state: "healthy",
+        rows: [{
+          logical_request_id: "request-1",
+          session_id: "session-1",
+          lane: "subscription",
+          destination_class: "subscription",
+          policy_version: "policy-1",
+          gitleaks_version: "8.24.3",
+          privacy_version: "privacy-1",
+          action: "block",
+          reasons: "confirmed_secret",
+          transform_count: 0,
+          override: false,
+          elapsed_ms: 12,
+          content: "shield-raw-sentinel",
+          cache_read_tokens: 999,
+          derived_total_cost: 123,
+        }],
+      };
+    },
+    async status() { return { state: "healthy" }; },
+  });
+  const result = await adapter.query("shield_decisions");
+  assert.deepEqual(result.rows, [{
+    logical_request_id: "request-1",
+    session_id: "session-1",
+    lane: "subscription",
+    destination_class: "subscription",
+    policy_version: "policy-1",
+    gitleaks_version: "8.24.3",
+    privacy_version: "privacy-1",
+    action: "block",
+    reasons: "confirmed_secret",
+    transform_count: 0,
+    override: false,
+    elapsed_ms: 12,
+  }]);
+  assert.doesNotMatch(JSON.stringify(result), /sentinel|cache_read|total_cost/i);
+
+  const projection = projectShieldStatus({
+    state: "protected",
+    policy_version: "policy-1",
+    gitleaks_version: "8.24.3",
+    privacy_version: "privacy-1",
+    coverage: 4,
+    bypass: false,
+    model: "must-not-affect-model",
+    cost: 123,
+    cache: "must-not-affect-cache",
+    context: "must-not-affect-context",
+    raw_prompt: "shield-raw-sentinel",
+  });
+  assert.deepEqual(projection, {
+    state: "protected",
+    policy_version: "policy-1",
+    gitleaks_version: "8.24.3",
+    privacy_version: "privacy-1",
+    coverage: 4,
+    bypass: false,
+  });
 });

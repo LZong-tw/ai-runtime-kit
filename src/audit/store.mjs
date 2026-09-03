@@ -11,7 +11,7 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import { validateAuditEvent } from "./event.mjs";
+import { isShieldAuditEvent, validateAuditEvent } from "./event.mjs";
 import { encryptAuditValue } from "./crypto.mjs";
 import { AUDIT_MIGRATIONS, checksumMigration } from "./migrations.mjs";
 
@@ -119,6 +119,9 @@ export function openAuditStore(options = {}) {
   async function ingestEvent(event) {
     assertWritable();
     const validated = validateAuditEvent(event);
+    if (isShieldAuditEvent(validated)) {
+      return ingestShieldAuditEvent(validated);
+    }
     const duplicate = findDuplicate(validated);
     if (duplicate) return { status: "duplicate" };
 
@@ -256,6 +259,38 @@ export function openAuditStore(options = {}) {
       }
     });
 
+    return { status: "committed" };
+  }
+
+  function ingestShieldAuditEvent(event) {
+    const table = event.event_kind === "shield_decision" ? "shield_decisions" : "shield_policy_transitions";
+    const duplicate = db.prepare(`SELECT event_id FROM ${table} WHERE event_id = ?`).get(event.event_id);
+    if (duplicate) return { status: "duplicate" };
+    const payload = event.payload;
+    execTransaction(db, () => {
+      db.prepare(`
+        INSERT INTO ${table} (
+          event_id, logical_request_id, session_id, lane, destination_class, policy_version,
+          gitleaks_version, privacy_version, action, reasons, transform_count, override,
+          elapsed_ms, observed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        event.event_id,
+        event.logical_request_id,
+        event.session_id,
+        payload.lane,
+        payload.destination_class,
+        payload.policy_version,
+        payload.gitleaks_version,
+        payload.privacy_version,
+        payload.action,
+        payload.reasons.join(","),
+        payload.transform_count,
+        payload.override ? 1 : 0,
+        payload.elapsed_ms,
+        event.observed_at,
+      );
+    });
     return { status: "committed" };
   }
 
