@@ -73,7 +73,10 @@ export function parseTaskCapsule(summary) {
 }
 
 export async function processContextHook(input, env = process.env) {
-  const auditOnly = env.AIRKIT_AUDIT_ENABLED === "1" && env.__airkitAudit;
+  // Audit-only covers claude-sub, which emits audit without AirClaude routing.
+  // A session that has a profile still gets context, completion and subagent
+  // handling: enabling audit must never silently retire them.
+  const auditOnly = env.AIRKIT_AUDIT_ENABLED === "1" && env.__airkitAudit && !env.AIRCLAUDE_PROFILE;
   if (!env.AIRCLAUDE_PROFILE && !auditOnly) return null;
   if (env.__airkitAudit) {
     try {
