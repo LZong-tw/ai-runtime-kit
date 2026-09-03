@@ -1,6 +1,7 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { GITLEAKS_COMMAND_PROFILE } from "./gitleaks.mjs";
 import { readShieldAssetsProvision, readShieldIdentity, readShieldPolicyState, shieldPaths } from "./paths.mjs";
 import { provisionShieldAssets } from "./provision.mjs";
 import { installShieldPolicyProvision, readShieldPolicyProvision } from "./policy-bundle.mjs";
@@ -83,7 +84,19 @@ async function createDefaultShieldDependencies(dependencies) {
       const { loadShieldPolicy } = dependencies.loadShieldPolicy ? { loadShieldPolicy: dependencies.loadShieldPolicy } : await import("./policy.mjs");
       const provision = await readPolicyProvision({ paths: lanePaths, io: dependencies.io });
       await loadShieldPolicy(provision);
-      const config = { lane, gitleaks: { executable: assets.gitleaks.path, sha256: assets.gitleaks.sha256 } };
+      const config = {
+        lane,
+        gitleaks: {
+          executable: assets.gitleaks.path,
+          sha256: assets.gitleaks.sha256,
+          ruleBundle: {
+            path: assets.gitleaks.rules.path,
+            sha256: assets.gitleaks.rules.sha256,
+            version: assets.gitleaks.rules.version,
+            commandProfile: { versionArgs: [...GITLEAKS_COMMAND_PROFILE.versionArgs], scanArgs: [...GITLEAKS_COMMAND_PROFILE.scanArgs] },
+          },
+        },
+      };
       const service = await installService({ ...common, paths: lanePaths, config, write });
       return { state: write ? "degraded" : "preview", exitCode: write ? 1 : 0, write, lane, service: { label: service.label, planned: true } };
     },
@@ -101,11 +114,12 @@ async function createDefaultShieldDependencies(dependencies) {
     async doctor({ lane }) {
       return { ...(await shieldStatus({ paths: shieldPaths({ env, lane }), io: dependencies.io, runLaunchctl: dependencies.runLaunchctl })), operational: await readShieldOperationalStatus({ env }), checked: true };
     },
-    async privacyProvision({ bundlePath, gitleaksPath, policyBundlePath, lane = "subscription", write }) {
+    async privacyProvision({ bundlePath, gitleaksPath, gitleaksRulesPath, policyBundlePath, lane = "subscription", write }) {
       const lanePaths = shieldPaths({ env, lane });
       await provisionAssets({
         bundlePath: policyBundlePath ?? lanePaths.policyBundlePath,
         gitleaksPath,
+        gitleaksRulesPath,
         privacyBundlePath: bundlePath,
         write,
         paths: lanePaths,
@@ -226,22 +240,24 @@ function parseLaneCommand(argv, command) {
   throw new Error(`usage: ${command} [--lane subscription|managed]`);
 }
 
+const PRIVACY_PROVISION_USAGE = "usage: shield privacy provision --bundle /absolute/privacy-manifest --gitleaks /absolute/gitleaks --gitleaks-rules /absolute/gitleaks-rules.toml [--policy-bundle /absolute/policy-bundle] [--write]";
+
 function parsePrivacyProvision(argv) {
-  if (argv[0] !== "provision") throw new Error("usage: shield privacy provision --bundle /absolute/privacy-manifest --gitleaks /absolute/gitleaks [--policy-bundle /absolute/policy-bundle] [--write]");
+  if (argv[0] !== "provision") throw new Error(PRIVACY_PROVISION_USAGE);
   const write = argv.includes("--write");
-  const names = ["--bundle", "--gitleaks", "--lane", "--policy-bundle"];
+  const names = ["--bundle", "--gitleaks", "--gitleaks-rules", "--lane", "--policy-bundle"];
   const values = Object.fromEntries(names.map((name) => [name, null]));
   for (let index = 1; index < argv.length; index += 1) {
     const token = argv[index];
     if (token === "--write") continue;
     if (!names.includes(token) || values[token] !== null || typeof argv[index + 1] !== "string" || argv[index + 1].startsWith("--")) {
-      throw new Error("usage: shield privacy provision --bundle /absolute/privacy-manifest --gitleaks /absolute/gitleaks [--policy-bundle /absolute/policy-bundle] [--write]");
+      throw new Error(PRIVACY_PROVISION_USAGE);
     }
     values[token] = argv[index + 1];
     index += 1;
   }
-  if (!values["--bundle"] || !values["--gitleaks"] || (values["--lane"] !== null && !["subscription", "managed"].includes(values["--lane"]))) throw new Error("usage: shield privacy provision --bundle /absolute/privacy-manifest --gitleaks /absolute/gitleaks [--policy-bundle /absolute/policy-bundle] [--write]");
-  return { bundlePath: values["--bundle"], gitleaksPath: values["--gitleaks"], ...(values["--policy-bundle"] === null ? {} : { policyBundlePath: values["--policy-bundle"] }), lane: values["--lane"] ?? "subscription", write };
+  if (!values["--bundle"] || !values["--gitleaks"] || !values["--gitleaks-rules"] || (values["--lane"] !== null && !["subscription", "managed"].includes(values["--lane"]))) throw new Error(PRIVACY_PROVISION_USAGE);
+  return { bundlePath: values["--bundle"], gitleaksPath: values["--gitleaks"], gitleaksRulesPath: values["--gitleaks-rules"], ...(values["--policy-bundle"] === null ? {} : { policyBundlePath: values["--policy-bundle"] }), lane: values["--lane"] ?? "subscription", write };
 }
 
 function parsePolicyInstall(argv) {
@@ -263,7 +279,7 @@ function parsePolicyInstall(argv) {
 }
 
 function renderShieldHelp() {
-  return `Commands:\n  shield install [--lane subscription|managed] [--write]\n  shield start [--lane subscription|managed]\n  shield stop [--lane subscription|managed]\n  shield status [--lane subscription|managed]\n  shield doctor [--lane subscription|managed]\n  shield policy <status [--lane subscription|managed]|install --bundle /absolute/policy-bundle --public-key /absolute/policy-public-key [--lane subscription|managed] [--write]>\n  shield privacy provision --bundle /absolute/privacy-manifest --gitleaks /absolute/gitleaks [--policy-bundle /absolute/policy-bundle] [--lane subscription|managed] [--write]\n  shield launch --lane subscription|managed [--target http://127.0.0.1:port] -- command [args...]\n`;
+  return `Commands:\n  shield install [--lane subscription|managed] [--write]\n  shield start [--lane subscription|managed]\n  shield stop [--lane subscription|managed]\n  shield status [--lane subscription|managed]\n  shield doctor [--lane subscription|managed]\n  shield policy <status [--lane subscription|managed]|install --bundle /absolute/policy-bundle --public-key /absolute/policy-public-key [--lane subscription|managed] [--write]>\n  shield privacy provision --bundle /absolute/privacy-manifest --gitleaks /absolute/gitleaks --gitleaks-rules /absolute/gitleaks-rules.toml [--policy-bundle /absolute/policy-bundle] [--lane subscription|managed] [--write]\n  shield launch --lane subscription|managed [--target http://127.0.0.1:port] -- command [args...]\n`;
 }
 
 function renderShieldResult(command, result = {}) {

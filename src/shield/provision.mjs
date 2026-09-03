@@ -8,16 +8,23 @@ import { writeShieldAssetsProvision } from "./paths.mjs";
 const FORMAT_VERSION = 1;
 const defaultIo = { lstat, readFile, realpath };
 
-export async function provisionShieldAssets({ bundlePath, gitleaksPath, privacyBundlePath, write = false, paths, io = defaultIo, writeState, runPrivacySelfTest: selfTest = runPrivacyWorkerSelfTest } = {}) {
+export async function provisionShieldAssets({ bundlePath, gitleaksPath, gitleaksRulesPath, privacyBundlePath, write = false, paths, io = defaultIo, writeState, runPrivacySelfTest: selfTest = runPrivacyWorkerSelfTest } = {}) {
   const bundle = await validateAsset({ path: bundlePath, executable: false, label: "policy bundle", io });
   const gitleaks = await validateAsset({ path: gitleaksPath, executable: true, label: "gitleaks", io });
+  const gitleaksRules = await validateAsset({ path: gitleaksRulesPath, executable: false, label: "gitleaks rules", io });
   const privacyBundle = await validateAsset({ path: privacyBundlePath, executable: false, label: "privacy bundle", io });
   const manifest = parsePrivacyManifest(privacyBundle.bytes);
   const worker = await validateAsset({ path: manifest.worker.command, executable: true, label: "privacy worker", expectedDigest: manifest.worker.sha256, io });
   const state = Object.freeze({
     version: FORMAT_VERSION,
     bundle: Object.freeze({ version: policyVersion(bundle.bytes), sha256: bundle.sha256, path: bundle.path }),
-    gitleaks: Object.freeze({ sha256: gitleaks.sha256, path: gitleaks.path }),
+    gitleaks: Object.freeze({
+      sha256: gitleaks.sha256,
+      path: gitleaks.path,
+      // Derived, not declared: nothing cross-checks this version, so a
+      // hand-typed one could only ever go stale against the file it names.
+      rules: Object.freeze({ path: gitleaksRules.path, sha256: gitleaksRules.sha256, version: `rules-${gitleaksRules.sha256.slice(0, 12)}` }),
+    }),
     privacy: Object.freeze({
       version: manifest.version,
       sha256: privacyBundle.sha256,

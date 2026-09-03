@@ -30,11 +30,11 @@ policy and Privacy/Gitleaks assets for the exact lane before installing it:
 
 ```bash
 airkit shield policy install --lane managed --bundle <policy-bundle> --public-key <policy-public-key>
-airkit shield privacy provision --lane managed --policy-bundle <policy-bundle> --bundle <privacy-manifest> --gitleaks <gitleaks-executable>
+airkit shield privacy provision --lane managed --policy-bundle <policy-bundle> --bundle <privacy-manifest> --gitleaks <gitleaks-executable> --gitleaks-rules <gitleaks-rules.toml>
 airkit shield install --lane managed
 
 airkit shield policy install --lane managed --bundle <policy-bundle> --public-key <policy-public-key> --write
-airkit shield privacy provision --lane managed --bundle <privacy-manifest> --gitleaks <gitleaks-executable> --write
+airkit shield privacy provision --lane managed --bundle <privacy-manifest> --gitleaks <gitleaks-executable> --gitleaks-rules <gitleaks-rules.toml> --write
 airkit shield install --lane managed --write
 airkit shield status --lane managed
 airkit shield doctor --lane managed
@@ -44,6 +44,14 @@ airkit shield doctor --lane managed
 that lane lacks either valid policy or Privacy/Gitleaks provisioning. Stop a
 lane without deleting its private state with
 `airkit shield stop --lane managed`.
+
+`--gitleaks-rules` is the Gitleaks configuration TOML you author. AirKit ships
+no rules, so that file alone decides what counts as a secret. It is digest-pinned
+next to the executable and revalidated before every scan, so editing it means
+re-running `privacy provision --write`. Shield scans the request body on stdin
+with one fixed argument vector, and self-tests the rules at daemon startup
+against a fixed sentinel that must produce exactly one `private-key` finding —
+two rules matching that sentinel, or one matching it twice, fails closed.
 
 On a clean lane, provide the same reviewed policy bundle to the Privacy preview
 with `--policy-bundle`; this validates the complete future asset binding without

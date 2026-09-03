@@ -9,6 +9,14 @@ const SCAN_TIMEOUT_MS = 2_000;
 const MAX_FINDINGS = 512;
 const defaultIo = { lstat, readFile, realpath };
 
+// The only argument vector Shield will run Gitleaks with. `shield install`
+// writes it into the daemon config and the daemon revalidates it here, so both
+// sides read this constant rather than repeating the array.
+export const GITLEAKS_COMMAND_PROFILE = Object.freeze({
+  versionArgs: Object.freeze(["version"]),
+  scanArgs: Object.freeze(["stdin", "--config", "{rules}", "--report-format", "json", "--report-path", "-", "--redact"]),
+});
+
 export async function createGitleaksScanner({ executable, sha256, ruleBundle, run = runGitleaks, io = defaultIo } = {}) {
   const provision = await validateProvision({ executable, sha256, ruleBundle, io });
   if (typeof run !== "function") throw new TypeError("shield gitleaks runner is required");
@@ -75,13 +83,9 @@ async function validateAsset({ path, digest, executable, label, io }) {
 }
 
 function assertCommandProfile(value) {
-  const expected = {
-    versionArgs: ["version"],
-    scanArgs: ["stdin", "--config", "{rules}", "--report-format", "json", "--report-path", "-", "--redact"],
-  };
   if (!isPlainObject(value) || !hasExactKeys(value, ["scanArgs", "versionArgs"])
-    || JSON.stringify(value.versionArgs) !== JSON.stringify(expected.versionArgs)
-    || JSON.stringify(value.scanArgs) !== JSON.stringify(expected.scanArgs)) {
+    || JSON.stringify(value.versionArgs) !== JSON.stringify(GITLEAKS_COMMAND_PROFILE.versionArgs)
+    || JSON.stringify(value.scanArgs) !== JSON.stringify(GITLEAKS_COMMAND_PROFILE.scanArgs)) {
     throw new Error("shield gitleaks command profile is invalid");
   }
   return Object.freeze({ versionArgs: Object.freeze([...value.versionArgs]), scanArgs: Object.freeze([...value.scanArgs]) });

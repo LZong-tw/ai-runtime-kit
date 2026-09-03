@@ -266,13 +266,15 @@ function assertCanonicalAssetsProvisionPath(paths) {
 export function assertShieldAssetsProvision(state) {
   if (!isPlainObject(state) || !exactKeys(state, ["bundle", "gitleaks", "privacy", "version"]) || state.version !== 1
     || !isPlainObject(state.bundle) || !exactKeys(state.bundle, ["path", "sha256", "version"])
-    || !isPlainObject(state.gitleaks) || !exactKeys(state.gitleaks, ["path", "sha256"])
+    || !isPlainObject(state.gitleaks) || !exactKeys(state.gitleaks, ["path", "rules", "sha256"])
+    || !isPlainObject(state.gitleaks.rules) || !exactKeys(state.gitleaks.rules, ["path", "sha256", "version"])
     || !isPlainObject(state.privacy) || !exactKeys(state.privacy, ["path", "sha256", "version", "worker"])
     || !isPlainObject(state.privacy.worker) || !exactKeys(state.privacy.worker, ["args", "command", "sha256"])) {
     throw new Error("shield asset provision is invalid");
   }
   assertAssetReference(state.bundle, "shield policy bundle");
   assertAssetReference(state.gitleaks, "shield gitleaks");
+  assertAssetReference(state.gitleaks.rules, "shield gitleaks rules");
   assertAssetReference(state.privacy, "shield privacy bundle");
   if (!safePath(state.privacy.worker.command) || !/^[a-f0-9]{64}$/.test(state.privacy.worker.sha256)
     || !Array.isArray(state.privacy.worker.args) || !state.privacy.worker.args.every((argument) => typeof argument === "string" && argument.length > 0 && argument.length <= 256)) {
@@ -281,7 +283,11 @@ export function assertShieldAssetsProvision(state) {
   return Object.freeze({
     version: state.version,
     bundle: Object.freeze({ version: state.bundle.version, sha256: state.bundle.sha256, path: state.bundle.path }),
-    gitleaks: Object.freeze({ sha256: state.gitleaks.sha256, path: state.gitleaks.path }),
+    gitleaks: Object.freeze({
+      sha256: state.gitleaks.sha256,
+      path: state.gitleaks.path,
+      rules: Object.freeze({ path: state.gitleaks.rules.path, sha256: state.gitleaks.rules.sha256, version: state.gitleaks.rules.version }),
+    }),
     privacy: Object.freeze({
       version: state.privacy.version,
       sha256: state.privacy.sha256,

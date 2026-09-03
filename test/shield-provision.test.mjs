@@ -10,11 +10,13 @@ import { readShieldAssetsProvision, shieldPaths } from "../src/shield/paths.mjs"
 
 const policyPath = "/opt/airkit/policy.json";
 const gitleaksPath = "/opt/airkit/gitleaks";
+const gitleaksRulesPath = "/opt/airkit/gitleaks-rules.toml";
 const privacyPath = "/opt/airkit/privacy-filter.json";
 const workerPath = "/opt/airkit/privacy-worker";
 const bytes = {
   [policyPath]: Buffer.from(JSON.stringify({ manifest: { version: "policy-1" } })),
   [gitleaksPath]: Buffer.from("gitleaks fixture"),
+  [gitleaksRulesPath]: Buffer.from("gitleaks rules fixture"),
   [privacyPath]: Buffer.from(JSON.stringify({
     formatVersion: 1,
     protocol: "airkit-privacy-ndjson-v1",
@@ -23,12 +25,14 @@ const bytes = {
   })),
   [workerPath]: Buffer.from("privacy worker fixture"),
 };
+const rulesDigest = sha256(bytes[gitleaksRulesPath]);
 
 test("asset provision previews without writes and only records opaque references after explicit write", async () => {
   const writes = [];
   const preview = await provisionShieldAssets({
     bundlePath: policyPath,
     gitleaksPath,
+    gitleaksRulesPath,
     privacyBundlePath: privacyPath,
     io: fixtureIo(),
     runPrivacySelfTest: async () => ({ version: "privacy-1" }),
@@ -39,7 +43,11 @@ test("asset provision previews without writes and only records opaque references
   assert.deepEqual(preview, {
     version: 1,
     bundle: { version: "policy-1", sha256: sha256(bytes[policyPath]), path: policyPath },
-    gitleaks: { sha256: sha256(bytes[gitleaksPath]), path: gitleaksPath },
+    gitleaks: {
+      sha256: sha256(bytes[gitleaksPath]),
+      path: gitleaksPath,
+      rules: { path: gitleaksRulesPath, sha256: rulesDigest, version: `rules-${rulesDigest.slice(0, 12)}` },
+    },
     privacy: {
       version: "privacy-1",
       sha256: sha256(bytes[privacyPath]),
@@ -51,6 +59,7 @@ test("asset provision previews without writes and only records opaque references
   const written = await provisionShieldAssets({
     bundlePath: policyPath,
     gitleaksPath,
+    gitleaksRulesPath,
     privacyBundlePath: privacyPath,
     write: true,
     io: fixtureIo(),
@@ -66,10 +75,12 @@ test("asset provision rejects unsafe, drifted, or protocol-invalid preinstalled 
   const options = {
     bundlePath: policyPath,
     gitleaksPath,
+    gitleaksRulesPath,
     privacyBundlePath: privacyPath,
     runPrivacySelfTest: async () => ({ version: "privacy-1" }),
   };
   await assert.rejects(provisionShieldAssets({ ...options, bundlePath: "relative", io: fixtureIo() }), /canonical and absolute/i);
+  await assert.rejects(provisionShieldAssets({ ...options, gitleaksRulesPath: undefined, io: fixtureIo() }), /gitleaks rules path must be canonical and absolute/i);
   await assert.rejects(provisionShieldAssets({ ...options, io: fixtureIo({ symlink: privacyPath }) }), /symlink/i);
   await assert.rejects(provisionShieldAssets({ ...options, io: fixtureIo({ owner: 999 }) }), /owner/i);
   await assert.rejects(provisionShieldAssets({ ...options, io: fixtureIo({ executable: false }) }), /executable/i);
@@ -84,6 +95,7 @@ test("explicit write stores a private canonical asset provision record", async (
     const written = await provisionShieldAssets({
       bundlePath: policyPath,
       gitleaksPath,
+      gitleaksRulesPath,
       privacyBundlePath: privacyPath,
       write: true,
       paths,
