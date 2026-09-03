@@ -15,50 +15,50 @@ state, and secret values live outside this repo and must not be copied into git.
 - Verify tools with command checks instead of assuming how they were installed.
 - Run `doctor --profile` after writing files and after any manual repair.
 
-## Sensitive Egress Shield Phase 1
+## Sensitive Egress Shield
 
-Shield Phase 1 is a loopback-only, fail-closed transport foundation for
-AirKit-managed launches. It is **disabled by default**. It has no selectable
-production allow policy and therefore does not currently scan, redact, approve,
-or enforce sensitive-data decisions. It is not ready to be enabled or marketed
-as protection for source code, prompts, credentials, or other data. Policy
-enforcement is a later phase.
+Sensitive Egress Shield is a loopback-only, fail-closed guard for declared
+AirKit launch paths. It is **disabled by default** and does not turn a direct
+Claude, browser, `curl`, or undeclared wrapper into a protected client. When an
+approved profile enables a lane, Shield evaluates its signed OPA/Wasm policy
+with provisioned Gitleaks and Privacy worker facts, durably records only
+allowlisted decision metadata, and blocks if policy, asset, approval, identity,
+or audit durability is unavailable.
 
-The lifecycle commands are available for inspection:
-
-```bash
-airkit shield install
-airkit shield status
-airkit shield doctor
-```
-
-`install` is preview-only. After reviewing the listed per-user LaunchAgent and
-private state paths, the explicit write form installs the service:
+Every lane has independent private state and a per-user service. Provision the
+policy and Privacy/Gitleaks assets for the exact lane before installing it:
 
 ```bash
-airkit shield install --write
-airkit shield start
-airkit shield status
+airkit shield policy install --lane managed --bundle <policy-bundle> --public-key <policy-public-key>
+airkit shield privacy provision --lane managed --bundle <privacy-manifest> --gitleaks <gitleaks-executable>
+airkit shield install --lane managed
+
+airkit shield policy install --lane managed --bundle <policy-bundle> --public-key <policy-public-key> --write
+airkit shield privacy provision --lane managed --bundle <privacy-manifest> --gitleaks <gitleaks-executable> --write
+airkit shield install --lane managed --write
+airkit shield status --lane managed
+airkit shield doctor --lane managed
 ```
 
-Stop it without deleting its private state with `airkit shield stop`. Its
-subscription child-only launch contract is:
+`install` is preview-only unless `--write` is present, and refuses to start if
+that lane lacks either valid policy or Privacy/Gitleaks provisioning. Stop a
+lane without deleting its private state with
+`airkit shield stop --lane managed`.
 
-```bash
-airkit shield launch --lane subscription -- command claude [args...]
-```
+Normal managed launches are wired by `airclaude`; do not manually nest it under
+`shield launch`. For each launch, AirKit registers a fresh loopback middleware
+destination as a one-use lease and revokes it when the child finishes. The
+child receives only a request capability; destination, control capability, and
+provider credentials are not handed to it. This is not a security boundary
+between mutually untrusted same-UID processes, which remain under the same
+operating-system user trust boundary.
 
-The managed `shield launch --lane managed -- command [args...]` form is an
-AirKit runtime and diagnostic contract, not a command to manually wrap
-`airclaude`. If a future profile explicitly enables managed Shield, normal
-`airclaude ...` launches perform the managed preflight and child wiring
-automatically. These contracts do not recommend enabling Phase 1. Shield
-validates a fresh authenticated loopback identity before spawning a child and
-does not print its capability. It covers only AirKit-managed entrypoints. A
-bare `command claude` bypasses AirKit and Shield. `claude-sub` remains direct
-subscription OAuth by default; it uses the subscription form only when
-`AIRKIT_SHIELD_SUBSCRIPTION=1` is explicitly set. Audit evidence is
-observability, not Shield enforcement.
+Subscription launchers remain feature-off by default. When
+`AIRKIT_SHIELD_SUBSCRIPTION=1` is explicitly set, both `claude-sub` and the
+Headroom `hr-claude-sub` adapter use the subscription Shield lane and fail
+closed before Claude starts. With the switch absent, they are deliberately
+direct-subscription bypasses. Audit evidence is observability; it does not turn
+an unlisted direct client into Shield enforcement.
 
 ## Prerequisites To Verify
 

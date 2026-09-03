@@ -118,7 +118,7 @@ reveal flow, and gap interpretation rules.
 AirKit includes a disabled-by-default local Sensitive Egress Shield for
 profiles that explicitly opt into a declared managed launcher lane. It evaluates
 a signed OPA/Wasm policy with provisioned Gitleaks and Privacy worker facts,
-can require a launcher-owned one-time local approval, and writes a
+can require a one-time local approval, and writes a
 metadata-only terminal decision before forwarding. Missing or invalid policy,
 assets, audit durability, identity, or approval capability blocks; there is no
 allow-all fallback.
@@ -129,16 +129,21 @@ provider origins are never downloaded during a request or packaged with AirKit.
 After reviewing each preview, explicitly apply only the required local writes:
 
 ```bash
-airkit shield policy install --bundle <policy-bundle> --public-key <policy-public-key>
-airkit shield privacy provision --bundle <privacy-manifest> --gitleaks <gitleaks-executable>
-airkit shield install
+airkit shield policy install --lane managed --bundle <policy-bundle> --public-key <policy-public-key>
+airkit shield privacy provision --lane managed --bundle <privacy-manifest> --gitleaks <gitleaks-executable>
+airkit shield install --lane managed
 
-airkit shield policy install --bundle <policy-bundle> --public-key <policy-public-key> --write
-airkit shield privacy provision --bundle <privacy-manifest> --gitleaks <gitleaks-executable> --write
-airkit shield install --write
-airkit shield status
-airkit shield doctor
+airkit shield policy install --lane managed --bundle <policy-bundle> --public-key <policy-public-key> --write
+airkit shield privacy provision --lane managed --bundle <privacy-manifest> --gitleaks <gitleaks-executable> --write
+airkit shield install --lane managed --write
+airkit shield status --lane managed
+airkit shield doctor --lane managed
 ```
+
+Provision and install are per lane. `install` validates that the same lane
+already has a valid signed policy and Privacy/Gitleaks provision; it does not
+download or infer either dependency. Repeat the sequence with
+`--lane subscription` only for an explicitly enabled subscription launcher.
 
 The asset references must resolve to canonical, user-owned regular files, with
 no symlink or group/world write permission. Provisioning verifies SHA-256; the
@@ -148,10 +153,19 @@ validates signature, compiled Wasm digest/ABI, detector versions, and self-test.
 
 Only declared AirKit-managed launchers are protected when their profile enables
 Shield: `airclaude`, generated `cclaude-*`, `hr-airclaude`, and
-`hr-claude-web`. Direct `command claude`, browsers, `curl`, and undeclared
-wrappers are outside the control. A profile must expose that enablement and lane
-in its own catalog; this public repository does not silently enable Shield for a
-shell or route. Do not manually wrap `airclaude` with `shield launch`.
+`hr-claude-web`. Subscription `claude-sub` and `hr-claude-sub` are protected
+only when their explicit subscription feature switch is enabled. Direct
+`command claude`, browsers, `curl`, and undeclared wrappers are outside the
+control. A profile must expose that enablement and lane in its own catalog; this
+public repository does not silently enable Shield for a shell or route. Do not
+manually wrap `airclaude` with `shield launch`.
+
+For a managed launch, AirKit binds the fresh local compatibility middleware to
+Shield with a one-use, short-lived destination lease and revokes it when the
+child exits. The child receives only its request capability, not a destination,
+control capability, or provider credential. This is an application-level
+least-privilege boundary, not hostile-principal isolation: processes running as
+the same operating-system user remain within that user's trust boundary.
 
 Policy replacement is atomic: a live daemon is quiesced, a reachable old proxy
 rejects the transition, and a replacement must publish matching policy/detector
