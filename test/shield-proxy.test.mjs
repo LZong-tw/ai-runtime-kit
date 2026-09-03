@@ -673,6 +673,35 @@ async function registerApprovalChannel(shield, channel) {
   assert.equal(response.status, 204);
 }
 
+test("managed destination leases are control-authenticated, one-use, and revocable", async (t) => {
+  let calls = 0;
+  const upstream = await startFixture(t, async (_request, response) => { calls += 1; response.end("ok"); });
+  const lease = "d".repeat(32);
+  const shield = await startShield(t, {
+    targetOrigin: undefined,
+    allowDestinationLeases: true,
+    decide: async () => ({ action: "allow", reasonCodes: ["policy_allow"], lane: "managed", destinationClass: "managed", bundleVersion: "policy-1", detectorVersions: { gitleaks: "8", privacy: "1" } }),
+  });
+  const unregistered = await fetch(`${shield.origin}/v1/messages`, { method: "POST", headers: { "x-airkit-shield": lease }, body: "{}" });
+  assert.equal(unregistered.status, 401);
+  const registered = await fetch(`${shield.origin}/_airkit/shield/destination-lease`, {
+    method: "POST", headers: { "x-airkit-shield-control": CONTROL_CAPABILITY, "content-type": "application/json" }, body: JSON.stringify({ capability: lease, targetOrigin: upstream.origin }),
+  });
+  assert.equal(registered.status, 204);
+  const forwarded = await fetch(`${shield.origin}/v1/messages`, { method: "POST", headers: { "x-airkit-shield": lease }, body: "{}" });
+  assert.equal(forwarded.status, 200);
+  assert.equal(calls, 1);
+  const replay = await fetch(`${shield.origin}/_airkit/shield/destination-lease`, {
+    method: "POST", headers: { "x-airkit-shield-control": CONTROL_CAPABILITY, "content-type": "application/json" }, body: JSON.stringify({ capability: lease, targetOrigin: upstream.origin }),
+  });
+  assert.equal(replay.status, 403);
+  const revoked = await fetch(`${shield.origin}/_airkit/shield/destination-lease`, { method: "DELETE", headers: { "x-airkit-shield-control": CONTROL_CAPABILITY, "content-type": "application/json" }, body: JSON.stringify({ capability: lease }) });
+  assert.equal(revoked.status, 204);
+  const afterRevoke = await fetch(`${shield.origin}/v1/messages`, { method: "POST", headers: { "x-airkit-shield": lease }, body: "{}" });
+  assert.equal(afterRevoke.status, 401);
+  assert.equal(calls, 1);
+});
+
 async function startShield(t, options) {
   const shield = await startShieldProxy({
     capability: CAPABILITY,

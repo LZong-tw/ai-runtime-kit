@@ -5174,8 +5174,15 @@ test("enabled Shield replaces only the spawned AirClaude endpoint and capability
         return {
           origin: "http://127.0.0.1:8811",
           capability,
+          lane: "managed",
           targetClass: "managed",
         };
+      },
+      createShieldDestinationLease: async ({ ready, targetOrigin }) => {
+        events.push("lease-create");
+        assert.equal(ready.capability, capability);
+        assert.equal(targetOrigin, "http://127.0.0.1:3456");
+        return { ...ready, capability: "lease-capability-012345678901234567890" };
       },
       openShieldApprovalChannel: async () => {
         events.push("approval-open");
@@ -5183,7 +5190,7 @@ test("enabled Shield replaces only the spawned AirClaude endpoint and capability
       },
       registerShieldApprovalChannel: async ({ ready, channel }) => {
         events.push("approval-register");
-        assert.equal(ready.capability, capability);
+        assert.equal(ready.capability, "lease-capability-012345678901234567890");
         assert.equal(channel, approvalChannel);
       },
       env: launchEnv,
@@ -5194,14 +5201,18 @@ test("enabled Shield replaces only the spawned AirClaude endpoint and capability
         spawnCalls.push({ args, command, env: options.env });
         return { status: 0 };
       },
+      revokeShieldDestinationLease: async ({ ready }) => {
+        events.push("lease-revoke");
+        assert.equal(ready.capability, "lease-capability-012345678901234567890");
+      },
     });
 
-    assert.deepEqual(events, ["gateway-ready", "shield-ready", "approval-open", "approval-register", "spawn", "approval-close"]);
+    assert.deepEqual(events, ["gateway-ready", "shield-ready", "lease-create", "approval-open", "approval-register", "spawn", "approval-close", "lease-revoke"]);
     assert.equal(spawnCalls[0].env.ANTHROPIC_API_BASE_URL, "http://127.0.0.1:8811");
     assert.equal(spawnCalls[0].env.ANTHROPIC_BASE_URL, "http://127.0.0.1:8811");
     assert.equal(
       spawnCalls[0].env.ANTHROPIC_CUSTOM_HEADERS,
-      `x-airkit-mode: auto\nx-airkit-shield: ${capability}`,
+      "x-airkit-mode: auto\nx-airkit-shield: lease-capability-012345678901234567890",
     );
     assert.equal(spawnCalls[0].env.AIRKIT_SHIELD_CAPABILITY, undefined);
     assert.equal(spawnCalls[0].env.AIRKIT_SHIELD_CONTROL_CAPABILITY, undefined);

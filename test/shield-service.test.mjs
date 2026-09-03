@@ -50,7 +50,7 @@ test("shield install previews without launchctl mutation", async () => {
   const io = new Proxy({}, { get: () => async (...args) => calls.push(args) });
   const plan = await installShieldService({ ...options, io, runLaunchctl: async (args) => calls.push(args) });
 
-  assert.equal(plan.label, "com.airkit.shield");
+  assert.equal(plan.label, "com.airkit.shield.subscription");
   assert.deepEqual(calls, []);
   assert.match(plan.plistXml, /com\.airkit\.shield/);
   assert.deepEqual(plan.plist.ProgramArguments, [options.nodePath, options.daemonPath, "--config", options.paths.configPath]);
@@ -67,7 +67,7 @@ test("shield privacy provision is preview-first and keeps asset references out o
     },
   });
   assert.equal(code, 0);
-  assert.deepEqual(calls, [{ bundlePath: "/private/privacy.json", gitleaksPath: "/private/gitleaks", write: false }]);
+  assert.deepEqual(calls, [{ bundlePath: "/private/privacy.json", gitleaksPath: "/private/gitleaks", lane: "subscription", write: false }]);
   assert.match(output.value(), /privacy/);
   assert.doesNotMatch(output.value(), /private/);
 });
@@ -80,7 +80,7 @@ test("shield policy install is preview-first and hides source paths", async () =
     shield: { async policyInstall(request) { calls.push(request); return { state: "preview", version: "2026.09.02.9" }; } },
   });
   assert.equal(code, 0);
-  assert.deepEqual(calls, [{ bundlePath: "/private/policy.bundle", publicKeyPath: "/private/policy.pub", write: false }]);
+  assert.deepEqual(calls, [{ bundlePath: "/private/policy.bundle", publicKeyPath: "/private/policy.pub", lane: "subscription", write: false }]);
   assert.match(output.value(), /2026\.09\.02\.9/);
   assert.doesNotMatch(output.value(), /private/);
 });
@@ -143,7 +143,7 @@ test("shield start refuses an uninstalled service without provisioning state", a
     }),
     /shield install --write/i,
   );
-  assert.deepEqual(calls, []);
+  assert.equal(calls.length, 0);
 });
 
 test("stale identity blocks shield launch", async () => {
@@ -210,7 +210,7 @@ test("lane and configuration generation mismatches reject readiness before probi
   assert.deepEqual(probes, []);
 });
 
-test("readiness binds subscription and managed lanes to the expected target origin", async () => {
+test("readiness keeps subscription fixed and rejects persisted managed targets", async () => {
   const { paths } = fixture();
   const probes = [];
   const baseIdentity = {
@@ -243,14 +243,13 @@ test("readiness binds subscription and managed lanes to the expected target orig
   await assert.rejects(
     ensureShieldReady({
       ...readyOptions,
-      expectedTargetOrigin: "http://127.0.0.1:4599/",
       lane: "managed",
       io: shieldStateIo(paths, {
         identity: { ...baseIdentity, lane: "managed", targetClass: "managed" },
         config: { capability, targetOrigin: "http://127.0.0.1:3456", lane: "managed", generation },
       }),
     }),
-    /shield target origin mismatch/,
+    /managed configuration must not persist/,
   );
   assert.deepEqual(probes, []);
 });
@@ -270,7 +269,7 @@ test("launchd PID mismatch and failed authenticated listener probe reject readin
   };
   const io = shieldStateIo(paths, {
     identity,
-    config: { capability, targetOrigin: "https://managed.example", lane: "managed", generation },
+    config: { capability, lane: "managed", generation },
   });
 
   await assert.rejects(
@@ -278,7 +277,7 @@ test("launchd PID mismatch and failed authenticated listener probe reject readin
     /PID mismatch/i,
   );
   await assert.rejects(
-    ensureShieldReady({ expectedTargetOrigin: "https://managed.example", lane: "managed", paths, io, inspectService: async () => ({ loaded: true, active: true, pid: 42 }), isProcessAlive: async () => true, probeShield: async () => false }),
+    ensureShieldReady({ lane: "managed", paths, io, inspectService: async () => ({ loaded: true, active: true, pid: 42 }), isProcessAlive: async () => true, probeShield: async () => false }),
     /listener.*readiness/i,
   );
 });
@@ -316,6 +315,7 @@ test("readiness returns only after the active identity answers the capability pr
   assert.deepEqual(ready, {
     origin: identity.origin,
     capability,
+    lane: "subscription",
     targetClass: "subscription",
     policyVersion: policyState.version,
     detectorVersions: policyState.detectorVersions,
@@ -518,7 +518,7 @@ test("start refuses launchd plist path drift before mutating the job", async () 
     }),
     /shield launch plist path drift/i,
   );
-  assert.deepEqual(calls, []);
+  assert.equal(calls.length, 0);
 });
 
 test("shield stop only unloads its own job and preserves shield state", async () => {
@@ -685,7 +685,17 @@ test("shield install applies lifecycle only with --write", async () => {
     },
   });
   assert.equal(code, 1);
-  assert.deepEqual(calls, [{ write: true }]);
+  assert.deepEqual(calls, [{ write: true, lane: "subscription" }]);
+});
+
+test("shield install requires an explicit valid lane and passes it to provisioning", async () => {
+  const calls = [];
+  await runShieldCli(["install", "--lane", "managed", "--write"], {
+    stdout: capture().stdout,
+    shield: { async install(options) { calls.push(options); return { state: "degraded", write: true, lane: options.lane }; } },
+  });
+  assert.deepEqual(calls, [{ write: true, lane: "managed" }]);
+  await assert.rejects(runShieldCli(["install", "--lane", "unknown"], { shield: {} }), /usage: shield install/i);
 });
 
 test("airkit routes shield commands before catalog loading", async () => {
@@ -703,12 +713,12 @@ test("airkit routes shield commands before catalog loading", async () => {
   assert.match(output.value(), /state: healthy/);
 });
 
-test("airkit shield install preview exits zero, names the service, and performs no mutation", async () => {
+test("airkit shield install preview fails closed when lane assets are absent", async () => {
   const { paths, options } = fixture();
   const output = capture();
   const calls = [];
   const io = new Proxy({}, { get: () => async (...args) => calls.push(args) });
-  const code = await runCli(["shield", "install"], {
+  await assert.rejects(runCli(["shield", "install"], {
     stdout: output.stdout,
     paths,
     nodePath: options.nodePath,
@@ -716,11 +726,8 @@ test("airkit shield install preview exits zero, names the service, and performs 
     io,
     runLaunchctl: async (args) => calls.push(args),
     catalogPath: "/does/not/exist.json",
-  });
-
-  assert.equal(code, 0);
-  assert.match(output.value(), /com\.airkit\.shield/);
-  assert.deepEqual(calls, []);
+  }), /shield asset provision|isSymbolicLink/i);
+  assert.equal(calls.length, 1);
 });
 
 function shieldStateIo(paths, { identity, config, state = policyState }) {

@@ -32,7 +32,7 @@ import { runAuditCli } from "./audit/cli.mjs";
 import { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
 import { runShieldCli } from "./shield/cli.mjs";
 import { resolveShieldLauncher } from "./shield/launchers.mjs";
-import { buildShieldChildEnv, ensureShieldReady, openShieldApprovalChannel, registerShieldApprovalChannel } from "./shield/service.mjs";
+import { buildShieldChildEnv, createShieldDestinationLease, ensureShieldReady, openShieldApprovalChannel, registerShieldApprovalChannel, revokeShieldDestinationLease } from "./shield/service.mjs";
 
 export { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
 export { tailHeadroomSavings } from "./audit/reconcile/headroom.mjs";
@@ -1507,6 +1507,9 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
           expectedTargetOrigin: middleware?.origin ?? gatewayOrigin,
           lane: plan.shieldLauncher.clientLane,
         });
+        if (shieldReady.lane === "managed") {
+          shieldReady = await (options.createShieldDestinationLease ?? createShieldDestinationLease)({ ready: shieldReady, targetOrigin: middleware?.origin ?? gatewayOrigin });
+        }
       }
     } catch (error) {
       await middleware?.close();
@@ -1564,6 +1567,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
       });
     } finally {
       await shieldApprovalChannel?.close?.();
+      await (options.revokeShieldDestinationLease ?? revokeShieldDestinationLease)({ ready: shieldReady }).catch(() => {});
     }
   }
 

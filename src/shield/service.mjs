@@ -26,7 +26,7 @@ export function planShieldService({ paths, nodePath, daemonPath } = {}) {
     if (typeof value !== "string" || !isAbsolute(value)) throw new Error(`${name} must be an absolute path`);
   }
   const plist = {
-    Label: SHIELD_SERVICE_LABEL,
+    Label: paths.serviceLabel,
     ProgramArguments: [nodePath, daemonPath, "--config", paths.configPath],
     EnvironmentVariables: {},
     RunAtLoad: true,
@@ -35,7 +35,7 @@ export function planShieldService({ paths, nodePath, daemonPath } = {}) {
   };
   const plistXml = renderPlist(plist);
   return {
-    label: SHIELD_SERVICE_LABEL,
+    label: paths.serviceLabel,
     plistPath: paths.launchAgentPath,
     domain: paths.launchdDomain,
     target: paths.launchdTarget,
@@ -73,11 +73,12 @@ export function createShieldConfig(config = {}) {
   const validated = {
     capability: config.capability ?? randomUUID().replaceAll("-", ""),
     controlCapability: config.controlCapability ?? randomUUID().replaceAll("-", ""),
-    targetOrigin: normalizeShieldTargetOrigin(targetOrigin, "shield configuration target"),
     lane,
     generation: config.generation ?? randomUUID(),
     targetClass: config.targetClass ?? lane,
   };
+  if (lane === "subscription") validated.targetOrigin = normalizeShieldTargetOrigin(targetOrigin, "shield configuration target");
+  if (lane === "managed" && targetOrigin !== undefined) throw new Error("shield managed configuration must not persist a target origin");
   if (validated.targetClass !== lane) throw new Error("shield configuration targetClass must match its lane");
   if (lane === "subscription" && validated.targetOrigin !== SUBSCRIPTION_TARGET_ORIGIN) {
     throw new Error("shield subscription configuration must target api.anthropic.com");
@@ -177,7 +178,7 @@ export async function inspectShieldService({ paths, io = defaultIo, runLaunchctl
   const pidValue = /^\s*pid = (\d+)\s*$/m.exec(printed.stdout ?? "")?.[1];
   const pid = pidValue === undefined ? null : Number(pidValue);
   const active = printed.ok && state === "running" && Number.isInteger(pid) && pid > 0;
-  return { label: SHIELD_SERVICE_LABEL, installed, loaded: printed.ok, active, pid, state, stale: installed && !active };
+  return { label: paths.serviceLabel, installed, loaded: printed.ok, active, pid, state, stale: installed && !active };
 }
 
 export async function readShieldConfig({ paths, io = defaultIo } = {}) {
@@ -193,7 +194,10 @@ export async function readShieldConfig({ paths, io = defaultIo } = {}) {
   if (typeof config.controlCapability !== "string" || config.controlCapability.length < 32 || config.controlCapability === config.capability) {
     throw new Error("shield configuration control capability is missing or invalid");
   }
-  const targetOrigin = normalizeShieldTargetOrigin(config.targetOrigin, "shield configuration target");
+  const targetOrigin = config.lane === "subscription"
+    ? normalizeShieldTargetOrigin(config.targetOrigin, "shield configuration target")
+    : undefined;
+  if (config.lane === "managed" && Object.hasOwn(config, "targetOrigin")) throw new Error("shield managed configuration must not persist a target origin");
   if (typeof config.generation !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(config.generation)) {
     throw new Error("shield configuration generation is missing or invalid");
   }
@@ -203,11 +207,11 @@ export async function readShieldConfig({ paths, io = defaultIo } = {}) {
   const result = {
     capability: config.capability,
     controlCapability: config.controlCapability,
-    targetOrigin,
     lane: config.lane,
     generation: config.generation,
     targetClass: config.lane,
   };
+  if (targetOrigin !== undefined) result.targetOrigin = targetOrigin;
   if (config.launcherContext !== undefined) {
     assertLauncherContext(config.launcherContext);
     result.launcherContext = config.launcherContext;
@@ -216,7 +220,7 @@ export async function readShieldConfig({ paths, io = defaultIo } = {}) {
   return result;
 }
 
-export async function ensureShieldReady({ lane, expectedTargetOrigin, env = process.env, paths = shieldPaths({ env }), io = defaultIo, inspectService = inspectShieldService, isProcessAlive = defaultIsProcessAlive, probeShield = defaultProbeShield } = {}) {
+export async function ensureShieldReady({ lane, expectedTargetOrigin, env = process.env, paths = shieldPaths({ env, lane }), io = defaultIo, inspectService = inspectShieldService, isProcessAlive = defaultIsProcessAlive, probeShield = defaultProbeShield } = {}) {
   assertLane(lane);
   const identity = await readShieldIdentity({ paths, io });
   if (!identity || !(await isProcessAlive(identity.pid))) {
@@ -229,10 +233,8 @@ export async function ensureShieldReady({ lane, expectedTargetOrigin, env = proc
   if (config.lane !== lane || identity.lane !== lane || identity.targetClass !== lane) {
     throw new Error("shield lane mismatch; start the service configured for the requested lane");
   }
-  const expectedOrigin = lane === "subscription"
-    ? SUBSCRIPTION_TARGET_ORIGIN
-    : normalizeShieldTargetOrigin(expectedTargetOrigin, "shield managed expected target");
-  if (config.targetOrigin !== expectedOrigin) {
+  const expectedOrigin = lane === "subscription" ? SUBSCRIPTION_TARGET_ORIGIN : undefined;
+  if (expectedOrigin !== undefined && config.targetOrigin !== expectedOrigin) {
     throw new Error("shield target origin mismatch; restart the service with the expected fixed target");
   }
   if (config.generation !== identity.generation) throw new Error("shield configuration generation mismatch; restart the shield service");
@@ -251,6 +253,7 @@ export async function ensureShieldReady({ lane, expectedTargetOrigin, env = proc
   return {
     origin: identity.origin,
     capability: identity.capability,
+    lane,
     targetClass: identity.targetClass,
     policyVersion: identity.policyVersion,
     detectorVersions: identity.detectorVersions,
@@ -284,7 +287,7 @@ export async function openShieldApprovalChannel({ approvalBroker, createApproval
 export async function registerShieldApprovalChannel({ ready, channel, paths, io, fetchImpl = fetch } = {}) {
   if (!ready?.origin || !ready?.capability || channel === null || channel === undefined) throw new Error("shield approval registration requires a fresh ready identity");
   const registration = approvalChannelRegistration(channel);
-  const config = await readShieldConfig({ paths: paths ?? shieldPaths(), io });
+  const config = await readShieldConfig({ paths: paths ?? shieldPaths({ lane: ready.lane }), io });
   let response;
   try {
     response = await fetchImpl(`${ready.origin}/_airkit/shield/approval-channel`, {
@@ -296,6 +299,30 @@ export async function registerShieldApprovalChannel({ ready, channel, paths, io,
     throw new Error("shield approval registration failed");
   }
   if (response?.status !== 204) throw new Error("shield approval registration failed");
+}
+
+export async function createShieldDestinationLease({ ready, targetOrigin, paths, io, fetchImpl = fetch } = {}) {
+  if (ready?.lane !== "managed" || !ready.origin || !targetOrigin) throw new Error("shield managed destination lease requires a fresh managed identity");
+  const config = await readShieldConfig({ paths: paths ?? shieldPaths({ lane: "managed" }), io });
+  const capability = randomUUID().replaceAll("-", "");
+  const response = await fetchImpl(`${ready.origin}/_airkit/shield/destination-lease`, {
+    method: "POST",
+    headers: { "x-airkit-shield-control": config.controlCapability, "content-type": "application/json" },
+    body: JSON.stringify({ capability, targetOrigin }),
+  }).catch(() => null);
+  if (response?.status !== 204) throw new Error("shield managed destination lease registration failed");
+  return Object.freeze({ ...ready, capability });
+}
+
+export async function revokeShieldDestinationLease({ ready, paths, io, fetchImpl = fetch } = {}) {
+  if (ready?.lane !== "managed" || !ready.origin || !ready.capability) return;
+  const config = await readShieldConfig({ paths: paths ?? shieldPaths({ lane: "managed" }), io });
+  const response = await fetchImpl(`${ready.origin}/_airkit/shield/destination-lease`, {
+    method: "DELETE",
+    headers: { "x-airkit-shield-control": config.controlCapability, "content-type": "application/json" },
+    body: JSON.stringify({ capability: ready.capability }),
+  }).catch(() => null);
+  if (response?.status !== 204) throw new Error("shield managed destination lease revocation failed");
 }
 
 export function buildShieldChildEnv(ready, env = process.env) {
@@ -379,16 +406,16 @@ function normalizeShieldTargetOrigin(value, label) {
 }
 
 function assertShieldPaths(paths) {
-  if (!paths?.rootDir || !paths.configPath || !paths.identityPath || !paths.policyStatePath || !paths.launchAgentPath || !paths.launchdDomain || !paths.launchdTarget) {
+  if (!paths?.rootDir || !paths.lane || !paths.serviceLabel || !paths.configPath || !paths.identityPath || !paths.policyStatePath || !paths.launchAgentPath || !paths.launchdDomain || !paths.launchdTarget) {
     throw new TypeError("shield service paths are required");
   }
-  if (!/^gui\/\d+$/.test(paths.launchdDomain) || paths.launchdTarget !== `${paths.launchdDomain}/${SHIELD_SERVICE_LABEL}`) {
-    throw new Error("paths.launchdTarget must target com.airkit.shield");
+  if (!/^gui\/\d+$/.test(paths.launchdDomain) || paths.launchdTarget !== `${paths.launchdDomain}/${paths.serviceLabel}`) {
+    throw new Error("paths.launchdTarget must target the lane-specific shield service");
   }
-  if (!isAbsolute(paths.launchAgentPath) || basename(paths.launchAgentPath) !== `${SHIELD_SERVICE_LABEL}.plist`) {
-    throw new Error("paths.launchAgentPath must be the absolute shield plist path");
+  if (!isAbsolute(paths.launchAgentPath) || basename(paths.launchAgentPath) !== `${paths.serviceLabel}.plist`) {
+    throw new Error("paths.launchAgentPath must be the absolute lane-specific shield plist path");
   }
-  if (!isAbsolute(paths.rootDir) || paths.configPath !== resolve(paths.rootDir, "config.json") || paths.identityPath !== resolve(paths.rootDir, "identity.json") || paths.policyStatePath !== resolve(paths.rootDir, "policy-state.json")) {
+  if ((paths.lane !== "subscription" && paths.lane !== "managed") || paths.serviceLabel !== `${SHIELD_SERVICE_LABEL}.${paths.lane}` || !isAbsolute(paths.rootDir) || paths.configPath !== resolve(paths.rootDir, "config.json") || paths.identityPath !== resolve(paths.rootDir, "identity.json") || paths.policyStatePath !== resolve(paths.rootDir, "policy-state.json")) {
     throw new Error("shield service paths must use the canonical shield state layout");
   }
 }

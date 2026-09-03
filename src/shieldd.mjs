@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { readShieldAssetsProvision, shieldPaths, writeShieldIdentity, writeShieldPolicyState } from "./shield/paths.mjs";
+import { readShieldAssetsProvision, shieldPathsForConfigPath, writeShieldIdentity, writeShieldPolicyState } from "./shield/paths.mjs";
 import { classifyShieldRequest } from "./shield/classify.mjs";
 import { createGitleaksScanner } from "./shield/gitleaks.mjs";
 import { readShieldPolicyProvision } from "./shield/policy-bundle.mjs";
@@ -25,8 +25,7 @@ const execFileAsync = promisify(execFile);
 
 async function main() {
   const configPath = parseConfigPath(process.argv.slice(2));
-  const paths = shieldPaths({ env: process.env });
-  if (configPath !== paths.configPath) throw new Error("shield daemon config path must be the canonical private configuration path");
+  const paths = shieldPathsForConfigPath({ env: process.env, configPath });
   await assertPrivateConfig(configPath);
   const config = await readShieldConfig({ paths });
   const { shield } = await startShieldDaemon({ config, paths });
@@ -112,6 +111,7 @@ export async function startShieldDaemon({
       capability: config.capability,
       controlCapability: config.controlCapability,
       targetOrigin: config.targetOrigin,
+      allowDestinationLeases: config.lane === "managed",
       decide,
       // Policy activation restarts this daemon after identity quiescence. This
       // cache is process-local, so no terminal decision survives that boundary.

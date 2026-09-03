@@ -5,7 +5,7 @@ import { runCli } from "../src/airkit.mjs";
 import { runShieldCli } from "../src/shield/cli.mjs";
 
 const SHIELD_COMMANDS = [
-  "shield install [--write]",
+  "shield install [--lane subscription|managed] [--write]",
   "shield start",
   "shield stop",
   "shield status",
