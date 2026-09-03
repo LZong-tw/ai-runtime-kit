@@ -82,6 +82,14 @@ test("CCR audit wrapper registers a browser backend and one-time bootstrap app",
     assert.equal(shieldQuery.statusCode, 200);
     assert.deepEqual(operations, ["shield_decisions"]);
     assert.doesNotMatch(shieldQuery.body(), /must-not-render/);
+    const rawDetail = responseRecorder();
+    await backends[0].handler(
+      { method: "GET", url: "/api/query?name=shield_decision&id=https%3A%2F%2Fprivate.invalid%2Frequest", headers: { cookie: sessionCookie } },
+      rawDetail,
+    );
+    assert.equal(rawDetail.statusCode, 200);
+    assert.match(rawDetail.body(), /invalid_query_arguments/);
+    assert.deepEqual(operations, ["shield_decisions"]);
     await assert.rejects(readFile(bootstrapPath, "utf8"), { code: "ENOENT" });
 
     const replayResponse = responseRecorder();

@@ -132,6 +132,9 @@ function validateQuery(name, args) {
     }
     normalized.push(arg);
   }
+  if (name === "shield_decision" && !isShieldOpaqueId(normalized[0])) {
+    return { ok: false, reason: "invalid_query_arguments" };
+  }
   return { ok: true, args: normalized };
 }
 
@@ -216,3 +219,4 @@ function degradedStatus(code) {
 function normalizeState(value) {
   return ALLOWED_STATES.has(value) ? value : "degraded";
 }
+import { isShieldOpaqueId } from "./event.mjs";
