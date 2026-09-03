@@ -60,14 +60,18 @@ test("shield install previews without launchctl mutation", async () => {
 test("shield privacy provision is preview-first and keeps asset references out of CLI output", async () => {
   const output = capture();
   const calls = [];
-  const code = await runShieldCli(["privacy", "provision", "--bundle", "/private/privacy.json", "--gitleaks", "/private/gitleaks"], {
+  const code = await runShieldCli(["privacy", "provision", "--bundle", "/private/privacy.json", "--gitleaks", "/private/gitleaks", "--gitleaks-rules", "/private/rules.toml"], {
     stdout: output.stdout,
     shield: {
       async privacyProvision(request) { calls.push(request); return { state: "preview", write: request.write }; },
     },
   });
   assert.equal(code, 0);
-  assert.deepEqual(calls, [{ bundlePath: "/private/privacy.json", gitleaksPath: "/private/gitleaks", lane: "subscription", write: false }]);
+  assert.deepEqual(calls, [{ bundlePath: "/private/privacy.json", gitleaksPath: "/private/gitleaks", gitleaksRulesPath: "/private/rules.toml", lane: "subscription", write: false }]);
+  await assert.rejects(
+    runShieldCli(["privacy", "provision", "--bundle", "/private/privacy.json", "--gitleaks", "/private/gitleaks"], { stdout: capture().stdout, shield: {} }),
+    /usage: shield privacy provision/i,
+  );
   assert.match(output.value(), /privacy/);
   assert.doesNotMatch(output.value(), /private/);
 });
@@ -77,14 +81,14 @@ test("clean-lane privacy preview accepts its explicit policy bundle without pers
   await runShieldCli([
     "privacy", "provision", "--lane", "managed",
     "--policy-bundle", "/private/policy.json",
-    "--bundle", "/private/privacy.json", "--gitleaks", "/private/gitleaks",
+    "--bundle", "/private/privacy.json", "--gitleaks", "/private/gitleaks", "--gitleaks-rules", "/private/rules.toml",
   ], {
     stdout: capture().stdout,
     shield: { async privacyProvision(request) { calls.push(request); return { state: "preview" }; } },
   });
   assert.deepEqual(calls, [{
     lane: "managed", write: false, policyBundlePath: "/private/policy.json",
-    bundlePath: "/private/privacy.json", gitleaksPath: "/private/gitleaks",
+    bundlePath: "/private/privacy.json", gitleaksPath: "/private/gitleaks", gitleaksRulesPath: "/private/rules.toml",
   }]);
 });
 
@@ -966,10 +970,22 @@ test("managed install parses through the CLI and binds same-lane verified provis
   try {
     await runShieldCli(["install", "--lane", "managed"], {
       env: { HOME: home }, stdout: capture().stdout,
-      readShieldAssetsProvision: async ({ paths }) => { calls.push(["assets", paths.lane]); return { gitleaks: { path: "/opt/gitleaks", sha256: "a".repeat(64) } }; },
+      readShieldAssetsProvision: async ({ paths }) => { calls.push(["assets", paths.lane]); return { gitleaks: { path: "/opt/gitleaks", sha256: "a".repeat(64), rules: { path: "/opt/gitleaks-rules.toml", sha256: "b".repeat(64), version: "rules-bbbbbbbbbbbb" } } }; },
       readShieldPolicyProvision: async ({ paths }) => { calls.push(["policy", paths.lane]); return { bundle: {}, publicKey: "key" }; },
       loadShieldPolicy: async () => ({ version: "policy-1" }),
-      installShieldService: async ({ paths, config, write }) => { calls.push(["install", paths.lane, config.gitleaks.executable, write]); return { label: paths.serviceLabel }; },
+      installShieldService: async ({ paths, config, write }) => {
+        calls.push(["install", paths.lane, config.gitleaks.executable, write]);
+        assert.deepEqual(config.gitleaks.ruleBundle, {
+          path: "/opt/gitleaks-rules.toml",
+          sha256: "b".repeat(64),
+          version: "rules-bbbbbbbbbbbb",
+          commandProfile: {
+            versionArgs: ["version"],
+            scanArgs: ["stdin", "--config", "{rules}", "--report-format", "json", "--report-path", "-", "--redact"],
+          },
+        });
+        return { label: paths.serviceLabel };
+      },
     });
     assert.deepEqual(calls, [["assets", "managed"], ["policy", "managed"], ["install", "managed", "/opt/gitleaks", false]]);
   } finally { await rm(home, { recursive: true, force: true }); }
@@ -982,13 +998,13 @@ test("managed policy privacy and install CLI sequence stays in one lane", async 
     env: { HOME: home }, stdout: capture().stdout,
     installShieldPolicyProvision: async ({ paths, write }) => { calls.push(["policy", paths.lane, write]); return { version: "p", detectorVersions: {} }; },
     provisionShieldAssets: async ({ paths, write }) => { calls.push(["privacy", paths.lane, write]); return {}; },
-    readShieldAssetsProvision: async () => ({ gitleaks: { path: "/opt/gitleaks", sha256: "a".repeat(64) } }),
+    readShieldAssetsProvision: async () => ({ gitleaks: { path: "/opt/gitleaks", sha256: "a".repeat(64), rules: { path: "/opt/gitleaks-rules.toml", sha256: "b".repeat(64), version: "rules-bbbbbbbbbbbb" } } }),
     readShieldPolicyProvision: async () => ({ bundle: {}, publicKey: "key" }), loadShieldPolicy: async () => ({}),
     installShieldService: async ({ paths }) => { calls.push(["install", paths.lane]); return { label: paths.serviceLabel }; },
   };
   try {
     await runShieldCli(["policy", "install", "--bundle", "/tmp/p", "--public-key", "/tmp/k", "--lane", "managed"], dependencies);
-    await runShieldCli(["privacy", "provision", "--bundle", "/tmp/privacy", "--gitleaks", "/tmp/g", "--lane", "managed"], dependencies);
+    await runShieldCli(["privacy", "provision", "--bundle", "/tmp/privacy", "--gitleaks", "/tmp/g", "--gitleaks-rules", "/tmp/rules.toml", "--lane", "managed"], dependencies);
     await runShieldCli(["install", "--lane", "managed"], dependencies);
     assert.deepEqual(calls, [["policy", "managed", undefined], ["privacy", "managed", false], ["install", "managed"]]);
   } finally { await rm(home, { recursive: true, force: true }); }

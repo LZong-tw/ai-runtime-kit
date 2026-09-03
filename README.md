@@ -130,11 +130,11 @@ After reviewing each preview, explicitly apply only the required local writes:
 
 ```bash
 airkit shield policy install --lane managed --bundle <policy-bundle> --public-key <policy-public-key>
-airkit shield privacy provision --lane managed --policy-bundle <policy-bundle> --bundle <privacy-manifest> --gitleaks <gitleaks-executable>
+airkit shield privacy provision --lane managed --policy-bundle <policy-bundle> --bundle <privacy-manifest> --gitleaks <gitleaks-executable> --gitleaks-rules <gitleaks-rules.toml>
 airkit shield install --lane managed
 
 airkit shield policy install --lane managed --bundle <policy-bundle> --public-key <policy-public-key> --write
-airkit shield privacy provision --lane managed --bundle <privacy-manifest> --gitleaks <gitleaks-executable> --write
+airkit shield privacy provision --lane managed --bundle <privacy-manifest> --gitleaks <gitleaks-executable> --gitleaks-rules <gitleaks-rules.toml> --write
 airkit shield install --lane managed --write
 airkit shield status --lane managed
 airkit shield doctor --lane managed
@@ -147,6 +147,16 @@ download or infer either dependency. Repeat the sequence with
 The explicit `--policy-bundle` makes a clean-lane Privacy preview fully
 read-only; after the reviewed policy write, the Privacy write reads the
 lane-local signed policy bundle.
+
+`--gitleaks-rules` is a Gitleaks configuration TOML you author, and it is the
+only thing that decides what Shield treats as a secret; AirKit ships no rules.
+It is digest-pinned alongside the executable and revalidated before every scan,
+so editing it requires re-running `privacy provision --write`. Shield always
+invokes Gitleaks with one fixed argument vector against the request body on
+stdin — never a repository — and starts by scanning a fixed sentinel that your
+rules must answer with exactly one `private-key` finding. A rules file that
+matches that sentinel under two rule ids, or twice under one, fails the daemon
+closed at startup.
 
 The asset references must resolve to canonical, user-owned regular files, with
 no symlink or group/world write permission. Provisioning verifies SHA-256; the

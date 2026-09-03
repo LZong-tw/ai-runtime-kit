@@ -181,6 +181,12 @@ function assertGitleaksAsset(gitleaks, asset) {
   if (!asset || gitleaks.executable !== asset.path || gitleaks.sha256 !== asset.sha256) {
     throw new Error("shield gitleaks asset provision does not match configuration");
   }
+  // The rules decide what counts as a secret, so a config naming rules that
+  // were never provisioned is the same class of failure as an unpinned binary.
+  const bundle = gitleaks.ruleBundle;
+  if (!asset.rules || !bundle || bundle.path !== asset.rules.path || bundle.sha256 !== asset.rules.sha256 || bundle.version !== asset.rules.version) {
+    throw new Error("shield gitleaks rule bundle does not match asset provision");
+  }
 }
 
 function canonicalPrivacyFindings(findings) {

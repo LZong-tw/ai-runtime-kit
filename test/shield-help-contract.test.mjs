@@ -11,7 +11,7 @@ const SHIELD_COMMANDS = [
   "shield status",
   "shield doctor",
   "shield policy <status [--lane subscription|managed]|install --bundle /absolute/policy-bundle --public-key /absolute/policy-public-key [--lane subscription|managed] [--write]>",
-  "shield privacy provision --bundle /absolute/privacy-manifest --gitleaks /absolute/gitleaks [--policy-bundle /absolute/policy-bundle] [--lane subscription|managed] [--write]",
+  "shield privacy provision --bundle /absolute/privacy-manifest --gitleaks /absolute/gitleaks --gitleaks-rules /absolute/gitleaks-rules.toml [--policy-bundle /absolute/policy-bundle] [--lane subscription|managed] [--write]",
   "shield launch --lane subscription|managed [--target http://127.0.0.1:port] -- command [args...]",
 ];
 
