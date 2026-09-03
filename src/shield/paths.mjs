@@ -7,12 +7,16 @@ const SHIELD_LABEL = "com.airkit.shield";
 const defaultIo = { chmod, constants, lstat, mkdir, open, readFile, rename, unlink };
 const canonicalShieldPaths = new WeakSet();
 
-export function shieldPaths({ env = process.env, homeDir = homeFromEnv(env), uid = env.AIRKIT_GUI_UID ?? env.UID ?? process.getuid?.(), rootDir, configPath, identityPath, socketPath, launchAgentPath } = {}) {
+export function shieldPaths({ env = process.env, homeDir = homeFromEnv(env), uid = env.AIRKIT_GUI_UID ?? env.UID ?? process.getuid?.(), lane = "subscription", rootDir, configPath, identityPath, socketPath, launchAgentPath } = {}) {
+  assertLane(lane);
   const home = absolutePath(homeDir, "homeDir");
-  const canonicalRoot = join(home, ".local", "state", "airkit-shield");
+  const canonicalRoot = join(home, ".local", "state", "airkit-shield", lane);
   const root = absolutePath(rootDir ?? env.AIRKIT_SHIELD_ROOT_DIR ?? canonicalRoot, "rootDir");
   if (resolve(root) !== resolve(canonicalRoot)) throw new Error("rootDir must be the canonical AirKit Shield state directory");
+  const serviceLabel = `${SHIELD_LABEL}.${lane}`;
   const paths = {
+    lane,
+    serviceLabel,
     rootDir: root,
     configPath: childPath(configPath ?? join(root, "config.json"), root, "configPath"),
     identityPath: childPath(identityPath ?? join(root, "identity.json"), root, "identityPath"),
@@ -21,17 +25,25 @@ export function shieldPaths({ env = process.env, homeDir = homeFromEnv(env), uid
     policyPublicKeyPath: childPath(join(root, "policy-public.pem"), root, "policyPublicKeyPath"),
     assetsProvisionPath: childPath(join(root, "assets-provision.json"), root, "assetsProvisionPath"),
     socketPath: childPath(socketPath ?? join(root, "shield.sock"), root, "socketPath"),
-    launchAgentPath: launchAgentPath ?? join(home, "Library", "LaunchAgents", `${SHIELD_LABEL}.plist`),
+    launchAgentPath: launchAgentPath ?? join(home, "Library", "LaunchAgents", `${serviceLabel}.plist`),
     launchdDomain: `gui/${numericUid(uid)}`,
   };
   paths.launchAgentPath = absolutePath(paths.launchAgentPath, "launchAgentPath");
   if (resolve(dirname(paths.launchAgentPath)) !== resolve(home, "Library", "LaunchAgents")) {
     throw new Error("launchAgentPath must be under homeDir/Library/LaunchAgents");
   }
-  paths.launchdTarget = `${paths.launchdDomain}/${SHIELD_LABEL}`;
+  paths.launchdTarget = `${paths.launchdDomain}/${serviceLabel}`;
   Object.freeze(paths);
   canonicalShieldPaths.add(paths);
   return paths;
+}
+
+export function shieldPathsForConfigPath({ env = process.env, configPath } = {}) {
+  for (const lane of ["subscription", "managed"]) {
+    const paths = shieldPaths({ env, lane });
+    if (configPath === paths.configPath) return paths;
+  }
+  throw new Error("shield daemon config path must be a canonical lane-specific private configuration path");
 }
 
 export async function readShieldIdentity({ paths, io = defaultIo } = {}) {
@@ -230,9 +242,13 @@ function assertWritablePaths(paths) {
   if (!canonicalShieldPaths.has(paths)) {
     throw new Error("shield paths must be a canonical object returned by shieldPaths");
   }
-  if (paths.configPath !== join(paths.rootDir, "config.json") || paths.identityPath !== join(paths.rootDir, "identity.json") || paths.policyStatePath !== join(paths.rootDir, "policy-state.json") || paths.policyBundlePath !== join(paths.rootDir, "policy-bundle.json") || paths.policyPublicKeyPath !== join(paths.rootDir, "policy-public.pem") || paths.assetsProvisionPath !== join(paths.rootDir, "assets-provision.json") || paths.socketPath !== join(paths.rootDir, "shield.sock")) {
+  if ((paths.lane !== "subscription" && paths.lane !== "managed") || paths.serviceLabel !== `${SHIELD_LABEL}.${paths.lane}` || paths.configPath !== join(paths.rootDir, "config.json") || paths.identityPath !== join(paths.rootDir, "identity.json") || paths.policyStatePath !== join(paths.rootDir, "policy-state.json") || paths.policyBundlePath !== join(paths.rootDir, "policy-bundle.json") || paths.policyPublicKeyPath !== join(paths.rootDir, "policy-public.pem") || paths.assetsProvisionPath !== join(paths.rootDir, "assets-provision.json") || paths.socketPath !== join(paths.rootDir, "shield.sock")) {
     throw new Error("shield paths must use the canonical AirKit Shield state layout");
   }
+}
+
+function assertLane(lane) {
+  if (lane !== "subscription" && lane !== "managed") throw new Error("shield lane must be subscription or managed");
 }
 
 function assertCanonicalPolicyStatePath(paths) {

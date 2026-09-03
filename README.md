@@ -10,8 +10,8 @@ keeps machine state outside git, and verifies the installed launch path.
   [`docs/install.md`](docs/install.md)
 - Local audit daemon, audit UI, exports, retention, client completeness, and
   gap interpretation: [`docs/audit.md`](docs/audit.md)
-- Sensitive Egress Shield Phase 1 lifecycle, coverage, and its deliberately
-  disabled transport-only boundary: [`docs/install.md`](docs/install.md)
+- Sensitive Egress Shield provision, policy lifecycle, audit projection, and
+  declared-launcher boundary: the Shield section below
 - Launch-path, routing, statusline, Headroom/cache evidence, and completion
   guard lessons: [`docs/runtime-lessons.md`](docs/runtime-lessons.md)
 - External-client adapter flow for Pi and OpenCode: the `Pi and OpenCode`
@@ -113,30 +113,55 @@ without turning the audit store into a payload browser. See
 [`docs/audit.md`](docs/audit.md) for the UI surface, safe export path, gated
 reveal flow, and gap interpretation rules.
 
-## Sensitive Egress Shield (Phase 1)
+## Sensitive Egress Shield
 
-AirKit includes a **disabled-by-default** local Shield transport foundation for
-AirKit-managed Claude launches. Phase 1 is intentionally not a data-protection
-feature: its daemon fails closed because it has no selectable production
-allow-all policy, and it does not yet scan, redact, approve, or enforce content
-decisions. Those capabilities are deferred to later phases. Do not enable or
-describe this phase as a way to protect source code, prompts, credentials, or
-other sensitive data.
+AirKit includes a disabled-by-default local Sensitive Egress Shield for
+profiles that explicitly opt into a declared managed launcher lane. It evaluates
+a signed OPA/Wasm policy with provisioned Gitleaks and Privacy worker facts,
+can require a launcher-owned one-time local approval, and writes a
+metadata-only terminal decision before forwarding. Missing or invalid policy,
+assets, audit durability, identity, or approval capability blocks; there is no
+allow-all fallback.
 
-Inspect its lifecycle without changing machine state:
+Provisioning is deliberately external and preview-first. Policy bundles,
+Gitleaks, Privacy Filter worker/model assets, public keys, credentials, and
+provider origins are never downloaded during a request or packaged with AirKit.
+After reviewing each preview, explicitly apply only the required local writes:
 
 ```bash
+airkit shield policy install --bundle <policy-bundle> --public-key <policy-public-key>
+airkit shield privacy provision --bundle <privacy-manifest> --gitleaks <gitleaks-executable>
 airkit shield install
+
+airkit shield policy install --bundle <policy-bundle> --public-key <policy-public-key> --write
+airkit shield privacy provision --bundle <privacy-manifest> --gitleaks <gitleaks-executable> --write
+airkit shield install --write
 airkit shield status
 airkit shield doctor
 ```
 
-`airkit shield install --write` installs its per-user service only after you
-review the preview. `airkit shield start` and `airkit shield stop` control that
-service; `airkit shield launch --lane subscription|managed -- command [args...]`
-is the child-only loopback transport entrypoint used by supported launchers.
-See [`docs/install.md`](docs/install.md) for the full boundary. The audit
-service records evidence; it is not Shield enforcement.
+The asset references must resolve to canonical, user-owned regular files, with
+no symlink or group/world write permission. Provisioning verifies SHA-256; the
+Privacy manifest pins its worker/version/protocol and runs a redaction
+self-test. Runtime worker validation repeats before spawn. The policy bundle
+validates signature, compiled Wasm digest/ABI, detector versions, and self-test.
+
+Only declared AirKit-managed launchers are protected when their profile enables
+Shield: `airclaude`, generated `cclaude-*`, `hr-airclaude`, and
+`hr-claude-web`. Direct `command claude`, browsers, `curl`, and undeclared
+wrappers are outside the control. A profile must expose that enablement and lane
+in its own catalog; this public repository does not silently enable Shield for a
+shell or route. Do not manually wrap `airclaude` with `shield launch`.
+
+Policy replacement is atomic: a live daemon is quiesced, a reachable old proxy
+rejects the transition, and a replacement must publish matching policy/detector
+identity before it is ready. Exact retry coalescing is bounded, in memory, and
+cannot cross a policy/detector version, lane, destination, digest, or expiry.
+Shield decisions and transitions are visible only as safe metadata in
+`airkit audit open`; the UI never becomes a prompt, match, or credential
+viewer. To roll back, apply a reviewed profile revision with Shield disabled,
+then use `airkit shield stop` if appropriate—do not edit CCR, OAuth, Shield, or
+Audit state by hand.
 
 ## Pi and OpenCode
 

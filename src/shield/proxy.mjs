@@ -24,10 +24,10 @@ const INTERNAL_HEADERS = new Set([
   "x-airkit-shield-approval-socket",
 ]);
 
-export async function startShieldProxy({ capability, controlCapability, targetOrigin, decide, decisionCache = null, decisionContext = null, approvalBroker = null, recordShieldDecision = null, onDecision = null, isReady = null, port = 0 } = {}) {
+export async function startShieldProxy({ capability, controlCapability, targetOrigin, allowDestinationLeases = false, decide, decisionCache = null, decisionContext = null, approvalBroker = null, recordShieldDecision = null, onDecision = null, isReady = null, port = 0 } = {}) {
   assertCapability(capability);
   assertCapability(controlCapability);
-  const target = assertFixedTarget(targetOrigin);
+  const target = targetOrigin === undefined && allowDestinationLeases ? null : assertFixedTarget(targetOrigin);
   if (typeof decide !== "function") throw new TypeError("shield proxy decision function is required");
   const record = resolveDecisionRecorder(recordShieldDecision, onDecision);
   if (approvalBroker !== null && (typeof approvalBroker?.request !== "function" || typeof approvalBroker?.consume !== "function")) {
@@ -41,8 +41,9 @@ export async function startShieldProxy({ capability, controlCapability, targetOr
     throw new TypeError("shield decision cache configuration is invalid");
   }
   const approvalRegistration = { channel: null };
+  const destinationLeases = new Map();
   const server = createServer((request, response) => {
-    void handleShieldRequest({ request, response, capability, controlCapability, target, decide, decisionCache, decisionContext, approvalBroker, recordShieldDecision: record, isReady, approvalRegistration });
+    void handleShieldRequest({ request, response, capability, controlCapability, target, allowDestinationLeases, destinationLeases, decide, decisionCache, decisionContext, approvalBroker, recordShieldDecision: record, isReady, approvalRegistration });
   });
   await listenLoopback(server, port);
   const address = server.address();
@@ -56,14 +57,26 @@ export async function startShieldProxy({ capability, controlCapability, targetOr
   };
 }
 
-async function handleShieldRequest({ request, response, capability, controlCapability, target, decide, decisionCache, decisionContext, approvalBroker, recordShieldDecision, isReady, approvalRegistration }) {
+async function handleShieldRequest({ request, response, capability, controlCapability, target, allowDestinationLeases, destinationLeases, decide, decisionCache, decisionContext, approvalBroker, recordShieldDecision, isReady, approvalRegistration }) {
   const startedAt = Date.now();
   const isApprovalRegistration = request.method === "POST" && request.url === "/_airkit/shield/approval-channel";
-  if (!isApprovalRegistration && !capabilityMatches(request.headers["x-airkit-shield"], capability)) {
+  const isLeaseRequest = request.url === "/_airkit/shield/destination-lease" && (request.method === "POST" || request.method === "DELETE");
+  if (isLeaseRequest) {
+    if (!allowDestinationLeases || !capabilityMatches(request.headers["x-airkit-shield-control"], controlCapability)) { request.resume(); await finish(response, { status: 401, code: "shield_unauthorized" }); return; }
+    const lease = await readDestinationLease(request, request.method === "POST");
+    if (lease === null || (request.method === "POST" && destinationLeases.has(lease.capability))) { await finish(response, { status: 403, code: "shield_blocked" }); return; }
+    if (request.method === "POST") destinationLeases.set(lease.capability, lease.target);
+    else destinationLeases.delete(lease.capability);
+    response.writeHead(204, { "cache-control": "no-store" }); response.end(); return;
+  }
+  const requestCapability = request.headers["x-airkit-shield"];
+  const leaseTarget = allowDestinationLeases ? destinationLeases.get(String(requestCapability ?? "")) ?? null : null;
+  if (!isApprovalRegistration && !capabilityMatches(requestCapability, capability) && leaseTarget === null) {
     request.resume();
     await finish(response, { status: 401, code: "shield_unauthorized" });
     return;
   }
+  const requestTarget = leaseTarget ?? target;
 
   if (request.method === "GET" && request.url === "/_airkit/shield/ready") {
     request.resume();
@@ -159,7 +172,8 @@ async function handleShieldRequest({ request, response, capability, controlCapab
   if (lifecycle.signal.aborted) return;
 
   try {
-    const upstream = await fetch(new URL(path, target), {
+    if (requestTarget === null) throw new Error("shield destination lease is required");
+    const upstream = await fetch(new URL(path, requestTarget), {
       method: request.method,
       headers: forwardHeaders(request.headers),
       body: request.method === "GET" || request.method === "HEAD" ? undefined : forwardBody,
@@ -226,6 +240,25 @@ async function readApprovalRegistration(request) {
   } catch {
     return null;
   }
+}
+
+async function readDestinationLease(request, needsTarget) {
+  const chunks = [];
+  let bytes = 0;
+  try {
+    for await (const chunk of request) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      bytes += buffer.byteLength;
+      if (bytes > 4 * 1024) return null;
+      chunks.push(buffer);
+    }
+    const value = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.capability !== "string" || !/^[A-Za-z0-9._-]{32,512}$/.test(value.capability)) return null;
+    if (!needsTarget) return { capability: value.capability };
+    const target = assertFixedTarget(value.targetOrigin);
+    if (target.protocol !== "http:" || target.hostname !== "127.0.0.1") return null;
+    return { capability: value.capability, target };
+  } catch { return null; }
 }
 
 async function discardResponse(upstream) {

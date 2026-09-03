@@ -27,9 +27,21 @@ const identity = {
 
 test("Shield identity is private and loopback-only", () => {
   const paths = shieldPaths({ homeDir: "/tmp/home", uid: 501 });
-  assert.equal(paths.rootDir, "/tmp/home/.local/state/airkit-shield");
-  assert.equal(paths.launchdTarget, "gui/501/com.airkit.shield");
+  assert.equal(paths.rootDir, "/tmp/home/.local/state/airkit-shield/subscription");
+  assert.equal(paths.launchdTarget, "gui/501/com.airkit.shield.subscription");
   assert.throws(() => assertShieldIdentity({ origin: "https://proxy.example" }), /loopback/);
+});
+
+test("Shield paths isolate managed and subscription state and services", () => {
+  const subscription = shieldPaths({ homeDir: "/tmp/home", uid: 501, lane: "subscription" });
+  const managed = shieldPaths({ homeDir: "/tmp/home", uid: 501, lane: "managed" });
+
+  assert.notEqual(subscription.rootDir, managed.rootDir);
+  assert.notEqual(subscription.configPath, managed.configPath);
+  assert.notEqual(subscription.identityPath, managed.identityPath);
+  assert.notEqual(subscription.policyStatePath, managed.policyStatePath);
+  assert.notEqual(subscription.launchAgentPath, managed.launchAgentPath);
+  assert.notEqual(subscription.launchdTarget, managed.launchdTarget);
 });
 
 test("shield paths reject relative and escaping overrides", () => {
@@ -140,7 +152,7 @@ test("identity writes reject a state directory owned by another uid", async () =
 
 test("identity writes reject caller paths outside the canonical layout", async () => {
   const homeDir = await mkdtemp("/tmp/airkit-shield-");
-  const identityPath = join(homeDir, ".local", "state", "airkit-shield", "other.json");
+  const identityPath = join(homeDir, ".local", "state", "airkit-shield", "subscription", "other.json");
   const paths = shieldPaths({ homeDir, uid: 501, identityPath });
   try {
     await assert.rejects(writeShieldIdentity({ paths, identity }), /canonical/);
