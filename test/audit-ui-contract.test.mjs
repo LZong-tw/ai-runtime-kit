@@ -145,6 +145,31 @@ test("Shield audit accepts only metadata and exposes a static metadata-only quer
   assert.doesNotMatch(calls[0].sql, /payload_json|reveal|body|url|header/i);
 });
 
+test("Shield correlation identifiers are bounded opaque values, never raw evidence", () => {
+  const fields = {
+    source: "airkit-shield",
+    source_version: "1",
+    logical_request_id: "shield-request-1",
+    session_id: "shield-session-1",
+    client: "airkit-shield",
+    event_kind: "shield_decision",
+    payload: {
+      lane: "subscription", destination_class: "subscription", policy_version: "policy-1",
+      gitleaks_version: "8.24.3", privacy_version: "privacy-1", action: "block",
+      reasons: ["confirmed_secret"], transform_count: 0, override: false, elapsed_ms: 1,
+    },
+  };
+  for (const [logical_request_id, session_id] of [
+    ["raw prompt with secret", "shield-session-1"],
+    ["https://private.invalid/request", "shield-session-1"],
+    ["shield-request-1", "/Users/private/repo"],
+    ["shield-request-1", "Bearer grant-token"],
+    ["x".repeat(129), "shield-session-1"],
+  ]) {
+    assert.throws(() => validateAuditEvent(createAuditEvent({ ...fields, logical_request_id, session_id })), /shield.*(identifier|metadata)|logical_request/i);
+  }
+});
+
 test("Shield UI and status projections preserve accounting-neutral protection state", async () => {
   const adapter = createAuditUiAdapter({
     async query() {

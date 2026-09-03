@@ -78,6 +78,22 @@ test("durable recorder sends an encrypted transport envelope and waits for audit
   assert.deepEqual(JSON.parse(plaintext.toString("utf8")).payload, buildShieldDecisionEvent(decision, { now: () => new Date("2026-09-02T00:00:00.000Z") }).payload);
 });
 
+test("durable recorder persists policy transition events through the same encrypted channel", async () => {
+  const sent = [];
+  const recorder = createShieldDecisionRecorder({
+    masterKey: MASTER_KEY,
+    client: { send: async (envelope) => { sent.push(envelope); return { status: "committed" }; } },
+  });
+  await recorder.recordShieldPolicyTransition({ ...decision, action: "transition", reasonCodes: ["policy_replaced"] });
+  const plaintext = decryptAuditValue({
+    masterKey: MASTER_KEY,
+    purpose: "request-evidence/v1",
+    identity: sent[0].event_id,
+    encrypted: sent[0].encrypted,
+  });
+  assert.equal(JSON.parse(plaintext.toString("utf8")).event_kind, "shield_policy_transition");
+});
+
 test("audit transport failure and full spool fail closed", async () => {
   const unavailable = createShieldDecisionRecorder({
     masterKey: MASTER_KEY,

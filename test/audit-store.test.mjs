@@ -18,6 +18,8 @@ import { DatabaseSync } from "node:sqlite";
 import { AUDIT_EVENT_VERSION, createAuditEvent } from "../src/audit/event.mjs";
 import { AUDIT_MIGRATIONS } from "../src/audit/migrations.mjs";
 import { openAuditStore } from "../src/audit/store.mjs";
+import { queryAuditStore } from "../src/audit/query.mjs";
+import { buildShieldPolicyTransitionEvent } from "../src/shield/audit.mjs";
 
 const REQUIRED_NODE = [22, 13, 0];
 
@@ -125,6 +127,21 @@ test("shield audit events persist only the allowlisted metadata table", async ()
         logical_request_id: "shield-request-1", lane: "subscription", action: "block", reasons: "confirmed_secret",
       }]);
       assert.equal(store.query("SELECT count(*) AS n FROM source_events WHERE event_id = ?", ["shield-event-1"])[0].n, 0);
+      await store.ingestEvent(buildShieldPolicyTransitionEvent({
+        requestId: "shield-transition-1",
+        lane: "subscription",
+        destinationClass: "subscription",
+        bundleVersion: "policy-2",
+        detectorVersions: { gitleaks: "8.24.3", privacy: "privacy-1" },
+        action: "transition",
+        reasonCodes: ["policy_replaced"],
+        transformCount: 0,
+        override: false,
+        elapsedMs: 1,
+      }));
+      const transitionRows = queryAuditStore(store, "shield_policy_transitions").map((row) => ({ ...row }));
+      assert.equal(transitionRows[0].action, "transition");
+      assert.equal(transitionRows[0].policy_version, "policy-2");
       await assert.rejects(store.ingestEvent(createAuditEvent({
         ...event,
         event_id: "shield-event-raw",

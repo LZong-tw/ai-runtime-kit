@@ -88,6 +88,14 @@ test("query store uses static SQL and caps every bridge result", () => {
   assert.throws(() => queryAuditStore(store, "DROP TABLE requests"), /allowed|unknown/i);
 });
 
+test("Shield detail query binds exactly one opaque request ID and its limit", () => {
+  const calls = [];
+  const store = { query(sql, params) { calls.push({ sql, params }); return []; } };
+  queryAuditStore(store, "shield_decision", { id: "shield-request-1" }, { limit: 7 });
+  assert.match(calls[0].sql, /FROM shield_decisions WHERE logical_request_id = \?/);
+  assert.deepEqual(calls[0].params, ["shield-request-1", 7]);
+});
+
 test("audit daemon owns the query socket and reports its lifecycle", async () => {
   await withSocket(async ({ root, socketPath }) => {
     const ingestSocketPath = join(root, "auditd.sock");

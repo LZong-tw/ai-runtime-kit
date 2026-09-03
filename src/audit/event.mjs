@@ -108,8 +108,9 @@ export function validateAuditEvent(event) {
   ) {
     throwInvalid("logical_request_id is required for audit events");
   }
-  if (SHIELD_EVENT_KINDS.has(event.event_kind) && !isNonEmptyString(event.logical_request_id)) {
-    throwInvalid("logical_request_id is required for shield audit events");
+  if (SHIELD_EVENT_KINDS.has(event.event_kind) && (!safeId(event.logical_request_id)
+    || (event.session_id !== null && event.session_id !== undefined && !safeId(event.session_id)))) {
+    throwInvalid("shield correlation identifiers are invalid");
   }
   if (PROVIDER_ATTEMPT_KINDS.has(event.event_kind) && !isNonEmptyString(event.attempt_id)) {
     throwInvalid(`attempt_id is required for ${event.event_kind}`);

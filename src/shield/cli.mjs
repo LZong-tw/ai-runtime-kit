@@ -54,6 +54,10 @@ async function createDefaultShieldDependencies(dependencies) {
   const paths = dependencies.paths ?? shieldPaths({ env });
   const nodePath = dependencies.nodePath ?? process.execPath;
   const daemonPath = dependencies.daemonPath ?? resolve(repoRoot, "src", "shieldd.mjs");
+  const createDecisionRecorder = dependencies.createDecisionRecorder ?? (async () => {
+    const { createDefaultDecisionRecorder } = await import("../shieldd.mjs");
+    return createDefaultDecisionRecorder({ env });
+  });
   const common = { paths, nodePath, daemonPath, env, ...(dependencies.io ? { io: dependencies.io } : {}), ...(dependencies.runLaunchctl ? { runLaunchctl: dependencies.runLaunchctl } : {}) };
   return {
     async install({ write }) {
@@ -88,9 +92,14 @@ async function createDefaultShieldDependencies(dependencies) {
       const { loadShieldPolicy } = await import("./policy.mjs");
       const preview = await installShieldPolicyProvision({ bundlePath, publicKeyPath, paths, loadPolicy });
       if (!write) return { state: "preview", version: preview.version, detectorVersions: preview.detectorVersions, write: false, restarted: false };
+      const recorder = await createDecisionRecorder();
+      if (typeof recorder?.recordShieldPolicyTransition !== "function") {
+        throw new Error("shield policy transition audit recorder is unavailable");
+      }
       const result = await transitionShieldPolicy({
         ...common,
         installPolicy: () => installShieldPolicyProvision({ bundlePath, publicKeyPath, write: true, paths, loadPolicy }),
+        recordShieldPolicyTransition: recorder.recordShieldPolicyTransition,
       });
       return { state: "degraded", version: result.version, detectorVersions: result.detectorVersions, write: true };
     },
