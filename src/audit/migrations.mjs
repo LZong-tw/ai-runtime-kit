@@ -541,10 +541,73 @@ const SHIELD_METADATA_AUDIT_STATEMENTS = Object.freeze([
 
 const SHIELD_DECISION_SOURCE_STATEMENTS = Object.freeze([
   `ALTER TABLE shield_decisions ADD COLUMN decision_source TEXT NOT NULL DEFAULT 'evaluated'
-    CHECK (decision_source IN ('evaluated', 'cache_hit', 'coalesced'))`,
+    CHECK (decision_source IN ('evaluated', 'cache_hit'))`,
   `ALTER TABLE shield_policy_transitions ADD COLUMN decision_source TEXT NOT NULL DEFAULT 'evaluated'
-    CHECK (decision_source IN ('evaluated', 'cache_hit', 'coalesced'))`,
+    CHECK (decision_source IN ('evaluated', 'cache_hit'))`,
   `INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('audit_schema_version', '5')`,
+]);
+
+const SHIELD_DECISION_SOURCE_COALESCED_STATEMENTS = Object.freeze([
+  `CREATE TABLE shield_decisions_next (
+    event_id TEXT PRIMARY KEY,
+    logical_request_id TEXT NOT NULL CHECK (length(logical_request_id) > 0),
+    session_id TEXT CHECK (session_id IS NULL OR length(session_id) > 0),
+    lane TEXT NOT NULL CHECK (lane IN ('managed', 'subscription', 'unknown')),
+    destination_class TEXT NOT NULL CHECK (destination_class IN ('managed', 'subscription', 'unknown')),
+    policy_version TEXT NOT NULL CHECK (length(policy_version) > 0),
+    gitleaks_version TEXT NOT NULL CHECK (length(gitleaks_version) > 0),
+    privacy_version TEXT NOT NULL CHECK (length(privacy_version) > 0),
+    action TEXT NOT NULL CHECK (action IN ('allow', 'block', 'redact', 'require_approval', 'unavailable', 'unauthorized', 'transition')),
+    reasons TEXT NOT NULL CHECK (length(reasons) > 0),
+    transform_count INTEGER NOT NULL CHECK (transform_count >= 0),
+    decision_source TEXT NOT NULL DEFAULT 'evaluated' CHECK (decision_source IN ('evaluated', 'cache_hit', 'coalesced')),
+    override INTEGER NOT NULL CHECK (override IN (0, 1)),
+    elapsed_ms REAL NOT NULL CHECK (elapsed_ms >= 0),
+    observed_at TEXT NOT NULL
+  )`,
+  `INSERT INTO shield_decisions_next (
+    event_id, logical_request_id, session_id, lane, destination_class, policy_version,
+    gitleaks_version, privacy_version, action, reasons, transform_count, decision_source,
+    override, elapsed_ms, observed_at
+  ) SELECT
+    event_id, logical_request_id, session_id, lane, destination_class, policy_version,
+    gitleaks_version, privacy_version, action, reasons, transform_count, decision_source,
+    override, elapsed_ms, observed_at
+  FROM shield_decisions`,
+  `DROP TABLE shield_decisions`,
+  `ALTER TABLE shield_decisions_next RENAME TO shield_decisions`,
+  `CREATE INDEX idx_shield_decisions_request ON shield_decisions(logical_request_id, observed_at)`,
+  `CREATE INDEX idx_shield_decisions_session ON shield_decisions(session_id, observed_at)`,
+  `CREATE TABLE shield_policy_transitions_next (
+    event_id TEXT PRIMARY KEY,
+    logical_request_id TEXT NOT NULL CHECK (length(logical_request_id) > 0),
+    session_id TEXT CHECK (session_id IS NULL OR length(session_id) > 0),
+    lane TEXT NOT NULL CHECK (lane IN ('managed', 'subscription', 'unknown')),
+    destination_class TEXT NOT NULL CHECK (destination_class IN ('managed', 'subscription', 'unknown')),
+    policy_version TEXT NOT NULL CHECK (length(policy_version) > 0),
+    gitleaks_version TEXT NOT NULL CHECK (length(gitleaks_version) > 0),
+    privacy_version TEXT NOT NULL CHECK (length(privacy_version) > 0),
+    action TEXT NOT NULL CHECK (action IN ('allow', 'block', 'redact', 'require_approval', 'unavailable', 'unauthorized', 'transition')),
+    reasons TEXT NOT NULL CHECK (length(reasons) > 0),
+    transform_count INTEGER NOT NULL CHECK (transform_count >= 0),
+    decision_source TEXT NOT NULL DEFAULT 'evaluated' CHECK (decision_source IN ('evaluated', 'cache_hit', 'coalesced')),
+    override INTEGER NOT NULL CHECK (override IN (0, 1)),
+    elapsed_ms REAL NOT NULL CHECK (elapsed_ms >= 0),
+    observed_at TEXT NOT NULL
+  )`,
+  `INSERT INTO shield_policy_transitions_next (
+    event_id, logical_request_id, session_id, lane, destination_class, policy_version,
+    gitleaks_version, privacy_version, action, reasons, transform_count, decision_source,
+    override, elapsed_ms, observed_at
+  ) SELECT
+    event_id, logical_request_id, session_id, lane, destination_class, policy_version,
+    gitleaks_version, privacy_version, action, reasons, transform_count, decision_source,
+    override, elapsed_ms, observed_at
+  FROM shield_policy_transitions`,
+  `DROP TABLE shield_policy_transitions`,
+  `ALTER TABLE shield_policy_transitions_next RENAME TO shield_policy_transitions`,
+  `CREATE INDEX idx_shield_policy_transitions_request ON shield_policy_transitions(logical_request_id, observed_at)`,
+  `INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('audit_schema_version', '6')`,
 ]);
 
 export const AUDIT_MIGRATIONS = Object.freeze([
@@ -572,6 +635,11 @@ export const AUDIT_MIGRATIONS = Object.freeze([
     id: "005_shield_decision_source",
     statements: SHIELD_DECISION_SOURCE_STATEMENTS,
     checksum: checksumStatements(SHIELD_DECISION_SOURCE_STATEMENTS),
+  }),
+  Object.freeze({
+    id: "006_shield_decision_source_coalesced",
+    statements: SHIELD_DECISION_SOURCE_COALESCED_STATEMENTS,
+    checksum: checksumStatements(SHIELD_DECISION_SOURCE_COALESCED_STATEMENTS),
   }),
 ]);
 

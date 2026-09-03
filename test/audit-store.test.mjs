@@ -16,7 +16,7 @@ import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 
 import { AUDIT_EVENT_VERSION, createAuditEvent } from "../src/audit/event.mjs";
-import { AUDIT_MIGRATIONS } from "../src/audit/migrations.mjs";
+import { AUDIT_MIGRATIONS, checksumMigration } from "../src/audit/migrations.mjs";
 import { openAuditStore } from "../src/audit/store.mjs";
 import { queryAuditStore } from "../src/audit/query.mjs";
 import { buildShieldPolicyTransitionEvent } from "../src/shield/audit.mjs";
@@ -149,6 +149,61 @@ test("shield audit events persist only the allowlisted metadata table", async ()
         event_id: "shield-event-raw",
         payload: { ...event.payload, headers: { authorization: "shield-raw-sentinel" } },
       })), /shield metadata/i);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+test("pre-fix Shield decision-source migration history upgrades immutably to coalesced", async () => {
+  await withRoot(async (paths) => {
+    const preFixMigrations = AUDIT_MIGRATIONS.filter((migration) => migration.id !== "006_shield_decision_source_coalesced");
+    const legacy = new DatabaseSync(paths.databasePath);
+    try {
+      legacy.exec(`CREATE TABLE audit_migrations (
+        id TEXT PRIMARY KEY,
+        checksum TEXT NOT NULL,
+        applied_at TEXT,
+        started_at TEXT NOT NULL
+      )`);
+      for (const migration of preFixMigrations) {
+        legacy.exec(migration.statements.join(";\n"));
+        legacy.prepare(`INSERT INTO audit_migrations (id, checksum, applied_at, started_at)
+          VALUES (?, ?, '2026-08-13T01:00:00.000Z', '2026-08-13T01:00:00.000Z')`)
+          .run(migration.id, checksumMigration(migration));
+      }
+      legacy.prepare(`INSERT INTO shield_decisions (
+        event_id, logical_request_id, session_id, lane, destination_class, policy_version,
+        gitleaks_version, privacy_version, action, reasons, transform_count, decision_source,
+        override, elapsed_ms, observed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run("legacy-shield-event", "legacy-shield-request", null, "managed", "managed", "policy-1",
+          "gitleaks-1", "privacy-1", "allow", "policy_allow", 0, "cache_hit", 0, 1,
+          "2026-08-13T01:00:00.000Z");
+    } finally {
+      legacy.close();
+    }
+
+    const store = openTestStore(paths);
+    try {
+      assert.ok(AUDIT_MIGRATIONS.some((migration) => migration.id === "006_shield_decision_source_coalesced"));
+      assert.equal(store.query("SELECT decision_source FROM shield_decisions WHERE event_id = ?", ["legacy-shield-event"])[0].decision_source, "cache_hit");
+      const migration = store.query("SELECT checksum FROM audit_migrations WHERE id = ?", ["005_shield_decision_source"])[0];
+      assert.equal(migration.checksum, checksumMigration(AUDIT_MIGRATIONS.find((entry) => entry.id === "005_shield_decision_source")));
+      assert.deepEqual(await store.ingestEvent(createAuditEvent({
+        event_id: "coalesced-shield-event",
+        source: "airkit-shield",
+        source_version: "1",
+        logical_request_id: "coalesced-shield-request",
+        client: "airkit-shield",
+        event_kind: "shield_decision",
+        payload: {
+          lane: "managed", destination_class: "managed", policy_version: "policy-2",
+          gitleaks_version: "gitleaks-2", privacy_version: "privacy-2", action: "allow",
+          reasons: ["policy_allow"], transform_count: 0, decision_source: "coalesced", override: false, elapsed_ms: 1,
+        },
+      })), { status: "committed" });
+      assert.equal(store.query("SELECT decision_source FROM shield_decisions WHERE event_id = ?", ["coalesced-shield-event"])[0].decision_source, "coalesced");
     } finally {
       store.close();
     }
