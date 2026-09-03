@@ -500,6 +500,45 @@ const COMPLETE_APPROVED_AUDIT_DESIGN_COLUMNS = Object.freeze([
     VALUES ('audit_schema_version', '3')`,
 ]);
 
+const SHIELD_METADATA_AUDIT_STATEMENTS = Object.freeze([
+  `CREATE TABLE IF NOT EXISTS shield_decisions (
+    event_id TEXT PRIMARY KEY,
+    logical_request_id TEXT NOT NULL CHECK (length(logical_request_id) > 0),
+    session_id TEXT CHECK (session_id IS NULL OR length(session_id) > 0),
+    lane TEXT NOT NULL CHECK (lane IN ('managed', 'subscription', 'unknown')),
+    destination_class TEXT NOT NULL CHECK (destination_class IN ('managed', 'subscription', 'unknown')),
+    policy_version TEXT NOT NULL CHECK (length(policy_version) > 0),
+    gitleaks_version TEXT NOT NULL CHECK (length(gitleaks_version) > 0),
+    privacy_version TEXT NOT NULL CHECK (length(privacy_version) > 0),
+    action TEXT NOT NULL CHECK (action IN ('allow', 'block', 'redact', 'require_approval', 'unavailable', 'unauthorized', 'transition')),
+    reasons TEXT NOT NULL CHECK (length(reasons) > 0),
+    transform_count INTEGER NOT NULL CHECK (transform_count >= 0),
+    override INTEGER NOT NULL CHECK (override IN (0, 1)),
+    elapsed_ms REAL NOT NULL CHECK (elapsed_ms >= 0),
+    observed_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS shield_policy_transitions (
+    event_id TEXT PRIMARY KEY,
+    logical_request_id TEXT NOT NULL CHECK (length(logical_request_id) > 0),
+    session_id TEXT CHECK (session_id IS NULL OR length(session_id) > 0),
+    lane TEXT NOT NULL CHECK (lane IN ('managed', 'subscription', 'unknown')),
+    destination_class TEXT NOT NULL CHECK (destination_class IN ('managed', 'subscription', 'unknown')),
+    policy_version TEXT NOT NULL CHECK (length(policy_version) > 0),
+    gitleaks_version TEXT NOT NULL CHECK (length(gitleaks_version) > 0),
+    privacy_version TEXT NOT NULL CHECK (length(privacy_version) > 0),
+    action TEXT NOT NULL CHECK (action IN ('allow', 'block', 'redact', 'require_approval', 'unavailable', 'unauthorized', 'transition')),
+    reasons TEXT NOT NULL CHECK (length(reasons) > 0),
+    transform_count INTEGER NOT NULL CHECK (transform_count >= 0),
+    override INTEGER NOT NULL CHECK (override IN (0, 1)),
+    elapsed_ms REAL NOT NULL CHECK (elapsed_ms >= 0),
+    observed_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_shield_decisions_request ON shield_decisions(logical_request_id, observed_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_shield_decisions_session ON shield_decisions(session_id, observed_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_shield_policy_transitions_request ON shield_policy_transitions(logical_request_id, observed_at)`,
+  `INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('audit_schema_version', '4')`,
+]);
+
 export const AUDIT_MIGRATIONS = Object.freeze([
   Object.freeze({
     id: "001_initial_audit_store",
@@ -515,6 +554,11 @@ export const AUDIT_MIGRATIONS = Object.freeze([
     id: "003_complete_approved_audit_design_columns",
     statements: COMPLETE_APPROVED_AUDIT_DESIGN_COLUMNS,
     checksum: checksumStatements(COMPLETE_APPROVED_AUDIT_DESIGN_COLUMNS),
+  }),
+  Object.freeze({
+    id: "004_shield_metadata_audit",
+    statements: SHIELD_METADATA_AUDIT_STATEMENTS,
+    checksum: checksumStatements(SHIELD_METADATA_AUDIT_STATEMENTS),
   }),
 ]);
 

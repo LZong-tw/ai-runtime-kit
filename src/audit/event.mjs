@@ -19,6 +19,8 @@ export const AUDIT_EVENT_KINDS = Object.freeze([
   "collector_gap",
   "retention_pruned",
   "payload_revealed",
+  "shield_decision",
+  "shield_policy_transition",
 ]);
 
 const AUDIT_EVENT_KIND_SET = new Set(AUDIT_EVENT_KINDS);
@@ -37,6 +39,13 @@ const REQUEST_KINDS = new Set([
   "request_failed",
 ]);
 const MAX_CANONICAL_PAYLOAD_BYTES = 64 * 1024;
+const SHIELD_EVENT_KINDS = new Set(["shield_decision", "shield_policy_transition"]);
+const SHIELD_ACTIONS = new Set(["allow", "block", "redact", "require_approval", "unavailable", "unauthorized", "transition"]);
+const SHIELD_LANES = new Set(["managed", "subscription", "unknown"]);
+const SHIELD_PAYLOAD_KEYS = [
+  "lane", "destination_class", "policy_version", "gitleaks_version", "privacy_version",
+  "action", "reasons", "transform_count", "override", "elapsed_ms",
+];
 
 export class AuditEventError extends Error {
   constructor(message) {
@@ -99,6 +108,9 @@ export function validateAuditEvent(event) {
   ) {
     throwInvalid("logical_request_id is required for audit events");
   }
+  if (SHIELD_EVENT_KINDS.has(event.event_kind) && !isNonEmptyString(event.logical_request_id)) {
+    throwInvalid("logical_request_id is required for shield audit events");
+  }
   if (PROVIDER_ATTEMPT_KINDS.has(event.event_kind) && !isNonEmptyString(event.attempt_id)) {
     throwInvalid(`attempt_id is required for ${event.event_kind}`);
   }
@@ -133,7 +145,9 @@ export function validateAuditEvent(event) {
     throwInvalid("client is required");
   }
 
-  const payload = cloneJsonSafeValue(event.payload ?? null, "payload");
+  const payload = SHIELD_EVENT_KINDS.has(event.event_kind)
+    ? validateShieldMetadata(event.payload)
+    : cloneJsonSafeValue(event.payload ?? null, "payload");
   let encodedPayload;
   try {
     encodedPayload = JSON.stringify(payload);
@@ -158,6 +172,44 @@ export function validateAuditEvent(event) {
     event_kind: event.event_kind,
     payload,
   });
+}
+
+export function isShieldAuditEvent(event) {
+  return SHIELD_EVENT_KINDS.has(event?.event_kind);
+}
+
+function validateShieldMetadata(payload) {
+  if (!isPlainRecord(payload) || !hasExactKeys(payload, SHIELD_PAYLOAD_KEYS)
+    || !SHIELD_LANES.has(payload.lane) || !SHIELD_LANES.has(payload.destination_class)
+    || !safeId(payload.policy_version) || !safeId(payload.gitleaks_version) || !safeId(payload.privacy_version)
+    || !SHIELD_ACTIONS.has(payload.action) || !Array.isArray(payload.reasons)
+    || payload.reasons.length < 1 || payload.reasons.length > 32 || !payload.reasons.every(safeId)
+    || !Number.isInteger(payload.transform_count) || payload.transform_count < 0 || payload.transform_count > 1_000_000
+    || typeof payload.override !== "boolean" || !Number.isFinite(payload.elapsed_ms) || payload.elapsed_ms < 0 || payload.elapsed_ms > 3_600_000) {
+    throwInvalid("shield metadata is invalid");
+  }
+  return Object.freeze({
+    lane: payload.lane,
+    destination_class: payload.destination_class,
+    policy_version: payload.policy_version,
+    gitleaks_version: payload.gitleaks_version,
+    privacy_version: payload.privacy_version,
+    action: payload.action,
+    reasons: Object.freeze([...payload.reasons]),
+    transform_count: payload.transform_count,
+    override: payload.override,
+    elapsed_ms: payload.elapsed_ms,
+  });
+}
+
+function hasExactKeys(value, expected) {
+  const keys = Object.keys(value).sort();
+  const allowed = [...expected].sort();
+  return keys.length === allowed.length && keys.every((key, index) => key === allowed[index]);
+}
+
+function safeId(value) {
+  return typeof value === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(value);
 }
 
 function cloneJsonSafeValue(value, label, seen = new WeakSet()) {

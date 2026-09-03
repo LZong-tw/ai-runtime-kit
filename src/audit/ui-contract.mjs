@@ -2,6 +2,7 @@ const UI_SCHEMA_VERSION = 1;
 const MAX_ARGUMENTS = 2;
 const MAX_ARGUMENT_LENGTH = 256;
 const ALLOWED_STATES = new Set(["healthy", "degraded", "stopped", "blocked"]);
+const SHIELD_STATES = new Set(["protected", "approval", "blocked", "unavailable"]);
 
 // The UI contract is deliberately narrower than the audit-store schema. A CCR
 // UI must be able to render useful metadata without becoming a payload reveal
@@ -32,6 +33,21 @@ const QUERY_FIELDS = Object.freeze({
     "cache_reuse_ratio", "normalization_state",
   ],
   gaps: ["gap_kind", "source", "reason", "recorded_at", "affected_client", "affected_session", "resolution"],
+  shield_decisions: [
+    "logical_request_id", "session_id", "lane", "destination_class", "policy_version",
+    "gitleaks_version", "privacy_version", "action", "reasons", "transform_count", "override",
+    "elapsed_ms", "observed_at",
+  ],
+  shield_decision: [
+    "logical_request_id", "session_id", "lane", "destination_class", "policy_version",
+    "gitleaks_version", "privacy_version", "action", "reasons", "transform_count", "override",
+    "elapsed_ms", "observed_at",
+  ],
+  shield_policy_transitions: [
+    "logical_request_id", "session_id", "lane", "destination_class", "policy_version",
+    "gitleaks_version", "privacy_version", "action", "reasons", "transform_count", "override",
+    "elapsed_ms", "observed_at",
+  ],
 });
 
 const QUERY_NAMES = new Set(Object.keys(QUERY_FIELDS));
@@ -83,6 +99,7 @@ export async function statusAuditUi({ status } = {}) {
       database: projectStatusSection(result?.database, ["present", "ok"]),
       service: projectStatusSection(result?.service, ["installed", "loaded", "stale"]),
       keychain: projectStatusSection(result?.keychain, ["present"]),
+      shield: projectShieldStatus(result?.shield),
       metadata_only: true,
       payload_included: false,
       projection: "audit-ui-status-v1",
@@ -91,6 +108,18 @@ export async function statusAuditUi({ status } = {}) {
   } catch {
     return degradedStatus("audit_status_unavailable");
   }
+}
+
+export function projectShieldStatus(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const state = SHIELD_STATES.has(value.state) ? value.state : "unavailable";
+  const fields = ["policy_version", "gitleaks_version", "privacy_version", "coverage", "bypass"];
+  return Object.fromEntries([
+    ["state", state],
+    ...fields
+      .filter((field) => Object.hasOwn(value, field))
+      .map((field) => [field, safeShieldScalar(value[field])]),
+  ]);
 }
 
 function validateQuery(name, args) {
@@ -126,6 +155,12 @@ function safeScalar(value) {
   if (value === null || typeof value === "boolean" || typeof value === "number") return value;
   if (typeof value !== "string") return null;
   return scrubText(value).slice(0, 512);
+}
+
+function safeShieldScalar(value) {
+  if (typeof value === "boolean" || typeof value === "number") return value;
+  if (typeof value === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(value)) return value;
+  return null;
 }
 
 function scrubText(value) {
@@ -170,6 +205,7 @@ function degradedStatus(code) {
     database: {},
     service: {},
     keychain: {},
+    shield: { state: "unavailable" },
     metadata_only: true,
     payload_included: false,
     projection: "audit-ui-status-v1",
