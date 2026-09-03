@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { resolveShieldLauncher } from "../src/shield/launchers.mjs";
+import { resolveShieldLauncher, shieldLauncherDescriptors } from "../src/shield/launchers.mjs";
 import { createDecisionCache } from "../src/shield/decision-cache.mjs";
 
 test("every declared AirKit and Headroom launcher has an explicit Shield disposition", () => {
@@ -10,7 +10,6 @@ test("every declared AirKit and Headroom launcher has an explicit Shield disposi
     ["cclaude-work", "managed", "managed", ["cclaude-*", "airclaude", "shield", "managed"]],
     ["hr-airclaude", "managed", "managed", ["headroom", "airclaude", "shield", "managed"]],
     ["hr-claude-web", "managed", "managed", ["headroom", "web", "shield", "managed"]],
-    ["hr-claude-sub", "subscription", "subscription", ["headroom", "subscription", "shield", "subscription"]],
   ];
 
   for (const [launcher, lane, destinationClass, hopChain] of cases) {
@@ -27,10 +26,24 @@ test("declared direct client bypasses are visible and undeclared helpers fail cl
     resolveShieldLauncher({ launcher: "claude", mode: "auto" }),
     { coverage: "bypass", bypassReason: "direct_client" },
   );
+  assert.deepEqual(
+    resolveShieldLauncher({ launcher: "hr-claude-sub", mode: "auto", headroom: true }),
+    { coverage: "bypass", bypassReason: "zsh_direct_subscription" },
+  );
   assert.throws(
     () => resolveShieldLauncher({ launcher: "hr-unknown", mode: "auto" }),
     /undeclared Shield launcher/i,
   );
+});
+
+test("launcher descriptor inventory exposes protected hops and zsh bypasses distinctly", () => {
+  const descriptors = shieldLauncherDescriptors();
+  assert.deepEqual(descriptors.find((entry) => entry.launcher === "hr-claude-sub"), {
+    coverage: "bypass", launcher: "hr-claude-sub", bypassReason: "zsh_direct_subscription",
+  });
+  assert.deepEqual(descriptors.find((entry) => entry.launcher === "hr-claude-web"), {
+    coverage: "protected", launcher: "hr-claude-web", lanes: ["managed"], hopChain: ["headroom", "web", "shield", "managed"],
+  });
 });
 
 test("decision cache reuses only exact terminal retry metadata and invalidates transitions", async () => {

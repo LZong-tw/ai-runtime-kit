@@ -23,17 +23,14 @@ const PROTECTED_LAUNCHERS = Object.freeze([
     lanes: ["managed"],
     hopChain: ["headroom", "web", "shield", "managed"],
   }),
-  Object.freeze({
-    matches: (value) => value === "hr-claude-sub",
-    name: "hr-claude-sub",
-    lanes: ["subscription"],
-    hopChain: ["headroom", "subscription", "shield", "subscription"],
-  }),
 ]);
 
 const DECLARED_BYPASSES = Object.freeze({
   claude: "direct_client",
   "command-claude": "direct_client",
+  // This external zsh helper invokes `command claude` directly. It remains a
+  // bypass until that launcher itself routes through Shield.
+  "hr-claude-sub": "zsh_direct_subscription",
 });
 
 export function resolveShieldLauncher({ launcher, mode, headroom = false, providerOverride } = {}) {
@@ -59,7 +56,11 @@ export function resolveShieldLauncher({ launcher, mode, headroom = false, provid
 }
 
 export function shieldLauncherDescriptors() {
-  return Object.freeze(PROTECTED_LAUNCHERS.map(({ name, lanes, hopChain }) => Object.freeze({
+  const protectedDescriptors = PROTECTED_LAUNCHERS.map(({ name, lanes, hopChain }) => Object.freeze({
     coverage: "protected", launcher: name, lanes: [...lanes], hopChain: [...hopChain],
-  })));
+  }));
+  const bypassDescriptors = Object.entries(DECLARED_BYPASSES).map(([launcher, bypassReason]) => Object.freeze({
+    coverage: "bypass", launcher, bypassReason,
+  }));
+  return Object.freeze([...protectedDescriptors, ...bypassDescriptors]);
 }

@@ -35,17 +35,17 @@ const QUERY_FIELDS = Object.freeze({
   gaps: ["gap_kind", "source", "reason", "recorded_at", "affected_client", "affected_session", "resolution"],
   shield_decisions: [
     "logical_request_id", "session_id", "lane", "destination_class", "policy_version",
-    "gitleaks_version", "privacy_version", "action", "reasons", "transform_count", "override",
+    "gitleaks_version", "privacy_version", "action", "reasons", "transform_count", "decision_source", "override",
     "elapsed_ms", "observed_at",
   ],
   shield_decision: [
     "logical_request_id", "session_id", "lane", "destination_class", "policy_version",
-    "gitleaks_version", "privacy_version", "action", "reasons", "transform_count", "override",
+    "gitleaks_version", "privacy_version", "action", "reasons", "transform_count", "decision_source", "override",
     "elapsed_ms", "observed_at",
   ],
   shield_policy_transitions: [
     "logical_request_id", "session_id", "lane", "destination_class", "policy_version",
-    "gitleaks_version", "privacy_version", "action", "reasons", "transform_count", "override",
+    "gitleaks_version", "privacy_version", "action", "reasons", "transform_count", "decision_source", "override",
     "elapsed_ms", "observed_at",
   ],
 });

@@ -42,9 +42,10 @@ const MAX_CANONICAL_PAYLOAD_BYTES = 64 * 1024;
 const SHIELD_EVENT_KINDS = new Set(["shield_decision", "shield_policy_transition"]);
 const SHIELD_ACTIONS = new Set(["allow", "block", "redact", "require_approval", "unavailable", "unauthorized", "transition"]);
 const SHIELD_LANES = new Set(["managed", "subscription", "unknown"]);
+const SHIELD_DECISION_SOURCES = new Set(["evaluated", "cache_hit"]);
 const SHIELD_PAYLOAD_KEYS = [
   "lane", "destination_class", "policy_version", "gitleaks_version", "privacy_version",
-  "action", "reasons", "transform_count", "override", "elapsed_ms",
+  "action", "reasons", "transform_count", "decision_source", "override", "elapsed_ms",
 ];
 
 export class AuditEventError extends Error {
@@ -180,26 +181,31 @@ export function isShieldAuditEvent(event) {
 }
 
 function validateShieldMetadata(payload) {
-  if (!isPlainRecord(payload) || !hasExactKeys(payload, SHIELD_PAYLOAD_KEYS)
-    || !SHIELD_LANES.has(payload.lane) || !SHIELD_LANES.has(payload.destination_class)
-    || !isShieldOpaqueId(payload.policy_version) || !isShieldOpaqueId(payload.gitleaks_version) || !isShieldOpaqueId(payload.privacy_version)
-    || !SHIELD_ACTIONS.has(payload.action) || !Array.isArray(payload.reasons)
-    || payload.reasons.length < 1 || payload.reasons.length > 32 || !payload.reasons.every(isShieldOpaqueId)
-    || !Number.isInteger(payload.transform_count) || payload.transform_count < 0 || payload.transform_count > 1_000_000
-    || typeof payload.override !== "boolean" || !Number.isFinite(payload.elapsed_ms) || payload.elapsed_ms < 0 || payload.elapsed_ms > 3_600_000) {
+  const normalized = isPlainRecord(payload) && !Object.hasOwn(payload, "decision_source")
+    ? { ...payload, decision_source: "evaluated" }
+    : payload;
+  if (!isPlainRecord(normalized) || !hasExactKeys(normalized, SHIELD_PAYLOAD_KEYS)
+    || !SHIELD_LANES.has(normalized.lane) || !SHIELD_LANES.has(normalized.destination_class)
+    || !isShieldOpaqueId(normalized.policy_version) || !isShieldOpaqueId(normalized.gitleaks_version) || !isShieldOpaqueId(normalized.privacy_version)
+    || !SHIELD_ACTIONS.has(normalized.action) || !Array.isArray(normalized.reasons)
+    || normalized.reasons.length < 1 || normalized.reasons.length > 32 || !normalized.reasons.every(isShieldOpaqueId)
+    || !Number.isInteger(normalized.transform_count) || normalized.transform_count < 0 || normalized.transform_count > 1_000_000
+    || !SHIELD_DECISION_SOURCES.has(normalized.decision_source)
+    || typeof normalized.override !== "boolean" || !Number.isFinite(normalized.elapsed_ms) || normalized.elapsed_ms < 0 || normalized.elapsed_ms > 3_600_000) {
     throwInvalid("shield metadata is invalid");
   }
   return Object.freeze({
-    lane: payload.lane,
-    destination_class: payload.destination_class,
-    policy_version: payload.policy_version,
-    gitleaks_version: payload.gitleaks_version,
-    privacy_version: payload.privacy_version,
-    action: payload.action,
-    reasons: Object.freeze([...payload.reasons]),
-    transform_count: payload.transform_count,
-    override: payload.override,
-    elapsed_ms: payload.elapsed_ms,
+    lane: normalized.lane,
+    destination_class: normalized.destination_class,
+    policy_version: normalized.policy_version,
+    gitleaks_version: normalized.gitleaks_version,
+    privacy_version: normalized.privacy_version,
+    action: normalized.action,
+    reasons: Object.freeze([...normalized.reasons]),
+    transform_count: normalized.transform_count,
+    decision_source: normalized.decision_source,
+    override: normalized.override,
+    elapsed_ms: normalized.elapsed_ms,
   });
 }
 

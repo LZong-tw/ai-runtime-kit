@@ -4,7 +4,8 @@ import { encryptAuditValue } from "../audit/crypto.mjs";
 const ACTIONS = new Set(["allow", "block", "redact", "require_approval", "unavailable", "unauthorized", "transition"]);
 const LANES = new Set(["managed", "subscription", "unknown"]);
 const DESTINATION_CLASSES = new Set(["managed", "subscription", "unknown"]);
-const DECISION_KEYS = ["action", "bundleVersion", "destinationClass", "detectorVersions", "elapsedMs", "lane", "override", "reasonCodes", "requestId", "transformCount"];
+const DECISION_KEYS = ["action", "bundleVersion", "decisionSource", "destinationClass", "detectorVersions", "elapsedMs", "lane", "override", "reasonCodes", "requestId", "transformCount"];
+const DECISION_SOURCES = new Set(["evaluated", "cache_hit"]);
 
 export function buildShieldDecisionEvent(decision, { now = () => new Date() } = {}) {
   return buildShieldEvent("shield_decision", decision, { now });
@@ -34,6 +35,7 @@ function buildShieldEvent(eventKind, decision, { now }) {
       action: metadata.action,
       reasons: metadata.reasonCodes,
       transform_count: metadata.transformCount,
+      decision_source: metadata.decisionSource,
       override: metadata.override,
       elapsed_ms: metadata.elapsedMs,
     },
@@ -104,26 +106,31 @@ export async function recordShieldDecision(decision, dependencies) {
 }
 
 export function assertShieldDecisionMetadata(value) {
-  if (!isPlainObject(value) || !hasExactKeys(value, DECISION_KEYS)
-    || typeof value.requestId !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(value.requestId)
-    || !LANES.has(value.lane) || !DESTINATION_CLASSES.has(value.destinationClass)
-    || typeof value.bundleVersion !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(value.bundleVersion)
-    || !isVersionMap(value.detectorVersions) || !ACTIONS.has(value.action)
-    || !validReasonCodes(value.reasonCodes) || !Number.isInteger(value.transformCount) || value.transformCount < 0 || value.transformCount > 1_000_000
-    || typeof value.override !== "boolean" || !Number.isFinite(value.elapsedMs) || value.elapsedMs < 0 || value.elapsedMs > 3_600_000) {
+  const normalized = isPlainObject(value) && !Object.hasOwn(value, "decisionSource")
+    ? { ...value, decisionSource: "evaluated" }
+    : value;
+  if (!isPlainObject(normalized) || !hasExactKeys(normalized, DECISION_KEYS)
+    || typeof normalized.requestId !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(normalized.requestId)
+    || !LANES.has(normalized.lane) || !DESTINATION_CLASSES.has(normalized.destinationClass)
+    || typeof normalized.bundleVersion !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(normalized.bundleVersion)
+    || !isVersionMap(normalized.detectorVersions) || !ACTIONS.has(normalized.action)
+    || !validReasonCodes(normalized.reasonCodes) || !Number.isInteger(normalized.transformCount) || normalized.transformCount < 0 || normalized.transformCount > 1_000_000
+    || !DECISION_SOURCES.has(normalized.decisionSource)
+    || typeof normalized.override !== "boolean" || !Number.isFinite(normalized.elapsedMs) || normalized.elapsedMs < 0 || normalized.elapsedMs > 3_600_000) {
     throw new TypeError("shield decision metadata is invalid");
   }
   return Object.freeze({
-    requestId: value.requestId,
-    lane: value.lane,
-    destinationClass: value.destinationClass,
-    bundleVersion: value.bundleVersion,
-    detectorVersions: Object.freeze({ ...value.detectorVersions }),
-    action: value.action,
-    reasonCodes: Object.freeze([...value.reasonCodes]),
-    transformCount: value.transformCount,
-    override: value.override,
-    elapsedMs: value.elapsedMs,
+    requestId: normalized.requestId,
+    lane: normalized.lane,
+    destinationClass: normalized.destinationClass,
+    bundleVersion: normalized.bundleVersion,
+    detectorVersions: Object.freeze({ ...normalized.detectorVersions }),
+    action: normalized.action,
+    reasonCodes: Object.freeze([...normalized.reasonCodes]),
+    transformCount: normalized.transformCount,
+    decisionSource: normalized.decisionSource,
+    override: normalized.override,
+    elapsedMs: normalized.elapsedMs,
   });
 }
 

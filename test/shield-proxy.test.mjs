@@ -83,6 +83,7 @@ test("proxy reuses an exact terminal decision but re-audits and forwards each re
   assert.equal(decisions, 2);
   assert.equal(upstreamCalls, 3);
   assert.equal(events.length, 3);
+  assert.deepEqual(events.map((event) => event.decisionSource), ["evaluated", "cache_hit", "evaluated"]);
 });
 
 test("authentication and decision failure never contact upstream", async (t) => {

@@ -185,7 +185,8 @@ async function handleShieldRequest({ request, response, capability, controlCapab
 async function cachedDecision({ decisionCache, decisionContext, body, evaluate }) {
   const requestDigest = createHash("sha256").update(body).digest("hex");
   const key = { ...decisionContext, requestDigest };
-  const cached = await decisionCache.getOrCompute(key, async () => {
+  const prior = decisionCache.get(key);
+  const cached = prior ?? await decisionCache.getOrCompute(key, async () => {
     const decision = await evaluate();
     const redactedBody = decision?.action === "redact" ? validateRedactedBody(decision.redactedBody) : Buffer.alloc(0);
     if (redactedBody === null) throw new Error("shield decision redaction is invalid");
@@ -204,6 +205,7 @@ async function cachedDecision({ decisionCache, decisionContext, body, evaluate }
     destinationClass: decisionContext.destinationClass,
     bundleVersion: decisionContext.policyVersion,
     detectorVersions: decisionContext.detectorVersions,
+    decisionSource: prior === null ? "evaluated" : "cache_hit",
   };
 }
 
@@ -384,6 +386,7 @@ function buildDecisionMetadata(decision, startedAt) {
     action: action === "allow" || action === "block" || action === "redact" || action === "require_approval" ? action : "block",
     reasonCodes,
     transformCount: Number.isInteger(decision?.transformCount) && decision.transformCount >= 0 ? decision.transformCount : 0,
+    decisionSource: decision?.decisionSource === "cache_hit" ? "cache_hit" : "evaluated",
     override: false,
     elapsedMs: Math.max(0, Date.now() - startedAt),
   };

@@ -91,8 +91,11 @@ test("CCR UI contract rejects unknown or oversized queries without invoking stor
 
 test("Shield audit accepts only metadata and exposes a static metadata-only query", async () => {
   const shieldMigration = AUDIT_MIGRATIONS.find((migration) => migration.id === "004_shield_metadata_audit");
+  const decisionSourceMigration = AUDIT_MIGRATIONS.find((migration) => migration.id === "005_shield_decision_source");
   assert.ok(shieldMigration);
+  assert.ok(decisionSourceMigration);
   assert.match(shieldMigration.statements.join("\n"), /CREATE TABLE IF NOT EXISTS shield_decisions/);
+  assert.match(decisionSourceMigration.statements.join("\n"), /decision_source/);
 
   const event = createAuditEvent({
     source: "airkit-shield",
@@ -135,6 +138,7 @@ test("Shield audit accepts only metadata and exposes a static metadata-only quer
         action: "block",
         reasons: "confirmed_secret",
         transform_count: 0,
+        decision_source: "cache_hit",
         override: 0,
         elapsed_ms: 12,
         payload_json: "shield-raw-sentinel",
@@ -186,6 +190,7 @@ test("Shield UI and status projections preserve accounting-neutral protection st
           action: "block",
           reasons: "confirmed_secret",
           transform_count: 0,
+          decision_source: "cache_hit",
           override: false,
           elapsed_ms: 12,
           content: "shield-raw-sentinel",
@@ -208,6 +213,7 @@ test("Shield UI and status projections preserve accounting-neutral protection st
     action: "block",
     reasons: "confirmed_secret",
     transform_count: 0,
+    decision_source: "cache_hit",
     override: false,
     elapsed_ms: 12,
   }]);

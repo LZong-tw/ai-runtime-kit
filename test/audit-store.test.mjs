@@ -118,13 +118,14 @@ test("shield audit events persist only the allowlisted metadata table", async ()
           action: "block",
           reasons: ["confirmed_secret"],
           transform_count: 0,
+          decision_source: "cache_hit",
           override: false,
           elapsed_ms: 8,
         },
       });
       assert.deepEqual(await store.ingestEvent(event), { status: "committed" });
-      assert.deepEqual(store.query("SELECT logical_request_id, lane, action, reasons FROM shield_decisions").map((row) => ({ ...row })), [{
-        logical_request_id: "shield-request-1", lane: "subscription", action: "block", reasons: "confirmed_secret",
+      assert.deepEqual(store.query("SELECT logical_request_id, lane, action, reasons, decision_source FROM shield_decisions").map((row) => ({ ...row })), [{
+        logical_request_id: "shield-request-1", lane: "subscription", action: "block", reasons: "confirmed_secret", decision_source: "cache_hit",
       }]);
       assert.equal(store.query("SELECT count(*) AS n FROM source_events WHERE event_id = ?", ["shield-event-1"])[0].n, 0);
       await store.ingestEvent(buildShieldPolicyTransitionEvent({
@@ -142,6 +143,7 @@ test("shield audit events persist only the allowlisted metadata table", async ()
       const transitionRows = queryAuditStore(store, "shield_policy_transitions").map((row) => ({ ...row }));
       assert.equal(transitionRows[0].action, "transition");
       assert.equal(transitionRows[0].policy_version, "policy-2");
+      assert.equal(transitionRows[0].decision_source, "evaluated");
       await assert.rejects(store.ingestEvent(createAuditEvent({
         ...event,
         event_id: "shield-event-raw",
