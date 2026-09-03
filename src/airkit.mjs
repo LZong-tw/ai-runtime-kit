@@ -33,7 +33,7 @@ import { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs
 import { runShieldCli } from "./shield/cli.mjs";
 import { DEFAULT_BACKGROUND_HOST_GRACE_MS, backgroundHostUsesAdapter, hasBackgroundClaudeHost, scheduleBackgroundHostRelease } from "./shield/background-host.mjs";
 import { resolveShieldLauncher, resolveShieldLauncherMarker } from "./shield/launchers.mjs";
-import { buildShieldChildEnv, createShieldDestinationLease, ensureShieldReady, openShieldApprovalChannel, registerShieldApprovalChannel, renewShieldDestinationLease, revokeShieldDestinationLease, unregisterShieldApprovalChannel } from "./shield/service.mjs";
+import { assertNoPersistedShieldEndpointOverride, buildShieldChildEnv, createShieldDestinationLease, ensureShieldReady, openShieldApprovalChannel, registerShieldApprovalChannel, renewShieldDestinationLease, revokeShieldDestinationLease, unregisterShieldApprovalChannel } from "./shield/service.mjs";
 
 export { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
 export { tailHeadroomSavings } from "./audit/reconcile/headroom.mjs";
@@ -1479,6 +1479,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
   let externalClient;
   if (options.launch !== false) {
     await assertNoInheritedApiKeyHelper(launchEnv);
+    if (profileShield?.enabled === true) await assertNoPersistedShieldEndpointOverride(undefined, launchEnv);
     const { gatewayOrigin, gatewayToken } = await prepareManagedGateway({
       ccrClient,
       currentConfig,
@@ -1516,9 +1517,6 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
       await middleware?.close();
       throw error;
     }
-    const compatibilityLaunch = middleware
-      ? buildCompatibilityLaunch(managed.compatibility, middleware.origin, gatewayToken)
-      : { args: [], env: {} };
     const spawnCommand = options.spawnCommand ?? spawnCommandAsync;
     const inherited = { ...(options.env ?? process.env) };
     for (const key of plan.launch.clearEnv ?? []) delete inherited[key];
@@ -1534,6 +1532,19 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
       shieldLeaseTimer = schedule(() => { void (options.renewShieldDestinationLease ?? renewShieldDestinationLease)({ ready: shieldReady, targetOrigin: shieldLeaseTarget }).catch(() => {}); }, 15_000);
       shieldLeaseTimer.unref?.();
     }
+    const compatibilityLaunch = middleware
+      ? buildCompatibilityLaunch(managed.compatibility, shieldReady?.origin ?? middleware.origin, gatewayToken)
+      : { args: [], env: {} };
+    let shieldCleanedUp = false;
+    const cleanupShieldLaunch = async ({ closeMiddleware = false } = {}) => {
+      if (shieldCleanedUp) return;
+      shieldCleanedUp = true;
+      stopShieldLeaseTimer();
+      if (shieldApprovalRegistered) await (options.unregisterShieldApprovalChannel ?? unregisterShieldApprovalChannel)({ ready: shieldReady }).catch(() => {});
+      await shieldApprovalChannel?.close?.();
+      await (options.revokeShieldDestinationLease ?? revokeShieldDestinationLease)({ ready: shieldReady }).catch(() => {});
+      if (closeMiddleware) await middleware?.close();
+    };
     try {
       if (shieldReady) {
         shieldApprovalChannel = await (options.openShieldApprovalChannel ?? openShieldApprovalChannel)({
@@ -1567,24 +1578,24 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
         stdio: "inherit",
       });
     } catch (error) {
-      await shieldApprovalChannel?.close?.();
-      await middleware?.close();
+      await cleanupShieldLaunch({ closeMiddleware: true });
       throw error;
     }
     try {
-      childStatus = await monitorChildLifecycle(middleware, child, {
+      const lifecycleMiddleware = shieldReady && middleware
+        ? { ...middleware, origin: shieldReady.origin }
+        : middleware;
+      childStatus = await monitorChildLifecycle(lifecycleMiddleware, child, {
         backgroundHostDetector: options.backgroundHostDetector,
         backgroundMiddlewareGraceMs: options.backgroundMiddlewareGraceMs,
         backgroundSetTimeout: options.backgroundSetTimeout,
         preserveForBackground: options.preserveMiddlewareForBackground !== false,
         stderr: options.stderr ?? process.stderr,
         onPreserveBackground: () => { shieldLeaseRetained = true; },
-        onDeferredClose: async () => { stopShieldLeaseTimer(); await (options.revokeShieldDestinationLease ?? revokeShieldDestinationLease)({ ready: shieldReady }).catch(() => {}); },
+        onDeferredClose: async () => await cleanupShieldLaunch(),
       });
     } finally {
-      if (shieldApprovalRegistered) await (options.unregisterShieldApprovalChannel ?? unregisterShieldApprovalChannel)({ ready: shieldReady }).catch(() => {});
-      await shieldApprovalChannel?.close?.();
-      if (!shieldLeaseRetained) { stopShieldLeaseTimer(); await (options.revokeShieldDestinationLease ?? revokeShieldDestinationLease)({ ready: shieldReady }).catch(() => {}); }
+      if (!shieldLeaseRetained) await cleanupShieldLaunch();
     }
   }
 

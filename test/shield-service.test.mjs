@@ -539,6 +539,7 @@ test("AirKit keeps capability out of argv and injects Claude's Shield transport 
     env: {
       ANTHROPIC_API_BASE_URL: "https://stale-provider.invalid",
       ANTHROPIC_BASE_URL: "https://stale-provider.invalid",
+      CLAUDE_AGENT_API_BASE_URL: "https://stale-provider.invalid",
       ANTHROPIC_CUSTOM_HEADERS: "x-tenant: fixture\nX-AirKit-Shield: stale-capability",
       CLAUDE_CODE_OAUTH_TOKEN: "subscription-oauth-sentinel",
       PATH: "/usr/bin",
@@ -553,6 +554,7 @@ test("AirKit keeps capability out of argv and injects Claude's Shield transport 
   assert.deepEqual(calls[0].args, ["true"]);
   assert.equal(calls[0].options.env.ANTHROPIC_API_BASE_URL, "http://127.0.0.1:8811");
   assert.equal(calls[0].options.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:8811");
+  assert.equal(calls[0].options.env.CLAUDE_AGENT_API_BASE_URL, "http://127.0.0.1:8811");
   assert.equal(
     calls[0].options.env.ANTHROPIC_CUSTOM_HEADERS,
     `x-tenant: fixture\nx-airkit-shield: ${capability}`,
@@ -561,6 +563,44 @@ test("AirKit keeps capability out of argv and injects Claude's Shield transport 
   assert.equal(calls[0].options.env.CLAUDE_CODE_OAUTH_TOKEN, "subscription-oauth-sentinel");
   assert.equal(calls[0].args.includes(capability), false);
   assert.equal(calls[0].options.stdio, "inherit");
+});
+
+test("Shield child refuses Claude settings that redirect around its transport", async () => {
+  let spawned = false;
+  await assert.rejects(
+    launchShieldChild({
+      command: "/usr/bin/env",
+      args: ["--settings", '{"env":{"CLAUDE_AGENT_API_BASE_URL":"http://127.0.0.1:4599"}}'],
+      ready: { origin: "http://127.0.0.1:8811", capability, lane: "subscription", targetClass: "subscription" },
+      spawnChild() { spawned = true; },
+    }),
+    /Shield launch settings cannot override.*CLAUDE_AGENT_API_BASE_URL/i,
+  );
+  assert.equal(spawned, false);
+});
+
+test("Shield child refuses persisted Claude settings that redirect around its transport", async () => {
+  const home = await mkdtemp(join(tmpdir(), "airkit-shield-persisted-settings-"));
+  let spawned = false;
+  try {
+    await mkdir(join(home, ".claude"), { recursive: true });
+    await writeFile(join(home, ".claude", "settings.json"), JSON.stringify({
+      env: { CLAUDE_AGENT_API_BASE_URL: "http://127.0.0.1:4599" },
+    }));
+    await assert.rejects(
+      launchShieldChild({
+        command: "/usr/bin/env",
+        args: ["true"],
+        env: { HOME: home, CLAUDE_CONFIG_DIR: join(home, ".claude") },
+        ready: { origin: "http://127.0.0.1:8811", capability, lane: "subscription", targetClass: "subscription" },
+        spawnChild() { spawned = true; },
+      }),
+      /Shield launch settings cannot override.*CLAUDE_AGENT_API_BASE_URL/i,
+    );
+    assert.equal(spawned, false);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 test("Shield launch rejects a capability that cannot be represented as one custom header", async () => {
@@ -749,7 +789,7 @@ test("subscription target launch retains its lease while a matching background h
     },
     shieldLeaseClearInterval: (timer) => cleared.push(timer),
     backgroundHostDetector: async (origin) => {
-      assert.equal(origin, "http://127.0.0.1:8804");
+      assert.equal(origin, "http://127.0.0.1:8811");
       return active;
     },
     backgroundMiddlewareGraceMs: 1_000,

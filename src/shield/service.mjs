@@ -263,6 +263,8 @@ export async function ensureShieldReady({ lane, expectedTargetOrigin, env = proc
 export async function launchShieldChild({ command, args = [], ready, env = process.env, spawnChild = spawn, approvalBroker, createApprovalChannel: createChannel = createLauncherApprovalChannel, registerApprovalChannel: registerChannel = registerShieldApprovalChannel, unregisterApprovalChannel: unregisterChannel = unregisterShieldApprovalChannel } = {}) {
   if (typeof command !== "string" || command.length === 0 || command.includes("\0")) throw new Error("shield launch command is required");
   if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string" || arg.includes("\0"))) throw new Error("shield launch arguments must be strings");
+  assertNoShieldEndpointOverride(args, ready?.origin);
+  await assertNoPersistedShieldEndpointOverride(ready?.origin, env);
   const channel = await openShieldApprovalChannel({ approvalBroker, createApprovalChannel: createChannel });
   let registered = false;
   try {
@@ -366,10 +368,48 @@ export function buildShieldChildEnv(ready, env = process.env) {
     ...env,
     ANTHROPIC_API_BASE_URL: ready.origin,
     ANTHROPIC_BASE_URL: ready.origin,
+    CLAUDE_AGENT_API_BASE_URL: ready.origin,
     ANTHROPIC_CUSTOM_HEADERS: [...keptHeaders, `x-airkit-shield: ${ready.capability}`].join("\n"),
   };
   for (const key of ["AIRKIT_SHIELD_CONTROL_CAPABILITY", "AIRKIT_SHIELD_APPROVAL_CAPABILITY", "AIRKIT_SHIELD_APPROVAL_SOCKET", "AIRKIT_SHIELD_CAPABILITY"]) delete childEnv[key];
   return childEnv;
+}
+
+function assertNoShieldEndpointOverride(args, shieldOrigin) {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--settings-file" || arg.startsWith("--settings-file=")) {
+      throw new Error("Shield launch settings file cannot override the Shield transport");
+    }
+    const raw = arg === "--settings"
+      ? args[index + 1]
+      : arg.startsWith("--settings=")
+        ? arg.slice("--settings=".length)
+        : null;
+    if (raw === null) continue;
+    let settings;
+    try { settings = JSON.parse(raw); } catch { throw new Error("Shield launch settings must be valid JSON"); }
+    assertNoShieldEndpointSettings(settings, shieldOrigin);
+  }
+}
+
+export async function assertNoPersistedShieldEndpointOverride(shieldOrigin, env) {
+  const settingsPath = resolve(env?.CLAUDE_CONFIG_DIR ?? resolve(env?.HOME ?? tmpdir(), ".claude"), "settings.json");
+  let raw;
+  try { raw = await readFile(settingsPath, "utf8"); } catch { return; }
+  let settings;
+  try { settings = JSON.parse(raw); } catch { throw new Error("Shield launch settings must be valid JSON"); }
+  assertNoShieldEndpointSettings(settings, shieldOrigin);
+}
+
+function assertNoShieldEndpointSettings(settings, shieldOrigin) {
+  const configured = settings?.env;
+  if (!configured || typeof configured !== "object" || Array.isArray(configured)) return;
+  for (const key of ["ANTHROPIC_API_BASE_URL", "ANTHROPIC_BASE_URL", "CLAUDE_AGENT_API_BASE_URL"]) {
+    if (Object.hasOwn(configured, key) && configured[key] !== shieldOrigin) {
+      throw new Error(`Shield launch settings cannot override ${key}`);
+    }
+  }
 }
 
 async function createLauncherApprovalChannel({ broker }) {
