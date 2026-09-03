@@ -60,12 +60,18 @@ export async function startShieldProxy({ capability, controlCapability, targetOr
 
 async function handleShieldRequest({ request, response, capability, controlCapability, target, allowDestinationLeases, destinationLeases, decide, decisionCache, decisionContext, approvalBroker, recordShieldDecision, isReady, approvalRegistration, now }) {
   const startedAt = Date.now();
-  const isApprovalRegistration = request.method === "POST" && request.url === "/_airkit/shield/approval-channel";
+  const isApprovalRegistration = request.url === "/_airkit/shield/approval-channel" && (request.method === "POST" || request.method === "DELETE");
   const isLeaseRequest = request.url === "/_airkit/shield/destination-lease" && (request.method === "POST" || request.method === "DELETE");
   if (isLeaseRequest) {
     if (!allowDestinationLeases || !capabilityMatches(request.headers["x-airkit-shield-control"], controlCapability)) { request.resume(); await finish(response, { status: 401, code: "shield_unauthorized" }); return; }
     const lease = await readDestinationLease(request, request.method === "POST", now);
-    if (lease === null || (request.method === "POST" && destinationLeases.has(lease.capability) && !lease.renew)) { await finish(response, { status: 403, code: "shield_blocked" }); return; }
+    const current = request.method === "POST" ? destinationLeases.get(lease?.capability) ?? null : null;
+    if (current !== null && current.expiresAt <= now()) destinationLeases.delete(lease.capability);
+    if (
+      lease === null
+      || (request.method === "POST" && lease.renew && (current === null || current.expiresAt <= now()))
+      || (request.method === "POST" && !lease.renew && current !== null && current.expiresAt > now())
+    ) { await finish(response, { status: 403, code: "shield_blocked" }); return; }
     if (request.method === "POST") destinationLeases.set(lease.capability, { target: lease.target, expiresAt: lease.expiresAt });
     else destinationLeases.delete(lease.capability);
     response.writeHead(204, { "cache-control": "no-store" }); response.end(); return;
@@ -101,6 +107,13 @@ async function handleShieldRequest({ request, response, capability, controlCapab
     if (!capabilityMatches(request.headers["x-airkit-shield-control"], controlCapability)) {
       request.resume();
       await finish(response, { status: 401, code: "shield_unauthorized" });
+      return;
+    }
+    if (request.method === "DELETE") {
+      request.resume();
+      approvalRegistration.channel = null;
+      response.writeHead(204, { "cache-control": "no-store" });
+      response.end();
       return;
     }
     const channel = await readApprovalRegistration(request);

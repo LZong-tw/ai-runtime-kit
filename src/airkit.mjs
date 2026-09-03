@@ -31,8 +31,9 @@ import { createPiAuditRuntime } from "./audit/adapters/pi-extension.mjs";
 import { runAuditCli } from "./audit/cli.mjs";
 import { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
 import { runShieldCli } from "./shield/cli.mjs";
+import { DEFAULT_BACKGROUND_HOST_GRACE_MS, backgroundHostUsesAdapter, hasBackgroundClaudeHost, scheduleBackgroundHostRelease } from "./shield/background-host.mjs";
 import { resolveShieldLauncher, resolveShieldLauncherMarker } from "./shield/launchers.mjs";
-import { buildShieldChildEnv, createShieldDestinationLease, ensureShieldReady, openShieldApprovalChannel, registerShieldApprovalChannel, renewShieldDestinationLease, revokeShieldDestinationLease } from "./shield/service.mjs";
+import { buildShieldChildEnv, createShieldDestinationLease, ensureShieldReady, openShieldApprovalChannel, registerShieldApprovalChannel, renewShieldDestinationLease, revokeShieldDestinationLease, unregisterShieldApprovalChannel } from "./shield/service.mjs";
 
 export { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
 export { tailHeadroomSavings } from "./audit/reconcile/headroom.mjs";
@@ -1522,6 +1523,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     const inherited = { ...(options.env ?? process.env) };
     for (const key of plan.launch.clearEnv ?? []) delete inherited[key];
     let shieldApprovalChannel = null;
+    let shieldApprovalRegistered = false;
     let shieldLeaseRetained = false;
     let shieldLeaseTimer = null;
     let shieldLeaseTarget = null;
@@ -1540,6 +1542,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
         });
         if (shieldApprovalChannel !== null) {
           await (options.registerShieldApprovalChannel ?? registerShieldApprovalChannel)({ ready: shieldReady, channel: shieldApprovalChannel });
+          shieldApprovalRegistered = true;
         }
       }
       const childEnv = {
@@ -1579,6 +1582,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
         onDeferredClose: async () => { stopShieldLeaseTimer(); await (options.revokeShieldDestinationLease ?? revokeShieldDestinationLease)({ ready: shieldReady }).catch(() => {}); },
       });
     } finally {
+      if (shieldApprovalRegistered) await (options.unregisterShieldApprovalChannel ?? unregisterShieldApprovalChannel)({ ready: shieldReady }).catch(() => {});
       await shieldApprovalChannel?.close?.();
       if (!shieldLeaseRetained) { stopShieldLeaseTimer(); await (options.revokeShieldDestinationLease ?? revokeShieldDestinationLease)({ ready: shieldReady }).catch(() => {}); }
     }
@@ -4115,7 +4119,7 @@ function spawnCommandSync(command, args = [], options = {}) {
   });
 }
 
-const DEFAULT_BACKGROUND_MIDDLEWARE_GRACE_MS = 30 * 60 * 1_000;
+const DEFAULT_BACKGROUND_MIDDLEWARE_GRACE_MS = DEFAULT_BACKGROUND_HOST_GRACE_MS;
 
 export async function monitorChildLifecycle(middleware, child, options = {}) {
   let closePromise = null;
@@ -4153,12 +4157,7 @@ export async function monitorChildLifecycle(middleware, child, options = {}) {
 
 async function shouldPreserveMiddlewareForBackground(middleware, options) {
   if (!middleware || options.preserveForBackground !== true) return false;
-  const detector = options.backgroundHostDetector ?? detectBackgroundClaudeHost;
-  try {
-    return await detector(middleware.origin);
-  } catch {
-    return false;
-  }
+  return await hasBackgroundClaudeHost(middleware.origin, options.backgroundHostDetector);
 }
 
 function deferMiddlewareClose(middleware, options) {
@@ -4171,51 +4170,21 @@ function deferMiddlewareClose(middleware, options) {
   options.stderr?.write?.(
     `airkit: background Claude host detected for ${middleware.origin}; keeping compatibility adapter alive while it remains active (checking every ${Math.max(1, Math.round(graceMs / 60_000))} minutes)\n`,
   );
-  const detector = options.backgroundHostDetector ?? detectBackgroundClaudeHost;
-  const schedule = options.backgroundSetTimeout ?? setTimeout;
-  const checkHost = async () => {
-    let stillActive = false;
-    try {
-      stillActive = await detector(middleware.origin);
-    } catch {
-      // A failed process inspection must not keep a compatibility listener alive.
-    }
-    if (!stillActive) {
+  const retained = scheduleBackgroundHostRelease(middleware.origin, {
+    detector: options.backgroundHostDetector,
+    graceMs,
+    setTimeoutFn: options.backgroundSetTimeout,
+    onReleased: async () => {
       await middleware.close().catch(() => {});
       await options.onDeferredClose?.();
-      return;
-    }
-    const nextCheck = schedule(() => { void checkHost(); }, graceMs);
-    nextCheck.unref?.();
-  };
-  const timer = schedule(() => { void checkHost(); }, graceMs);
-  timer.unref?.();
-}
-
-function detectBackgroundClaudeHost(adapterOrigin) {
-  const result = spawnSync("ps", ["eww", "-axo", "pid=,command="], { encoding: "utf8" });
-  if (result.status !== 0 || typeof result.stdout !== "string") return false;
-  let endpoint;
-  try {
-    endpoint = new URL(adapterOrigin).origin;
-  } catch {
-    return false;
+    },
+  });
+  if (!retained) {
+    void middleware.close().catch(() => {});
   }
-  return result.stdout
-    .split(/\r?\n/)
-    .some((line) => backgroundHostUsesAdapter(line, endpoint));
 }
 
-export function backgroundHostUsesAdapter(commandLine, adapterOrigin) {
-  if (typeof commandLine !== "string" || typeof adapterOrigin !== "string") return false;
-  return commandLine.includes("--bg-pty-host")
-    && /(?:^|\/|\s)claude(?:\s|$)/.test(commandLine)
-    // Claude Code carries launch settings on the background host command line;
-    // macOS `ps eww` does not necessarily render those values as environment
-    // assignments. The loopback origin is per-launch, so matching it here is
-    // still narrower than retaining an adapter for an unrelated background host.
-    && commandLine.includes(adapterOrigin);
-}
+export { backgroundHostUsesAdapter };
 
 function sourceShellSnippet(path, functionNames) {
   const script = 'source "$1" || exit $?; shift; for fn in "$@"; do typeset -f "$fn" >/dev/null || exit 1; done';

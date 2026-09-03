@@ -260,12 +260,16 @@ export async function ensureShieldReady({ lane, expectedTargetOrigin, env = proc
   };
 }
 
-export async function launchShieldChild({ command, args = [], ready, env = process.env, spawnChild = spawn, approvalBroker, createApprovalChannel: createChannel = createLauncherApprovalChannel, registerApprovalChannel: registerChannel = registerShieldApprovalChannel } = {}) {
+export async function launchShieldChild({ command, args = [], ready, env = process.env, spawnChild = spawn, approvalBroker, createApprovalChannel: createChannel = createLauncherApprovalChannel, registerApprovalChannel: registerChannel = registerShieldApprovalChannel, unregisterApprovalChannel: unregisterChannel = unregisterShieldApprovalChannel } = {}) {
   if (typeof command !== "string" || command.length === 0 || command.includes("\0")) throw new Error("shield launch command is required");
   if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string" || arg.includes("\0"))) throw new Error("shield launch arguments must be strings");
   const channel = await openShieldApprovalChannel({ approvalBroker, createApprovalChannel: createChannel });
+  let registered = false;
   try {
-    if (channel !== null) await registerChannel({ ready, channel });
+    if (channel !== null) {
+      await registerChannel({ ready, channel });
+      registered = true;
+    }
     const child = spawnChild(command, args, {
       env: buildShieldChildEnv(ready, env),
       shell: false,
@@ -276,6 +280,7 @@ export async function launchShieldChild({ command, args = [], ready, env = proce
       child.once("close", (code, signal) => resolvePromise({ code, signal }));
     });
   } finally {
+    if (registered) await unregisterChannel({ ready }).catch(() => {});
     await channel?.close?.();
   }
 }
@@ -299,6 +304,16 @@ export async function registerShieldApprovalChannel({ ready, channel, paths, io,
     throw new Error("shield approval registration failed");
   }
   if (response?.status !== 204) throw new Error("shield approval registration failed");
+}
+
+export async function unregisterShieldApprovalChannel({ ready, paths, io, fetchImpl = fetch } = {}) {
+  if (!ready?.origin) return;
+  const config = await readShieldConfig({ paths: paths ?? shieldPaths({ lane: ready.lane }), io });
+  const response = await fetchImpl(`${ready.origin}/_airkit/shield/approval-channel`, {
+    method: "DELETE",
+    headers: { "x-airkit-shield-control": config.controlCapability },
+  }).catch(() => null);
+  if (response?.status !== 204) throw new Error("shield approval unregister failed");
 }
 
 export async function createShieldDestinationLease({ ready, targetOrigin, paths, io, fetchImpl = fetch } = {}) {

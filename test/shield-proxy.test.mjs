@@ -664,6 +664,35 @@ test("proxy blocks a client-spoofed approval socket even when it reports approva
   assert.equal(upstreamCalls, 0);
 });
 
+test("approval channel registration is control-only and can be replaced after lifecycle unregister", async (t) => {
+  const firstDirectory = await mkdtemp("/tmp/as1-");
+  const secondDirectory = await mkdtemp("/tmp/as2-");
+  t.after(() => rm(firstDirectory, { recursive: true, force: true }));
+  t.after(() => rm(secondDirectory, { recursive: true, force: true }));
+  const broker = createApprovalBroker({ tty: { interactive: true, write() {}, prompt: async () => "n" } });
+  const first = await createApprovalChannel({ directory: firstDirectory, capability: "a".repeat(32), broker });
+  const second = await createApprovalChannel({ directory: secondDirectory, capability: "b".repeat(32), broker });
+  t.after(() => first.close());
+  t.after(() => second.close());
+  const shield = await startShield(t, {
+    targetOrigin: "https://api.anthropic.com",
+    decide: async () => ({ action: "require_approval", reasonCodes: ["internal-subscription"], lane: "subscription", destinationClass: "subscription", bundleVersion: "policy-1", detectorVersions: { gitleaks: "8", privacy: "1" } }),
+  });
+  await registerApprovalChannel(shield, first);
+  const secondWhileBound = await fetch(`${shield.origin}/_airkit/shield/approval-channel`, {
+    method: "POST", headers: { "x-airkit-shield-control": CONTROL_CAPABILITY, "content-type": "application/json" }, body: JSON.stringify(approvalChannelRegistration(second)),
+  });
+  assert.equal(secondWhileBound.status, 403);
+  const normalDelete = await fetch(`${shield.origin}/_airkit/shield/approval-channel`, { method: "DELETE", headers: { "x-airkit-shield": CAPABILITY } });
+  assert.equal(normalDelete.status, 401);
+  const unregister = await fetch(`${shield.origin}/_airkit/shield/approval-channel`, { method: "DELETE", headers: { "x-airkit-shield-control": CONTROL_CAPABILITY } });
+  assert.equal(unregister.status, 204);
+  const secondRegistration = await fetch(`${shield.origin}/_airkit/shield/approval-channel`, {
+    method: "POST", headers: { "x-airkit-shield-control": CONTROL_CAPABILITY, "content-type": "application/json" }, body: JSON.stringify(approvalChannelRegistration(second)),
+  });
+  assert.equal(secondRegistration.status, 204);
+});
+
 async function registerApprovalChannel(shield, channel) {
   const response = await fetch(`${shield.origin}/_airkit/shield/approval-channel`, {
     method: "POST",
@@ -725,10 +754,31 @@ test("expired destination leases are removed before they can forward without ren
   const expired = await fetch(`${shield.origin}/v1/messages`, { method: "POST", headers: { "x-airkit-shield": lease }, body: "{}" });
   assert.equal(expired.status, 401);
   assert.equal(calls, 0);
+  const renewalAfterExpiry = await fetch(`${shield.origin}/_airkit/shield/destination-lease`, {
+    method: "POST", headers: { "x-airkit-shield-control": CONTROL_CAPABILITY, "content-type": "application/json" }, body: JSON.stringify({ capability: lease, targetOrigin: upstream.origin, expiresAt: now + 1_000, renew: true }),
+  });
+  assert.equal(renewalAfterExpiry.status, 403, "renewal cannot recreate an expired session lease");
   const reusedAfterExpiry = await fetch(`${shield.origin}/_airkit/shield/destination-lease`, {
     method: "POST", headers: { "x-airkit-shield-control": CONTROL_CAPABILITY, "content-type": "application/json" }, body: JSON.stringify({ capability: lease, targetOrigin: upstream.origin, expiresAt: now + 1_000 }),
   });
   assert.equal(reusedAfterExpiry.status, 204, "expiry cleanup permits a fresh session registration");
+});
+
+test("lease renewal cannot revive a capability after control revocation", async (t) => {
+  const upstream = await startFixture(t, async (_request, response) => response.end("ok"));
+  const lease = "f".repeat(32);
+  const shield = await startShield(t, {
+    targetOrigin: undefined,
+    allowDestinationLeases: true,
+    decide: async () => ({ action: "allow", reasonCodes: ["policy_allow"], lane: "managed", destinationClass: "managed", bundleVersion: "policy-1", detectorVersions: { gitleaks: "8", privacy: "1" } }),
+  });
+  const headers = { "x-airkit-shield-control": CONTROL_CAPABILITY, "content-type": "application/json" };
+  const create = await fetch(`${shield.origin}/_airkit/shield/destination-lease`, { method: "POST", headers, body: JSON.stringify({ capability: lease, targetOrigin: upstream.origin, expiresAt: Date.now() + 30_000 }) });
+  assert.equal(create.status, 204);
+  const revoke = await fetch(`${shield.origin}/_airkit/shield/destination-lease`, { method: "DELETE", headers, body: JSON.stringify({ capability: lease }) });
+  assert.equal(revoke.status, 204);
+  const renew = await fetch(`${shield.origin}/_airkit/shield/destination-lease`, { method: "POST", headers, body: JSON.stringify({ capability: lease, targetOrigin: upstream.origin, expiresAt: Date.now() + 30_000, renew: true }) });
+  assert.equal(renew.status, 403);
 });
 
 async function startShield(t, options) {
