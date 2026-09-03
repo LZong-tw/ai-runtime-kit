@@ -1,6 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { readApprovalChannelRegistration, requestApprovalChannel } from "./approval-channel.mjs";
+import { classifyShieldRequest } from "./classify.mjs";
 
 const INSPECTION_MAX_BYTES = 1_048_576;
 const INTERNAL_HEADERS = new Set([
@@ -72,7 +73,11 @@ async function handleShieldRequest({ request, response, capability, controlCapab
       || (request.method === "POST" && lease.renew && (current === null || current.expiresAt <= now()))
       || (request.method === "POST" && !lease.renew && current !== null && current.expiresAt > now())
     ) { await finish(response, { status: 403, code: "shield_blocked" }); return; }
-    if (request.method === "POST") destinationLeases.set(lease.capability, { target: lease.target, expiresAt: lease.expiresAt });
+    if (request.method === "POST") destinationLeases.set(lease.capability, {
+      target: lease.target,
+      expiresAt: lease.expiresAt,
+      launcherContext: lease.launcherContext ?? current?.launcherContext ?? null,
+    });
     else destinationLeases.delete(lease.capability);
     response.writeHead(204, { "cache-control": "no-store" }); response.end(); return;
   }
@@ -86,6 +91,7 @@ async function handleShieldRequest({ request, response, capability, controlCapab
     return;
   }
   const requestTarget = leaseTarget ?? target;
+  const launcherContext = leaseTarget === null ? null : lease?.launcherContext ?? null;
 
   if (request.method === "GET" && request.url === "/_airkit/shield/ready") {
     request.resume();
@@ -156,8 +162,8 @@ async function handleShieldRequest({ request, response, capability, controlCapab
   if (lifecycle.signal.aborted) return;
   let decision;
   try {
-    const evaluate = async () => await decide({ method: request.method ?? "GET", path, bytes: inspection.bytes, body: inspection.body, signal: lifecycle.signal });
-    decision = decisionCache === null
+    const evaluate = async () => await decide({ method: request.method ?? "GET", path, bytes: inspection.bytes, body: inspection.body, signal: lifecycle.signal, launcherContext });
+    decision = decisionCache === null || launcherContext !== null
       ? await evaluate()
       : await cachedDecision({ decisionCache, decisionContext, body: inspection.body, evaluate });
   } catch {
@@ -279,7 +285,12 @@ async function readDestinationLease(request, needsTarget, now = Date.now) {
     const target = assertFixedTarget(value.targetOrigin);
     if (target.protocol !== "http:" || target.hostname !== "127.0.0.1") return null;
     if (!Number.isInteger(value.expiresAt) || value.expiresAt <= now() || value.expiresAt > now() + 120_000 || (value.renew !== undefined && value.renew !== true)) return null;
-    return { capability: value.capability, target, expiresAt: value.expiresAt, renew: value.renew === true };
+    let launcherContext = null;
+    if (Object.hasOwn(value, "launcherContext")) {
+      try { classifyShieldRequest({ body: Buffer.alloc(0), launcherContext: value.launcherContext }); } catch { return null; }
+      launcherContext = value.launcherContext;
+    }
+    return { capability: value.capability, target, expiresAt: value.expiresAt, renew: value.renew === true, launcherContext };
   } catch { return null; }
 }
 

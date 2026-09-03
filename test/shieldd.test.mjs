@@ -269,6 +269,59 @@ test("proxy requests reach Gitleaks, category-only classification, and policy ev
   assert.doesNotMatch(JSON.stringify(policyInputs), /fixture-private-key|aaaa/);
 });
 
+test("a dynamic launch lease carries bounded classifier facts into the daemon policy without raw workspace data", async (t) => {
+  const workspace = "/private/workspaces/restricted-production-app";
+  const upstream = createServer((request, response) => {
+    request.resume();
+    response.end("must not forward");
+  });
+  upstream.listen(0, "127.0.0.1");
+  await once(upstream, "listening");
+  t.after(() => new Promise((resolve) => upstream.close(resolve)));
+  const address = upstream.address();
+  const policyInputs = [];
+  const managedConfig = { ...config, lane: "managed", targetClass: "managed" };
+  delete managedConfig.targetOrigin;
+  const daemon = await startDaemon({
+    config: managedConfig,
+    paths,
+    readPolicyBundle: async () => ({ bundle: {}, publicKey: "pinned-ed25519-public-key" }),
+    createScanner: async () => ({ version: "8.24.0", scan: async () => ({ findings: [] }) }),
+    loadPolicy: async () => ({
+      ...policy,
+      async evaluate(input) {
+        policyInputs.push(input);
+        return { action: input.repositoryClass === "restricted" ? "block" : "allow", reasonCodes: ["workspace_policy"], approvalEligible: false, redactions: [] };
+      },
+    }),
+    writePolicyState: async () => {},
+    writeIdentity: async () => {},
+  });
+  t.after(() => daemon.shield.close());
+  const context = {
+    repository: { remoteHash: createHash("sha256").update(workspace).digest("hex"), trustClass: "restricted" },
+    pathClasses: ["production_config"],
+    destinationClass: "managed",
+    interactive: true,
+  };
+  const lease = "e".repeat(32);
+  const registered = await fetch(`${daemon.shield.origin}/_airkit/shield/destination-lease`, {
+    method: "POST",
+    headers: { "x-airkit-shield-control": managedConfig.controlCapability, "content-type": "application/json" },
+    body: JSON.stringify({ capability: lease, targetOrigin: `http://127.0.0.1:${address.port}`, expiresAt: Date.now() + 30_000, launcherContext: context }),
+  });
+  assert.equal(registered.status, 204);
+  const response = await fetch(`${daemon.shield.origin}/v1/messages`, {
+    method: "POST", headers: { "x-airkit-shield": lease }, body: '{"content":"ordinary"}',
+  });
+  assert.equal(response.status, 403);
+  assert.deepEqual(policyInputs, [{
+    lane: "managed", destinationClass: "managed", interactive: true, repositoryClass: "restricted",
+    pathClasses: ["production_config"], secretFindings: [], piiFindings: [],
+  }]);
+  assert.doesNotMatch(JSON.stringify({ config: managedConfig, policyInputs }), /restricted-production-app|\/private\/workspaces/);
+});
+
 test("missing launcher context reaches policy facts and forwards only after durable audit", async (t) => {
   const upstream = createServer((request, response) => {
     request.resume();
