@@ -691,6 +691,45 @@ test("subscription shield CLI accepts only an explicit loopback dynamic target",
   }
 });
 
+test("subscription target launch renews its lease until its foreground child exits", async () => {
+  const intervals = [];
+  const cleared = [];
+  const events = [];
+  await runShieldCli(["launch", "--lane", "subscription", "--target", "http://127.0.0.1:8804", "--", "echo", "ok"], {
+    stdout: capture().stdout,
+    ensureShieldReady: async () => ({ origin: "http://127.0.0.1:8811", capability: "a".repeat(32), lane: "subscription", targetClass: "subscription" }),
+    createShieldDestinationLease: async ({ ready, targetOrigin }) => {
+      events.push(`create:${targetOrigin}`);
+      return { ...ready, capability: "b".repeat(32) };
+    },
+    renewShieldDestinationLease: async ({ ready, targetOrigin }) => {
+      events.push(`renew:${ready.capability}:${targetOrigin}`);
+      return true;
+    },
+    revokeShieldDestinationLease: async ({ ready }) => events.push(`revoke:${ready.capability}`),
+    shieldLeaseSetInterval: (callback, delay) => {
+      assert.equal(delay, 15_000);
+      const timer = { unref() {} };
+      intervals.push({ callback, timer });
+      return timer;
+    },
+    shieldLeaseClearInterval: (timer) => cleared.push(timer),
+    launchShieldChild: async () => {
+      assert.equal(intervals.length, 1);
+      await intervals[0].callback();
+      events.push("child-exit");
+      return { code: 0 };
+    },
+  });
+  assert.deepEqual(events, [
+    "create:http://127.0.0.1:8804",
+    `renew:${"b".repeat(32)}:http://127.0.0.1:8804`,
+    "child-exit",
+    `revoke:${"b".repeat(32)}`,
+  ]);
+  assert.deepEqual(cleared, [intervals[0].timer]);
+});
+
 test("shield install applies lifecycle only with --write", async () => {
   const calls = [];
   const output = capture();

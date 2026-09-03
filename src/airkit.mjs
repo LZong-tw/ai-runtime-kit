@@ -32,7 +32,7 @@ import { runAuditCli } from "./audit/cli.mjs";
 import { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
 import { runShieldCli } from "./shield/cli.mjs";
 import { resolveShieldLauncher, resolveShieldLauncherMarker } from "./shield/launchers.mjs";
-import { buildShieldChildEnv, createShieldDestinationLease, ensureShieldReady, openShieldApprovalChannel, registerShieldApprovalChannel, revokeShieldDestinationLease } from "./shield/service.mjs";
+import { buildShieldChildEnv, createShieldDestinationLease, ensureShieldReady, openShieldApprovalChannel, registerShieldApprovalChannel, renewShieldDestinationLease, revokeShieldDestinationLease } from "./shield/service.mjs";
 
 export { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
 export { tailHeadroomSavings } from "./audit/reconcile/headroom.mjs";
@@ -1523,6 +1523,15 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     for (const key of plan.launch.clearEnv ?? []) delete inherited[key];
     let shieldApprovalChannel = null;
     let shieldLeaseRetained = false;
+    let shieldLeaseTimer = null;
+    let shieldLeaseTarget = null;
+    const stopShieldLeaseTimer = () => { if (shieldLeaseTimer !== null) { (options.shieldLeaseClearInterval ?? clearInterval)(shieldLeaseTimer); shieldLeaseTimer = null; } };
+    if (shieldReady?.lane === "managed") {
+      shieldLeaseTarget = middleware?.origin ?? gatewayOrigin;
+      const schedule = options.shieldLeaseSetInterval ?? setInterval;
+      shieldLeaseTimer = schedule(() => { void (options.renewShieldDestinationLease ?? renewShieldDestinationLease)({ ready: shieldReady, targetOrigin: shieldLeaseTarget }).catch(() => {}); }, 15_000);
+      shieldLeaseTimer.unref?.();
+    }
     try {
       if (shieldReady) {
         shieldApprovalChannel = await (options.openShieldApprovalChannel ?? openShieldApprovalChannel)({
@@ -1563,14 +1572,15 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
       childStatus = await monitorChildLifecycle(middleware, child, {
         backgroundHostDetector: options.backgroundHostDetector,
         backgroundMiddlewareGraceMs: options.backgroundMiddlewareGraceMs,
+        backgroundSetTimeout: options.backgroundSetTimeout,
         preserveForBackground: options.preserveMiddlewareForBackground !== false,
         stderr: options.stderr ?? process.stderr,
         onPreserveBackground: () => { shieldLeaseRetained = true; },
-        onDeferredClose: async () => await (options.revokeShieldDestinationLease ?? revokeShieldDestinationLease)({ ready: shieldReady }).catch(() => {}),
+        onDeferredClose: async () => { stopShieldLeaseTimer(); await (options.revokeShieldDestinationLease ?? revokeShieldDestinationLease)({ ready: shieldReady }).catch(() => {}); },
       });
     } finally {
       await shieldApprovalChannel?.close?.();
-      if (!shieldLeaseRetained) await (options.revokeShieldDestinationLease ?? revokeShieldDestinationLease)({ ready: shieldReady }).catch(() => {});
+      if (!shieldLeaseRetained) { stopShieldLeaseTimer(); await (options.revokeShieldDestinationLease ?? revokeShieldDestinationLease)({ ready: shieldReady }).catch(() => {}); }
     }
   }
 

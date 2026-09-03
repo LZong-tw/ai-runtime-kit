@@ -5164,6 +5164,11 @@ test("enabled Shield replaces only the spawned AirClaude endpoint and capability
   const capability = "fixture-capability-012345678901234567890";
   const events = [];
   const spawnCalls = [];
+  const leaseTimers = [];
+  const clearedLeaseTimers = [];
+  const childListeners = new Map();
+  let spawned;
+  const spawnedPromise = new Promise((resolve) => { spawned = resolve; });
   const approvalChannel = {
     socketPath: "/tmp/airkit-shield-approval-fixture.sock",
     capability: "a".repeat(32),
@@ -5184,7 +5189,7 @@ test("enabled Shield replaces only the spawned AirClaude endpoint and capability
   ccrClient.ensureGateway = async () => events.push("gateway-ready");
 
   try {
-    const result = await prepareLaunch(catalog, "launch-example", {
+    const launch = prepareLaunch(catalog, "launch-example", {
       ccrClient,
       commandExists: async () => true,
       configDir,
@@ -5215,13 +5220,31 @@ test("enabled Shield replaces only the spawned AirClaude endpoint and capability
         assert.equal(ready.capability, "lease-capability-012345678901234567890");
         assert.equal(channel, approvalChannel);
       },
+      shieldLeaseSetInterval: (callback, delay) => {
+        assert.equal(delay, 15_000);
+        const timer = { unref() {} };
+        leaseTimers.push({ callback, timer });
+        return timer;
+      },
+      shieldLeaseClearInterval: (timer) => clearedLeaseTimers.push(timer),
+      renewShieldDestinationLease: async ({ ready, targetOrigin }) => {
+        events.push("lease-renew");
+        assert.equal(ready.capability, "lease-capability-012345678901234567890");
+        assert.equal(targetOrigin, "http://127.0.0.1:3456");
+      },
       env: launchEnv,
       runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
       runtimeVersions: passingRuntimeVersions(),
       spawnCommand: (command, args, options) => {
         events.push("spawn");
         spawnCalls.push({ args, command, env: options.env });
-        return { status: 0 };
+        spawned();
+        return {
+          once(event, listener) {
+            childListeners.set(event, listener);
+            return this;
+          },
+        };
       },
       revokeShieldDestinationLease: async ({ ready }) => {
         events.push("lease-revoke");
@@ -5229,7 +5252,14 @@ test("enabled Shield replaces only the spawned AirClaude endpoint and capability
       },
     });
 
-    assert.deepEqual(events, ["gateway-ready", "shield-ready", "lease-create", "approval-open", "approval-register", "spawn", "approval-close", "lease-revoke"]);
+    await spawnedPromise;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(leaseTimers.length, 1);
+    await leaseTimers[0].callback();
+    childListeners.get("exit")(0);
+    const result = await launch;
+    assert.deepEqual(events, ["gateway-ready", "shield-ready", "lease-create", "approval-open", "approval-register", "spawn", "lease-renew", "approval-close", "lease-revoke"]);
+    assert.deepEqual(clearedLeaseTimers, [leaseTimers[0].timer]);
     assert.equal(spawnCalls[0].env.ANTHROPIC_API_BASE_URL, "http://127.0.0.1:8811");
     assert.equal(spawnCalls[0].env.ANTHROPIC_BASE_URL, "http://127.0.0.1:8811");
     assert.equal(
@@ -5423,6 +5453,65 @@ test("prepareLaunch keeps the compatibility adapter alive for a matching backgro
 
     assert.equal(result.childStatus, 0);
     assert.equal(adapterClosed, 0, "background-capable adapters outlive the foreground Claude process");
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("a managed Shield lease renews for a live background host then revokes exactly once", async () => {
+  const catalog = compatibilityCatalog();
+  catalog.profiles[0].shield = { enabled: true, lane: "managed" };
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-shield-background-lease-"));
+  const intervalCallbacks = [];
+  const timeoutCallbacks = [];
+  const cleared = [];
+  const events = [];
+  let active = true;
+
+  try {
+    const result = await prepareLaunch(catalog, "launch-example", {
+      ccrClient: ccrTestClient([]),
+      commandExists: async () => true,
+      configDir,
+      env: { DEMO_API_KEY: "runtime-secret", HOME: configDir },
+      runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
+      runtimeVersions: passingRuntimeVersions(),
+      startCompatibilityMiddleware: async () => ({
+        close: async () => events.push("middleware-close"),
+        origin: "http://127.0.0.1:4599",
+      }),
+      ensureShieldReady: async () => ({ origin: "http://127.0.0.1:8811", capability: "b".repeat(32), lane: "managed", targetClass: "managed" }),
+      createShieldDestinationLease: async ({ ready }) => ({ ...ready, capability: "c".repeat(32) }),
+      renewShieldDestinationLease: async ({ targetOrigin }) => events.push(`renew:${targetOrigin}`),
+      revokeShieldDestinationLease: async () => events.push("revoke"),
+      openShieldApprovalChannel: async () => null,
+      shieldLeaseSetInterval: (callback, delay) => {
+        assert.equal(delay, 15_000);
+        const timer = { unref() {} };
+        intervalCallbacks.push({ callback, timer });
+        return timer;
+      },
+      shieldLeaseClearInterval: (timer) => cleared.push(timer),
+      backgroundHostDetector: async () => active,
+      backgroundMiddlewareGraceMs: 1_000,
+      backgroundSetTimeout: (callback) => {
+        const timer = { unref() {} };
+        timeoutCallbacks.push(callback);
+        return timer;
+      },
+      spawnCommand: () => ({ status: 0 }),
+    });
+
+    assert.equal(result.childStatus, 0);
+    assert.equal(intervalCallbacks.length, 1);
+    await intervalCallbacks[0].callback();
+    assert.deepEqual(events, ["renew:http://127.0.0.1:4599"]);
+    assert.equal(timeoutCallbacks.length, 1);
+    active = false;
+    await timeoutCallbacks[0]();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(events, ["renew:http://127.0.0.1:4599", "middleware-close", "revoke"]);
+    assert.deepEqual(cleared, [intervalCallbacks[0].timer]);
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }
