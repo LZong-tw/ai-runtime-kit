@@ -1,5 +1,6 @@
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -5157,6 +5158,37 @@ test("profile-scoped Shield rollback removes only child Shield wiring", () => {
   assert.deepEqual(rollbackPlan.launch.clearEnv, protectedPlan.launch.clearEnv);
 });
 
+test("Shield launch derives a bounded git repository identity and reviewed profile trust", async () => {
+  const catalog = compatibilityCatalog();
+  catalog.profiles[0].shield = { enabled: true, lane: "managed", trustClass: "restricted" };
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-shield-git-context-"));
+  const observed = [];
+  try {
+    await prepareLaunch(catalog, "launch-example", {
+      ccrClient: ccrTestClient([]), commandExists: async () => true, configDir,
+      env: { HOME: configDir, DEMO_API_KEY: "fixture-provider-key" }, interactive: false,
+      runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key" }),
+      runGit: (args) => args.includes("--show-toplevel") ? "/work/restricted-platform\n" : "ssh://git@example.test/platform/restricted.git\n",
+      cwd: "/work/restricted-platform/terraform/production",
+      runtimeVersions: passingRuntimeVersions(),
+      startCompatibilityMiddleware: async () => ({ origin: "http://127.0.0.1:4599", close: async () => {} }),
+      ensureShieldReady: async () => ({ origin: "http://127.0.0.1:8811", capability: "a".repeat(40), lane: "managed", targetClass: "managed" }),
+      createShieldDestinationLease: async (request) => {
+        observed.push(request.launcherContext);
+        return { ...request.ready, capability: "b".repeat(40) };
+      },
+      spawnCommand: () => ({ once(event, callback) { if (event === "exit") callback(0); } }),
+    });
+    assert.deepEqual(observed, [{
+      repository: { remoteHash: createHash("sha256").update("ssh://git@example.test/platform/restricted.git").digest("hex"), trustClass: "restricted" },
+      pathClasses: ["production_config"], destinationClass: "managed", interactive: false,
+    }]);
+    assert.doesNotMatch(JSON.stringify(observed), /restricted-platform|example\.test/);
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
 test("enabled Shield replaces only the spawned AirClaude endpoint and capability", async () => {
   const catalog = compatibilityCatalog();
   catalog.profiles[0].shield = { enabled: true, lane: "managed" };
@@ -5211,7 +5243,7 @@ test("enabled Shield replaces only the spawned AirClaude endpoint and capability
         assert.equal(targetOrigin, "http://127.0.0.1:4599");
         assert.deepEqual(launcherContext, {
           repository: { remoteHash: launcherContext.repository.remoteHash, trustClass: "unknown" },
-          pathClasses: ["production_config"],
+          pathClasses: ["unknown"],
           destinationClass: "managed",
           interactive: true,
         });

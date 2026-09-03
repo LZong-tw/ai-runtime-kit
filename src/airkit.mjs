@@ -5,7 +5,7 @@ import { access, chmod, copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile 
 import { spawn, spawnSync } from "node:child_process";
 import { readdirSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 
@@ -1370,15 +1370,39 @@ async function assertNoInheritedApiKeyHelper(env) {
   }
 }
 
-function shieldLaunchContext(lane, options) {
+function shieldLaunchContext(lane, shield, options) {
   const workspace = resolve(options.cwd ?? process.cwd());
   const interactive = options.interactive ?? (process.stdin?.isTTY === true && process.stdout?.isTTY === true);
+  const repositoryRoot = readShieldGitValue(["-C", workspace, "rev-parse", "--show-toplevel"], options);
+  const remote = readShieldGitValue(["-C", workspace, "config", "--get", "remote.origin.url"], options);
+  const resolvedRoot = repositoryRoot ? resolve(repositoryRoot) : null;
+  const relativeWorkspace = resolvedRoot && (workspace === resolvedRoot || workspace.startsWith(`${resolvedRoot}${sep}`))
+    ? relative(resolvedRoot, workspace)
+    : null;
   return {
-    repository: { remoteHash: createHash("sha256").update(workspace).digest("hex"), trustClass: "unknown" },
-    pathClasses: [classifyShieldWorkspacePath(workspace)],
+    repository: {
+      remoteHash: createHash("sha256").update(remote ?? "unknown").digest("hex"),
+      trustClass: shield?.trustClass ?? "unknown",
+    },
+    pathClasses: [relativeWorkspace === null ? "unknown" : classifyShieldWorkspacePath(relativeWorkspace)],
     destinationClass: lane,
     interactive,
   };
+}
+
+function readShieldGitValue(args, options) {
+  const runGit = options.runGit ?? ((gitArgs) => {
+    const result = spawnSync("git", gitArgs, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    return result.status === 0 ? result.stdout : null;
+  });
+  try {
+    const value = runGit(args);
+    if (typeof value !== "string") return null;
+    const trimmed = value.trim();
+    return trimmed.length > 0 && trimmed.length <= 2048 && !/[\u0000-\r\n]/.test(trimmed) ? trimmed : null;
+  } catch {
+    return null;
+  }
 }
 
 function classifyShieldWorkspacePath(workspace) {
@@ -1534,7 +1558,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
           shieldReady = await (options.createShieldDestinationLease ?? createShieldDestinationLease)({
             ready: shieldReady,
             targetOrigin: middleware?.origin ?? gatewayOrigin,
-            launcherContext: shieldLaunchContext(plan.shieldLauncher.clientLane, options),
+            launcherContext: shieldLaunchContext(plan.shieldLauncher.clientLane, profileShield, options),
           });
         }
       }
@@ -1827,7 +1851,7 @@ function validateShield(profile) {
   if (!isPlainObject(shield)) {
     throw new Error(`profile "${profile.name}" shield must be an object`);
   }
-  const supportedFields = new Set(["enabled", "lane"]);
+  const supportedFields = new Set(["enabled", "lane", "trustClass"]);
   for (const field of Object.keys(shield)) {
     if (!supportedFields.has(field)) {
       throw new Error(`profile "${profile.name}" shield contains unsupported field: ${field}`);
@@ -1838,6 +1862,9 @@ function validateShield(profile) {
   }
   if (shield.lane !== "managed") {
     throw new Error(`profile "${profile.name}" shield.lane must be managed`);
+  }
+  if (shield.trustClass !== undefined && !["public", "internal", "restricted", "unknown"].includes(shield.trustClass)) {
+    throw new Error(`profile "${profile.name}" shield.trustClass must be public, internal, restricted, or unknown`);
   }
 }
 
