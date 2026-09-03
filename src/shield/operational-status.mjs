@@ -25,7 +25,9 @@ export async function readShieldOperationalStatus({
     }
     return readLaneStatus({ lane, audit: auditState, paths, inspectService, readIdentity, readPolicy, readAssets });
   }));
-  const descriptors = safeLauncherDescriptors(launcherDescriptors());
+  const descriptors = safeLauncherDescriptors(launcherDescriptors({
+    subscriptionShield: env?.AIRKIT_SHIELD_SUBSCRIPTION === "1",
+  }));
   return {
     state: lanes.some((lane) => lane.state === "protected") ? "protected" : "unavailable",
     lanes,

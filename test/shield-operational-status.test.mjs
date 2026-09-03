@@ -55,6 +55,23 @@ test("operational Shield status reports each lane from verified local state and 
   });
 });
 
+test("operational Shield status reports the Headroom subscription route as protected only when enabled", async () => {
+  let descriptorOptions;
+  await readShieldOperationalStatus({
+    env: { AIRKIT_SHIELD_SUBSCRIPTION: "1" },
+    shieldPaths: ({ lane }) => ({ lane }),
+    inspectService: async () => ({ installed: false, loaded: false, active: false }),
+    readIdentity: async () => null,
+    readPolicy: async () => null,
+    readAssets: async () => null,
+    launcherDescriptors: (options) => {
+      descriptorOptions = options;
+      return [];
+    },
+  });
+  assert.deepEqual(descriptorOptions, { subscriptionShield: true });
+});
+
 test("operational Shield status fails closed for broken local state and never returns sensitive state", async () => {
   const result = await readShieldOperationalStatus({
     audit: "unavailable",
