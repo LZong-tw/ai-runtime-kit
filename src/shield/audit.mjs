@@ -5,7 +5,7 @@ const ACTIONS = new Set(["allow", "block", "redact", "require_approval", "unavai
 const LANES = new Set(["managed", "subscription", "unknown"]);
 const DESTINATION_CLASSES = new Set(["managed", "subscription", "unknown"]);
 const DECISION_KEYS = ["action", "bundleVersion", "decisionSource", "destinationClass", "detectorVersions", "elapsedMs", "lane", "override", "reasonCodes", "requestId", "transformCount"];
-const DECISION_SOURCES = new Set(["evaluated", "cache_hit"]);
+const DECISION_SOURCES = new Set(["evaluated", "cache_hit", "coalesced"]);
 
 export function buildShieldDecisionEvent(decision, { now = () => new Date() } = {}) {
   return buildShieldEvent("shield_decision", decision, { now });

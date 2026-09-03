@@ -86,6 +86,30 @@ test("proxy reuses an exact terminal decision but re-audits and forwards each re
   assert.deepEqual(events.map((event) => event.decisionSource), ["evaluated", "cache_hit", "evaluated"]);
 });
 
+test("proxy preserves atomic cache provenance in its re-audit metadata", async (t) => {
+  const events = [];
+  const upstream = await startFixture(t, async (_request, response) => response.end("{}"));
+  const shield = await startShield(t, {
+    targetOrigin: upstream.origin,
+    decisionCache: {
+      async getOrCompute() {
+        return {
+          source: "coalesced",
+          decision: { action: "allow", reasonCodes: ["policy_allow"], transformCount: 0, body: Buffer.alloc(0) },
+        };
+      },
+    },
+    decisionContext: { lane: "subscription", destinationClass: "subscription", policyVersion: "policy-1", detectorVersions: { gitleaks: "1", privacy: "1" } },
+    decide: async () => assert.fail("atomic cache result must avoid reevaluation"),
+    onDecision: (event) => events.push(event),
+  });
+  const result = await rawRequest(shield.origin, "/v1/messages", {
+    "x-airkit-shield": CAPABILITY, "content-type": "application/json",
+  }, '{"same":true}');
+  assert.equal(result.status, 200);
+  assert.deepEqual(events.map((event) => event.decisionSource), ["coalesced"]);
+});
+
 test("authentication and decision failure never contact upstream", async (t) => {
   let upstreamCalls = 0;
   const upstream = await startFixture(t, async (_request, response) => {

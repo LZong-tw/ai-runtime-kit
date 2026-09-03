@@ -60,22 +60,28 @@ test("decision cache reuses only exact terminal retry metadata and invalidates t
     reasonCodes: ["pii_redacted"], transformCount: 1,
   };
   cache.set(first);
-  const hit = cache.get(first);
-  assert.equal(hit.action, "redact");
-  assert.deepEqual(hit.body, Buffer.from('{"safe":"redacted"}'));
-  assert.notEqual(hit.body, first.body);
-  assert.equal(cache.get({ ...first, requestDigest: "b".repeat(64) }), null);
-  assert.equal(cache.get({ ...first, policyVersion: "policy-2" }), null);
-  assert.equal(cache.get({ ...first, lane: "subscription", destinationClass: "subscription" }), null);
+  const hit = await cache.getOrCompute(first, async () => assert.fail("exact cached retry must not evaluate"));
+  assert.equal(hit.source, "cache_hit");
+  assert.equal(hit.decision.action, "redact");
+  assert.deepEqual(hit.decision.body, Buffer.from('{"safe":"redacted"}'));
+  assert.notEqual(hit.decision.body, first.body);
+  const miss = await cache.getOrCompute({ ...first, requestDigest: "b".repeat(64) }, async () => ({ ...first, requestDigest: "b".repeat(64) }));
+  assert.equal(miss.source, "evaluated");
+  const policyMiss = await cache.getOrCompute({ ...first, policyVersion: "policy-2" }, async () => ({ ...first, policyVersion: "policy-2" }));
+  assert.equal(policyMiss.source, "evaluated");
+  const laneMiss = await cache.getOrCompute({ ...first, lane: "subscription", destinationClass: "subscription" }, async () => ({ ...first, lane: "subscription", destinationClass: "subscription" }));
+  assert.equal(laneMiss.source, "evaluated");
 
   cache.invalidateTransition({ policyVersion: "policy-2", detectorVersions: { Gitleaks: "2", Privacy: "1" } });
-  assert.equal(cache.get(first), null);
+  const invalidated = await cache.getOrCompute(first, async () => ({ ...first }));
+  assert.equal(invalidated.source, "evaluated");
   cache.set({ ...first, policyVersion: "policy-2", detectorVersions: { Gitleaks: "2", Privacy: "1" } });
   now += 101;
-  assert.equal(cache.get({ ...first, policyVersion: "policy-2", detectorVersions: { Gitleaks: "2", Privacy: "1" } }), null);
+  const expired = await cache.getOrCompute({ ...first, policyVersion: "policy-2", detectorVersions: { Gitleaks: "2", Privacy: "1" } }, async () => ({ ...first, policyVersion: "policy-2", detectorVersions: { Gitleaks: "2", Privacy: "1" } }));
+  assert.equal(expired.source, "evaluated");
 });
 
-test("decision cache coalesces concurrent exact computations without retaining request input", async () => {
+test("decision cache atomically identifies concurrent exact retry provenance without retaining request input", async () => {
   const cache = createDecisionCache();
   const key = {
     detectorVersions: { Gitleaks: "1", Privacy: "1" }, destinationClass: "managed", lane: "managed", policyVersion: "policy-1", requestDigest: "c".repeat(64),
@@ -87,8 +93,10 @@ test("decision cache coalesces concurrent exact computations without retaining r
   };
   const [left, right] = await Promise.all([cache.getOrCompute(key, compute), cache.getOrCompute(key, compute)]);
   assert.equal(calls, 1);
-  assert.equal(left.action, "allow");
-  assert.equal(right.action, "allow");
+  assert.equal(left.decision.action, "allow");
+  assert.equal(right.decision.action, "allow");
+  assert.equal(left.source, "evaluated");
+  assert.equal(right.source, "coalesced");
   assert.equal(JSON.stringify(cache.inspect()).includes("requestDigest"), false);
 });
 
@@ -101,5 +109,25 @@ test("decision cache rejects a computed decision whose identity differs from the
     cache.getOrCompute(key, async () => ({ ...key, requestDigest: "e".repeat(64), action: "allow", body: Buffer.alloc(0), reasonCodes: ["policy_allow"], transformCount: 0 })),
     /identity mismatch/i,
   );
-  assert.equal(cache.get(key), null);
+  const retry = await cache.getOrCompute(key, async () => ({ ...key, action: "allow", body: Buffer.alloc(0), reasonCodes: ["policy_allow"], transformCount: 0 }));
+  assert.equal(retry.source, "evaluated");
+});
+
+test("policy transition invalidation prevents an older pending decision from entering the cache", async () => {
+  const cache = createDecisionCache();
+  const key = {
+    detectorVersions: { Gitleaks: "1", Privacy: "1" }, destinationClass: "managed", lane: "managed", policyVersion: "policy-1", requestDigest: "e".repeat(64),
+  };
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const pending = cache.getOrCompute(key, async () => {
+    await gate;
+    return { ...key, action: "allow", body: Buffer.alloc(0), reasonCodes: ["policy_allow"], transformCount: 0 };
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  cache.invalidateTransition({ policyVersion: "policy-2", detectorVersions: { Gitleaks: "2", Privacy: "1" } });
+  release();
+  await assert.rejects(pending, /invalidated/);
+  const retry = await cache.getOrCompute(key, async () => ({ ...key, action: "allow", body: Buffer.alloc(0), reasonCodes: ["policy_allow"], transformCount: 0 }));
+  assert.equal(retry.source, "evaluated");
 });

@@ -57,6 +57,12 @@ test("shield policy transitions use the same metadata-only event contract", () =
   assert.doesNotMatch(JSON.stringify(event), /capability|body|secret/i);
 });
 
+test("shield audit admits only declared cache provenance", () => {
+  const coalesced = buildShieldDecisionEvent({ ...decision, decisionSource: "coalesced" });
+  assert.equal(coalesced.payload.decision_source, "coalesced");
+  assert.throws(() => buildShieldDecisionEvent({ ...decision, decisionSource: "request_digest" }), /shield decision/i);
+});
+
 test("durable recorder sends an encrypted transport envelope and waits for audit daemon ACK", async () => {
   const sent = [];
   const recorder = createShieldDecisionRecorder({

@@ -541,9 +541,9 @@ const SHIELD_METADATA_AUDIT_STATEMENTS = Object.freeze([
 
 const SHIELD_DECISION_SOURCE_STATEMENTS = Object.freeze([
   `ALTER TABLE shield_decisions ADD COLUMN decision_source TEXT NOT NULL DEFAULT 'evaluated'
-    CHECK (decision_source IN ('evaluated', 'cache_hit'))`,
+    CHECK (decision_source IN ('evaluated', 'cache_hit', 'coalesced'))`,
   `ALTER TABLE shield_policy_transitions ADD COLUMN decision_source TEXT NOT NULL DEFAULT 'evaluated'
-    CHECK (decision_source IN ('evaluated', 'cache_hit'))`,
+    CHECK (decision_source IN ('evaluated', 'cache_hit', 'coalesced'))`,
   `INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('audit_schema_version', '5')`,
 ]);
 
