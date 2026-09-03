@@ -108,8 +108,8 @@ export function validateAuditEvent(event) {
   ) {
     throwInvalid("logical_request_id is required for audit events");
   }
-  if (SHIELD_EVENT_KINDS.has(event.event_kind) && (!safeId(event.logical_request_id)
-    || (event.session_id !== null && event.session_id !== undefined && !safeId(event.session_id)))) {
+  if (SHIELD_EVENT_KINDS.has(event.event_kind) && (!isShieldOpaqueId(event.logical_request_id)
+    || (event.session_id !== null && event.session_id !== undefined && !isShieldOpaqueId(event.session_id)))) {
     throwInvalid("shield correlation identifiers are invalid");
   }
   if (PROVIDER_ATTEMPT_KINDS.has(event.event_kind) && !isNonEmptyString(event.attempt_id)) {
@@ -182,9 +182,9 @@ export function isShieldAuditEvent(event) {
 function validateShieldMetadata(payload) {
   if (!isPlainRecord(payload) || !hasExactKeys(payload, SHIELD_PAYLOAD_KEYS)
     || !SHIELD_LANES.has(payload.lane) || !SHIELD_LANES.has(payload.destination_class)
-    || !safeId(payload.policy_version) || !safeId(payload.gitleaks_version) || !safeId(payload.privacy_version)
+    || !isShieldOpaqueId(payload.policy_version) || !isShieldOpaqueId(payload.gitleaks_version) || !isShieldOpaqueId(payload.privacy_version)
     || !SHIELD_ACTIONS.has(payload.action) || !Array.isArray(payload.reasons)
-    || payload.reasons.length < 1 || payload.reasons.length > 32 || !payload.reasons.every(safeId)
+    || payload.reasons.length < 1 || payload.reasons.length > 32 || !payload.reasons.every(isShieldOpaqueId)
     || !Number.isInteger(payload.transform_count) || payload.transform_count < 0 || payload.transform_count > 1_000_000
     || typeof payload.override !== "boolean" || !Number.isFinite(payload.elapsed_ms) || payload.elapsed_ms < 0 || payload.elapsed_ms > 3_600_000) {
     throwInvalid("shield metadata is invalid");
@@ -209,7 +209,7 @@ function hasExactKeys(value, expected) {
   return keys.length === allowed.length && keys.every((key, index) => key === allowed[index]);
 }
 
-function safeId(value) {
+export function isShieldOpaqueId(value) {
   return typeof value === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(value);
 }
 

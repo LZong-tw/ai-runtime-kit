@@ -235,3 +235,16 @@ test("Shield UI and status projections preserve accounting-neutral protection st
     bypass: false,
   });
 });
+
+test("Shield UI rejects non-opaque detail identifiers before it invokes the query bridge", async () => {
+  let calls = 0;
+  const adapter = createAuditUiAdapter({
+    async query() { calls += 1; return { state: "healthy", rows: [] }; },
+    async status() { return { state: "healthy" }; },
+  });
+  for (const rawId of ["raw prompt secret", "https://private.invalid/request", "Bearer grant-token"]) {
+    const result = await adapter.query("shield_decision", [rawId]);
+    assert.equal(result.error.code, "invalid_query_arguments");
+  }
+  assert.equal(calls, 0);
+});

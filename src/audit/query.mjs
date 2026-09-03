@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import { createConnection, createServer } from "node:net";
 
 import { createAuditFrameDecoder, encodeAuditFrame } from "./transport.mjs";
+import { isShieldOpaqueId } from "./event.mjs";
 
 const MAX_QUERY_LIMIT = 200;
 const DEFAULT_QUERY_LIMIT = 100;
@@ -247,6 +248,7 @@ function normalizeQueryRequest(request) {
   const limit = normalizeLimit(request.limit ?? params.limit ?? DEFAULT_QUERY_LIMIT);
   if (!AUDIT_QUERY_OPERATIONS.includes(request.operation)) throw queryError("AIRKIT_AUDIT_QUERY_OPERATION_NOT_ALLOWED");
   if ((request.operation === "request" || request.operation === "shield_decision") && !normalizedArgs.id) throw queryError("AIRKIT_AUDIT_QUERY_INVALID_REQUEST");
+  if (request.operation === "shield_decision" && !isShieldOpaqueId(normalizedArgs.id)) throw queryError("AIRKIT_AUDIT_QUERY_INVALID_SHIELD_IDENTIFIER");
   return {
     version: QUERY_VERSION,
     request_id: request.request_id,
@@ -262,6 +264,9 @@ function normalizeQueryArguments(operation, params, limit) {
   const id = input.id;
   if ((operation === "request" || operation === "shield_decision") && (typeof id !== "string" || id.length === 0)) {
     throw queryError("AIRKIT_AUDIT_QUERY_INVALID_REQUEST");
+  }
+  if (operation === "shield_decision" && !isShieldOpaqueId(id)) {
+    throw queryError("AIRKIT_AUDIT_QUERY_INVALID_SHIELD_IDENTIFIER");
   }
   return { id, limit: normalizeLimit(limit) };
 }

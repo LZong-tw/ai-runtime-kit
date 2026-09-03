@@ -6,6 +6,7 @@ import { test } from "node:test";
 import {
   createAuditQueryClient,
   createAuditQueryServer,
+  authenticateAuditQueryRequest,
   queryAuditStore,
 } from "../src/audit/query.mjs";
 import { createAuditDaemon } from "../src/audit/daemon.mjs";
@@ -94,6 +95,12 @@ test("Shield detail query binds exactly one opaque request ID and its limit", ()
   queryAuditStore(store, "shield_decision", { id: "shield-request-1" }, { limit: 7 });
   assert.match(calls[0].sql, /FROM shield_decisions WHERE logical_request_id = \?/);
   assert.deepEqual(calls[0].params, ["shield-request-1", 7]);
+  for (const rawId of ["raw prompt secret", "https://private.invalid/request", "Bearer grant-token"]) {
+    assert.throws(() => queryAuditStore(store, "shield_decision", { id: rawId }), /shield.*opaque|shield.*identifier/i);
+    assert.throws(() => authenticateAuditQueryRequest({
+      version: 1, request_id: "request-1", operation: "shield_decision", params: { id: rawId },
+    }, CAPABILITY), /shield.*identifier/i);
+  }
 });
 
 test("audit daemon owns the query socket and reports its lifecycle", async () => {
