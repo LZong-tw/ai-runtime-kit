@@ -72,6 +72,22 @@ test("shield privacy provision is preview-first and keeps asset references out o
   assert.doesNotMatch(output.value(), /private/);
 });
 
+test("clean-lane privacy preview accepts its explicit policy bundle without persisted policy state", async () => {
+  const calls = [];
+  await runShieldCli([
+    "privacy", "provision", "--lane", "managed",
+    "--policy-bundle", "/private/policy.json",
+    "--bundle", "/private/privacy.json", "--gitleaks", "/private/gitleaks",
+  ], {
+    stdout: capture().stdout,
+    shield: { async privacyProvision(request) { calls.push(request); return { state: "preview" }; } },
+  });
+  assert.deepEqual(calls, [{
+    lane: "managed", write: false, policyBundlePath: "/private/policy.json",
+    bundlePath: "/private/privacy.json", gitleaksPath: "/private/gitleaks",
+  }]);
+});
+
 test("shield policy install is preview-first and hides source paths", async () => {
   const output = capture();
   const calls = [];

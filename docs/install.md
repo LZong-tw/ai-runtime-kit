@@ -30,7 +30,7 @@ policy and Privacy/Gitleaks assets for the exact lane before installing it:
 
 ```bash
 airkit shield policy install --lane managed --bundle <policy-bundle> --public-key <policy-public-key>
-airkit shield privacy provision --lane managed --bundle <privacy-manifest> --gitleaks <gitleaks-executable>
+airkit shield privacy provision --lane managed --policy-bundle <policy-bundle> --bundle <privacy-manifest> --gitleaks <gitleaks-executable>
 airkit shield install --lane managed
 
 airkit shield policy install --lane managed --bundle <policy-bundle> --public-key <policy-public-key> --write
@@ -44,6 +44,11 @@ airkit shield doctor --lane managed
 that lane lacks either valid policy or Privacy/Gitleaks provisioning. Stop a
 lane without deleting its private state with
 `airkit shield stop --lane managed`.
+
+On a clean lane, provide the same reviewed policy bundle to the Privacy preview
+with `--policy-bundle`; this validates the complete future asset binding without
+writing state. After the policy `--write` succeeds, omit that preview-only flag
+from the Privacy `--write` command so it binds the persisted lane policy.
 
 Normal managed launches are wired by `airclaude`; do not manually nest it under
 `shield launch`. For each launch, AirKit makes a one-time control registration

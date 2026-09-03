@@ -130,7 +130,7 @@ After reviewing each preview, explicitly apply only the required local writes:
 
 ```bash
 airkit shield policy install --lane managed --bundle <policy-bundle> --public-key <policy-public-key>
-airkit shield privacy provision --lane managed --bundle <privacy-manifest> --gitleaks <gitleaks-executable>
+airkit shield privacy provision --lane managed --policy-bundle <policy-bundle> --bundle <privacy-manifest> --gitleaks <gitleaks-executable>
 airkit shield install --lane managed
 
 airkit shield policy install --lane managed --bundle <policy-bundle> --public-key <policy-public-key> --write
@@ -144,6 +144,9 @@ Provision and install are per lane. `install` validates that the same lane
 already has a valid signed policy and Privacy/Gitleaks provision; it does not
 download or infer either dependency. Repeat the sequence with
 `--lane subscription` only for an explicitly enabled subscription launcher.
+The explicit `--policy-bundle` makes a clean-lane Privacy preview fully
+read-only; after the reviewed policy write, the Privacy write reads the
+lane-local signed policy bundle.
 
 The asset references must resolve to canonical, user-owned regular files, with
 no symlink or group/world write permission. Provisioning verifies SHA-256; the
