@@ -11,6 +11,7 @@ import { gzipSync } from "node:zlib";
 import { startShieldProxy } from "../src/shield/proxy.mjs";
 import { createApprovalBroker } from "../src/shield/approval.mjs";
 import { approvalChannelRegistration, createApprovalChannel } from "../src/shield/approval-channel.mjs";
+import { createDecisionCache } from "../src/shield/decision-cache.mjs";
 
 const CAPABILITY = "c".repeat(32);
 const CONTROL_CAPABILITY = "d".repeat(32);
@@ -52,6 +53,36 @@ test("proxy forwards only after allow and never emits OAuth", async (t) => {
   assert.deepEqual(events[0].reasonCodes, ["policy_allow"]);
   assert.equal(Number.isInteger(events[0].elapsedMs), true);
   assert.doesNotMatch(JSON.stringify(events), /oauth-secret|cookie-secret|body-secret|target-switch-secret/);
+});
+
+test("proxy reuses an exact terminal decision but re-audits and forwards each retry", async (t) => {
+  let decisions = 0;
+  let upstreamCalls = 0;
+  const events = [];
+  const upstream = await startFixture(t, async (_request, response) => {
+    upstreamCalls += 1;
+    response.end("{}");
+  });
+  const shield = await startShield(t, {
+    targetOrigin: upstream.origin,
+    decisionCache: createDecisionCache(),
+    decisionContext: { lane: "subscription", destinationClass: "subscription", policyVersion: "policy-1", detectorVersions: { gitleaks: "1", privacy: "1" } },
+    decide: async () => {
+      decisions += 1;
+      return { action: "allow", reasonCodes: ["policy_allow"], lane: "subscription", destinationClass: "subscription", bundleVersion: "policy-1", detectorVersions: { gitleaks: "1", privacy: "1" } };
+    },
+    onDecision: (event) => events.push(event),
+  });
+  const send = (body) => fetch(`${shield.origin}/v1/messages`, {
+    method: "POST", headers: { "x-airkit-shield": CAPABILITY, "content-type": "application/json" }, body,
+  });
+
+  assert.equal((await send('{"same":true}')).status, 200);
+  assert.equal((await send('{"same":true}')).status, 200);
+  assert.equal((await send('{"same":false}')).status, 200);
+  assert.equal(decisions, 2);
+  assert.equal(upstreamCalls, 3);
+  assert.equal(events.length, 3);
 });
 
 test("authentication and decision failure never contact upstream", async (t) => {

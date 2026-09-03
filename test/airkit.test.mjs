@@ -5110,6 +5110,31 @@ test("enabled Shield blocks before AirClaude spawn when preflight fails", async 
   }
 });
 
+test("profile-scoped Shield rollback removes only child Shield wiring", () => {
+  const catalog = launchCatalog();
+  catalog.profiles[0].shield = { enabled: true, lane: "managed" };
+
+  const protectedPlan = buildLaunchPlan(catalog, "launch-example", {
+    launcher: "hr-airclaude",
+  });
+  const rollbackPlan = buildLaunchPlan(catalog, "launch-example", {
+    launcher: "hr-airclaude",
+    shieldEnabled: false,
+  });
+
+  assert.deepEqual(protectedPlan.shieldLauncher, {
+    coverage: "protected",
+    clientLane: "managed",
+    destinationClass: "managed",
+    hopChain: ["headroom", "airclaude", "shield", "managed"],
+  });
+  assert.equal(protectedPlan.shield.enabled, true);
+  assert.equal(rollbackPlan.shield.enabled, false);
+  assert.deepEqual(rollbackPlan.ccrConfig, protectedPlan.ccrConfig);
+  assert.deepEqual(rollbackPlan.launch.env, protectedPlan.launch.env);
+  assert.deepEqual(rollbackPlan.launch.clearEnv, protectedPlan.launch.clearEnv);
+});
+
 test("enabled Shield replaces only the spawned AirClaude endpoint and capability", async () => {
   const catalog = launchCatalog();
   catalog.profiles[0].shield = { enabled: true, lane: "managed" };

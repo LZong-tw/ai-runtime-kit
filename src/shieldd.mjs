@@ -13,6 +13,7 @@ import { readShieldPolicyProvision } from "./shield/policy-bundle.mjs";
 import { loadShieldPolicy } from "./shield/policy.mjs";
 import { createPrivacyFilter, isVerifiedRedaction } from "./shield/privacy.mjs";
 import { startShieldProxy } from "./shield/proxy.mjs";
+import { createDecisionCache } from "./shield/decision-cache.mjs";
 import { defaultShieldLauncherContext, readShieldConfig } from "./shield/service.mjs";
 import { createShieldDecisionRecorder } from "./shield/audit.mjs";
 import { createMasterKeyProvider } from "./audit/keychain.mjs";
@@ -48,6 +49,7 @@ export async function startShieldDaemon({
   createScanner = createGitleaksScanner,
   createPrivacy = createPrivacyFilter,
   createDecisionRecorder = createDefaultDecisionRecorder,
+  createCache = createDecisionCache,
   writePolicyState = writeShieldPolicyState,
   startProxy = startShieldProxy,
   writeIdentity = writeShieldIdentity,
@@ -111,6 +113,8 @@ export async function startShieldDaemon({
       controlCapability: config.controlCapability,
       targetOrigin: config.targetOrigin,
       decide,
+      decisionCache: createCache(),
+      decisionContext: { lane: config.lane, destinationClass, policyVersion: policy.version, detectorVersions: policy.detectorVersions },
       recordShieldDecision: recorder.recordShieldDecision,
       isReady: recorder.isReady ?? (() => true),
     });
