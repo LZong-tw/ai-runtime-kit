@@ -34,6 +34,26 @@ state from the child transcript instead of losing the launch entirely.
 - It does not invent missing child text when the transcript is ambiguous or
   unavailable.
 - It does not replace the user's existing `statusLine` or ccstatusline.
+- It does not replace the task/subagent row content when Shield appends its
+  protection suffix; the suffix is added to the existing row.
+
+## Shield protection suffix
+
+When the generated `subagentStatusLine` runs, it appends one bounded suffix of
+the form ` · Shield subscription:<state> managed:<state>`, where each state is
+`protected`, `blocked`, or `unavailable`.
+
+Each lane is reported separately and deliberately. The aggregate operational
+state reads `protected` as soon as any lane is, so a single word would assert
+protection for a session running on a lane that does not have it.
+
+The suffix is telemetry, not attestation. It reports what Shield's own state
+says about service, policy and Privacy health; it is not evidence that a given
+request was inspected, and it must not be read as one. The statusline sink
+validates the whole suffix shape against a fixed enum, so it can never carry a
+token, cost, capability, path, origin, or request body. Reading Shield state
+spawns `launchctl` per lane, so it is bounded by a short deadline: a stalled
+probe renders `unavailable` rather than delaying the rows.
 
 For very large transcript-like child results returned through `Agent`, `Task`,
 or `TaskOutput`, AirKit stores the full transcript as a local artifact and
