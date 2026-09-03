@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 
-const MAX_BODY_BYTES = 256 * 1024;
+const MAX_BODY_BYTES = 1_048_576;
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const SCAN_TIMEOUT_MS = 2_000;
 const MAX_FINDINGS = 512;

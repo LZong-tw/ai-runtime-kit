@@ -40,7 +40,7 @@ test("scanner provisions canonical trusted assets and scans with bounded shell-f
   assert.equal(Object.isFrozen(keyResult.findings[0]), true);
   assert.ok(calls.every((call) => call.command === executable && call.shell === false));
   assert.ok(calls.every((call) => call.timeout === 2_000 && call.maxOutputBytes === 64 * 1024));
-  assert.ok(calls.every((call) => Buffer.isBuffer(call.input) && call.input.length <= 256 * 1024));
+  assert.ok(calls.every((call) => Buffer.isBuffer(call.input) && call.input.length <= 1_048_576));
   assert.deepEqual(calls.at(1).args, ["stdin", "--config", rulesPath, "--report-format", "json", "--report-path", "-", "--redact"]);
   assert.doesNotMatch(JSON.stringify(keyResult), /fixture-secret|BEGIN PRIVATE KEY/);
 });
