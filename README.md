@@ -160,12 +160,15 @@ control. A profile must expose that enablement and lane in its own catalog; this
 public repository does not silently enable Shield for a shell or route. Do not
 manually wrap `airclaude` with `shield launch`.
 
-For a managed launch, AirKit binds the fresh local compatibility middleware to
-Shield with a one-use, short-lived destination lease and revokes it when the
-child exits. The child receives only its request capability, not a destination,
-control capability, or provider credential. This is an application-level
-least-privilege boundary, not hostile-principal isolation: processes running as
-the same operating-system user remain within that user's trust boundary.
+For a managed launch, AirKit binds fresh local compatibility middleware to
+Shield through a one-time control registration. The child receives only a
+bounded, renewable session capability, not a destination, control capability,
+or provider credential; the registration is revoked when the child exits. This
+is an application-level least-privilege boundary, not hostile-principal
+isolation: processes running as the same operating-system user remain within
+that user's trust boundary. A Headroom marker, where an adapter supplies one,
+is shape-validated declarative launcher telemetry, not an authenticated
+identity.
 
 Policy replacement is atomic: a live daemon is quiesced, a reachable old proxy
 rejects the transition, and a replacement must publish matching policy/detector
