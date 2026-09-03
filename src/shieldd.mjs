@@ -113,6 +113,8 @@ export async function startShieldDaemon({
       controlCapability: config.controlCapability,
       targetOrigin: config.targetOrigin,
       decide,
+      // Policy activation restarts this daemon after identity quiescence. This
+      // cache is process-local, so no terminal decision survives that boundary.
       decisionCache: createCache(),
       decisionContext: { lane: config.lane, destinationClass, policyVersion: policy.version, detectorVersions: policy.detectorVersions },
       recordShieldDecision: recorder.recordShieldDecision,

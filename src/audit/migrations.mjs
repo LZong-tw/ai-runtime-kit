@@ -539,6 +539,14 @@ const SHIELD_METADATA_AUDIT_STATEMENTS = Object.freeze([
   `INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('audit_schema_version', '4')`,
 ]);
 
+const SHIELD_DECISION_SOURCE_STATEMENTS = Object.freeze([
+  `ALTER TABLE shield_decisions ADD COLUMN decision_source TEXT NOT NULL DEFAULT 'evaluated'
+    CHECK (decision_source IN ('evaluated', 'cache_hit'))`,
+  `ALTER TABLE shield_policy_transitions ADD COLUMN decision_source TEXT NOT NULL DEFAULT 'evaluated'
+    CHECK (decision_source IN ('evaluated', 'cache_hit'))`,
+  `INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('audit_schema_version', '5')`,
+]);
+
 export const AUDIT_MIGRATIONS = Object.freeze([
   Object.freeze({
     id: "001_initial_audit_store",
@@ -559,6 +567,11 @@ export const AUDIT_MIGRATIONS = Object.freeze([
     id: "004_shield_metadata_audit",
     statements: SHIELD_METADATA_AUDIT_STATEMENTS,
     checksum: checksumStatements(SHIELD_METADATA_AUDIT_STATEMENTS),
+  }),
+  Object.freeze({
+    id: "005_shield_decision_source",
+    statements: SHIELD_DECISION_SOURCE_STATEMENTS,
+    checksum: checksumStatements(SHIELD_DECISION_SOURCE_STATEMENTS),
   }),
 ]);
 

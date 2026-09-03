@@ -271,9 +271,9 @@ export function openAuditStore(options = {}) {
       db.prepare(`
         INSERT INTO ${table} (
           event_id, logical_request_id, session_id, lane, destination_class, policy_version,
-          gitleaks_version, privacy_version, action, reasons, transform_count, override,
+          gitleaks_version, privacy_version, action, reasons, transform_count, decision_source, override,
           elapsed_ms, observed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         event.event_id,
         event.logical_request_id,
@@ -286,6 +286,7 @@ export function openAuditStore(options = {}) {
         payload.action,
         payload.reasons.join(","),
         payload.transform_count,
+        payload.decision_source,
         payload.override ? 1 : 0,
         payload.elapsed_ms,
         event.observed_at,

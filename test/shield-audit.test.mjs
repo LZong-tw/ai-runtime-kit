@@ -35,10 +35,11 @@ test("shield decision builder admits only metadata allowlist", () => {
     action: "allow",
     reasons: ["policy_allow"],
     transform_count: 0,
+    decision_source: "evaluated",
     override: false,
     elapsed_ms: 4,
   });
-  for (const forbidden of ["body", "path", "url", "headers", "digest", "span", "prompt", "grant"]) {
+  for (const forbidden of ["body", "path", "url", "headers", "digest", "span", "prompt", "grant", "cacheKey"]) {
     assert.throws(() => buildShieldDecisionEvent({ ...decision, [forbidden]: "sentinel-secret" }), /shield decision/i);
   }
   assert.doesNotMatch(JSON.stringify(event), /sentinel-secret/);
