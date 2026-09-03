@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { resolveShieldLauncher, shieldLauncherDescriptors } from "../src/shield/launchers.mjs";
+import { resolveShieldLauncher, resolveShieldLauncherMarker, shieldLauncherDescriptors } from "../src/shield/launchers.mjs";
 import { createDecisionCache } from "../src/shield/decision-cache.mjs";
 
 test("every declared AirKit and Headroom launcher has an explicit Shield disposition", () => {
@@ -36,6 +36,34 @@ test("declared direct client bypasses are visible and undeclared helpers fail cl
   );
 });
 
+test("Headroom launcher markers require their exact loopback compatibility override", () => {
+  assert.equal(
+    resolveShieldLauncherMarker({
+      AIRKIT_SHIELD_LAUNCHER: "headroom/hr-airclaude/v1",
+      AIRCLAUDE_PROVIDER_BASE_URL: "http://127.0.0.1:8804/v1/chat/completions",
+    }),
+    "hr-airclaude",
+  );
+  assert.equal(
+    resolveShieldLauncherMarker({
+      AIRKIT_SHIELD_LAUNCHER: "headroom/hr-claude-web/v1",
+      AIRCLAUDE_ANTHROPIC_PROVIDER_BASE_URL: "http://127.0.0.1:8807/v1/messages",
+    }),
+    "hr-claude-web",
+  );
+});
+
+test("spoofed or malformed Headroom launcher markers fail closed", () => {
+  for (const env of [
+    { AIRKIT_SHIELD_LAUNCHER: "headroom/hr-airclaude/v1" },
+    { AIRKIT_SHIELD_LAUNCHER: "headroom/hr-airclaude/v1", AIRCLAUDE_PROVIDER_BASE_URL: "http://localhost:8804/v1/chat/completions" },
+    { AIRKIT_SHIELD_LAUNCHER: "headroom/hr-claude-web/v1", AIRCLAUDE_ANTHROPIC_PROVIDER_BASE_URL: "http://127.0.0.1:8807/v1/chat/completions" },
+    { AIRKIT_SHIELD_LAUNCHER: "headroom/hr-airclaude/v2", AIRCLAUDE_PROVIDER_BASE_URL: "http://127.0.0.1:8804/v1/chat/completions" },
+  ]) {
+    assert.throws(() => resolveShieldLauncherMarker(env), /shield launcher marker/i);
+  }
+});
+
 test("launcher descriptor inventory exposes protected hops and zsh bypasses distinctly", () => {
   const descriptors = shieldLauncherDescriptors();
   assert.deepEqual(descriptors.find((entry) => entry.launcher === "hr-claude-sub"), {
@@ -44,6 +72,27 @@ test("launcher descriptor inventory exposes protected hops and zsh bypasses dist
   assert.deepEqual(descriptors.find((entry) => entry.launcher === "hr-claude-web"), {
     coverage: "protected", launcher: "hr-claude-web", lanes: ["managed"], hopChain: ["headroom", "web", "shield", "managed"],
   });
+});
+
+test("feature-enabled Headroom subscription is represented as protected without exposing its destination", () => {
+  assert.deepEqual(
+    resolveShieldLauncher({ launcher: "hr-claude-sub", mode: "auto", headroom: true, subscriptionShield: true }),
+    {
+      coverage: "protected",
+      clientLane: "subscription",
+      destinationClass: "subscription",
+      hopChain: ["headroom", "subscription", "shield", "subscription"],
+    },
+  );
+  assert.deepEqual(
+    shieldLauncherDescriptors({ subscriptionShield: true }).find((entry) => entry.launcher === "hr-claude-sub"),
+    {
+      coverage: "protected",
+      launcher: "hr-claude-sub",
+      lanes: ["subscription"],
+      hopChain: ["headroom", "subscription", "shield", "subscription"],
+    },
+  );
 });
 
 test("decision cache reuses only exact terminal retry metadata and invalidates transitions", async () => {

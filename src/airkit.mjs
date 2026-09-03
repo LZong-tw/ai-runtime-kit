@@ -31,7 +31,7 @@ import { createPiAuditRuntime } from "./audit/adapters/pi-extension.mjs";
 import { runAuditCli } from "./audit/cli.mjs";
 import { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
 import { runShieldCli } from "./shield/cli.mjs";
-import { resolveShieldLauncher } from "./shield/launchers.mjs";
+import { resolveShieldLauncher, resolveShieldLauncherMarker } from "./shield/launchers.mjs";
 import { buildShieldChildEnv, createShieldDestinationLease, ensureShieldReady, openShieldApprovalChannel, registerShieldApprovalChannel, revokeShieldDestinationLease } from "./shield/service.mjs";
 
 export { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
@@ -2288,6 +2288,7 @@ export async function runCli(argv = process.argv.slice(2), options = {}) {
 
 export async function runAirclaudeCli(argv = process.argv.slice(2), options = {}) {
   const stdout = options.stdout ?? process.stdout;
+  const launchEnv = options.env ?? process.env;
 
   if (isHelpRequest(argv)) {
     stdout.write(renderAirclaudeHelp());
@@ -2301,7 +2302,7 @@ export async function runAirclaudeCli(argv = process.argv.slice(2), options = {}
   // (--profile/env/default) so we know which mode names are valid before parsing positionals.
   const ownArgvForProfile = argv.indexOf("--") === -1 ? argv : argv.slice(0, argv.indexOf("--"));
   const preProfileName =
-    readFlag(ownArgvForProfile, "--profile") ?? process.env.AIRCLAUDE_PROFILE ?? defaultLaunchProfile(catalog);
+    readFlag(ownArgvForProfile, "--profile") ?? launchEnv.AIRCLAUDE_PROFILE ?? defaultLaunchProfile(catalog);
   const preProfile = catalog.profiles.find((candidate) => candidate.name === preProfileName);
   const validModes = new Set(["auto", "pro", ...Object.keys(preProfile?.launch?.modes ?? {})]);
   const parsed = parseAirclaudeArgs(argv, validModes);
@@ -2318,7 +2319,7 @@ export async function runAirclaudeCli(argv = process.argv.slice(2), options = {}
   if (options.spawnCommand === undefined && !parsed.dryRun && !parsed.doctor) {
     assertInteractiveResumeLaunch(parsed.userArgs);
   }
-  const profile = parsed.profile ?? process.env.AIRCLAUDE_PROFILE ?? defaultLaunchProfile(catalog);
+  const profile = parsed.profile ?? launchEnv.AIRCLAUDE_PROFILE ?? defaultLaunchProfile(catalog);
   const result = await prepareLaunch(catalog, profile, {
     ...options,
     configDir: parsed.configDir ?? options.configDir ?? defaultConfigDir(),
@@ -2329,6 +2330,7 @@ export async function runAirclaudeCli(argv = process.argv.slice(2), options = {}
     launch: !parsed.dryRun && !parsed.doctor,
     mode: parsed.plainClaude ? "plain" : parsed.mode,
     plainClaude: parsed.plainClaude,
+    launcher: resolveShieldLauncherMarker(launchEnv),
     userArgs: parsed.userArgs,
   });
   stdout.write(renderLaunchResult(result, { doctor: parsed.doctor, dryRun: parsed.dryRun }));

@@ -5798,6 +5798,26 @@ test("runAirclaudeCli dry run supports positional pro mode and avoids launching"
   }
 });
 
+test("runAirclaudeCli rejects an unpaired Headroom launcher marker before planning a route", async () => {
+  const catalogPath = await writeLaunchCatalog();
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-cli-"));
+
+  try {
+    await assert.rejects(
+      () => runAirclaudeCli(["--dry-run", "--profile", "launch-example", "--config-dir", configDir], {
+        catalogPath,
+        commandExists: async () => true,
+        env: { AIRKIT_SHIELD_LAUNCHER: "headroom/hr-airclaude/v1" },
+        stdout: { write() {} },
+      }),
+      /shield launcher marker/i,
+    );
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+    await rm(resolve(catalogPath, ".."), { force: true, recursive: true });
+  }
+});
+
 test("resume launches fail clearly when no interactive terminal is attached", () => {
   assert.throws(
     () => assertInteractiveResumeLaunch(["-r", "session-id"], { stdinIsTTY: false, stdoutIsTTY: false }),
