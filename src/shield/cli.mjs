@@ -14,6 +14,7 @@ import {
   startShieldService,
   stopShieldService,
   transitionShieldPolicy,
+  renewShieldDestinationLease,
   revokeShieldDestinationLease,
 } from "./service.mjs";
 
@@ -63,6 +64,11 @@ async function createDefaultShieldDependencies(dependencies) {
   const installService = dependencies.installShieldService ?? installShieldService;
   const provisionAssets = dependencies.provisionShieldAssets ?? provisionShieldAssets;
   const installPolicy = dependencies.installShieldPolicyProvision ?? installShieldPolicyProvision;
+  const ensureReady = dependencies.ensureShieldReady ?? ensureShieldReady;
+  const createLease = dependencies.createShieldDestinationLease ?? createShieldDestinationLease;
+  const renewLease = dependencies.renewShieldDestinationLease ?? renewShieldDestinationLease;
+  const revokeLease = dependencies.revokeShieldDestinationLease ?? revokeShieldDestinationLease;
+  const launchChild = dependencies.launchShieldChild ?? launchShieldChild;
   const createDecisionRecorder = dependencies.createDecisionRecorder ?? (async () => {
     const { createDefaultDecisionRecorder } = await import("../shieldd.mjs");
     return createDefaultDecisionRecorder({ env });
@@ -127,11 +133,29 @@ async function createDefaultShieldDependencies(dependencies) {
       return state ? { state: "healthy", version: state.version, detectorVersions: state.detectorVersions } : { state: "stopped", installed: false };
     },
     async launch({ lane, targetOrigin, command, args }) {
-      let ready = await ensureShieldReady({ lane, env, paths: shieldPaths({ env, lane }), io: dependencies.io, inspectService: dependencies.inspectService, isProcessAlive: dependencies.isProcessAlive, probeShield: dependencies.probeShield });
-      if (targetOrigin) ready = await createShieldDestinationLease({ ready, targetOrigin, paths: shieldPaths({ env, lane }), io: dependencies.io });
+      const lanePaths = shieldPaths({ env, lane });
+      let ready = await ensureReady({ lane, env, paths: lanePaths, io: dependencies.io, inspectService: dependencies.inspectService, isProcessAlive: dependencies.isProcessAlive, probeShield: dependencies.probeShield });
+      if (targetOrigin) ready = await createLease({ ready, targetOrigin, paths: lanePaths, io: dependencies.io });
+      let leaseTimer = null;
+      const stopLeaseTimer = () => {
+        if (leaseTimer !== null) {
+          (dependencies.shieldLeaseClearInterval ?? clearInterval)(leaseTimer);
+          leaseTimer = null;
+        }
+      };
+      if (targetOrigin) {
+        const schedule = dependencies.shieldLeaseSetInterval ?? setInterval;
+        leaseTimer = schedule(() => {
+          void renewLease({ ready, targetOrigin, paths: lanePaths, io: dependencies.io }).catch(() => {});
+        }, 15_000);
+        leaseTimer.unref?.();
+      }
       let outcome;
-      try { outcome = await launchShieldChild({ command, args, ready, env, spawnChild: dependencies.spawnChild }); }
-      finally { if (targetOrigin) await revokeShieldDestinationLease({ ready, paths: shieldPaths({ env, lane }), io: dependencies.io }).catch(() => {}); }
+      try { outcome = await launchChild({ command, args, ready, env, spawnChild: dependencies.spawnChild }); }
+      finally {
+        stopLeaseTimer();
+        if (targetOrigin) await revokeLease({ ready, paths: lanePaths, io: dependencies.io }).catch(() => {});
+      }
       return { state: outcome.code === 0 ? "healthy" : "degraded", launched: true, exitCode: outcome.code ?? 1 };
     },
   };
@@ -221,7 +245,7 @@ function parsePolicyInstall(argv) {
 }
 
 function renderShieldHelp() {
-  return `Commands:\n  shield install [--lane subscription|managed] [--write]\n  shield start [--lane subscription|managed]\n  shield stop [--lane subscription|managed]\n  shield status [--lane subscription|managed]\n  shield doctor [--lane subscription|managed]\n  shield policy <status [--lane subscription|managed]|install --bundle /absolute/policy-bundle --public-key /absolute/policy-public-key [--lane subscription|managed] [--write]>\n  shield privacy provision --bundle /absolute/privacy-manifest --gitleaks /absolute/gitleaks [--lane subscription|managed] [--write]\n  shield launch --lane subscription|managed -- command [args...]\n`;
+  return `Commands:\n  shield install [--lane subscription|managed] [--write]\n  shield start [--lane subscription|managed]\n  shield stop [--lane subscription|managed]\n  shield status [--lane subscription|managed]\n  shield doctor [--lane subscription|managed]\n  shield policy <status [--lane subscription|managed]|install --bundle /absolute/policy-bundle --public-key /absolute/policy-public-key [--lane subscription|managed] [--write]>\n  shield privacy provision --bundle /absolute/privacy-manifest --gitleaks /absolute/gitleaks [--lane subscription|managed] [--write]\n  shield launch --lane subscription|managed [--target http://127.0.0.1:port] -- command [args...]\n`;
 }
 
 function renderShieldResult(command, result = {}) {

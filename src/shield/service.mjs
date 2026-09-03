@@ -308,7 +308,7 @@ export async function createShieldDestinationLease({ ready, targetOrigin, paths,
   const response = await fetchImpl(`${ready.origin}/_airkit/shield/destination-lease`, {
     method: "POST",
     headers: { "x-airkit-shield-control": config.controlCapability, "content-type": "application/json" },
-    body: JSON.stringify({ capability, targetOrigin }),
+    body: JSON.stringify({ capability, targetOrigin, expiresAt: Date.now() + 30_000 }),
   }).catch(() => null);
   if (response?.status !== 204) throw new Error("shield managed destination lease registration failed");
   return Object.freeze({ ...ready, capability });
@@ -323,6 +323,17 @@ export async function revokeShieldDestinationLease({ ready, paths, io, fetchImpl
     body: JSON.stringify({ capability: ready.capability }),
   }).catch(() => null);
   if (response?.status !== 204) throw new Error("shield managed destination lease revocation failed");
+}
+
+export async function renewShieldDestinationLease({ ready, targetOrigin, paths, io, fetchImpl = fetch } = {}) {
+  if ((ready?.lane !== "managed" && ready?.lane !== "subscription") || !ready.origin || !ready.capability || !targetOrigin) return false;
+  const config = await readShieldConfig({ paths: paths ?? shieldPaths({ lane: ready.lane }), io });
+  const response = await fetchImpl(`${ready.origin}/_airkit/shield/destination-lease`, {
+    method: "POST",
+    headers: { "x-airkit-shield-control": config.controlCapability, "content-type": "application/json" },
+    body: JSON.stringify({ capability: ready.capability, targetOrigin, expiresAt: Date.now() + 30_000, renew: true }),
+  }).catch(() => null);
+  return response?.status === 204;
 }
 
 export function buildShieldChildEnv(ready, env = process.env) {
