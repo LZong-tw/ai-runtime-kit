@@ -57,28 +57,34 @@ export function createShieldDecisionRecorder({ client = null, spool = null, mast
       }
     },
     async recordShieldDecision(decision) {
-      const event = buildShieldDecisionEvent(decision, { now });
-      if (client) {
-        try {
-          const ack = await client.send(encryptShieldDecisionEvent(event, masterKey));
-          if (ack?.status === "committed" || ack?.status === "duplicate") return Object.freeze({ durable: "ack" });
-        } catch {
-          // A trusted encrypted spool may provide the only durable fallback.
-        }
-      }
-      if (!spool) throw unavailable();
-      try {
-        const state = await spool.stats();
-        if (state?.atCapacity === true) throw unavailable();
-        const entry = await spool.enqueue(event);
-        if (entry?.event?.event_id !== event.event_id) throw unavailable();
-        return Object.freeze({ durable: "spool" });
-      } catch (error) {
-        if (error?.code === "AIRKIT_SHIELD_AUDIT_UNAVAILABLE") throw error;
-        throw unavailable();
-      }
+      return persistShieldEvent(buildShieldDecisionEvent(decision, { now }), { client, spool, masterKey });
+    },
+    async recordShieldPolicyTransition(transition) {
+      return persistShieldEvent(buildShieldPolicyTransitionEvent(transition, { now }), { client, spool, masterKey });
     },
   });
+}
+
+async function persistShieldEvent(event, { client, spool, masterKey }) {
+  if (client) {
+    try {
+      const ack = await client.send(encryptShieldDecisionEvent(event, masterKey));
+      if (ack?.status === "committed" || ack?.status === "duplicate") return Object.freeze({ durable: "ack" });
+    } catch {
+      // A trusted encrypted spool may provide the only durable fallback.
+    }
+  }
+  if (!spool) throw unavailable();
+  try {
+    const state = await spool.stats();
+    if (state?.atCapacity === true) throw unavailable();
+    const entry = await spool.enqueue(event);
+    if (entry?.event?.event_id !== event.event_id) throw unavailable();
+    return Object.freeze({ durable: "spool" });
+  } catch (error) {
+    if (error?.code === "AIRKIT_SHIELD_AUDIT_UNAVAILABLE") throw error;
+    throw unavailable();
+  }
 }
 
 function encryptShieldDecisionEvent(event, masterKey) {

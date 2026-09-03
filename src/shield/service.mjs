@@ -118,8 +118,11 @@ export async function stopShieldService({ paths, runLaunchctl = defaultLaunchctl
   return { label: SHIELD_SERVICE_LABEL, stopped: true };
 }
 
-export async function transitionShieldPolicy({ paths, installPolicy, io = defaultIo, runLaunchctl = defaultLaunchctl, inspectService = inspectShieldService, stopService = stopShieldService, startService = startShieldService, isProcessAlive = defaultIsProcessAlive, probeShield = defaultProbeShield, ensureReady = ensureShieldReady } = {}) {
+export async function transitionShieldPolicy({ paths, installPolicy, io = defaultIo, runLaunchctl = defaultLaunchctl, inspectService = inspectShieldService, stopService = stopShieldService, startService = startShieldService, isProcessAlive = defaultIsProcessAlive, probeShield = defaultProbeShield, ensureReady = ensureShieldReady, recordShieldPolicyTransition = null } = {}) {
   if (typeof installPolicy !== "function") throw new TypeError("shield policy transition installer is required");
+  if (recordShieldPolicyTransition !== null && typeof recordShieldPolicyTransition !== "function") {
+    throw new TypeError("shield policy transition recorder is invalid");
+  }
   const previous = await readShieldIdentity({ paths, io });
   const service = await inspectService({ paths, io, runLaunchctl });
   if (service.active) {
@@ -148,6 +151,20 @@ export async function transitionShieldPolicy({ paths, installPolicy, io = defaul
   });
   if (ready.policyVersion !== installed.version || !sameDetectorVersions(ready.detectorVersions, installed.detectorVersions)) {
     throw new Error("shield policy transition fresh daemon binding mismatch");
+  }
+  if (recordShieldPolicyTransition !== null) {
+    await recordShieldPolicyTransition({
+      requestId: `policy-${randomUUID().replaceAll("-", "")}`,
+      lane: config.lane,
+      destinationClass: config.targetClass,
+      bundleVersion: installed.version,
+      detectorVersions: installed.detectorVersions,
+      action: "transition",
+      reasonCodes: ["policy_replaced"],
+      transformCount: 0,
+      override: false,
+      elapsedMs: 0,
+    });
   }
   return installed;
 }

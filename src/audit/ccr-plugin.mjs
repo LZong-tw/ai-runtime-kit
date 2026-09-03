@@ -5,10 +5,12 @@ import { dirname } from "node:path";
 import { resolveAuditPaths } from "./paths.mjs";
 import { createAuditQueryClient } from "./query.mjs";
 import { createAuditUiAdapter } from "./ui-contract.mjs";
+import { readShieldIdentity, readShieldPolicyState, shieldPaths } from "../shield/paths.mjs";
 
 const PLUGIN_ID = "airkit-audit-ui";
 const API_PATH = "/api";
-const QUERY_NAMES = ["requests", "sessions", "clients", "accounts", "repos", "usage", "cache", "gaps"];
+const QUERY_NAMES = ["requests", "sessions", "clients", "accounts", "repos", "usage", "cache", "gaps", "shield_decisions", "shield_policy_transitions"];
+const DETAIL_QUERY_NAMES = new Set(["request", "shield_decision"]);
 
 export default {
   async setup(ctx) {
@@ -20,18 +22,19 @@ export default {
       },
     });
     const capabilityFile = ctx.pluginConfig?.capabilityFile ?? `${paths.rootDir}/capability`;
+    const createQueryClient = ctx.createAuditQueryClient ?? createAuditQueryClient;
     let clientPromise;
     const query = async (name, args = []) => {
       const client = await getClient();
-      const result = await client.query(name, name === "request" ? { id: args[0] } : {});
+      const result = await client.query(name, DETAIL_QUERY_NAMES.has(name) ? { id: args[0] } : {});
       return { state: "healthy", rows: result.rows };
     };
     const status = async () => {
       try {
         await query("clients");
-        return { state: "healthy", database: { present: true, ok: true }, service: { loaded: true } };
+        return { state: "healthy", database: { present: true, ok: true }, service: { loaded: true }, shield: await shieldUiStatus() };
       } catch {
-        return { state: "degraded", database: { present: false, ok: false }, service: { loaded: false } };
+        return { state: "degraded", database: { present: false, ok: false }, service: { loaded: false }, shield: await shieldUiStatus() };
       }
     };
     const adapter = createAuditUiAdapter({ query, status });
@@ -89,12 +92,33 @@ export default {
 
     async function getClient() {
       if (!clientPromise) {
-        clientPromise = readFile(capabilityFile, "utf8").then((capability) => createAuditQueryClient({
+        clientPromise = readFile(capabilityFile, "utf8").then((capability) => createQueryClient({
           socketPath: paths.querySocketPath,
           capability: capability.trim(),
         }));
       }
       return clientPromise;
+    }
+
+    async function shieldUiStatus() {
+      try {
+        const shield = shieldPaths({ env: process.env });
+        const [identity, policy] = await Promise.all([
+          readShieldIdentity({ paths: shield }),
+          readShieldPolicyState({ paths: shield }),
+        ]);
+        if (!identity || !policy || identity.policyVersion !== policy.version) return { state: "unavailable" };
+        return {
+          state: "protected",
+          policy_version: policy.version,
+          gitleaks_version: policy.detectorVersions.gitleaks,
+          privacy_version: policy.detectorVersions.privacy,
+          coverage: 2,
+          bypass: false,
+        };
+      } catch {
+        return { state: "unavailable" };
+      }
     }
   },
 };

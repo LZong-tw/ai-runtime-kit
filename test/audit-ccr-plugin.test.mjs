@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -25,13 +25,23 @@ test("CCR audit wrapper registers a browser backend and one-time bootstrap app",
   const root = await mkdtemp("/tmp/airkit-ccr-plugin-");
   const apps = [];
   const backends = [];
+  const operations = [];
   try {
+    await writeFile(join(root, "capability"), "c".repeat(32), { mode: 0o600 });
     await plugin.setup({
       pluginConfig: {
         auditRootDir: root,
         auditQuerySocketPath: join(root, "auditd-query.sock"),
       },
       registerApp(app) { apps.push(app); },
+      createAuditQueryClient() {
+        return {
+          async query(operation) {
+            operations.push(operation);
+            return { rows: operation === "shield_decisions" ? [{ logical_request_id: "shield-request-1", raw_prompt: "must-not-render" }] : [] };
+          },
+        };
+      },
       async registerHttpBackend(backend) {
         backends.push(backend);
         return { host: backend.host, port: 4567, url: "http://127.0.0.1:4567" };
@@ -60,7 +70,18 @@ test("CCR audit wrapper registers a browser backend and one-time bootstrap app",
     assert.equal(pageResponse.statusCode, 200);
     assert.match(pageResponse.headers["set-cookie"], /HttpOnly/i);
     assert.match(pageResponse.body(), /metadata-only local audit view/i);
+    assert.match(pageResponse.body(), /shield_decisions/);
+    assert.match(pageResponse.body(), /shield_policy_transitions/);
     assert.doesNotMatch(pageResponse.body(), /api[_-]?key|authorization|bearer|secret|\/Users\//i);
+    const sessionCookie = pageResponse.headers["set-cookie"].split(";", 1)[0];
+    const shieldQuery = responseRecorder();
+    await backends[0].handler(
+      { method: "GET", url: "/api/query?name=shield_decisions", headers: { cookie: sessionCookie } },
+      shieldQuery,
+    );
+    assert.equal(shieldQuery.statusCode, 200);
+    assert.deepEqual(operations, ["shield_decisions"]);
+    assert.doesNotMatch(shieldQuery.body(), /must-not-render/);
     await assert.rejects(readFile(bootstrapPath, "utf8"), { code: "ENOENT" });
 
     const replayResponse = responseRecorder();

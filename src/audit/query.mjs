@@ -60,8 +60,10 @@ export function queryAuditStore(store, operation, params = {}, { limit = DEFAULT
   if (!store || typeof store.query !== "function") throw new TypeError("query store is required");
   const normalized = normalizeQueryArguments(operation, params, limit);
   const sql = `${AUDIT_QUERY_SQL[operation]}\nLIMIT ?`;
-  const values = operation === "request" || operation === "shield_decision"
+  const values = operation === "request"
     ? [normalized.id, normalized.id, normalized.limit]
+    : operation === "shield_decision"
+      ? [normalized.id, normalized.limit]
     : [normalized.limit];
   return store.query(sql, values);
 }

@@ -415,6 +415,7 @@ test("policy lifecycle transaction stops a live proxy before activating and bind
   assert.equal((await fetch(`${oldProxy.origin}/v1/messages`, { method: "POST", headers: { "x-airkit-shield": capability }, body: "{}" })).status, 200);
   let activePid = 777;
   let replacement = null;
+  const transitions = [];
   const probe = async (origin, receivedCapability) => {
     try { return (await fetch(`${origin}/_airkit/shield/ready`, { headers: { "x-airkit-shield": receivedCapability } })).status === 204; } catch { return false; }
   };
@@ -431,11 +432,15 @@ test("policy lifecycle transaction stops a live proxy before activating and bind
       await writeShieldPolicyState({ paths, state: newPolicy });
       await writeShieldIdentity({ paths, identity: { ...oldIdentity, origin: replacement.origin, pid: activePid, policyVersion: newPolicy.version } });
     },
+    recordShieldPolicyTransition: async (transition) => { transitions.push(transition); return { durable: "ack" }; },
   });
   t.after(() => replacement?.close());
   assert.equal(upstreamCalls, 1, "the old proxy forwarded only before the transaction");
   assert.equal((await fetch(`${replacement.origin}/v1/messages`, { method: "POST", headers: { "x-airkit-shield": capability }, body: "{}" })).status, 200);
   assert.equal(upstreamCalls, 2);
+  assert.equal(transitions.length, 1);
+  assert.equal(transitions[0].action, "transition");
+  assert.equal(transitions[0].bundleVersion, newPolicy.version);
 });
 
 test("policy lifecycle transaction rejects a launchd respawn before installing", async () => {
