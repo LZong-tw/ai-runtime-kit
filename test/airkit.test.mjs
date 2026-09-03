@@ -34,6 +34,7 @@ import {
   exportOssRelease,
   installProfile,
   loadCatalog,
+  monitorChildLifecycle,
   prepareExternalClient,
   prepareLaunch,
   assertInteractiveResumeLaunch,
@@ -42,6 +43,27 @@ import {
   runCli,
   updateProfile,
 } from "../src/airkit.mjs";
+
+test("background lifecycle retains a lease until the matching host disappears exactly once", async () => {
+  const events = [];
+  let active = true;
+  const scheduled = [];
+  const middleware = { origin: "http://127.0.0.1:4599", async close() { events.push("close"); } };
+  await monitorChildLifecycle(middleware, { status: 0 }, {
+    preserveForBackground: true,
+    backgroundMiddlewareGraceMs: 1_000,
+    backgroundHostDetector: async () => active,
+    backgroundSetTimeout: (callback) => { scheduled.push(callback); return { unref() {} }; },
+    onPreserveBackground: () => events.push("retain"),
+    onDeferredClose: async () => events.push("revoke"),
+  });
+  assert.deepEqual(events, ["retain"]);
+  active = false;
+  await scheduled.shift()();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, ["retain", "close", "revoke"]);
+  assert.equal(scheduled.length, 0);
+});
 
 const profile = "openai-compatible-example";
 

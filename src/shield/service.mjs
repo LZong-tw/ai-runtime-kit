@@ -302,8 +302,8 @@ export async function registerShieldApprovalChannel({ ready, channel, paths, io,
 }
 
 export async function createShieldDestinationLease({ ready, targetOrigin, paths, io, fetchImpl = fetch } = {}) {
-  if (ready?.lane !== "managed" || !ready.origin || !targetOrigin) throw new Error("shield managed destination lease requires a fresh managed identity");
-  const config = await readShieldConfig({ paths: paths ?? shieldPaths({ lane: "managed" }), io });
+  if ((ready?.lane !== "managed" && ready?.lane !== "subscription") || !ready.origin || !targetOrigin) throw new Error("shield destination lease requires a fresh lane identity");
+  const config = await readShieldConfig({ paths: paths ?? shieldPaths({ lane: ready.lane }), io });
   const capability = randomUUID().replaceAll("-", "");
   const response = await fetchImpl(`${ready.origin}/_airkit/shield/destination-lease`, {
     method: "POST",
@@ -315,8 +315,8 @@ export async function createShieldDestinationLease({ ready, targetOrigin, paths,
 }
 
 export async function revokeShieldDestinationLease({ ready, paths, io, fetchImpl = fetch } = {}) {
-  if (ready?.lane !== "managed" || !ready.origin || !ready.capability) return;
-  const config = await readShieldConfig({ paths: paths ?? shieldPaths({ lane: "managed" }), io });
+  if ((ready?.lane !== "managed" && ready?.lane !== "subscription") || !ready.origin || !ready.capability) return;
+  const config = await readShieldConfig({ paths: paths ?? shieldPaths({ lane: ready.lane }), io });
   const response = await fetchImpl(`${ready.origin}/_airkit/shield/destination-lease`, {
     method: "DELETE",
     headers: { "x-airkit-shield-control": config.controlCapability, "content-type": "application/json" },

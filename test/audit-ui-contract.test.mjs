@@ -174,6 +174,75 @@ test("Shield correlation identifiers are bounded opaque values, never raw eviden
   }
 });
 
+test("Shield UI status projects real per-lane health and declared coverage without route metadata", () => {
+  const projection = projectShieldStatus({
+    state: "protected",
+    lanes: [
+      {
+        lane: "subscription",
+        state: "protected",
+        service: "healthy",
+        policy: "healthy",
+        privacy: "healthy",
+        audit: "healthy",
+        policy_version: "policy-1",
+        gitleaks_version: "8.24.3",
+        privacy_version: "privacy-1",
+        origin: "http://127.0.0.1:8811",
+        capability: "must-not-render",
+      },
+      {
+        lane: "managed",
+        state: "unavailable",
+        service: "stopped",
+        policy: "missing",
+        privacy: "missing",
+        audit: "unavailable",
+      },
+    ],
+    declared_coverage: [
+      { launcher: "airclaude", lanes: ["managed"], hop_chain: ["airclaude", "shield", "managed"] },
+    ],
+    declared_bypasses: [
+      { launcher: "claude", reason: "direct_client" },
+    ],
+    coverage: 4,
+    bypass: false,
+    raw_prompt: "shield-raw-sentinel",
+  });
+  assert.deepEqual(projection, {
+    state: "protected",
+    lanes: [
+      {
+        lane: "subscription",
+        state: "protected",
+        service: "healthy",
+        policy: "healthy",
+        privacy: "healthy",
+        audit: "healthy",
+        policy_version: "policy-1",
+        gitleaks_version: "8.24.3",
+        privacy_version: "privacy-1",
+      },
+      {
+        lane: "managed",
+        state: "unavailable",
+        service: "stopped",
+        policy: "missing",
+        privacy: "missing",
+        audit: "unavailable",
+      },
+    ],
+    declared_coverage: [
+      { launcher: "airclaude", lanes: ["managed"], hop_chain: ["airclaude", "shield", "managed"] },
+    ],
+    declared_bypasses: [
+      { launcher: "claude", reason: "direct_client" },
+    ],
+  });
+  assert.doesNotMatch(JSON.stringify(projection), /8811|capability|sentinel/i);
+});
+
 test("Shield UI and status projections preserve accounting-neutral protection state", async () => {
   const adapter = createAuditUiAdapter({
     async query() {
@@ -219,27 +288,7 @@ test("Shield UI and status projections preserve accounting-neutral protection st
   }]);
   assert.doesNotMatch(JSON.stringify(result), /sentinel|cache_read|total_cost/i);
 
-  const projection = projectShieldStatus({
-    state: "protected",
-    policy_version: "policy-1",
-    gitleaks_version: "8.24.3",
-    privacy_version: "privacy-1",
-    coverage: 4,
-    bypass: false,
-    model: "must-not-affect-model",
-    cost: 123,
-    cache: "must-not-affect-cache",
-    context: "must-not-affect-context",
-    raw_prompt: "shield-raw-sentinel",
-  });
-  assert.deepEqual(projection, {
-    state: "protected",
-    policy_version: "policy-1",
-    gitleaks_version: "8.24.3",
-    privacy_version: "privacy-1",
-    coverage: 4,
-    bypass: false,
-  });
+  assert.deepEqual(projectShieldStatus({ state: "protected", raw_prompt: "shield-raw-sentinel" }), { state: "protected" });
 });
 
 test("Shield UI rejects non-opaque detail identifiers before it invokes the query bridge", async () => {

@@ -28,7 +28,7 @@ test("airkit and shield help expose the documented Shield command contract", asy
     });
 
     assert.equal(code, 0);
-    assert.match(output.value(), /shield <install\|start\|stop\|status\|doctor\|privacy\|launch> \[options\]/);
+    assert.match(output.value(), /shield <install\|start\|stop\|status\|doctor\|policy\|privacy\|launch> \[options\]/);
   }
 
   for (const argv of [[], ["help"], ["-h"], ["--help"]]) {
