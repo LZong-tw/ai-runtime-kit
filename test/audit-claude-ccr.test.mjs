@@ -104,6 +104,28 @@ test("Claude-Sub audit-only hooks emit without enabling AirClaude routing", asyn
   assert.ok(!JSON.stringify(events).includes("private prompt"));
 });
 
+test("audit stays additive for an AirClaude profile session instead of retiring context hooks", async () => {
+  const events = [];
+  const response = await processContextHook(
+    {
+      hook_event_name: "UserPromptSubmit",
+      session_id: "profile-session",
+      prompt: "private prompt",
+    },
+    {
+      AIRCLAUDE_MODE: "auto",
+      AIRCLAUDE_PROFILE: "launch-example",
+      AIRKIT_AUDIT_ENABLED: "1",
+      __airkitAudit: { emit: async (event) => events.push(event) },
+    },
+  );
+
+  assert.equal(response.hookSpecificOutput.hookEventName, "UserPromptSubmit");
+  assert.match(response.hookSpecificOutput.additionalContext, /AirClaude/);
+  assert.deepEqual(events.map((event) => event.event_kind), ["session_context", "request_started"]);
+  assert.ok(!JSON.stringify(events).includes("private prompt"));
+});
+
 test("Claude-Sub hook runtime builds an encrypted audit emitter from the local capability", async () => {
   let sent;
   const emitter = await createClaudeAuditHookEmitter({
