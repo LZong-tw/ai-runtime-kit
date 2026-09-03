@@ -133,6 +133,11 @@ async function handleShieldRequest({ request, response, capability, controlCapab
     await finish(response, { status: 403, code: "shield_blocked" });
     return;
   }
+  if (!hasIdentityContentEncoding(request.headers["content-encoding"])) {
+    request.resume();
+    await finish(response, { status: 403, code: "shield_blocked" });
+    return;
+  }
 
   const lifecycle = requestLifecycleSignal(request, response);
   if (lifecycle.signal.aborted) return;
@@ -331,6 +336,10 @@ async function readInspection(request) {
     chunks.push(buffer);
   }
   return { body: Buffer.concat(chunks), bytes, tooLarge: false };
+}
+
+function hasIdentityContentEncoding(value) {
+  return value === undefined || (typeof value === "string" && value.trim().toLowerCase() === "identity");
 }
 
 function forwardHeaders(headers) {

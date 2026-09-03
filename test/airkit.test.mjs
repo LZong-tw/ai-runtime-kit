@@ -5158,7 +5158,7 @@ test("profile-scoped Shield rollback removes only child Shield wiring", () => {
 });
 
 test("enabled Shield replaces only the spawned AirClaude endpoint and capability", async () => {
-  const catalog = launchCatalog();
+  const catalog = compatibilityCatalog();
   catalog.profiles[0].shield = { enabled: true, lane: "managed" };
   const configDir = await mkdtemp(join(tmpdir(), "airkit-shield-enabled-launch-"));
   const capability = "fixture-capability-012345678901234567890";
@@ -5197,7 +5197,7 @@ test("enabled Shield replaces only the spawned AirClaude endpoint and capability
         events.push("shield-ready");
         assert.equal(options.lane, "managed");
         assert.equal(options.env, launchEnv);
-        assert.equal(options.expectedTargetOrigin, "http://127.0.0.1:3456");
+        assert.equal(options.expectedTargetOrigin, "http://127.0.0.1:4599");
         return {
           origin: "http://127.0.0.1:8811",
           capability,
@@ -5208,7 +5208,7 @@ test("enabled Shield replaces only the spawned AirClaude endpoint and capability
       createShieldDestinationLease: async ({ ready, targetOrigin }) => {
         events.push("lease-create");
         assert.equal(ready.capability, capability);
-        assert.equal(targetOrigin, "http://127.0.0.1:3456");
+        assert.equal(targetOrigin, "http://127.0.0.1:4599");
         return { ...ready, capability: "lease-capability-012345678901234567890" };
       },
       openShieldApprovalChannel: async () => {
@@ -5235,6 +5235,7 @@ test("enabled Shield replaces only the spawned AirClaude endpoint and capability
       env: launchEnv,
       runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
       runtimeVersions: passingRuntimeVersions(),
+      startCompatibilityMiddleware: async () => ({ origin: "http://127.0.0.1:4599", close: async () => events.push("middleware-close") }),
       spawnCommand: (command, args, options) => {
         events.push("spawn");
         spawnCalls.push({ args, command, env: options.env });
@@ -5258,10 +5259,20 @@ test("enabled Shield replaces only the spawned AirClaude endpoint and capability
     await leaseTimers[0].callback();
     childListeners.get("exit")(0);
     const result = await launch;
-    assert.deepEqual(events, ["gateway-ready", "shield-ready", "lease-create", "approval-open", "approval-register", "spawn", "lease-renew", "approval-close", "lease-revoke"]);
+    assert.deepEqual(events, ["gateway-ready", "shield-ready", "lease-create", "approval-open", "approval-register", "spawn", "lease-renew", "middleware-close", "approval-close", "lease-revoke"]);
     assert.deepEqual(clearedLeaseTimers, [leaseTimers[0].timer]);
     assert.equal(spawnCalls[0].env.ANTHROPIC_API_BASE_URL, "http://127.0.0.1:8811");
     assert.equal(spawnCalls[0].env.ANTHROPIC_BASE_URL, "http://127.0.0.1:8811");
+    assert.equal(spawnCalls[0].env.CLAUDE_AGENT_API_BASE_URL, "http://127.0.0.1:8811");
+    const settingsIndex = spawnCalls[0].args.indexOf("--settings");
+    assert.notEqual(settingsIndex, -1);
+    assert.deepEqual(JSON.parse(spawnCalls[0].args[settingsIndex + 1]).env, {
+      ANTHROPIC_API_BASE_URL: "http://127.0.0.1:8811",
+      ANTHROPIC_BASE_URL: "http://127.0.0.1:8811",
+      CLAUDE_AGENT_API_BASE_URL: "http://127.0.0.1:8811",
+      CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0",
+    });
+    assert.doesNotMatch(JSON.stringify({ args: spawnCalls[0].args, env: spawnCalls[0].env }), /127\.0\.0\.1:4599/);
     assert.equal(
       spawnCalls[0].env.ANTHROPIC_CUSTOM_HEADERS,
       "x-airkit-mode: auto\nx-airkit-shield: lease-capability-012345678901234567890",
@@ -5276,6 +5287,88 @@ test("enabled Shield replaces only the spawned AirClaude endpoint and capability
     assert.doesNotMatch(JSON.stringify(result), /approval-fixture|aaaaaaaa/);
   } finally {
     await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("Shield spawn failure clears its approval, lease, timer, and middleware exactly once", async () => {
+  const catalog = compatibilityCatalog();
+  catalog.profiles[0].shield = { enabled: true, lane: "managed" };
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-shield-spawn-cleanup-"));
+  const events = [];
+  const timer = { unref() {} };
+  const channel = { async close() { events.push("approval-close"); } };
+
+  try {
+    await assert.rejects(
+      prepareLaunch(catalog, "launch-example", {
+        ccrClient: Object.assign(ccrTestClient([]), { ensureGateway: async () => events.push("gateway-ready") }),
+        commandExists: async () => true,
+        configDir,
+        env: { DEMO_API_KEY: "runtime-secret", HOME: configDir },
+        ensureShieldReady: async () => {
+          events.push("shield-ready");
+          return { origin: "http://127.0.0.1:8811", capability: "a".repeat(32), lane: "managed", targetClass: "managed" };
+        },
+        createShieldDestinationLease: async ({ ready }) => {
+          events.push("lease-create");
+          return { ...ready, capability: "b".repeat(32) };
+        },
+        openShieldApprovalChannel: async () => {
+          events.push("approval-open");
+          return channel;
+        },
+        registerShieldApprovalChannel: async () => events.push("approval-register"),
+        unregisterShieldApprovalChannel: async () => events.push("approval-unregister"),
+        revokeShieldDestinationLease: async () => events.push("lease-revoke"),
+        shieldLeaseSetInterval: () => timer,
+        shieldLeaseClearInterval: (cleared) => {
+          assert.equal(cleared, timer);
+          events.push("timer-clear");
+        },
+        runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
+        runtimeVersions: passingRuntimeVersions(),
+        startCompatibilityMiddleware: async () => ({ origin: "http://127.0.0.1:4599", async close() { events.push("middleware-close"); } }),
+        spawnCommand: () => { throw new Error("spawn fixture failure"); },
+      }),
+      /spawn fixture failure/,
+    );
+    assert.deepEqual(events, [
+      "gateway-ready", "shield-ready", "lease-create", "approval-open", "approval-register",
+      "timer-clear", "approval-unregister", "approval-close", "lease-revoke", "middleware-close",
+    ]);
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("AirClaude Shield launch blocks a persisted Claude endpoint override before spawn", async () => {
+  const catalog = compatibilityCatalog();
+  catalog.profiles[0].shield = { enabled: true, lane: "managed" };
+  const home = await mkdtemp(join(tmpdir(), "airkit-shield-persisted-launch-"));
+  let spawned = false;
+  try {
+    await mkdir(join(home, ".claude"), { recursive: true });
+    await writeFile(join(home, ".claude", "settings.json"), JSON.stringify({
+      env: { CLAUDE_AGENT_API_BASE_URL: "http://127.0.0.1:4599" },
+    }));
+    await assert.rejects(
+      prepareLaunch(catalog, "launch-example", {
+        ccrClient: ccrTestClient([]),
+        commandExists: async () => true,
+        configDir: home,
+        env: { DEMO_API_KEY: "runtime-secret", HOME: home },
+        ensureShieldReady: async () => ({ origin: "http://127.0.0.1:8811", capability: "a".repeat(32), lane: "managed", targetClass: "managed" }),
+        createShieldDestinationLease: async ({ ready }) => ({ ...ready, capability: "b".repeat(32) }),
+        runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
+        runtimeVersions: passingRuntimeVersions(),
+        startCompatibilityMiddleware: async () => ({ origin: "http://127.0.0.1:4599", async close() {} }),
+        spawnCommand: () => { spawned = true; return { status: 0 }; },
+      }),
+      /Shield launch settings cannot override.*CLAUDE_AGENT_API_BASE_URL/i,
+    );
+    assert.equal(spawned, false);
+  } finally {
+    await rm(home, { force: true, recursive: true });
   }
 });
 
@@ -5466,6 +5559,11 @@ test("a managed Shield lease renews for a live background host then revokes exac
   const timeoutCallbacks = [];
   const cleared = [];
   const events = [];
+  const detectorOrigins = [];
+  const shieldBackgroundCommand = [
+    "/Applications/Claude.app/Contents/MacOS/claude --bg-pty-host /tmp/session.sock",
+    '--settings {"env":{"ANTHROPIC_API_BASE_URL":"http://127.0.0.1:8811","CLAUDE_AGENT_API_BASE_URL":"http://127.0.0.1:8811"}}',
+  ].join(" ");
   let active = true;
 
   try {
@@ -5492,7 +5590,10 @@ test("a managed Shield lease renews for a live background host then revokes exac
         return timer;
       },
       shieldLeaseClearInterval: (timer) => cleared.push(timer),
-      backgroundHostDetector: async () => active,
+      backgroundHostDetector: async (origin) => {
+        detectorOrigins.push(origin);
+        return active && airkitRuntime.backgroundHostUsesAdapter(shieldBackgroundCommand, origin);
+      },
       backgroundMiddlewareGraceMs: 1_000,
       backgroundSetTimeout: (callback) => {
         const timer = { unref() {} };
@@ -5512,6 +5613,7 @@ test("a managed Shield lease renews for a live background host then revokes exac
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(events, ["renew:http://127.0.0.1:4599", "middleware-close", "revoke"]);
     assert.deepEqual(cleared, [intervalCallbacks[0].timer]);
+    assert.deepEqual(detectorOrigins, ["http://127.0.0.1:8811", "http://127.0.0.1:8811"]);
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }

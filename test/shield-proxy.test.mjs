@@ -224,6 +224,32 @@ test("oversized inspection is blocked before contacting upstream", async (t) => 
   assert.equal(upstreamCalls, 0);
 });
 
+test("proxy rejects compressed request bodies before inspection or forwarding", async (t) => {
+  let upstreamCalls = 0;
+  let decisions = 0;
+  const upstream = await startFixture(t, async (_request, response) => {
+    upstreamCalls += 1;
+    response.end();
+  });
+  const shield = await startShield(t, {
+    targetOrigin: upstream.origin,
+    decide: async () => {
+      decisions += 1;
+      return { action: "allow" };
+    },
+  });
+
+  const result = await rawRequest(shield.origin, "/v1/messages", {
+    "content-encoding": "gzip",
+    "x-airkit-shield": CAPABILITY,
+  }, gzipSync('{"private":"compressed"}'));
+
+  assert.equal(result.status, 403);
+  assert.deepEqual(JSON.parse(result.body), { error: { code: "shield_blocked" } });
+  assert.equal(decisions, 0);
+  assert.equal(upstreamCalls, 0);
+});
+
 test("proxy preserves streaming upstream responses", async (t) => {
   const upstream = await startFixture(t, async (_request, response) => {
     response.writeHead(200, { "content-type": "text/event-stream" });

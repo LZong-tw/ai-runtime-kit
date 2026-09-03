@@ -162,8 +162,8 @@ async function createDefaultShieldDependencies(dependencies) {
       };
       try {
         outcome = await launchChild({ command, args, ready, env, spawnChild: dependencies.spawnChild });
-        if (targetOrigin && await hasBackgroundClaudeHost(targetOrigin, dependencies.backgroundHostDetector)) {
-          leaseRetained = scheduleBackgroundHostRelease(targetOrigin, {
+        if (targetOrigin && await hasBackgroundClaudeHost(ready.origin, dependencies.backgroundHostDetector)) {
+          leaseRetained = scheduleBackgroundHostRelease(ready.origin, {
             detector: dependencies.backgroundHostDetector,
             graceMs: dependencies.backgroundMiddlewareGraceMs,
             setTimeoutFn: dependencies.backgroundSetTimeout,
