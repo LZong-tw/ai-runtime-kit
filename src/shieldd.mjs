@@ -73,9 +73,9 @@ export async function startShieldDaemon({
     privacy.close?.();
     throw new Error("shield audit recorder is unavailable");
   }
-  const decide = async ({ body }) => {
+  const decide = async ({ body, launcherContext: requestLauncherContext = null }) => {
     const launcherContext = {
-      ...(config.launcherContext ?? defaultShieldLauncherContext(destinationClass)),
+      ...(requestLauncherContext ?? config.launcherContext ?? defaultShieldLauncherContext(destinationClass)),
       destinationClass,
     };
     const facts = classifyShieldRequest({ body, launcherContext });

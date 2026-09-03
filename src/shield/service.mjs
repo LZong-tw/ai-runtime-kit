@@ -318,14 +318,15 @@ export async function unregisterShieldApprovalChannel({ ready, paths, io, fetchI
   if (response?.status !== 204) throw new Error("shield approval unregister failed");
 }
 
-export async function createShieldDestinationLease({ ready, targetOrigin, paths, io, fetchImpl = fetch } = {}) {
+export async function createShieldDestinationLease({ ready, targetOrigin, launcherContext, paths, io, fetchImpl = fetch } = {}) {
   if ((ready?.lane !== "managed" && ready?.lane !== "subscription") || !ready.origin || !targetOrigin) throw new Error("shield destination lease requires a fresh lane identity");
+  if (launcherContext !== undefined) classifyShieldRequest({ body: Buffer.alloc(0), launcherContext });
   const config = await readShieldConfig({ paths: paths ?? shieldPaths({ lane: ready.lane }), io });
   const capability = randomUUID().replaceAll("-", "");
   const response = await fetchImpl(`${ready.origin}/_airkit/shield/destination-lease`, {
     method: "POST",
     headers: { "x-airkit-shield-control": config.controlCapability, "content-type": "application/json" },
-    body: JSON.stringify({ capability, targetOrigin, expiresAt: Date.now() + 30_000 }),
+    body: JSON.stringify({ capability, targetOrigin, expiresAt: Date.now() + 30_000, ...(launcherContext === undefined ? {} : { launcherContext }) }),
   }).catch(() => null);
   if (response?.status !== 204) throw new Error("shield managed destination lease registration failed");
   return Object.freeze({ ...ready, capability });

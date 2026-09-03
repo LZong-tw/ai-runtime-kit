@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { access, chmod, copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { spawn, spawnSync } from "node:child_process";
 import { readdirSync, realpathSync } from "node:fs";
@@ -1369,6 +1369,26 @@ async function assertNoInheritedApiKeyHelper(env) {
   }
 }
 
+function shieldLaunchContext(lane, options) {
+  const workspace = resolve(options.cwd ?? process.cwd());
+  const interactive = options.interactive ?? (process.stdin?.isTTY === true && process.stdout?.isTTY === true);
+  return {
+    repository: { remoteHash: createHash("sha256").update(workspace).digest("hex"), trustClass: "unknown" },
+    pathClasses: [classifyShieldWorkspacePath(workspace)],
+    destinationClass: lane,
+    interactive,
+  };
+}
+
+function classifyShieldWorkspacePath(workspace) {
+  const value = workspace.toLowerCase();
+  if (/(^|[/\\])\.env(?:$|[/\\])/.test(value)) return "environment";
+  if (/(^|[/\\])terraform\.tfstate(?:$|[/\\])/.test(value)) return "terraform_state";
+  if (/(^|[/\\])(credentials?|secrets?)(?:$|[/\\])/.test(value)) return "credential_store";
+  if (/(^|[/\\])(production|prod)(?:$|[/\\])/.test(value)) return "production_config";
+  return "source";
+}
+
 async function resolveGatewayToken(plan, options = {}) {
   const runCommand = options.runCommand ?? runCommandSync;
   const command = plan.launch.gatewayTokenCommand;
@@ -1510,7 +1530,11 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
           lane: plan.shieldLauncher.clientLane,
         });
         if (shieldReady.lane === "managed") {
-          shieldReady = await (options.createShieldDestinationLease ?? createShieldDestinationLease)({ ready: shieldReady, targetOrigin: middleware?.origin ?? gatewayOrigin });
+          shieldReady = await (options.createShieldDestinationLease ?? createShieldDestinationLease)({
+            ready: shieldReady,
+            targetOrigin: middleware?.origin ?? gatewayOrigin,
+            launcherContext: shieldLaunchContext(plan.shieldLauncher.clientLane, options),
+          });
         }
       }
     } catch (error) {

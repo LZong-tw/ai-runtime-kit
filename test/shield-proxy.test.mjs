@@ -730,22 +730,27 @@ async function registerApprovalChannel(shield, channel) {
 
 test("managed destination leases are control-authenticated, session-scoped, and revocable", async (t) => {
   let calls = 0;
+  let observedContext = null;
   const upstream = await startFixture(t, async (_request, response) => { calls += 1; response.end("ok"); });
   const lease = "d".repeat(32);
   const shield = await startShield(t, {
     targetOrigin: undefined,
     allowDestinationLeases: true,
-    decide: async () => ({ action: "allow", reasonCodes: ["policy_allow"], lane: "managed", destinationClass: "managed", bundleVersion: "policy-1", detectorVersions: { gitleaks: "8", privacy: "1" } }),
+    decide: async ({ launcherContext }) => {
+      observedContext = launcherContext;
+      return { action: "allow", reasonCodes: ["policy_allow"], lane: "managed", destinationClass: "managed", bundleVersion: "policy-1", detectorVersions: { gitleaks: "8", privacy: "1" } };
+    },
   });
   const unregistered = await fetch(`${shield.origin}/v1/messages`, { method: "POST", headers: { "x-airkit-shield": lease }, body: "{}" });
   assert.equal(unregistered.status, 401);
   const registered = await fetch(`${shield.origin}/_airkit/shield/destination-lease`, {
-    method: "POST", headers: { "x-airkit-shield-control": CONTROL_CAPABILITY, "content-type": "application/json" }, body: JSON.stringify({ capability: lease, targetOrigin: upstream.origin, expiresAt: Date.now() + 30_000 }),
+    method: "POST", headers: { "x-airkit-shield-control": CONTROL_CAPABILITY, "content-type": "application/json" }, body: JSON.stringify({ capability: lease, targetOrigin: upstream.origin, expiresAt: Date.now() + 30_000, launcherContext: { repository: { remoteHash: "a".repeat(64), trustClass: "internal" }, pathClasses: ["source"], destinationClass: "managed", interactive: true } }),
   });
   assert.equal(registered.status, 204);
   const forwarded = await fetch(`${shield.origin}/v1/messages`, { method: "POST", headers: { "x-airkit-shield": lease }, body: "{}" });
   assert.equal(forwarded.status, 200);
   assert.equal(calls, 1);
+  assert.deepEqual(observedContext, { repository: { remoteHash: "a".repeat(64), trustClass: "internal" }, pathClasses: ["source"], destinationClass: "managed", interactive: true });
   const replay = await fetch(`${shield.origin}/_airkit/shield/destination-lease`, {
     method: "POST", headers: { "x-airkit-shield-control": CONTROL_CAPABILITY, "content-type": "application/json" }, body: JSON.stringify({ capability: lease, targetOrigin: upstream.origin, expiresAt: Date.now() + 30_000 }),
   });

@@ -5205,10 +5205,17 @@ test("enabled Shield replaces only the spawned AirClaude endpoint and capability
           targetClass: "managed",
         };
       },
-      createShieldDestinationLease: async ({ ready, targetOrigin }) => {
+      createShieldDestinationLease: async ({ ready, targetOrigin, launcherContext }) => {
         events.push("lease-create");
         assert.equal(ready.capability, capability);
         assert.equal(targetOrigin, "http://127.0.0.1:4599");
+        assert.deepEqual(launcherContext, {
+          repository: { remoteHash: launcherContext.repository.remoteHash, trustClass: "unknown" },
+          pathClasses: ["production_config"],
+          destinationClass: "managed",
+          interactive: true,
+        });
+        assert.match(launcherContext.repository.remoteHash, /^[a-f0-9]{64}$/);
         return { ...ready, capability: "lease-capability-012345678901234567890" };
       },
       openShieldApprovalChannel: async () => {
@@ -5233,6 +5240,8 @@ test("enabled Shield replaces only the spawned AirClaude endpoint and capability
         assert.equal(targetOrigin, "http://127.0.0.1:3456");
       },
       env: launchEnv,
+      cwd: "/workspace/production",
+      interactive: true,
       runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
       runtimeVersions: passingRuntimeVersions(),
       startCompatibilityMiddleware: async () => ({ origin: "http://127.0.0.1:4599", close: async () => events.push("middleware-close") }),
