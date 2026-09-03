@@ -389,7 +389,7 @@ export function renderHeartbeatManagedFiles(configDir, runtimeModuleUrl = import
     },
   };
   const script = `import { runHeartbeatHook } from ${JSON.stringify(runtimeModuleUrl)};\nawait runHeartbeatHook();\n`;
-  const statuslineScript = `import { runSubagentStatusLine } from ${JSON.stringify(new URL("./subagent-observability.mjs", runtimeModuleUrl).href)};\nawait runSubagentStatusLine();\n`;
+  const statuslineScript = `import { runShieldStatusline } from ${JSON.stringify(new URL("./shield/statusline-state.mjs", runtimeModuleUrl).href)};\nawait runShieldStatusline();\n`;
   const settings = {
     subagentStatusLine: {
       type: "command",

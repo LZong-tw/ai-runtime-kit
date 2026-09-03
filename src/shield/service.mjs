@@ -138,7 +138,25 @@ export async function transitionShieldPolicy({ paths, installPolicy, io = defaul
     if (await probeShield(previous.origin, previous.capability)) throw new Error("shield policy transition prior proxy remains reachable");
   }
   const installed = await installPolicy();
-  if (!service.active) return installed;
+  const recordTransition = async (config = null) => {
+    if (recordShieldPolicyTransition === null) return;
+    await recordShieldPolicyTransition({
+      requestId: `policy-${randomUUID().replaceAll("-", "")}`,
+      lane: config?.lane ?? paths.lane,
+      destinationClass: config?.targetClass ?? paths.lane,
+      bundleVersion: installed.version,
+      detectorVersions: installed.detectorVersions,
+      action: "transition",
+      reasonCodes: ["policy_replaced"],
+      transformCount: 0,
+      override: false,
+      elapsedMs: 0,
+    });
+  };
+  if (!service.active) {
+    await recordTransition();
+    return installed;
+  }
   await startService({ paths, io, runLaunchctl });
   const config = await readShieldConfig({ paths, io });
   const ready = await ensureReady({
@@ -153,20 +171,7 @@ export async function transitionShieldPolicy({ paths, installPolicy, io = defaul
   if (ready.policyVersion !== installed.version || !sameDetectorVersions(ready.detectorVersions, installed.detectorVersions)) {
     throw new Error("shield policy transition fresh daemon binding mismatch");
   }
-  if (recordShieldPolicyTransition !== null) {
-    await recordShieldPolicyTransition({
-      requestId: `policy-${randomUUID().replaceAll("-", "")}`,
-      lane: config.lane,
-      destinationClass: config.targetClass,
-      bundleVersion: installed.version,
-      detectorVersions: installed.detectorVersions,
-      action: "transition",
-      reasonCodes: ["policy_replaced"],
-      transformCount: 0,
-      override: false,
-      elapsedMs: 0,
-    });
-  }
+  await recordTransition(config);
   return installed;
 }
 
