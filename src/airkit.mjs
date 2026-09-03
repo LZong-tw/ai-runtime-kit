@@ -1522,6 +1522,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     const inherited = { ...(options.env ?? process.env) };
     for (const key of plan.launch.clearEnv ?? []) delete inherited[key];
     let shieldApprovalChannel = null;
+    let shieldLeaseRetained = false;
     try {
       if (shieldReady) {
         shieldApprovalChannel = await (options.openShieldApprovalChannel ?? openShieldApprovalChannel)({
@@ -1564,10 +1565,12 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
         backgroundMiddlewareGraceMs: options.backgroundMiddlewareGraceMs,
         preserveForBackground: options.preserveMiddlewareForBackground !== false,
         stderr: options.stderr ?? process.stderr,
+        onPreserveBackground: () => { shieldLeaseRetained = true; },
+        onDeferredClose: async () => await (options.revokeShieldDestinationLease ?? revokeShieldDestinationLease)({ ready: shieldReady }).catch(() => {}),
       });
     } finally {
       await shieldApprovalChannel?.close?.();
-      await (options.revokeShieldDestinationLease ?? revokeShieldDestinationLease)({ ready: shieldReady }).catch(() => {});
+      if (!shieldLeaseRetained) await (options.revokeShieldDestinationLease ?? revokeShieldDestinationLease)({ ready: shieldReady }).catch(() => {});
     }
   }
 
@@ -2766,7 +2769,7 @@ function renderAirkitHelp() {
 Commands:
   connect [--profile <name>] [--mode <mode>] [--port <port>]
   audit <install|start|stop|status|doctor|update|verify|open|repo|account|requests|request|sessions|clients|accounts|repos|usage|cache|gaps|query> [options]
-  shield <install|start|stop|status|doctor|privacy|launch> [options]
+  shield <install|start|stop|status|doctor|policy|privacy|launch> [options]
   runtime check
   runtime update [--write]
   repair codex-takeover [--write]
@@ -4102,7 +4105,7 @@ function spawnCommandSync(command, args = [], options = {}) {
 
 const DEFAULT_BACKGROUND_MIDDLEWARE_GRACE_MS = 30 * 60 * 1_000;
 
-async function monitorChildLifecycle(middleware, child, options = {}) {
+export async function monitorChildLifecycle(middleware, child, options = {}) {
   let closePromise = null;
   const close = () => {
     closePromise ??= Promise.resolve().then(() => middleware?.close());
@@ -4110,6 +4113,7 @@ async function monitorChildLifecycle(middleware, child, options = {}) {
   };
   const finish = async (status) => {
     if (await shouldPreserveMiddlewareForBackground(middleware, options)) {
+      options.onPreserveBackground?.();
       deferMiddlewareClose(middleware, options);
       return status;
     }
@@ -4156,6 +4160,7 @@ function deferMiddlewareClose(middleware, options) {
     `airkit: background Claude host detected for ${middleware.origin}; keeping compatibility adapter alive while it remains active (checking every ${Math.max(1, Math.round(graceMs / 60_000))} minutes)\n`,
   );
   const detector = options.backgroundHostDetector ?? detectBackgroundClaudeHost;
+  const schedule = options.backgroundSetTimeout ?? setTimeout;
   const checkHost = async () => {
     let stillActive = false;
     try {
@@ -4165,12 +4170,13 @@ function deferMiddlewareClose(middleware, options) {
     }
     if (!stillActive) {
       await middleware.close().catch(() => {});
+      await options.onDeferredClose?.();
       return;
     }
-    const nextCheck = setTimeout(() => { void checkHost(); }, graceMs);
+    const nextCheck = schedule(() => { void checkHost(); }, graceMs);
     nextCheck.unref?.();
   };
-  const timer = setTimeout(() => { void checkHost(); }, graceMs);
+  const timer = schedule(() => { void checkHost(); }, graceMs);
   timer.unref?.();
 }
 

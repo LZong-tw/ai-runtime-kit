@@ -3,15 +3,18 @@ import { fileURLToPath } from "node:url";
 
 import { readShieldAssetsProvision, readShieldIdentity, readShieldPolicyState, shieldPaths } from "./paths.mjs";
 import { provisionShieldAssets } from "./provision.mjs";
-import { installShieldPolicyProvision } from "./policy-bundle.mjs";
+import { installShieldPolicyProvision, readShieldPolicyProvision } from "./policy-bundle.mjs";
+import { readShieldOperationalStatus } from "./operational-status.mjs";
 import {
   ensureShieldReady,
+  createShieldDestinationLease,
   inspectShieldService,
   installShieldService,
   launchShieldChild,
   startShieldService,
   stopShieldService,
   transitionShieldPolicy,
+  revokeShieldDestinationLease,
 } from "./service.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -37,14 +40,15 @@ export async function runShieldCli(argv = [], dependencies = {}) {
 
 const SHIELD_COMMANDS = Object.freeze({
   install: (argv, shield) => shield.install(parseInstall(argv)),
-  start: (_argv, shield) => shield.start(),
-  stop: (_argv, shield) => shield.stop(),
-  status: (_argv, shield) => shield.status(),
-  doctor: (_argv, shield) => shield.doctor(),
-  policy: (argv, shield) => argv[0] === "status" ? shield.policyStatus() : shield.policyInstall(parsePolicyInstall(argv)),
+  start: (argv, shield) => shield.start(parseLaneCommand(argv, "shield start")),
+  stop: (argv, shield) => shield.stop(parseLaneCommand(argv, "shield stop")),
+  status: (argv, shield) => shield.status(parseLaneCommand(argv, "shield status")),
+  doctor: (argv, shield) => shield.doctor(parseLaneCommand(argv, "shield doctor")),
+  policy: (argv, shield) => argv[0] === "status" ? shield.policyStatus(parseLaneCommand(argv.slice(1), "shield policy status")) : shield.policyInstall(parsePolicyInstall(argv)),
   privacy: (argv, shield) => shield.privacyProvision(parsePrivacyProvision(argv)),
   launch: (argv, shield) => {
     const launch = parseLaunch(argv);
+    if (launch.lane === "managed") throw new Error("managed Shield launch requires AirKit lease lifecycle");
     return shield.launch(launch);
   },
 });
@@ -64,23 +68,26 @@ async function createDefaultShieldDependencies(dependencies) {
       const lanePaths = shieldPaths({ env, lane });
       const assets = await readShieldAssetsProvision({ paths: lanePaths, io: dependencies.io });
       if (!assets) throw new Error("shield assets are missing; provision Privacy and Gitleaks before install");
+      const { loadShieldPolicy } = await import("./policy.mjs");
+      const provision = await readShieldPolicyProvision({ paths: lanePaths, io: dependencies.io });
+      await loadShieldPolicy(provision);
       const config = { lane, gitleaks: { executable: assets.gitleaks.path, sha256: assets.gitleaks.sha256 } };
       const service = await installShieldService({ ...common, paths: lanePaths, config, write });
       return { state: write ? "degraded" : "preview", exitCode: write ? 1 : 0, write, lane, service: { label: service.label, planned: true } };
     },
-    async start() {
-      await startShieldService(common);
+    async start({ lane }) {
+      await startShieldService({ ...common, paths: shieldPaths({ env, lane }) });
       return { state: "degraded", started: true };
     },
-    async stop() {
-      await stopShieldService(common);
+    async stop({ lane }) {
+      await stopShieldService({ ...common, paths: shieldPaths({ env, lane }) });
       return { state: "stopped", stopped: true };
     },
-    async status() {
-      return await shieldStatus({ paths, io: dependencies.io, runLaunchctl: dependencies.runLaunchctl });
+    async status({ lane }) {
+      return await shieldStatus({ paths: shieldPaths({ env, lane }), io: dependencies.io, runLaunchctl: dependencies.runLaunchctl });
     },
-    async doctor() {
-      return { ...(await shieldStatus({ paths, io: dependencies.io, runLaunchctl: dependencies.runLaunchctl })), checked: true };
+    async doctor({ lane }) {
+      return { ...(await shieldStatus({ paths: shieldPaths({ env, lane }), io: dependencies.io, runLaunchctl: dependencies.runLaunchctl })), operational: await readShieldOperationalStatus({ env }), checked: true };
     },
     async privacyProvision({ bundlePath, gitleaksPath, lane = "subscription", write }) {
       const lanePaths = shieldPaths({ env, lane });
@@ -110,13 +117,16 @@ async function createDefaultShieldDependencies(dependencies) {
       });
       return { state: "degraded", version: result.version, detectorVersions: result.detectorVersions, write: true };
     },
-    async policyStatus() {
-      const state = await readShieldPolicyState({ paths, io: dependencies.io });
+    async policyStatus({ lane }) {
+      const state = await readShieldPolicyState({ paths: shieldPaths({ env, lane }), io: dependencies.io });
       return state ? { state: "healthy", version: state.version, detectorVersions: state.detectorVersions } : { state: "stopped", installed: false };
     },
-    async launch({ lane, command, args }) {
-      const ready = await ensureShieldReady({ lane, env, paths, io: dependencies.io, inspectService: dependencies.inspectService, isProcessAlive: dependencies.isProcessAlive, probeShield: dependencies.probeShield });
-      const outcome = await launchShieldChild({ command, args, ready: { ...ready, lane }, env, spawnChild: dependencies.spawnChild });
+    async launch({ lane, targetOrigin, command, args }) {
+      let ready = await ensureShieldReady({ lane, env, paths: shieldPaths({ env, lane }), io: dependencies.io, inspectService: dependencies.inspectService, isProcessAlive: dependencies.isProcessAlive, probeShield: dependencies.probeShield });
+      if (targetOrigin) ready = await createShieldDestinationLease({ ready, targetOrigin, paths: shieldPaths({ env, lane }), io: dependencies.io });
+      let outcome;
+      try { outcome = await launchShieldChild({ command, args, ready, env, spawnChild: dependencies.spawnChild }); }
+      finally { if (targetOrigin) await revokeShieldDestinationLease({ ready, paths: shieldPaths({ env, lane }), io: dependencies.io }).catch(() => {}); }
       return { state: outcome.code === 0 ? "healthy" : "degraded", launched: true, exitCode: outcome.code ?? 1 };
     },
   };
@@ -137,11 +147,18 @@ function parseLaunch(argv) {
   const laneIndex = argv.indexOf("--lane");
   const boundary = argv.indexOf("--");
   const lane = laneIndex >= 0 ? argv[laneIndex + 1] : undefined;
-  if (laneIndex < 0 || !lane || boundary < 0 || boundary !== laneIndex + 2 || boundary === argv.length - 1 || (lane !== "subscription" && lane !== "managed")) {
+  const targetIndex = argv.indexOf("--target");
+  const targetOrigin = targetIndex >= 0 ? argv[targetIndex + 1] : undefined;
+  const beforeBoundary = argv.slice(0, boundary);
+  const validTarget = targetIndex < 0 || (targetIndex + 1 < boundary && isLoopbackTarget(targetOrigin));
+  if (laneIndex < 0 || !lane || boundary < 0 || boundary === argv.length - 1 || (lane !== "subscription" && lane !== "managed") || !validTarget || beforeBoundary.some((value, index) => !["--lane", lane, "--target", targetOrigin].includes(value))) {
     throw new Error("usage: shield launch --lane subscription|managed -- command [args...]");
   }
-  return { lane, command: argv[boundary + 1], args: argv.slice(boundary + 2) };
+  if (lane === "managed" && targetOrigin) throw new Error("managed Shield launch requires AirKit lease lifecycle");
+  return { lane, targetOrigin, command: argv[boundary + 1], args: argv.slice(boundary + 2) };
 }
+
+function isLoopbackTarget(value) { try { const url = new URL(value); return url.protocol === "http:" && url.hostname === "127.0.0.1" && Number.isInteger(Number(url.port)) && Number(url.port) > 0 && url.pathname === "/" && !url.search && !url.hash; } catch { return false; } }
 
 function parseInstall(argv) {
   let write = false;
@@ -154,6 +171,12 @@ function parseInstall(argv) {
     throw new Error("usage: shield install [--lane subscription|managed] [--write]");
   }
   return { write, lane };
+}
+
+function parseLaneCommand(argv, command) {
+  if (argv.length === 0) return { lane: "subscription" };
+  if (argv.length === 2 && argv[0] === "--lane" && ["subscription", "managed"].includes(argv[1])) return { lane: argv[1] };
+  throw new Error(`usage: ${command} [--lane subscription|managed]`);
 }
 
 function parsePrivacyProvision(argv) {

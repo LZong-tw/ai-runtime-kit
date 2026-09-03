@@ -111,7 +111,7 @@ export async function startShieldDaemon({
       capability: config.capability,
       controlCapability: config.controlCapability,
       targetOrigin: config.targetOrigin,
-      allowDestinationLeases: config.lane === "managed",
+      allowDestinationLeases: true,
       decide,
       // Policy activation restarts this daemon after identity quiescence. This
       // cache is process-local, so no terminal decision survives that boundary.

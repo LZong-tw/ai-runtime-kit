@@ -5,7 +5,7 @@ import { dirname } from "node:path";
 import { resolveAuditPaths } from "./paths.mjs";
 import { createAuditQueryClient } from "./query.mjs";
 import { createAuditUiAdapter } from "./ui-contract.mjs";
-import { readShieldIdentity, readShieldPolicyState, shieldPaths } from "../shield/paths.mjs";
+import { readShieldOperationalStatus } from "../shield/operational-status.mjs";
 
 const PLUGIN_ID = "airkit-audit-ui";
 const API_PATH = "/api";
@@ -23,6 +23,7 @@ export default {
     });
     const capabilityFile = ctx.pluginConfig?.capabilityFile ?? `${paths.rootDir}/capability`;
     const createQueryClient = ctx.createAuditQueryClient ?? createAuditQueryClient;
+    const shieldStatus = ctx.shieldStatus ?? readShieldOperationalStatus;
     let clientPromise;
     const query = async (name, args = []) => {
       const client = await getClient();
@@ -32,9 +33,9 @@ export default {
     const status = async () => {
       try {
         await query("clients");
-        return { state: "healthy", database: { present: true, ok: true }, service: { loaded: true }, shield: await shieldUiStatus() };
+        return { state: "healthy", database: { present: true, ok: true }, service: { loaded: true }, shield: await shieldUiStatus("healthy") };
       } catch {
-        return { state: "degraded", database: { present: false, ok: false }, service: { loaded: false }, shield: await shieldUiStatus() };
+        return { state: "degraded", database: { present: false, ok: false }, service: { loaded: false }, shield: await shieldUiStatus("unavailable") };
       }
     };
     const adapter = createAuditUiAdapter({ query, status });
@@ -100,22 +101,9 @@ export default {
       return clientPromise;
     }
 
-    async function shieldUiStatus() {
+    async function shieldUiStatus(audit) {
       try {
-        const shield = shieldPaths({ env: process.env });
-        const [identity, policy] = await Promise.all([
-          readShieldIdentity({ paths: shield }),
-          readShieldPolicyState({ paths: shield }),
-        ]);
-        if (!identity || !policy || identity.policyVersion !== policy.version) return { state: "unavailable" };
-        return {
-          state: "protected",
-          policy_version: policy.version,
-          gitleaks_version: policy.detectorVersions.gitleaks,
-          privacy_version: policy.detectorVersions.privacy,
-          coverage: 2,
-          bypass: false,
-        };
+        return await shieldStatus({ audit });
       } catch {
         return { state: "unavailable" };
       }

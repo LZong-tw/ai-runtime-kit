@@ -672,6 +672,25 @@ test("shield launch CLI requires a lane and command boundary", async () => {
   );
 });
 
+test("managed shield CLI launch fails closed without an AirKit destination lease", async () => {
+  await assert.rejects(
+    runShieldCli(["launch", "--lane", "managed", "--", "echo", "unsafe"], { shield: { async launch() { throw new Error("managed Shield launch requires AirKit lease lifecycle"); } } }),
+    /requires AirKit lease lifecycle/i,
+  );
+});
+
+test("subscription shield CLI accepts only an explicit loopback dynamic target", async () => {
+  const calls = [];
+  await runShieldCli(["launch", "--lane", "subscription", "--target", "http://127.0.0.1:8804", "--", "echo", "ok"], {
+    stdout: capture().stdout,
+    shield: { async launch(options) { calls.push(options); return { state: "healthy", exitCode: 0 }; } },
+  });
+  assert.equal(calls[0].targetOrigin, "http://127.0.0.1:8804");
+  for (const target of ["https://127.0.0.1:8804", "http://localhost:8804", "http://127.0.0.1", "http://example.com:80"]) {
+    await assert.rejects(runShieldCli(["launch", "--lane", "subscription", "--target", target, "--", "echo", "no"], { shield: {} }), /usage: shield launch/i);
+  }
+});
+
 test("shield install applies lifecycle only with --write", async () => {
   const calls = [];
   const output = capture();
@@ -696,6 +715,13 @@ test("shield install requires an explicit valid lane and passes it to provisioni
   });
   assert.deepEqual(calls, [{ write: true, lane: "managed" }]);
   await assert.rejects(runShieldCli(["install", "--lane", "unknown"], { shield: {} }), /usage: shield install/i);
+});
+
+test("shield lifecycle commands pass the selected lane without sharing subscription state", async () => {
+  const calls = [];
+  await runShieldCli(["status", "--lane", "managed"], { stdout: capture().stdout, shield: { async status(options) { calls.push(options); return { state: "stopped" }; } } });
+  assert.deepEqual(calls, [{ lane: "managed" }]);
+  await assert.rejects(runShieldCli(["doctor", "--lane", "invalid"], { shield: {} }), /usage: shield doctor/i);
 });
 
 test("airkit routes shield commands before catalog loading", async () => {

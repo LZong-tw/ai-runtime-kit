@@ -113,13 +113,59 @@ export async function statusAuditUi({ status } = {}) {
 export function projectShieldStatus(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const state = SHIELD_STATES.has(value.state) ? value.state : "unavailable";
-  const fields = ["policy_version", "gitleaks_version", "privacy_version", "coverage", "bypass"];
-  return Object.fromEntries([
-    ["state", state],
-    ...fields
-      .filter((field) => Object.hasOwn(value, field))
-      .map((field) => [field, safeShieldScalar(value[field])]),
-  ]);
+  const result = { state };
+  const lanes = projectShieldLanes(value.lanes);
+  const coverage = projectDeclaredCoverage(value.declared_coverage);
+  const bypasses = projectDeclaredBypasses(value.declared_bypasses);
+  if (lanes.length > 0) result.lanes = lanes;
+  if (coverage.length > 0) result.declared_coverage = coverage;
+  if (bypasses.length > 0) result.declared_bypasses = bypasses;
+  return result;
+}
+
+function projectShieldLanes(value) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((lane) => {
+    if (!lane || typeof lane !== "object" || Array.isArray(lane)
+      || !["subscription", "managed"].includes(lane.lane)
+      || !["protected", "unavailable"].includes(lane.state)
+      || !["healthy", "degraded", "stopped", "unavailable"].includes(lane.service)
+      || !["healthy", "degraded", "missing", "unavailable"].includes(lane.policy)
+      || !["healthy", "degraded", "missing", "unavailable"].includes(lane.privacy)
+      || !["healthy", "unavailable"].includes(lane.audit)) return [];
+    const projected = {
+      lane: lane.lane,
+      state: lane.state,
+      service: lane.service,
+      policy: lane.policy,
+      privacy: lane.privacy,
+      audit: lane.audit,
+    };
+    for (const field of ["policy_version", "gitleaks_version", "privacy_version"]) {
+      if (Object.hasOwn(lane, field) && safeShieldScalar(lane[field]) !== null) projected[field] = lane[field];
+    }
+    return [projected];
+  });
+}
+
+function projectDeclaredCoverage(value) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)
+      || safeShieldScalar(entry.launcher) === null
+      || !Array.isArray(entry.lanes) || !entry.lanes.every((lane) => lane === "subscription" || lane === "managed")
+      || !Array.isArray(entry.hop_chain) || !entry.hop_chain.every((hop) => safeShieldScalar(hop) !== null)) return [];
+    return [{ launcher: entry.launcher, lanes: [...entry.lanes], hop_chain: [...entry.hop_chain] }];
+  });
+}
+
+function projectDeclaredBypasses(value) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)
+      || safeShieldScalar(entry.launcher) === null || safeShieldScalar(entry.reason) === null) return [];
+    return [{ launcher: entry.launcher, reason: entry.reason }];
+  });
 }
 
 function validateQuery(name, args) {
