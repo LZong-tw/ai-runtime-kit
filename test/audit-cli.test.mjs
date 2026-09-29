@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 import { runAuditCli } from "../src/audit/cli.mjs";
+import { resolveAuditPaths } from "../src/audit/paths.mjs";
+import { planAuditService } from "../src/audit/service.mjs";
 
 function capture() {
   let text = "";
@@ -52,6 +57,39 @@ test("status emits metadata-only output and deterministic health exit codes", as
   }
 });
 
+test("status is degraded when launchd is loaded but audit sockets are absent", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "airkit-audit-status-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const env = { HOME: home, UID: "501" };
+  const auditPathOverrides = { rootDir: join(home, "state") };
+  const paths = resolveAuditPaths({ env, overrides: auditPathOverrides });
+  const servicePaths = {
+    paths,
+    nodePath: "/opt/node/bin/node",
+    daemonPath: "/opt/airkit/src/auditd.mjs",
+    authHelperPath: "/opt/airkit/bin/airkit-audit-auth",
+  };
+  await mkdir(dirname(paths.launchAgentPath), { recursive: true });
+  await mkdir(paths.rootDir, { recursive: true });
+  await writeFile(paths.launchAgentPath, planAuditService(servicePaths).plistXml);
+  await writeFile(join(paths.rootDir, "audit.sqlite"), "");
+
+  const output = capture();
+  const exitCode = await runAuditCli(["status"], {
+    env,
+    auditPathOverrides,
+    ...servicePaths,
+    masterKeyProvider: { inspect: async () => true },
+    openAuditStore: () => ({ verify() {}, close() {} }),
+    runLaunchctl: async () => ({ ok: true, status: 0 }),
+    stdout: output.stdout,
+  });
+
+  assert.equal(exitCode, 1);
+  assert.match(output.text(), /state: degraded/);
+  assert.match(output.text(), /service.socketReady: false/);
+});
+
 test("install and update preview by default, and write only when requested", async () => {
   const calls = [];
   const audit = {
@@ -75,6 +113,41 @@ test("install and update preview by default, and write only when requested", asy
     ["install", { write: false }],
     ["update", { write: true }],
   ]);
+});
+
+test("start waits for the audit socket after launchd accepts kickstart", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "airkit-audit-start-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const env = { HOME: home, UID: "501" };
+  const auditPathOverrides = { rootDir: join(home, "state") };
+  const paths = resolveAuditPaths({ env, overrides: auditPathOverrides });
+  const servicePaths = {
+    paths,
+    nodePath: "/opt/node/bin/node",
+    daemonPath: "/opt/airkit/src/auditd.mjs",
+    authHelperPath: "/opt/airkit/bin/airkit-audit-auth",
+  };
+  await mkdir(dirname(paths.launchAgentPath), { recursive: true });
+  await writeFile(paths.launchAgentPath, planAuditService(servicePaths).plistXml);
+
+  let timer;
+  t.after(() => clearTimeout(timer));
+  const output = capture();
+  const exitCode = await runAuditCli(["start"], {
+    env,
+    auditPathOverrides,
+    ...servicePaths,
+    masterKeyProvider: { inspect: async () => true },
+    runLaunchctl: async (args) => {
+      if (args[0] === "kickstart") timer = setTimeout(() => { void writeFile(paths.socketPath, ""); }, 50);
+      return { ok: true, status: 0 };
+    },
+    stdout: output.stdout,
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.text(), /state: healthy/);
+  assert.match(output.text(), /socketReady: true/);
 });
 
 test("verify dispatches to the injected audit verifier", async () => {

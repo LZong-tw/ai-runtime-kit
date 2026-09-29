@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { resolveAuditPaths } from "../src/audit/paths.mjs";
-import { installAuditService, inspectAuditService, planAuditService, stopAuditService, uninstallAuditService } from "../src/audit/service.mjs";
+import { installAuditService, inspectAuditService, planAuditService, startAuditService, stopAuditService, uninstallAuditService } from "../src/audit/service.mjs";
 
 function fixture() {
   const home = join(tmpdir(), "airkit-service-home");
@@ -38,6 +38,25 @@ test("write install is atomic, private, and idempotent", async () => {
   assert.equal(calls.filter((args) => args[0] === "bootstrap").length, 2);
   assert.equal(calls.filter((args) => args[0] === "kickstart").length, 2);
   assert.equal((await readFile(actual.launchAgentPath, "utf8")).includes("/opt/node/bin/node"), true);
+});
+
+test("start kickstarts an already loaded service without bootstrapping it again", async () => {
+  const { options } = fixture();
+  const plan = planAuditService(options);
+  const calls = [];
+  const io = { readFile: async () => plan.plistXml };
+  const runLaunchctl = async (args) => {
+    calls.push(args);
+    if (args[0] === "bootstrap") return { ok: false, stderr: "Bootstrap failed: 5: Input/output error" };
+    return { ok: true, status: 0 };
+  };
+
+  const result = await startAuditService({ ...options, io, runLaunchctl });
+  assert.equal(result.started, true);
+  assert.deepEqual(calls, [
+    ["print", plan.target],
+    ["kickstart", "-k", plan.target],
+  ]);
 });
 
 test("uninstall requires explicit write and confirmation", async () => {

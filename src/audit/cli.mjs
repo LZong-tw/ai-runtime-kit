@@ -160,7 +160,7 @@ async function createDefaultAuditDependencies(dependencies = {}) {
       const serviceState = write
         ? await inspectService({ authHelperPath, daemonPath, nodePath, paths, runLaunchctl })
         : null;
-      const socketReady = write && await pathExists(paths.socketPath);
+      const socketReady = write && await waitForPath(paths.socketPath);
       return {
         state: write ? (serviceState.loaded && socketReady ? "healthy" : "degraded") : keychain.present ? "stopped" : "degraded",
         write,
@@ -178,7 +178,7 @@ async function createDefaultAuditDependencies(dependencies = {}) {
       if (!keychain.present) await masterKeyProvider.create();
       const result = await service.startAuditService({ authHelperPath, daemonPath, nodePath, paths, runLaunchctl });
       const serviceState = await inspectService({ authHelperPath, daemonPath, nodePath, paths, runLaunchctl });
-      const socketReady = await pathExists(paths.socketPath);
+      const socketReady = await waitForPath(paths.socketPath);
       return { state: serviceState.loaded && socketReady ? "healthy" : "degraded", started: true, socketReady, service: result };
     },
 
@@ -388,11 +388,14 @@ async function inspectAuditState({
   databasePath,
   backupDir,
 }) {
-  const [keychain, service, database] = await Promise.all([
+  const [keychain, inspectedService, database, socketReady, querySocketReady] = await Promise.all([
     inspectKeychain(masterKeyProvider),
     inspectService({ authHelperPath, daemonPath, nodePath, paths, runLaunchctl }),
     inspectDatabase({ backupDir, databasePath, openAuditStore }),
+    pathExists(paths.socketPath),
+    pathExists(paths.querySocketPath),
   ]);
+  const service = { ...inspectedService, socketReady, querySocketReady };
   return {
     state: deriveAuditState({ keychain, service, database }),
     database,
@@ -448,7 +451,7 @@ async function inspectDatabase({ backupDir, databasePath, openAuditStore }) {
 function deriveAuditState({ keychain, service, database }) {
   if (service.blocked || keychain.reason) return "blocked";
   if (!service.installed && !service.loaded && !database.present) return "stopped";
-  if (service.loaded && keychain.present && database.ok) return "healthy";
+  if (service.loaded && service.socketReady && service.querySocketReady && keychain.present && database.ok) return "healthy";
   return "degraded";
 }
 
@@ -604,6 +607,16 @@ async function pathExists(target) {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function waitForPath(target, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await pathExists(target)) return true;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await new Promise((resolveWait) => setTimeout(resolveWait, Math.min(100, remaining)));
   }
 }
 
