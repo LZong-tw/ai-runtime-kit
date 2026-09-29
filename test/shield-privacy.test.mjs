@@ -20,9 +20,21 @@ const opfProvision = {
   privacy: {
     ...provision.privacy,
     checkpoint: { path: "/opt/airkit/model", sha256: "b".repeat(64), version: "opf-2026-09" },
+    source: { path: "/opt/airkit/opf-source", sha256: "c".repeat(64), version: "opf-source-1" },
+    adapter: { path: "/opt/airkit/opf-adapter.mjs", sha256: "d".repeat(64) },
+    tokenizer: { path: "/opt/airkit/tiktoken-cache/fb374d419588a4632f3f557e76b4b70aebbca790", sha256: "e".repeat(64), version: "o200k_base" },
   },
 };
+opfProvision.privacy.worker = { ...opfProvision.privacy.worker, args: [
+  "--python", "/opt/airkit/python", "--checkpoint", opfProvision.privacy.checkpoint.path,
+  "--checkpoint-sha256", opfProvision.privacy.checkpoint.sha256, "--checkpoint-version", opfProvision.privacy.checkpoint.version,
+  "--opf-source", opfProvision.privacy.source.path, "--opf-source-sha256", opfProvision.privacy.source.sha256,
+  "--adapter-sha256", opfProvision.privacy.adapter.sha256,
+  "--tokenizer", opfProvision.privacy.tokenizer.path, "--tokenizer-sha256", opfProvision.privacy.tokenizer.sha256,
+  "--startup-timeout-ms", "30000", "--scan-timeout-ms", "2000",
+] };
 const validateWorker = async () => {};
+const validateFile = async () => {};
 
 test("persistent privacy worker health-checks then returns a validated redacted JSON buffer", async (t) => {
   const worker = fakeWorker((message, emit) => {
@@ -86,6 +98,7 @@ test("a missing or replaced checkpoint blocks before the worker receives request
   await assert.rejects(createPrivacyFilter({
     provision: opfProvision,
     validateWorker,
+    validateFile,
     validateCheckpoint: async () => { throw new Error("missing model"); },
     spawnWorker: () => { spawns += 1; return worker; },
   }), /checkpoint unavailable/i);
@@ -95,7 +108,11 @@ test("a missing or replaced checkpoint blocks before the worker receives request
   const filter = await createPrivacyFilter({
     provision: opfProvision,
     validateWorker,
-    validateCheckpoint: async () => { validations += 1; return async () => { if (++validations === 2) throw new Error("checkpoint replaced"); }; },
+    validateFile,
+    validateCheckpoint: async (_asset, { label } = {}) => {
+      if (label !== "source") validations += 1;
+      return async () => { if (label !== "source" && ++validations === 2) throw new Error("checkpoint replaced"); };
+    },
     spawnWorker: () => worker,
   });
   t.after(() => filter.close());
@@ -104,6 +121,34 @@ test("a missing or replaced checkpoint blocks before the worker receives request
   assert.equal(validations, 2);
   assert.equal(worker.messages.filter((message) => message.type === "scan").length, 0);
   assert.doesNotMatch(JSON.stringify(result), new RegExp(sentinel));
+});
+
+test("OPF source, adapter and tokenizer drift fail closed before scan bytes", async (t) => {
+  for (const changed of ["source", "adapter", "tokenizer"]) {
+    const worker = fakeWorker((message, emit) => {
+      if (message.type === "health") emit(health(message));
+      if (message.type === "scan") emit({ type: "scan", id: message.id, status: "ok", findings: [] });
+    });
+    let ready = false;
+    const filter = await createPrivacyFilter({
+      provision: opfProvision, validateWorker, spawnWorker: () => worker,
+      validateCheckpoint: async (_asset, { label } = {}) => async () => {
+        if (ready && label === changed) throw new Error("tree replaced");
+      },
+      validateFile: async (_asset, { label } = {}) => {
+        if (ready && label === changed) throw new Error("file replaced");
+      },
+    });
+    t.after(() => filter.close());
+    ready = true;
+    const result = await filter.scan(Buffer.from(`{"content":"${sentinel}"}`));
+    assert.equal(result.status, "unavailable", changed);
+    assert.equal(worker.messages.filter((message) => message.type === "scan").length, 0, changed);
+  }
+  await assert.rejects(createPrivacyFilter({
+    provision: { privacy: { ...opfProvision.privacy, source: undefined } },
+    validateWorker, validateFile, validateCheckpoint: async () => async () => {},
+  }), /provision is invalid/i);
 });
 
 test("runtime redaction proof requires every reported privacy span to be absent from replacement JSON", () => {
@@ -148,7 +193,7 @@ test("OPF provision self-test uses a valid synthetic mailbox and requires privat
     }
   });
   assert.deepEqual(await runPrivacyWorkerSelfTest(opfProvision, {
-    spawnWorker: () => worker, validateWorker, validateCheckpoint: async () => async () => {},
+    spawnWorker: () => worker, validateWorker, validateFile, validateCheckpoint: async () => async () => {},
   }), { version: "privacy-1" });
   assert.equal(scannedBody, '{"content":"alice@example.com"}');
 
@@ -161,7 +206,7 @@ test("OPF provision self-test uses a valid synthetic mailbox and requires privat
     });
   });
   await assert.rejects(runPrivacyWorkerSelfTest(opfProvision, {
-    spawnWorker: () => wrongLabel, validateWorker, validateCheckpoint: async () => async () => {},
+    spawnWorker: () => wrongLabel, validateWorker, validateFile, validateCheckpoint: async () => async () => {},
   }), /self-test failed/i);
 });
 

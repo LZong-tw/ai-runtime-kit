@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 
 import { attestShieldCheckpoint } from "./checkpoint.mjs";
 
@@ -16,19 +16,27 @@ const KNOWN_LABELS = new Set([
   "private_phone", "private_url", "private_date", "secret",
 ]);
 
-export async function createPrivacyFilter({ provision, spawnWorker = defaultSpawnWorker, validateWorker = validatePrivacyWorkerAsset, validateCheckpoint = attestShieldCheckpoint, timeoutMs = DEFAULT_TIMEOUT_MS, startupTimeoutMs = DEFAULT_STARTUP_TIMEOUT_MS } = {}) {
+export async function createPrivacyFilter({ provision, spawnWorker = defaultSpawnWorker, validateWorker = validatePrivacyWorkerAsset, validateCheckpoint = attestShieldCheckpoint, validateFile = validatePrivacyPinnedFile, timeoutMs = DEFAULT_TIMEOUT_MS, startupTimeoutMs = DEFAULT_STARTUP_TIMEOUT_MS } = {}) {
   const privacy = assertPrivacyProvision(provision);
   if (typeof spawnWorker !== "function") throw new TypeError("shield privacy worker launcher is required");
   if (typeof validateWorker !== "function") throw new TypeError("shield privacy worker validator is required");
   if (typeof validateCheckpoint !== "function") throw new TypeError("shield privacy checkpoint validator is required");
+  if (typeof validateFile !== "function") throw new TypeError("shield privacy file validator is required");
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) throw new TypeError("shield privacy worker timeout is invalid");
   if (!Number.isInteger(startupTimeoutMs) || startupTimeoutMs < 1 || startupTimeoutMs > 60_000) throw new TypeError("shield privacy startup timeout is invalid");
 
   try { await validateWorker(privacy.worker); } catch { throw new Error("shield privacy worker unavailable"); }
   let assertCheckpointUnchanged;
+  let assertSourceUnchanged;
   if (privacy.checkpoint) {
     try { assertCheckpointUnchanged = await validateCheckpoint(privacy.checkpoint); } catch { throw new Error("shield privacy checkpoint unavailable"); }
     if (typeof assertCheckpointUnchanged !== "function") throw new Error("shield privacy checkpoint unavailable");
+    try { assertSourceUnchanged = await validateCheckpoint(privacy.source, { label: "source" }); } catch { throw new Error("shield privacy source unavailable"); }
+    if (typeof assertSourceUnchanged !== "function") throw new Error("shield privacy source unavailable");
+    try {
+      await validateFile(privacy.adapter, { label: "adapter" });
+      await validateFile(privacy.tokenizer, { label: "tokenizer" });
+    } catch { throw new Error("shield privacy pinned file unavailable"); }
   }
 
   let worker;
@@ -101,7 +109,12 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
     async scan(body) {
       if (closed || !validBody(body)) return unavailable();
       if (assertCheckpointUnchanged) {
-        try { await assertCheckpointUnchanged(); } catch { close(); return unavailable(); }
+        try {
+          await assertCheckpointUnchanged();
+          await assertSourceUnchanged();
+          await validateFile(privacy.adapter, { label: "adapter" });
+          await validateFile(privacy.tokenizer, { label: "tokenizer" });
+        } catch { close(); return unavailable(); }
       }
       const reply = await request({ type: "scan", body: Buffer.from(body).toString("base64") });
       return normalizeScanReply(reply);
@@ -110,8 +123,8 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
   });
 }
 
-export async function runPrivacyWorkerSelfTest(provision, { spawnWorker = defaultSpawnWorker, validateWorker = validatePrivacyWorkerAsset, validateCheckpoint = attestShieldCheckpoint, timeoutMs = DEFAULT_TIMEOUT_MS, startupTimeoutMs = DEFAULT_STARTUP_TIMEOUT_MS } = {}) {
-  const filter = await createPrivacyFilter({ provision, spawnWorker, validateWorker, validateCheckpoint, timeoutMs, startupTimeoutMs });
+export async function runPrivacyWorkerSelfTest(provision, { spawnWorker = defaultSpawnWorker, validateWorker = validatePrivacyWorkerAsset, validateCheckpoint = attestShieldCheckpoint, validateFile = validatePrivacyPinnedFile, timeoutMs = DEFAULT_TIMEOUT_MS, startupTimeoutMs = DEFAULT_STARTUP_TIMEOUT_MS } = {}) {
+  const filter = await createPrivacyFilter({ provision, spawnWorker, validateWorker, validateCheckpoint, validateFile, timeoutMs, startupTimeoutMs });
   try {
     const opf = Boolean(provision?.privacy?.checkpoint);
     const email = opf ? "alice@example.com" : "AIRKIT_PRIVACY_PROTOCOL_PROBE_EMAIL";
@@ -226,17 +239,58 @@ function assertPrivacyProvision(provision) {
     || !/^[a-f0-9]{64}$/.test(privacy.worker.sha256 ?? "")) {
     throw new TypeError("shield privacy provision is invalid");
   }
-  if (privacy.checkpoint !== undefined && (!isPlainObject(privacy.checkpoint)
-    || Object.keys(privacy.checkpoint).sort().join(",") !== "path,sha256,version"
-    || !isAbsoluteCanonical(privacy.checkpoint.path) || !/^[a-f0-9]{64}$/.test(privacy.checkpoint.sha256 ?? "")
-    || !safeIdentifier(privacy.checkpoint.version))) {
-    throw new TypeError("shield privacy checkpoint provision is invalid");
+  if (privacy.checkpoint !== undefined && (!validTree(privacy.checkpoint) || !validTree(privacy.source)
+    || !validPinnedFile(privacy.adapter) || privacy.adapter.path !== resolve(dirname(privacy.worker.command), "opf-adapter.mjs")
+    || !validPinnedFile(privacy.tokenizer, true) || !validOpfRuntimeArgs(privacy))) {
+    throw new TypeError("shield privacy provision is invalid");
   }
   return Object.freeze({
     version: privacy.version,
     worker: Object.freeze({ command: privacy.worker.command, args: Object.freeze([...privacy.worker.args]), sha256: privacy.worker.sha256 }),
-    ...(privacy.checkpoint ? { checkpoint: Object.freeze({ ...privacy.checkpoint }) } : {}),
+    ...(privacy.checkpoint ? {
+      checkpoint: Object.freeze({ ...privacy.checkpoint }),
+      source: Object.freeze({ ...privacy.source }),
+      adapter: Object.freeze({ ...privacy.adapter }),
+      tokenizer: Object.freeze({ ...privacy.tokenizer }),
+    } : {}),
   });
+}
+
+function validTree(value) {
+  return isPlainObject(value) && Object.keys(value).sort().join(",") === "path,sha256,version"
+    && isAbsoluteCanonical(value.path) && resolve(value.path) === value.path
+    && /^[a-f0-9]{64}$/.test(value.sha256 ?? "") && safeIdentifier(value.version);
+}
+
+function validPinnedFile(value, tokenizer = false) {
+  return isPlainObject(value) && Object.keys(value).sort().join(",") === (tokenizer ? "path,sha256,version" : "path,sha256")
+    && isAbsoluteCanonical(value.path) && resolve(value.path) === value.path
+    && /^[a-f0-9]{64}$/.test(value.sha256 ?? "")
+    && (!tokenizer || (value.version === "o200k_base" && value.path.endsWith("/fb374d419588a4632f3f557e76b4b70aebbca790")));
+}
+
+function validOpfRuntimeArgs(privacy) {
+  const args = privacy.worker.args;
+  return args.length === 22 && args[0] === "--python" && isAbsoluteCanonical(args[1]) && resolve(args[1]) === args[1]
+    && args[2] === "--checkpoint" && args[3] === privacy.checkpoint.path
+    && args[4] === "--checkpoint-sha256" && args[5] === privacy.checkpoint.sha256
+    && args[6] === "--checkpoint-version" && args[7] === privacy.checkpoint.version
+    && args[8] === "--opf-source" && args[9] === privacy.source.path
+    && args[10] === "--opf-source-sha256" && args[11] === privacy.source.sha256
+    && args[12] === "--adapter-sha256" && args[13] === privacy.adapter.sha256
+    && args[14] === "--tokenizer" && args[15] === privacy.tokenizer.path
+    && args[16] === "--tokenizer-sha256" && args[17] === privacy.tokenizer.sha256
+    && args[18] === "--startup-timeout-ms" && args[19] === "30000"
+    && args[20] === "--scan-timeout-ms" && args[21] === "2000";
+}
+
+async function validatePrivacyPinnedFile(asset, { label } = {}) {
+  try {
+    const [entry, canonical, bytes] = await Promise.all([lstat(asset.path), realpath(asset.path), readFile(asset.path)]);
+    if (canonical !== asset.path || !entry.isFile() || entry.isSymbolicLink() || (entry.mode & 0o022) !== 0
+      || (typeof process.getuid === "function" && entry.uid !== process.getuid())
+      || createHash("sha256").update(bytes).digest("hex") !== asset.sha256) throw new Error("pinned file drift");
+  } catch { throw new Error(`shield privacy ${label ?? "file"} validation failed`); }
 }
 
 export async function validatePrivacyWorkerAsset(worker, { io = { lstat, readFile, realpath } } = {}) {
