@@ -28,6 +28,31 @@ test("missing Keychain key never rotates while encrypted spool records remain", 
   await assert.rejects(access(join(rootDir, "capability")), { code: "ENOENT" });
 });
 
+for (const existing of ["database", "backup"]) {
+  test(`missing Keychain key never rotates while an audit ${existing} remains`, async (t) => {
+    const rootDir = await mkdtemp(join(tmpdir(), "airkit-audit-key-guard-"));
+    t.after(() => rm(rootDir, { recursive: true, force: true }));
+    if (existing === "database") {
+      await writeFile(join(rootDir, "audit.sqlite"), "existing audit data");
+    } else {
+      await mkdir(join(rootDir, "backups"));
+      await writeFile(join(rootDir, "backups", "audit-old.sqlite"), "existing audit backup");
+    }
+    let creates = 0;
+    const dependencies = {
+      stdout: capture().stdout,
+      auditPathOverrides: { rootDir, homeDir: rootDir },
+      masterKeyProvider: { inspect: async () => false, create: async () => { creates += 1; } },
+      runLaunchctl: async () => { throw new Error("service unexpectedly reached"); },
+    };
+    for (const args of [["install", "--write"], ["start"]]) {
+      await assert.rejects(runAuditCli(args, dependencies), new RegExp(`existing ${existing}`, "i"));
+    }
+    assert.equal(creates, 0);
+    await assert.rejects(access(join(rootDir, "capability")), { code: "ENOENT" });
+  });
+}
+
 function capture() {
   let text = "";
   return {
