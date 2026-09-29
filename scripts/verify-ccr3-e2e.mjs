@@ -413,6 +413,28 @@ async function main() {
     assert.ok(resolve(managedProfile.env.CLAUDE_STATUSLINE_CACHE_DIR).startsWith(`${resolve(root)}/`));
     assert.equal(JSON.stringify(managedProfile).includes(homedir()), false);
 
+    env.FAKE_CLAUDE_RESULT_FILE = join(root, "fake-responses-result.json");
+    const responsesLaunch = await installedRuntime.prepareLaunch(catalog, "ccr3-e2e", {
+      ...prepareOptions,
+      env,
+      launch: true,
+      mode: "responses",
+    });
+    assert.ok(responsesLaunch.child, "Responses mode must launch fake Claude");
+    assert.equal(await waitForExit(responsesLaunch.child, 10_000), true, "Responses fake Claude did not exit");
+    assert.equal(responsesLaunch.child.exitCode ?? responsesLaunch.child.status, 0, "Responses launch failed");
+    const responseContinuation = JSON.parse(await readFile(env.FAKE_CLAUDE_RESULT_FILE, "utf8"));
+    assert.equal(responseContinuation.content?.[0]?.text, "FAKE_RESPONSES_OK");
+    const responsesRequests = JSON.parse(await readFile(fakeProvider.requestFile, "utf8"))
+      .filter(({ url }) => url === "/v1/responses");
+    assert.equal(responsesRequests.length, 2, "Responses tool cycle must make two upstream requests");
+    const [responseProviderRequest, responseToolResult] = responsesRequests;
+    assert.equal(responseProviderRequest.body.model, "gpt-fixture");
+    assert.equal(responseProviderRequest.method, "POST");
+    assert.ok(Array.isArray(responseProviderRequest.body.tools), "Responses request lost Claude tools");
+    assert.equal(responseProviderRequest.body.reasoning?.effort, "high", "Responses request lost reasoning effort");
+    assert.match(JSON.stringify(responseToolResult.body.input), /function_call_output/);
+
     process.stdout.write(`${JSON.stringify({
       ccrVersion: ccrPackage.version,
       compatibilityPolicies,
@@ -423,6 +445,7 @@ async function main() {
       compatibilityMcp: payload.compatibilityMcp.serverInfo.name,
       namedProfile: managedProfileId,
       nativeRequestLogs,
+      responsesToolContinuation: responseContinuation.content[0].text,
       realHomeAccessDenied: true,
       realHomeReferenced: false,
       sqliteFiles: sqliteAfterInit.length,
@@ -521,7 +544,16 @@ function fakeCatalog(providerPort) {
       // claudeModel is a bare Claude id on purpose: the fake claude sends it as
       // body.model, so the run proves the compat plugin's bare-model rewrite
       // end to end (provider must receive the routed provider-local model).
-      launch: { binary: "claude", args: [], claudeModel: "claude-sonnet-5", defaultMode: "auto", modes: { auto: {} } },
+      launch: {
+        binary: "claude",
+        args: [],
+        claudeModel: "claude-sonnet-5",
+        defaultMode: "auto",
+        modes: {
+          auto: {},
+          responses: { ccr: { Router: { default: "fake-responses,gpt-fixture" } } },
+        },
+      },
       ccr: {
         APIKEY: "ccr-local",
         LOG: false,
@@ -542,6 +574,12 @@ function fakeCatalog(providerPort) {
           api_base_url: `http://127.0.0.1:${providerPort}/v1/messages`,
           api_key: "$FAKE_PROVIDER_API_KEY",
           models: ["claude-sonnet"],
+        }, {
+          name: "fake-responses",
+          type: "openai_responses",
+          api_base_url: `http://127.0.0.1:${providerPort}/v1/responses`,
+          api_key: "$FAKE_PROVIDER_API_KEY",
+          models: ["gpt-fixture"],
         }],
         Router: { default: "fake-openai,fake-model", background: "fake-openai,fake-model" },
       },
@@ -786,7 +824,7 @@ const server = createServer((request, response) => {
       body,
     });
     await writeFile(process.env.FAKE_PROVIDER_REQUEST_FILE, JSON.stringify(records));
-    const credentialValid = request.url === "/v1/chat/completions"
+    const credentialValid = ["/v1/chat/completions", "/v1/responses"].includes(request.url)
       ? request.headers.authorization === "Bearer fixture-key"
       : request.headers["x-api-key"] === "fixture-key";
     if (!credentialValid) {
@@ -794,9 +832,39 @@ const server = createServer((request, response) => {
       response.end(JSON.stringify({ error: { message: "invalid fixture credential" } }));
       return;
     }
-    if (!["fake-model", "claude-sonnet"].includes(body.model)) {
+    if (!["fake-model", "claude-sonnet", "gpt-fixture"].includes(body.model)) {
       response.writeHead(422, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: { message: "unexpected fixture model" } }));
+      return;
+    }
+    if (request.url === "/v1/responses") {
+      const continuation = JSON.stringify(body.input ?? []).includes("function_call_output");
+      const output = continuation
+        ? [{
+          id: "msg_fixture",
+          type: "message",
+          status: "completed",
+          role: "assistant",
+          content: [{ type: "output_text", text: "FAKE_RESPONSES_OK", annotations: [] }],
+        }]
+        : [{
+          id: "fc_fixture",
+          type: "function_call",
+          status: "completed",
+          call_id: "call_fixture",
+          name: "fixture_tool",
+          arguments: "{}",
+        }];
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        id: continuation ? "resp_fixture_2" : "resp_fixture_1",
+        object: "response",
+        created_at: 1,
+        status: "completed",
+        model: body.model,
+        output,
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      }));
       return;
     }
     const marker = body.messages?.flatMap((message) => typeof message.content === "string" ? [message.content] : []).join(" ") ?? "";
@@ -932,7 +1000,8 @@ if (!model) throw new Error("direct launch did not supply --model");
 for (const name of ["ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_API_KEY"]) {
   if (process.env[name]) throw new Error(\`direct launch must clear \${name}\`);
 }
-if (process.env.ANTHROPIC_CUSTOM_HEADERS !== "x-airkit-mode: auto") {
+const launchMode = process.env.ANTHROPIC_CUSTOM_HEADERS?.replace("x-airkit-mode: ", "");
+if (!["auto", "responses"].includes(launchMode)) {
   throw new Error("direct launch must label its routing mode");
 }
 // The whole point of the direct launch: Claude keeps the home it inherited.
@@ -945,6 +1014,58 @@ if (!(await fetch(process.env.FAKE_PROVIDER_PROBE_URL, { signal: AbortSignal.tim
 for (const path of await findSettingsFiles(dirname(process.env.HOME))) {
   const settings = JSON.parse(await readFile(path, "utf8"));
   if (Object.hasOwn(settings, "model")) throw new Error(\`managed settings must not persist a Claude model default: \${path}\`);
+}
+if (launchMode === "responses") {
+  const headers = {
+    "content-type": "application/json",
+    "x-api-key": gatewayToken,
+    "x-airkit-mode": launchMode,
+  };
+  const tools = [{
+    name: "fixture_tool",
+    description: "Return a fixture result.",
+    input_schema: { type: "object", properties: {} },
+  }];
+  const firstResponse = await fetch(new URL("/v1/messages", baseUrl), {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model,
+      max_tokens: 64,
+      output_config: { effort: "high" },
+      messages: [{ role: "user", content: "Call fixture_tool once." }],
+      tools,
+    }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  const firstPayload = await firstResponse.json();
+  if (!firstResponse.ok) throw new Error(JSON.stringify(firstPayload));
+  const toolUse = firstPayload.content?.find(({ type }) => type === "tool_use");
+  if (!toolUse || toolUse.name !== "fixture_tool") {
+    throw new Error("Responses route did not return a Claude tool_use");
+  }
+  const response = await fetch(new URL("/v1/messages", baseUrl), {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model,
+      max_tokens: 64,
+      output_config: { effort: "high" },
+      messages: [
+        { role: "user", content: "Call fixture_tool once." },
+        { role: "assistant", content: [toolUse] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: toolUse.id, content: "fixture-result" }] },
+      ],
+      tools,
+    }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  const responseContinuation = await response.json();
+  if (!response.ok || responseContinuation.content?.[0]?.text !== "FAKE_RESPONSES_OK") {
+    throw new Error("Responses route did not complete a Claude tool continuation");
+  }
+  await writeFile(process.env.FAKE_CLAUDE_RESULT_FILE, JSON.stringify(responseContinuation));
+  process.exit(0);
 }
 const response = await fetch(new URL("/v1/messages", baseUrl), {
   method: "POST",

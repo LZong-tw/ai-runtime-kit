@@ -150,7 +150,9 @@ function resolveProviderBaseUrls(value, providers) {
       ? "/v1/messages"
       : provider.type === "openai_chat_completions"
         ? "/v1/chat/completions"
-        : null;
+        : provider.type === "openai_responses"
+          ? "/v1/responses"
+          : null;
     if (expectedPath && parsedUrl.pathname !== expectedPath) {
       throw new Error(`provider base URL for ${providerName} must end with ${expectedPath}`);
     }
@@ -183,6 +185,9 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
   const anthropicProviderBaseUrl = String(
     options.anthropicProviderBaseUrl ?? options.env?.AIRCLAUDE_ANTHROPIC_PROVIDER_BASE_URL ?? "",
   ).trim();
+  const responsesProviderBaseUrl = String(
+    options.responsesProviderBaseUrl ?? options.env?.AIRCLAUDE_RESPONSES_PROVIDER_BASE_URL ?? "",
+  ).trim();
   const baseConfig = buildSourceCcrConfig(catalog, profileName, { configDir });
   assertCcr3Compatible(baseConfig);
   const providerBaseUrls = resolveProviderBaseUrls(
@@ -202,7 +207,9 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
       ? providerBaseUrl
       : isActiveProvider && provider.type === "anthropic_messages"
         ? anthropicProviderBaseUrl
-        : "";
+        : isActiveProvider && provider.type === "openai_responses"
+          ? responsesProviderBaseUrl
+          : "";
     return {
       sourceName: provider.name,
       config: {

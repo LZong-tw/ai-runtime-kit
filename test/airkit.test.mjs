@@ -913,6 +913,56 @@ test("provider-specific Headroom URLs override scalar launch URLs for every prot
   );
 });
 
+test("Responses providers accept only Responses Headroom endpoints", () => {
+  const catalog = compatibilityCatalog();
+  catalog.profiles[0].ccr.Providers.push({
+    name: "responses",
+    type: "openai_responses",
+    api_base_url: "https://example.invalid/v1/responses",
+    api_key: "$DEMO_API_KEY",
+    models: ["gpt-fixture"],
+  });
+  const merged = airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {}, {
+    providerBaseUrls: { responses: "http://127.0.0.1:8807/v1/responses" },
+  });
+  assert.equal(
+    merged.config.Providers.find(({ name }) => name.endsWith("-responses")).api_base_url,
+    "http://127.0.0.1:8807/v1/responses",
+  );
+  assert.throws(
+    () => airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {}, {
+      providerBaseUrls: { responses: "http://127.0.0.1:8807/v1/chat/completions" },
+    }),
+    /must end with \/v1\/responses/,
+  );
+});
+
+test("active Responses mode uses its scalar Headroom override without changing Chat routes", () => {
+  const catalog = compatibilityCatalog();
+  catalog.profiles[0].ccr.Providers.push({
+    name: "responses",
+    type: "openai_responses",
+    api_base_url: "https://example.invalid/v1/responses",
+    api_key: "$DEMO_API_KEY",
+    models: ["gpt-fixture"],
+  });
+  catalog.profiles[0].launch.modes.responses = {
+    ccr: { Router: { default: "responses,gpt-fixture" } },
+  };
+  const merged = airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {}, {
+    env: { AIRCLAUDE_RESPONSES_PROVIDER_BASE_URL: "http://127.0.0.1:8807/v1/responses" },
+    mode: "responses",
+  });
+  assert.equal(
+    merged.config.Providers.find(({ name }) => name.endsWith("-responses")).api_base_url,
+    "http://127.0.0.1:8807/v1/responses",
+  );
+  assert.equal(
+    merged.config.Providers.find(({ name }) => name.endsWith("-demo")).api_base_url,
+    "https://example.invalid/v1/chat/completions",
+  );
+});
+
 test("provider-specific Headroom URLs fail closed before CCR state changes", () => {
   const invalidCases = [
     ["malformed JSON", "{", /provider base URLs must be valid JSON/],
