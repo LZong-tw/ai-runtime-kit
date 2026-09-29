@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
@@ -11,6 +11,7 @@ const PLUGIN_ID = "airkit-audit-ui";
 const API_PATH = "/api";
 const QUERY_NAMES = ["requests", "sessions", "clients", "accounts", "repos", "usage", "cache", "gaps", "shield_decisions", "shield_policy_transitions"];
 const DETAIL_QUERY_NAMES = new Set(["request", "shield_decision"]);
+let activeFiles;
 
 export default {
   async setup(ctx) {
@@ -40,6 +41,7 @@ export default {
     };
     const adapter = createAuditUiAdapter({ query, status });
     let bootstrapToken = randomToken();
+    const controlToken = randomToken();
     const sessions = new Map();
     const backend = await ctx.registerHttpBackend({
       id: PLUGIN_ID,
@@ -47,6 +49,14 @@ export default {
       port: 0,
       async handler(request, response) {
         const url = new URL(request.url ?? "/", "http://airkit-audit.local");
+        if (url.pathname === "/internal/bootstrap") {
+          if (request.method !== "POST") return sendJson(response, 405, { error: "method_not_allowed" });
+          if (!matchesToken(request.headers?.["x-airkit-audit-control"], controlToken)) {
+            return sendJson(response, 403, { error: "audit_control_denied" });
+          }
+          bootstrapToken = randomToken();
+          return sendJson(response, 200, { url: `${backend.url}/?bootstrap=${encodeURIComponent(bootstrapToken)}` });
+        }
         const session = sessions.get(readCookie(request.headers?.cookie, "airkit_audit_session"));
         if (request.method !== "GET") return sendJson(response, 405, { error: "method_not_allowed" });
 
@@ -83,13 +93,15 @@ export default {
       },
     });
     const appUrl = `${backend.url}/?bootstrap=${encodeURIComponent(bootstrapToken)}`;
-    await publishBootstrapUrl(paths.uiBootstrapPath, appUrl);
+    await publishPrivateFile(paths.uiBootstrapPath, `${appUrl}\n`);
+    await publishPrivateFile(paths.uiControlPath, `${JSON.stringify({ origin: new URL(backend.url).origin, token: controlToken })}\n`);
     ctx.registerApp({
       id: "airkit-audit",
       name: "AirKit Audit",
       description: "Metadata-only local audit and evidence gaps",
       url: appUrl,
     });
+    activeFiles = { bootstrapPath: paths.uiBootstrapPath, controlPath: paths.uiControlPath, appUrl, controlToken };
 
     async function getClient() {
       if (!clientPromise) {
@@ -109,16 +121,47 @@ export default {
       }
     }
   },
+  async stop() {
+    const files = activeFiles;
+    activeFiles = undefined;
+    if (!files) return;
+    await removeIfOwned(files.bootstrapPath, (raw) => raw.trim() === files.appUrl);
+    await removeIfOwned(files.controlPath, (raw) => {
+      try {
+        return JSON.parse(raw).token === files.controlToken;
+      } catch {
+        return false;
+      }
+    });
+  },
 };
 
 function randomToken() {
   return randomBytes(24).toString("base64url");
 }
 
-async function publishBootstrapUrl(path, url) {
+async function publishPrivateFile(path, contents) {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await writeFile(path, `${url}\n`, { encoding: "utf8", mode: 0o600 });
+  await writeFile(path, contents, { encoding: "utf8", mode: 0o600 });
   await chmod(path, 0o600);
+}
+
+async function removeIfOwned(path, matches) {
+  let raw;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  if (matches(raw)) await rm(path, { force: true });
+}
+
+function matchesToken(supplied, expected) {
+  if (typeof supplied !== "string") return false;
+  const given = Buffer.from(supplied);
+  const secret = Buffer.from(expected);
+  return given.length === secret.length && timingSafeEqual(given, secret);
 }
 
 function readCookie(header, name) {
