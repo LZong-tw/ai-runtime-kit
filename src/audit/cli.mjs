@@ -223,7 +223,19 @@ async function createDefaultAuditDependencies(dependencies = {}) {
     },
 
     async open() {
-      const url = await readAuditUiBootstrapUrl(paths.uiBootstrapPath);
+      let url = await readAuditUiBootstrapUrl(paths.uiBootstrapPath);
+      if (!url) {
+        const control = await readAuditUiControl(paths.uiControlPath);
+        if (control) {
+          try {
+            const requestControl = dependencies.requestAuditUiControl ?? requestAuditUiControl;
+            const issued = await requestControl(control);
+            url = parseAuditUiBootstrapUrl(issued?.url, control.origin);
+          } catch {
+            // A stale plugin host or control file must not disclose its endpoint or token.
+          }
+        }
+      }
       if (!url) return { state: "degraded", reason: "audit_ui_not_ready" };
       const openExternal = dependencies.openExternal ?? openBrowserUrl;
       await openExternal(url);
@@ -511,15 +523,45 @@ async function readAuditUiBootstrapUrl(path) {
     if (error?.code === "ENOENT") return null;
     throw error;
   }
+  return parseAuditUiBootstrapUrl(raw.trim());
+}
+
+function parseAuditUiBootstrapUrl(value, expectedOrigin) {
   try {
-    const url = new URL(raw.trim());
-    if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.pathname !== "/" || !url.searchParams.get("bootstrap")) {
-      return null;
-    }
+    const url = new URL(value);
+    if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || !url.port || url.pathname !== "/"
+      || url.username || url.password || url.hash || !/^[A-Za-z0-9_-]{32}$/.test(url.searchParams.get("bootstrap") ?? "")
+      || (expectedOrigin && url.origin !== expectedOrigin)) return null;
     return url.toString();
   } catch {
     return null;
   }
+}
+
+async function readAuditUiControl(path) {
+  try {
+    const info = await lstat(path);
+    if (!info.isFile() || (info.mode & 0o077) !== 0 || (process.getuid && info.uid !== process.getuid())) return null;
+    const control = JSON.parse(await readFile(path, "utf8"));
+    const origin = new URL(control.origin);
+    if (origin.protocol !== "http:" || origin.hostname !== "127.0.0.1" || !origin.port
+      || origin.pathname !== "/" || origin.search || origin.hash || origin.username || origin.password
+      || !/^[A-Za-z0-9_-]{32}$/.test(control.token ?? "")) return null;
+    return { origin: origin.origin, token: control.token };
+  } catch (error) {
+    if (error?.code === "ENOENT" || error instanceof SyntaxError || error instanceof TypeError) return null;
+    throw error;
+  }
+}
+
+async function requestAuditUiControl({ origin, token }) {
+  const response = await fetch(`${origin}/internal/bootstrap`, {
+    method: "POST",
+    headers: { "x-airkit-audit-control": token },
+    redirect: "error",
+    signal: AbortSignal.timeout(2000),
+  });
+  return response.ok ? response.json() : null;
 }
 
 async function openBrowserUrl(url) {

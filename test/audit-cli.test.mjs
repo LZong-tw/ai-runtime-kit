@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
 import { runAuditCli } from "../src/audit/cli.mjs";
+import auditPlugin from "../src/audit/ccr-plugin.mjs";
 import { resolveAuditPaths } from "../src/audit/paths.mjs";
 import { planAuditService } from "../src/audit/service.mjs";
 
@@ -227,6 +228,88 @@ test("open dispatches to the audit UI launcher without exposing its bootstrap UR
   assert.equal(opened, 1);
   assert.match(output.text(), /opened: true/);
   assert.equal(output.text().includes("bootstrap="), false);
+});
+
+test("audit open reissues a one-time URL after the first browser visit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-audit-open-again-"));
+  let backendHandler;
+  try {
+    await auditPlugin.setup({
+      pluginConfig: { auditRootDir: root },
+      registerApp() {},
+      async registerHttpBackend({ handler }) {
+        backendHandler = handler;
+        return { url: "http://127.0.0.1:4567" };
+      },
+    });
+
+    const output = capture();
+    const opened = [];
+    const dependencies = {
+      env: { HOME: root, UID: "501" },
+      auditPathOverrides: { rootDir: root, homeDir: root },
+      openExternal: async (url) => {
+        opened.push(url);
+        const response = { statusCode: null, writeHead(statusCode) { this.statusCode = statusCode; }, end() {} };
+        await backendHandler({ method: "GET", url: new URL(url).pathname + new URL(url).search, headers: {} }, response);
+        assert.equal(response.statusCode, 200);
+      },
+      requestAuditUiControl: async ({ origin, token }) => {
+        assert.equal(origin, "http://127.0.0.1:4567");
+        let body = "";
+        const response = { statusCode: null, writeHead(statusCode) { this.statusCode = statusCode; }, end(value) { body = value; } };
+        await backendHandler({ method: "POST", url: "/internal/bootstrap", headers: { "x-airkit-audit-control": token } }, response);
+        assert.equal(response.statusCode, 200);
+        return JSON.parse(body);
+      },
+      stdout: output.stdout,
+    };
+    assert.equal(await runAuditCli(["open"], dependencies), 0);
+    assert.equal(await runAuditCli(["open"], dependencies), 0);
+    assert.equal(opened.length, 2);
+    assert.notEqual(opened[0], opened[1]);
+    assert.equal(output.text().includes("bootstrap="), false);
+    assert.equal(output.text().includes(root), false);
+    assert.equal(output.text().includes("127.0.0.1"), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("audit open degrades without exposing a stale control token", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-audit-stale-control-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const token = "s".repeat(32);
+  await writeFile(join(root, "ccr-ui-control.json"), JSON.stringify({ origin: "http://127.0.0.1:4567", token }), { mode: 0o600 });
+  const output = capture();
+  const exitCode = await runAuditCli(["open"], {
+    env: { HOME: root, UID: "501" },
+    auditPathOverrides: { rootDir: root, homeDir: root },
+    requestAuditUiControl: async () => { throw new Error(`stale endpoint ${token}`); },
+    openExternal: async () => { throw new Error("browser must not open"); },
+    stdout: output.stdout,
+  });
+  assert.equal(exitCode, 1);
+  assert.match(output.text(), /audit_ui_not_ready/);
+  assert.equal(output.text().includes(token), false);
+  assert.equal(output.text().includes("127.0.0.1"), false);
+});
+
+test("audit open rejects a world-readable control file", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-audit-public-control-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const controlPath = join(root, "ccr-ui-control.json");
+  await writeFile(controlPath, JSON.stringify({ origin: "http://127.0.0.1:4567", token: "s".repeat(32) }));
+  await chmod(controlPath, 0o644);
+  const output = capture();
+  const exitCode = await runAuditCli(["open"], {
+    env: { HOME: root, UID: "501" },
+    auditPathOverrides: { rootDir: root, homeDir: root },
+    requestAuditUiControl: async () => { throw new Error("unsafe control file was used"); },
+    stdout: output.stdout,
+  });
+  assert.equal(exitCode, 1);
+  assert.match(output.text(), /audit_ui_not_ready/);
 });
 
 test("embedded absolute paths inside reason strings are scrubbed to basename-only metadata", async () => {

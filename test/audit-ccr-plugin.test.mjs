@@ -103,6 +103,72 @@ test("CCR audit wrapper registers a browser backend and one-time bootstrap app",
   }
 });
 
+test("CCR audit control reissues one-time URLs only for its private token", async () => {
+  const root = await mkdtemp("/tmp/airkit-ccr-control-");
+  let app;
+  let backend;
+  try {
+    await plugin.setup({
+      pluginConfig: { auditRootDir: root },
+      registerApp(value) { app = value; },
+      async registerHttpBackend(value) {
+        backend = value;
+        return { url: "http://127.0.0.1:4567" };
+      },
+    });
+
+    const controlPath = join(root, "ccr-ui-control.json");
+    const control = JSON.parse(await readFile(controlPath, "utf8"));
+    assert.equal((await stat(controlPath)).mode & 0o777, 0o600);
+    assert.equal(control.origin, "http://127.0.0.1:4567");
+    assert.match(control.token, /^[A-Za-z0-9_-]{32}$/);
+
+    const unauthorized = responseRecorder();
+    await backend.handler({ method: "POST", url: "/internal/bootstrap", headers: {} }, unauthorized);
+    assert.equal(unauthorized.statusCode, 403);
+    assert.equal(unauthorized.body().includes(control.token), false);
+
+    const first = responseRecorder();
+    await backend.handler({ method: "POST", url: "/internal/bootstrap", headers: { "x-airkit-audit-control": control.token } }, first);
+    assert.equal(first.statusCode, 200);
+    const firstUrl = JSON.parse(first.body()).url;
+    assert.match(firstUrl, /^http:\/\/127\.0\.0\.1:4567\/\?bootstrap=/);
+
+    const second = responseRecorder();
+    await backend.handler({ method: "POST", url: "/internal/bootstrap", headers: { "x-airkit-audit-control": control.token } }, second);
+    assert.equal(second.statusCode, 200);
+    const secondUrl = JSON.parse(second.body()).url;
+    assert.notEqual(secondUrl, firstUrl);
+    assert.notEqual(secondUrl, app.url);
+
+    const expired = responseRecorder();
+    await backend.handler({ method: "GET", url: new URL(firstUrl).pathname + new URL(firstUrl).search, headers: {} }, expired);
+    assert.equal(expired.statusCode, 410);
+
+    const fresh = responseRecorder();
+    await backend.handler({ method: "GET", url: new URL(secondUrl).pathname + new URL(secondUrl).search, headers: {} }, fresh);
+    assert.equal(fresh.statusCode, 200);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("CCR plugin stop removes its unpublished browser entry and control token", async () => {
+  const root = await mkdtemp("/tmp/airkit-ccr-stop-");
+  try {
+    await plugin.setup({
+      pluginConfig: { auditRootDir: root },
+      registerApp() {},
+      async registerHttpBackend() { return { url: "http://127.0.0.1:4567" }; },
+    });
+    await plugin.stop();
+    await assert.rejects(readFile(join(root, "ccr-ui-bootstrap-url"), "utf8"), { code: "ENOENT" });
+    await assert.rejects(readFile(join(root, "ccr-ui-control.json"), "utf8"), { code: "ENOENT" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("CCR audit UI uses supplied Shield operational state instead of hardcoded coverage", async () => {
   const root = await mkdtemp("/tmp/airkit-ccr-plugin-shield-state-");
   const apps = [];
