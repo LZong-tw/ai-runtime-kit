@@ -72,7 +72,8 @@ export async function startAuditService(options = {}) {
   if (missing) await installAuditService({ ...rest, io, runLaunchctl, write: true });
   else await ensurePathDrift(plan, io);
   if (missing) return { ...plan, started: true };
-  await launch(runLaunchctl, ["bootstrap", plan.domain, plan.plistPath], true);
+  const loaded = await launch(runLaunchctl, ["print", plan.target], true);
+  if (!loaded.ok) await launch(runLaunchctl, ["bootstrap", plan.domain, plan.plistPath], true);
   await launch(runLaunchctl, ["kickstart", "-k", plan.target], false);
   return { ...plan, started: true };
 }
