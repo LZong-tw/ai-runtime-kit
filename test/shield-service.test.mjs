@@ -55,6 +55,8 @@ test("shield install previews without launchctl mutation", async () => {
   assert.match(plan.plistXml, /com\.airkit\.shield/);
   assert.deepEqual(plan.plist.ProgramArguments, [options.nodePath, options.daemonPath, "--config", options.paths.configPath]);
   assert.deepEqual(Object.keys(plan.plist.EnvironmentVariables), []);
+  assert.equal(plan.plist.ProcessType, "Standard");
+  assert.match(plan.plistXml, /<key>ProcessType<\/key>\s*<string>Standard<\/string>/);
 });
 
 test("shield privacy provision is preview-first and keeps asset references out of CLI output", async () => {
