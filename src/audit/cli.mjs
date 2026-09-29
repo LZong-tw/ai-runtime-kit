@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { spawn } from "node:child_process";
-import { access, chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -146,6 +146,7 @@ async function createDefaultAuditDependencies(dependencies = {}) {
       const keychain = await inspectKeychain(masterKeyProvider);
       const capabilityFile = paths.capabilityFile ?? resolve(paths.rootDir, "capability");
       if (write) {
+        if (!keychain.present) await assertSpoolEmptyBeforeKeyCreate(paths.spoolDir);
         await ensureCapabilityFile(capabilityFile);
         if (!keychain.present) await masterKeyProvider.create();
       }
@@ -174,6 +175,7 @@ async function createDefaultAuditDependencies(dependencies = {}) {
     async start() {
       const keychain = await inspectKeychain(masterKeyProvider);
       const capabilityFile = paths.capabilityFile ?? resolve(paths.rootDir, "capability");
+      if (!keychain.present) await assertSpoolEmptyBeforeKeyCreate(paths.spoolDir);
       await ensureCapabilityFile(capabilityFile);
       if (!keychain.present) await masterKeyProvider.create();
       const result = await service.startAuditService({ authHelperPath, daemonPath, nodePath, paths, runLaunchctl });
@@ -410,6 +412,17 @@ async function inspectKeychain(provider) {
   } catch (error) {
     return { present: false, reason: error?.code ?? "unavailable" };
   }
+}
+
+async function assertSpoolEmptyBeforeKeyCreate(spoolDir) {
+  let names;
+  try {
+    names = await readdir(spoolDir);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw new Error("audit spool cannot be inspected before master key creation");
+  }
+  if (names.length > 0) throw new Error("audit existing spool blocks master key creation");
 }
 
 async function inspectService({ authHelperPath, daemonPath, nodePath, paths, runLaunchctl }) {
