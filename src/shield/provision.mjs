@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 
 import { runPrivacyWorkerSelfTest } from "./privacy.mjs";
+import { verifyShieldCheckpoint } from "./checkpoint.mjs";
 import { writeShieldAssetsProvision } from "./paths.mjs";
 
 const FORMAT_VERSION = 1;
+const O200K_CACHE_KEY = "fb374d419588a4632f3f557e76b4b70aebbca790";
 const defaultIo = { lstat, readFile, realpath };
 
 export async function provisionShieldAssets({ bundlePath, gitleaksPath, gitleaksRulesPath, privacyBundlePath, write = false, paths, io = defaultIo, writeState, runPrivacySelfTest: selfTest = runPrivacyWorkerSelfTest } = {}) {
@@ -15,6 +17,10 @@ export async function provisionShieldAssets({ bundlePath, gitleaksPath, gitleaks
   const privacyBundle = await validateAsset({ path: privacyBundlePath, executable: false, label: "privacy bundle", io });
   const manifest = parsePrivacyManifest(privacyBundle.bytes);
   const worker = await validateAsset({ path: manifest.worker.command, executable: true, label: "privacy worker", expectedDigest: manifest.worker.sha256, io });
+  const checkpoint = manifest.checkpoint ? await verifyShieldCheckpoint(manifest.checkpoint) : null;
+  const source = manifest.source ? await verifyShieldCheckpoint(manifest.source, { label: "source" }) : null;
+  const adapter = manifest.adapter ? await validateAsset({ path: manifest.adapter.path, executable: false, label: "privacy adapter", expectedDigest: manifest.adapter.sha256, io }) : null;
+  const tokenizer = manifest.tokenizer ? await validateAsset({ path: manifest.tokenizer.path, executable: false, label: "privacy tokenizer", expectedDigest: manifest.tokenizer.sha256, io }) : null;
   const state = Object.freeze({
     version: FORMAT_VERSION,
     bundle: Object.freeze({ version: policyVersion(bundle.bytes), sha256: bundle.sha256, path: bundle.path }),
@@ -30,6 +36,12 @@ export async function provisionShieldAssets({ bundlePath, gitleaksPath, gitleaks
       sha256: privacyBundle.sha256,
       path: privacyBundle.path,
       worker: Object.freeze({ command: worker.path, args: Object.freeze([...manifest.worker.args]), sha256: worker.sha256 }),
+      ...(checkpoint ? {
+        checkpoint,
+        source,
+        adapter: Object.freeze({ path: adapter.path, sha256: adapter.sha256 }),
+        tokenizer: Object.freeze({ path: tokenizer.path, sha256: tokenizer.sha256, version: manifest.tokenizer.version }),
+      } : {}),
     }),
   });
   const result = await selfTest(state);
@@ -72,7 +84,8 @@ function policyVersion(bytes) {
 function parsePrivacyManifest(bytes) {
   let value;
   try { value = JSON.parse(bytes.toString("utf8")); } catch { throw new Error("shield privacy bundle manifest is invalid"); }
-  if (!isPlainObject(value) || !exactKeys(value, ["formatVersion", "protocol", "version", "worker"])
+  if (!isPlainObject(value) || !(exactKeys(value, ["formatVersion", "protocol", "version", "worker"])
+    || exactKeys(value, ["adapter", "checkpoint", "formatVersion", "protocol", "source", "tokenizer", "version", "worker"]))
     || value.formatVersion !== FORMAT_VERSION || value.protocol !== "airkit-privacy-ndjson-v1" || !safeIdentifier(value.version)
     || !isPlainObject(value.worker) || !exactKeys(value.worker, ["args", "command", "sha256"])
     || typeof value.worker.command !== "string" || !isAbsolute(value.worker.command) || resolve(value.worker.command) !== value.worker.command
@@ -80,7 +93,37 @@ function parsePrivacyManifest(bytes) {
     || !/^[a-f0-9]{64}$/.test(value.worker.sha256 ?? "")) {
     throw new Error("shield privacy bundle manifest is invalid");
   }
-  return Object.freeze({ version: value.version, worker: Object.freeze({ command: value.worker.command, args: Object.freeze([...value.worker.args]), sha256: value.worker.sha256 }) });
+  if (value.checkpoint !== undefined && (!isPlainObject(value.adapter)
+    || !exactKeys(value.adapter, ["path", "sha256"])
+    || value.adapter.path !== resolve(dirname(value.worker.command), "opf-adapter.mjs")
+    || !/^[a-f0-9]{64}$/.test(value.adapter.sha256 ?? "")
+    || !isPlainObject(value.tokenizer) || !exactKeys(value.tokenizer, ["path", "sha256", "version"])
+    || !isAbsolute(value.tokenizer.path) || resolve(value.tokenizer.path) !== value.tokenizer.path
+    || basename(value.tokenizer.path) !== O200K_CACHE_KEY || value.tokenizer.version !== "o200k_base"
+    || !/^[a-f0-9]{64}$/.test(value.tokenizer.sha256 ?? "")
+    || !validOpfArguments(value.worker.args, value))) {
+    throw new Error("shield privacy bundle manifest is invalid");
+  }
+  return Object.freeze({
+    version: value.version,
+    worker: Object.freeze({ command: value.worker.command, args: Object.freeze([...value.worker.args]), sha256: value.worker.sha256 }),
+    ...(value.checkpoint ? { checkpoint: value.checkpoint, source: value.source, adapter: value.adapter, tokenizer: value.tokenizer } : {}),
+  });
+}
+
+function validOpfArguments(args, manifest) {
+  return args.length === 22 && isAbsolute(args[1]) && resolve(args[1]) === args[1]
+    && args[0] === "--python"
+    && args[2] === "--checkpoint" && args[3] === manifest.checkpoint?.path
+    && args[4] === "--checkpoint-sha256" && args[5] === manifest.checkpoint?.sha256
+    && args[6] === "--checkpoint-version" && args[7] === manifest.checkpoint?.version
+    && args[8] === "--opf-source" && args[9] === manifest.source?.path
+    && args[10] === "--opf-source-sha256" && args[11] === manifest.source?.sha256
+    && args[12] === "--adapter-sha256" && args[13] === manifest.adapter?.sha256
+    && args[14] === "--tokenizer" && args[15] === manifest.tokenizer?.path
+    && args[16] === "--tokenizer-sha256" && args[17] === manifest.tokenizer?.sha256
+    && args[18] === "--startup-timeout-ms" && args[19] === "30000"
+    && args[20] === "--scan-timeout-ms" && args[21] === "2000";
 }
 
 function safeIdentifier(value) { return typeof value === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(value); }
