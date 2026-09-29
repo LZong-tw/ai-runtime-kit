@@ -226,6 +226,7 @@ test("proxy requests reach Gitleaks, category-only classification, and policy ev
   const address = upstream.address();
   const scannerCalls = [];
   const policyInputs = [];
+  let privacyScans = 0;
   const daemon = await startDaemon({
     config: { ...config, targetOrigin: `http://127.0.0.1:${address.port}` },
     paths,
@@ -236,6 +237,11 @@ test("proxy requests reach Gitleaks, category-only classification, and policy ev
         scannerCalls.push(Buffer.from(body).toString("utf8"));
         return { findings: [{ category: "private-key", count: 1 }] };
       },
+    }),
+    createPrivacy: async () => ({
+      version: "privacy-1",
+      async scan() { privacyScans += 1; return { status: "unknown", findings: [] }; },
+      close() {},
     }),
     loadPolicy: async () => ({
       ...policy,
@@ -256,6 +262,7 @@ test("proxy requests reach Gitleaks, category-only classification, and policy ev
   });
 
   assert.equal(response.status, 403);
+  assert.equal(privacyScans, 0);
   assert.deepEqual(scannerCalls, ['{"content":"fixture-private-key"}']);
   assert.deepEqual(policyInputs, [{
     lane: "subscription",

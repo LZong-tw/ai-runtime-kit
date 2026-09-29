@@ -80,7 +80,8 @@ export async function startShieldDaemon({
     };
     const facts = classifyShieldRequest({ body, launcherContext });
     const secretScan = await scanner.scan(body);
-    const privacyScan = await privacy.scan(body);
+    const confirmedSecret = secretScan.findings.length > 0;
+    const privacyScan = confirmedSecret ? { status: "ok", findings: [] } : await privacy.scan(body);
     if (privacyScan.status !== "ok") throw new Error("shield privacy worker unavailable");
     const decision = await policy.evaluate({
       lane: config.lane,
@@ -91,6 +92,7 @@ export async function startShieldDaemon({
       secretFindings: secretScan.findings,
       piiFindings: canonicalPrivacyFindings(privacyScan.findings),
     });
+    if (confirmedSecret && decision.action !== "block") throw new Error("shield confirmed secret must be blocked");
     if (decision.action === "redact" && !isVerifiedRedaction({ original: body, result: privacyScan })) {
       throw new Error("shield privacy redaction is invalid");
     }
