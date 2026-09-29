@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -7,6 +7,26 @@ import test from "node:test";
 import { runAuditCli } from "../src/audit/cli.mjs";
 import { resolveAuditPaths } from "../src/audit/paths.mjs";
 import { planAuditService } from "../src/audit/service.mjs";
+
+test("missing Keychain key never rotates while encrypted spool records remain", async (t) => {
+  const rootDir = await mkdtemp(join(tmpdir(), "airkit-audit-key-guard-"));
+  t.after(() => rm(rootDir, { recursive: true, force: true }));
+  const spoolDir = join(rootDir, "spool");
+  await mkdir(spoolDir);
+  await writeFile(join(spoolDir, "old-event.json"), '{"kind":"audit-spool-record/v1"}');
+  let creates = 0;
+  const dependencies = {
+    stdout: capture().stdout,
+    auditPathOverrides: { rootDir, spoolDir, homeDir: rootDir },
+    masterKeyProvider: { inspect: async () => false, create: async () => { creates += 1; } },
+    runLaunchctl: async () => { throw new Error("service unexpectedly reached"); },
+  };
+  for (const args of [["install", "--write"], ["start"]]) {
+    await assert.rejects(runAuditCli(args, dependencies), /existing spool/i);
+  }
+  assert.equal(creates, 0);
+  await assert.rejects(access(join(rootDir, "capability")), { code: "ENOENT" });
+});
 
 function capture() {
   let text = "";
