@@ -30,6 +30,14 @@ test("isolated CCR verifier launches through the adapter and probes its MCP rout
   assert.match(verifierSource, /payload\.content\?\.\[0\]\?\.text, "FAKE_PROVIDER_OK"/);
 });
 
+test("isolated CCR verifier exercises a Responses tool continuation against its fake upstream", () => {
+  assert.match(verifierSource, /name: "fake-responses"[\s\S]*type: "openai_responses"/);
+  assert.match(verifierSource, /\/v1\/responses/);
+  assert.match(verifierSource, /function_call_output/);
+  assert.match(verifierSource, /responseProviderRequest\.body\.model, "gpt-fixture"/);
+  assert.match(verifierSource, /responseContinuation\.content\?\.\[0\]\?\.text, "FAKE_RESPONSES_OK"/);
+});
+
 test("isolated CCR verifier proves adapter traffic through native request-log RPC", async () => {
   assert.equal(typeof verifier.awaitNativeRequestLog, "function");
   assert.match(verifierSource, /getRequestLogs/);
