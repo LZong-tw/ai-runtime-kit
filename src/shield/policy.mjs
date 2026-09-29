@@ -120,11 +120,13 @@ function sameDecision(actual, expected) {
 
 function enforceSensitiveBlock(input, decision) {
   const hasConfirmedSecret = input.secretFindings.length > 0;
+  const hasPrivacySecret = input.piiFindings.some((finding) => finding.category === "secret");
   const hasRestrictedData = input.repositoryClass === "restricted"
     || input.pathClasses.some((pathClass) => pathClass === "environment" || pathClass === "terraform_state" || pathClass === "credential_store" || pathClass === "production_config");
-  if (!hasConfirmedSecret && !hasRestrictedData) return decision;
+  if (!hasConfirmedSecret && !hasPrivacySecret && !hasRestrictedData) return decision;
   const reasonCodes = [];
   if (hasConfirmedSecret) reasonCodes.push("confirmed-secret");
+  if (hasPrivacySecret) reasonCodes.push("privacy-secret");
   if (hasRestrictedData) reasonCodes.push("restricted-data");
   return Object.freeze({
     action: "block",

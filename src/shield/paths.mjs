@@ -271,7 +271,8 @@ export function assertShieldAssetsProvision(state) {
     || !isPlainObject(state.bundle) || !exactKeys(state.bundle, ["path", "sha256", "version"])
     || !isPlainObject(state.gitleaks) || !exactKeys(state.gitleaks, ["path", "rules", "sha256"])
     || !isPlainObject(state.gitleaks.rules) || !exactKeys(state.gitleaks.rules, ["path", "sha256", "version"])
-    || !isPlainObject(state.privacy) || !exactKeys(state.privacy, ["path", "sha256", "version", "worker"])
+    || !isPlainObject(state.privacy) || !(exactKeys(state.privacy, ["path", "sha256", "version", "worker"])
+      || exactKeys(state.privacy, ["adapter", "checkpoint", "path", "sha256", "source", "tokenizer", "version", "worker"]))
     || !isPlainObject(state.privacy.worker) || !exactKeys(state.privacy.worker, ["args", "command", "sha256"])) {
     throw new Error("shield asset provision is invalid");
   }
@@ -282,6 +283,24 @@ export function assertShieldAssetsProvision(state) {
   if (!safePath(state.privacy.worker.command) || !/^[a-f0-9]{64}$/.test(state.privacy.worker.sha256)
     || !Array.isArray(state.privacy.worker.args) || !state.privacy.worker.args.every((argument) => typeof argument === "string" && argument.length > 0 && argument.length <= 256)) {
     throw new Error("shield privacy worker reference is invalid");
+  }
+  if (state.privacy.checkpoint && (!isPlainObject(state.privacy.checkpoint)
+    || !exactKeys(state.privacy.checkpoint, ["path", "sha256", "version"])
+    || !safePath(state.privacy.checkpoint.path)
+    || !/^[a-f0-9]{64}$/.test(state.privacy.checkpoint.sha256)
+    || !safeIdentifier(state.privacy.checkpoint.version)
+    || !isPlainObject(state.privacy.source) || !exactKeys(state.privacy.source, ["path", "sha256", "version"])
+    || !safePath(state.privacy.source.path) || !/^[a-f0-9]{64}$/.test(state.privacy.source.sha256)
+    || !safeIdentifier(state.privacy.source.version)
+    || !isPlainObject(state.privacy.adapter) || !exactKeys(state.privacy.adapter, ["path", "sha256"])
+    || state.privacy.adapter.path !== resolve(dirname(state.privacy.worker.command), "opf-adapter.mjs")
+    || !/^[a-f0-9]{64}$/.test(state.privacy.adapter.sha256)
+    || !isPlainObject(state.privacy.tokenizer) || !exactKeys(state.privacy.tokenizer, ["path", "sha256", "version"])
+    || !safePath(state.privacy.tokenizer.path)
+    || state.privacy.tokenizer.path.split("/").at(-1) !== "fb374d419588a4632f3f557e76b4b70aebbca790"
+    || state.privacy.tokenizer.version !== "o200k_base"
+    || !/^[a-f0-9]{64}$/.test(state.privacy.tokenizer.sha256))) {
+    throw new Error("shield privacy checkpoint reference is invalid");
   }
   return Object.freeze({
     version: state.version,
@@ -296,6 +315,12 @@ export function assertShieldAssetsProvision(state) {
       sha256: state.privacy.sha256,
       path: state.privacy.path,
       worker: Object.freeze({ command: state.privacy.worker.command, args: Object.freeze([...state.privacy.worker.args]), sha256: state.privacy.worker.sha256 }),
+      ...(state.privacy.checkpoint ? {
+        checkpoint: Object.freeze({ ...state.privacy.checkpoint }),
+        source: Object.freeze({ ...state.privacy.source }),
+        adapter: Object.freeze({ ...state.privacy.adapter }),
+        tokenizer: Object.freeze({ ...state.privacy.tokenizer }),
+      } : {}),
     }),
   });
 }

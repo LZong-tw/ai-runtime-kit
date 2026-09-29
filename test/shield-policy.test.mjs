@@ -161,6 +161,34 @@ test("policy runtime normalizes a signed policy that tries to approve confirmed 
   });
 });
 
+test("Privacy Filter secret blocks even when the signed policy would redact or approve", async () => {
+  const policy = await loadTestPolicy({ opa: {
+    async loadPolicy() {
+      return { evaluate(input) {
+        if (input.piiFindings.some((finding) => finding.category === "secret")) {
+          return [{ result: input.lane === "managed" ? redactDecision : {
+            action: "require_approval", reasonCodes: ["unsafe-policy"], approvalEligible: true, redactions: [],
+          } }];
+        }
+        return [{ result: allowDecision }];
+      } };
+    },
+  } });
+  for (const lane of ["managed", "subscription"]) {
+    assert.deepEqual(await policy.evaluate({
+      ...policyInput,
+      lane,
+      destinationClass: lane,
+      piiFindings: [{ category: "secret", count: 1 }],
+    }), {
+      action: "block",
+      reasonCodes: ["privacy-secret"],
+      approvalEligible: false,
+      redactions: [],
+    });
+  }
+});
+
 test("policy passes bounded detector and classifier facts to OPA without a JavaScript allow path", async () => {
   const policy = await loadTestPolicy({ opa: detectorOpa });
   const decision = await policy.evaluate({

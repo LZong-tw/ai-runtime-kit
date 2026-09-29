@@ -1,18 +1,20 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { provisionShieldAssets } from "../src/shield/provision.mjs";
-import { readShieldAssetsProvision, shieldPaths } from "../src/shield/paths.mjs";
+import { assertShieldAssetsProvision, readShieldAssetsProvision, shieldPaths } from "../src/shield/paths.mjs";
 
 const policyPath = "/opt/airkit/policy.json";
 const gitleaksPath = "/opt/airkit/gitleaks";
 const gitleaksRulesPath = "/opt/airkit/gitleaks-rules.toml";
 const privacyPath = "/opt/airkit/privacy-filter.json";
 const workerPath = "/opt/airkit/privacy-worker";
+const adapterPath = "/opt/airkit/opf-adapter.mjs";
+const tokenizerPath = "/opt/airkit/tiktoken-cache/fb374d419588a4632f3f557e76b4b70aebbca790";
 const bytes = {
   [policyPath]: Buffer.from(JSON.stringify({ manifest: { version: "policy-1" } })),
   [gitleaksPath]: Buffer.from("gitleaks fixture"),
@@ -110,7 +112,85 @@ test("explicit write stores a private canonical asset provision record", async (
   }
 });
 
-function fixtureIo({ symlink = null, owner = process.getuid?.(), executable = true, mutate = null } = {}) {
+test("OPF provision pins its model, source, helper, tokenizer and worker arguments", async () => {
+  const homeDir = await realpath(await mkdtemp(join(tmpdir(), "airkit-shield-checkpoint-")));
+  const checkpointPath = join(homeDir, "model");
+  const sourcePath = join(homeDir, "source");
+  const checkpointSha256 = createHash("sha256")
+    .update("config.json\0", "utf8").update("2\0", "utf8").update("[]").update("\0", "utf8")
+    .update("weights.bin\0", "utf8").update("5\0", "utf8").update("model").update("\0", "utf8")
+    .digest("hex");
+  const checkpoint = { path: checkpointPath, sha256: checkpointSha256, version: "opf-2026-09" };
+  const sourceSha256 = createHash("sha256").update("source.py\0", "utf8").update("6\0", "utf8").update("source").update("\0", "utf8").digest("hex");
+  const source = { path: sourcePath, sha256: sourceSha256, version: "opf-source-1" };
+  const adapterBytes = Buffer.from("adapter helper fixture");
+  const adapter = { path: adapterPath, sha256: sha256(adapterBytes) };
+  const tokenizerBytes = Buffer.from("tokenizer fixture");
+  const tokenizer = { path: tokenizerPath, sha256: sha256(tokenizerBytes), version: "o200k_base" };
+  const privacyManifest = {
+    ...JSON.parse(bytes[privacyPath]), checkpoint, source, adapter, tokenizer,
+    worker: { ...JSON.parse(bytes[privacyPath]).worker, args: [
+      "--python", "/opt/airkit/python", "--checkpoint", checkpoint.path,
+      "--checkpoint-sha256", checkpoint.sha256, "--checkpoint-version", checkpoint.version,
+      "--opf-source", source.path, "--opf-source-sha256", source.sha256,
+      "--adapter-sha256", adapter.sha256,
+      "--tokenizer", tokenizer.path, "--tokenizer-sha256", tokenizer.sha256,
+      "--startup-timeout-ms", "30000", "--scan-timeout-ms", "2000",
+    ] },
+  };
+  const options = {
+    bundlePath: policyPath,
+    gitleaksPath,
+    gitleaksRulesPath,
+    privacyBundlePath: privacyPath,
+    io: fixtureIo({ privacyManifest, extraBytes: { [adapterPath]: adapterBytes, [tokenizerPath]: tokenizerBytes } }),
+    runPrivacySelfTest: async () => ({ version: "privacy-1" }),
+  };
+  try {
+    await mkdir(checkpointPath);
+    await mkdir(sourcePath);
+    await writeFile(join(checkpointPath, "weights.bin"), "model");
+    await writeFile(join(checkpointPath, "config.json"), "[]");
+    await writeFile(join(sourcePath, "source.py"), "source");
+    const preview = await provisionShieldAssets(options);
+    assert.deepEqual(preview.privacy.checkpoint, checkpoint);
+    assert.deepEqual(assertShieldAssetsProvision(preview).privacy.checkpoint, checkpoint);
+    assert.deepEqual(preview.privacy.source, source);
+    assert.deepEqual(preview.privacy.adapter, adapter);
+    assert.deepEqual(preview.privacy.tokenizer, tokenizer);
+    assert.deepEqual(assertShieldAssetsProvision(preview).privacy.source, source);
+    assert.deepEqual(assertShieldAssetsProvision(preview).privacy.adapter, adapter);
+    assert.deepEqual(assertShieldAssetsProvision(preview).privacy.tokenizer, tokenizer);
+
+    await assert.rejects(provisionShieldAssets({ ...options, io: fixtureIo({
+      privacyManifest: { ...privacyManifest, worker: { ...privacyManifest.worker, args: [...privacyManifest.worker.args.slice(0, 5), "0".repeat(64), ...privacyManifest.worker.args.slice(6)] } },
+      extraBytes: { [adapterPath]: adapterBytes, [tokenizerPath]: tokenizerBytes },
+    }) }), /privacy bundle manifest|worker arguments/i);
+    await assert.rejects(provisionShieldAssets({ ...options, io: fixtureIo({
+      privacyManifest: { ...privacyManifest, worker: { ...privacyManifest.worker, args: [...privacyManifest.worker.args.slice(0, 19), "2000", ...privacyManifest.worker.args.slice(20)] } },
+      extraBytes: { [adapterPath]: adapterBytes, [tokenizerPath]: tokenizerBytes },
+    }) }), /privacy bundle manifest|worker arguments/i);
+    await assert.rejects(provisionShieldAssets({ ...options, io: fixtureIo({
+      privacyManifest: { ...privacyManifest, adapter: undefined }, extraBytes: { [adapterPath]: adapterBytes, [tokenizerPath]: tokenizerBytes },
+    }) }), /privacy bundle manifest/i);
+
+    await writeFile(join(sourcePath, "source.py"), "drift!");
+    await assert.rejects(provisionShieldAssets(options), /source|checkpoint/i);
+    await writeFile(join(sourcePath, "source.py"), "source");
+    await assert.rejects(provisionShieldAssets({ ...options, io: fixtureIo({ privacyManifest, extraBytes: { [adapterPath]: adapterBytes, [tokenizerPath]: tokenizerBytes }, mutate: adapterPath }) }), /adapter|digest/i);
+    await assert.rejects(provisionShieldAssets({ ...options, io: fixtureIo({ privacyManifest, extraBytes: { [adapterPath]: adapterBytes, [tokenizerPath]: tokenizerBytes }, mutate: tokenizerPath }) }), /tokenizer|digest/i);
+
+    await writeFile(join(checkpointPath, "weights.bin"), "drift");
+    await assert.rejects(provisionShieldAssets(options), /checkpoint/i);
+    await writeFile(join(checkpointPath, "weights.bin"), "model");
+    await symlink(join(checkpointPath, "weights.bin"), join(checkpointPath, "alias.bin"));
+    await assert.rejects(provisionShieldAssets(options), /checkpoint/i);
+  } finally {
+    await rm(homeDir, { recursive: true, force: true });
+  }
+});
+
+function fixtureIo({ symlink = null, owner = process.getuid?.(), executable = true, mutate = null, privacyManifest = null, extraBytes = {} } = {}) {
   return {
     async lstat(path) {
       return {
@@ -121,7 +201,7 @@ function fixtureIo({ symlink = null, owner = process.getuid?.(), executable = tr
       };
     },
     async realpath(path) { return path; },
-    async readFile(path) { return path === mutate ? Buffer.from("drift") : bytes[path]; },
+    async readFile(path) { return path === mutate ? Buffer.from("drift") : path === privacyPath && privacyManifest ? Buffer.from(JSON.stringify(privacyManifest)) : bytes[path] ?? extraBytes[path]; },
   };
 }
 
