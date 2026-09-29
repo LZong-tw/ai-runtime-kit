@@ -41,7 +41,12 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
 
   let worker;
   try {
-    worker = spawnWorker({ command: privacy.worker.command, args: privacy.worker.args, shell: false, stdio: ["pipe", "pipe", "pipe"] });
+    worker = spawnWorker({
+      command: privacy.checkpoint ? process.execPath : privacy.worker.command,
+      args: privacy.checkpoint ? [privacy.worker.command, ...privacy.worker.args] : privacy.worker.args,
+      shell: false,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
   } catch {
     throw new Error("shield privacy worker unavailable");
   }

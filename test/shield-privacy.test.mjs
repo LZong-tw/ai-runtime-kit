@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdtemp, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -253,6 +253,28 @@ test("privacy startup can exceed the scan deadline without disabling scan fail-c
   t.after(() => filter.close());
   assert.equal((await filter.scan(Buffer.from('{"content":"synthetic"}'))).status, "unavailable");
   assert.equal(worker.messages.filter((message) => message.type === "scan").length, 1);
+});
+
+test("OPF worker runs through the current Node interpreter instead of its executable shebang", async (t) => {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "airkit-opf-interpreter-")));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const workerPath = join(directory, "worker.mjs");
+  await writeFile(workerPath, `#!/usr/bin/false\nprocess.stdin.on("data", (chunk) => {\n  const request = JSON.parse(String(chunk).trim());\n  process.stdout.write(JSON.stringify({ type: "health", id: request.id, protocol: request.protocol, version: "privacy-1" }) + "\\n");\n});\n`);
+  await chmod(workerPath, 0o700);
+  const pinned = { privacy: {
+    ...opfProvision.privacy,
+    worker: { ...opfProvision.privacy.worker, command: workerPath },
+    adapter: { ...opfProvision.privacy.adapter, path: join(directory, "opf-adapter.mjs") },
+  } };
+  const filter = await createPrivacyFilter({
+    provision: pinned,
+    validateWorker,
+    validateFile,
+    validateCheckpoint: async () => async () => {},
+    startupTimeoutMs: 1_000,
+  });
+  t.after(() => filter.close());
+  assert.equal(filter.version, "privacy-1");
 });
 
 test("checkpoint startup digest and per-scan metadata detect same-size inode replacement", async (t) => {

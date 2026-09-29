@@ -31,7 +31,7 @@ export function planShieldService({ paths, nodePath, daemonPath } = {}) {
     EnvironmentVariables: {},
     RunAtLoad: true,
     KeepAlive: true,
-    ProcessType: "Background",
+    ProcessType: "Standard",
   };
   const plistXml = renderPlist(plist);
   return {
