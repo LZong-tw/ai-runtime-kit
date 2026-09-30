@@ -10,10 +10,19 @@ export function normalizeResponsesThinkingHistory(rawBody, providers) {
     body = JSON.parse(source);
   } catch { return rawBody; }
   if (typeof body?.model !== "string" || !Array.isArray(body.messages)) return rawBody;
-  const separator = body.model.indexOf("/");
+  let selector = body.model;
+  const encodedSelector = /^(?:anthropic\/)?claude-ccr-h([0-9a-f]{2,4096})(?:\[1m\])?$/i.exec(selector);
+  if (encodedSelector) {
+    if (encodedSelector[1].length % 2 !== 0) return rawBody;
+    try {
+      selector = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
+        .decode(Buffer.from(encodedSelector[1], "hex"));
+    } catch { return rawBody; }
+  }
+  const separator = selector.indexOf("/");
   if (separator < 1) return rawBody;
-  const name = body.model.slice(0, separator);
-  const model = body.model.slice(separator + 1);
+  const name = selector.slice(0, separator);
+  const model = selector.slice(separator + 1);
   const provider = providers.find((entry) => entry.name === name);
   if (provider?.type !== "openai_responses" || !provider.models?.includes(model)) return rawBody;
 

@@ -125,3 +125,24 @@ test("does not mistake object-shaped content for a native content array", () => 
   const raw = Buffer.from(JSON.stringify(body));
   assert.equal(normalizeResponsesThinkingHistory(raw, providers), raw);
 });
+
+test("recognizes actual CCR /model selector encodings without changing the model control", async () => {
+  const hex = Buffer.from("responses/gpt-6-astra").toString("hex");
+  for (const model of [`claude-ccr-h${hex}`, `anthropic/claude-ccr-h${hex}`, `anthropic/claude-ccr-h${hex}[1m]`]) {
+    const body = history(model);
+    const sent = await capture(body);
+    assert.equal(sent.model, model);
+    assert.deepEqual(sent.messages[1].content[0], { type: "text", text: "Synthetic prior reasoning" });
+  }
+});
+
+test("unknown or malformed encoded selectors do not authorize history rewriting", async () => {
+  for (const route of ["chat/gpt-6-astra", "unknown/gpt-6-astra", "responses/gpt-other"]) {
+    const body = history(`anthropic/claude-ccr-h${Buffer.from(route).toString("hex")}`);
+    assert.deepEqual(await capture(body), body);
+  }
+  for (const model of ["anthropic/claude-ccr-hff", "anthropic/claude-ccr-h123", "anthropic/claude-ccr-hzz"]) {
+    const body = history(model);
+    assert.deepEqual(await capture(body), body);
+  }
+});
