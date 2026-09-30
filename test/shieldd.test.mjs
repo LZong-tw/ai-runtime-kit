@@ -148,6 +148,34 @@ test("daemon passes its durable decision recorder to the protected proxy", async
   assert.equal(proxyOptions.recordShieldDecision, recorder.recordShieldDecision);
 });
 
+test("daemon readiness requires both audit durability and a live privacy worker", async () => {
+  let privacyReady = true;
+  let auditReady = true;
+  let proxyOptions;
+  const daemon = await startDaemon({
+    config,
+    paths,
+    readPolicyBundle: async () => ({ bundle: {}, publicKey: "pinned-ed25519-public-key" }),
+    loadPolicy: async () => policy,
+    createScanner: async () => ({ version: "8.24.0", scan: async () => ({ findings: [] }) }),
+    createPrivacy: async () => ({ version: "privacy-1", async scan() { return { status: "ok", findings: [] }; }, async isReady() { return privacyReady; }, close() {} }),
+    createDecisionRecorder: async () => ({ recordShieldDecision: async () => ({ durable: "ack" }), async isReady() { return auditReady; } }),
+    writePolicyState: async () => {},
+    startProxy: async (options) => { proxyOptions = options; return { origin: "http://127.0.0.1:8811", close: async () => {} }; },
+    writeIdentity: async () => {},
+  });
+  try {
+    assert.equal(await proxyOptions.isReady(), true);
+    privacyReady = false;
+    assert.equal(await proxyOptions.isReady(), false);
+    privacyReady = true;
+    auditReady = false;
+    assert.equal(await proxyOptions.isReady(), false);
+  } finally {
+    await daemon.shield.close();
+  }
+});
+
 test("default daemon recorder requires an audit capability, key, and spare encrypted spool", async () => {
   const recorder = await createDefaultDecisionRecorder({
     env: { AIRKIT_AUDIT_CAPABILITY_FILE: "/private/audit-capability", AIRKIT_AUDIT_SOCKET_PATH: "/private/audit.sock" },
