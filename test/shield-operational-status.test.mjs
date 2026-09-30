@@ -21,6 +21,7 @@ test("operational Shield status reports each lane from verified local state and 
     readAssets: async ({ paths }) => paths.lane === "subscription"
       ? { privacy: { version: "privacy-1" }, gitleaks: { path: "/not-rendered", sha256: "a".repeat(64) } }
       : null,
+    ensureReady: async () => true,
     launcherDescriptors: () => [
       { coverage: "protected", launcher: "airclaude", lanes: ["managed"], hopChain: ["airclaude", "shield", "managed"] },
       { coverage: "bypass", launcher: "claude", bypassReason: "direct_client" },
@@ -53,6 +54,30 @@ test("operational Shield status reports each lane from verified local state and 
     declared_coverage: [{ launcher: "airclaude", lanes: ["managed"], hop_chain: ["airclaude", "shield", "managed"] }],
     declared_bypasses: [{ launcher: "claude", reason: "direct_client" }],
   });
+});
+
+test("operational Shield status does not claim protection when the live readiness probe fails", async () => {
+  const result = await readShieldOperationalStatus({
+    shieldPaths: ({ lane }) => ({ lane }),
+    inspectService: async ({ paths }) => paths.lane === "subscription"
+      ? { installed: true, loaded: true, active: true, pid: 42 }
+      : { installed: false, loaded: false, active: false },
+    readIdentity: async ({ paths }) => paths.lane === "subscription"
+      ? { pid: 42, policyVersion: "policy-1", detectorVersions: detectors }
+      : null,
+    readPolicy: async ({ paths }) => paths.lane === "subscription"
+      ? { version: "policy-1", detectorVersions: detectors }
+      : null,
+    readAssets: async ({ paths }) => paths.lane === "subscription"
+      ? { privacy: { version: "privacy-1" } }
+      : null,
+    ensureReady: async () => { throw new Error("private readiness detail"); },
+    launcherDescriptors: () => [],
+  });
+  assert.equal(result.state, "unavailable");
+  assert.equal(result.lanes[0].state, "unavailable");
+  assert.equal(result.lanes[0].service, "degraded");
+  assert.doesNotMatch(JSON.stringify(result), /private readiness detail/);
 });
 
 test("operational Shield status reports the Headroom subscription route as protected only when enabled", async () => {

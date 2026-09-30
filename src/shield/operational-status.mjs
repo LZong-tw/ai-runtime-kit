@@ -1,5 +1,5 @@
 import { readShieldAssetsProvision, readShieldIdentity, readShieldPolicyState, shieldPaths } from "./paths.mjs";
-import { inspectShieldService } from "./service.mjs";
+import { ensureShieldReady, inspectShieldService } from "./service.mjs";
 import { shieldLauncherDescriptors } from "./launchers.mjs";
 
 const LANES = Object.freeze(["subscription", "managed"]);
@@ -13,6 +13,7 @@ export async function readShieldOperationalStatus({
   readIdentity = readShieldIdentity,
   readPolicy = readShieldPolicyState,
   readAssets = readShieldAssetsProvision,
+  ensureReady = ensureShieldReady,
   launcherDescriptors = shieldLauncherDescriptors,
 } = {}) {
   const auditState = HEALTH.has(audit) ? audit : "unavailable";
@@ -23,7 +24,7 @@ export async function readShieldOperationalStatus({
     } catch {
       return unavailableLane(lane, auditState);
     }
-    return readLaneStatus({ lane, audit: auditState, paths, inspectService, readIdentity, readPolicy, readAssets });
+    return readLaneStatus({ lane, audit: auditState, paths, inspectService, readIdentity, readPolicy, readAssets, ensureReady });
   }));
   const descriptors = safeLauncherDescriptors(launcherDescriptors({
     subscriptionShield: env?.AIRKIT_SHIELD_SUBSCRIPTION === "1",
@@ -36,7 +37,7 @@ export async function readShieldOperationalStatus({
   };
 }
 
-async function readLaneStatus({ lane, audit, paths, inspectService, readIdentity, readPolicy, readAssets }) {
+async function readLaneStatus({ lane, audit, paths, inspectService, readIdentity, readPolicy, readAssets, ensureReady }) {
   const [serviceResult, identityResult, policyResult, assetsResult] = await Promise.allSettled([
     inspectService({ paths }),
     readIdentity({ paths }),
@@ -50,11 +51,16 @@ async function readLaneStatus({ lane, audit, paths, inspectService, readIdentity
   const serviceState = classifyService(service, identity, serviceResult.status === "rejected" || identityResult.status === "rejected");
   const policyState = classifyPolicy(policy, identity, policyResult.status === "rejected");
   const privacyState = classifyPrivacy(assets, identity, policy, assetsResult.status === "rejected");
-  const protectedLane = serviceState === "healthy" && policyState === "healthy" && privacyState === "healthy";
+  const provisioned = serviceState === "healthy" && policyState === "healthy" && privacyState === "healthy";
+  let runtimeReady = false;
+  if (provisioned) {
+    try { runtimeReady = Boolean(await ensureReady({ lane, paths })); } catch {}
+  }
+  const protectedLane = provisioned && runtimeReady;
   const result = {
     lane,
     state: protectedLane ? "protected" : "unavailable",
-    service: serviceState,
+    service: provisioned && !runtimeReady ? "degraded" : serviceState,
     policy: policyState,
     privacy: privacyState,
     audit,

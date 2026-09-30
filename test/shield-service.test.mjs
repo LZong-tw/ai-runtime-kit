@@ -1045,6 +1045,17 @@ test("managed status and doctor CLI commands preserve their lane", async () => {
   assert.deepEqual(calls, [["status", "managed"], ["doctor", "managed"]]);
 });
 
+test("shield doctor degrades a live service when its operational lane is unavailable", async () => {
+  const output = capture();
+  const code = await runShieldCli(["doctor", "--lane", "subscription"], {
+    stdout: output.stdout,
+    shieldStatus: async () => ({ state: "healthy", service: { active: true }, identity: { present: true } }),
+    readShieldOperationalStatus: async () => ({ state: "unavailable", lanes: [{ lane: "subscription", state: "unavailable" }] }),
+  });
+  assert.equal(code, 1);
+  assert.match(output.value(), /state: degraded/);
+});
+
 test("airkit routes shield commands before catalog loading", async () => {
   const output = capture();
   const code = await runCli(["shield", "status"], {
