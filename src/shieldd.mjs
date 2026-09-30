@@ -120,7 +120,7 @@ export async function startShieldDaemon({
       decisionCache: createCache(),
       decisionContext: { lane: config.lane, destinationClass, policyVersion: policy.version, detectorVersions: policy.detectorVersions },
       recordShieldDecision: recorder.recordShieldDecision,
-      isReady: recorder.isReady ?? (() => true),
+      isReady: async () => Boolean(await recorder.isReady?.() ?? true) && Boolean(await privacy.isReady?.()),
     });
     await writeIdentity({
       paths,

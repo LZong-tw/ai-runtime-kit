@@ -57,6 +57,21 @@ test("persistent privacy worker health-checks then returns a validated redacted 
   assert.equal(worker.messages.filter((entry) => entry.type === "scan").length, 1);
 });
 
+test("privacy readiness probes the live worker and fails closed after exit", async (t) => {
+  let healthy = true;
+  const worker = fakeWorker((message, emit) => {
+    if (message.type === "health" && healthy) emit(health(message));
+  });
+  const filter = await createPrivacyFilter({ provision, spawnWorker: () => worker, validateWorker, timeoutMs: 10 });
+  t.after(() => filter.close());
+
+  assert.equal(await filter.isReady(), true);
+  healthy = false;
+  assert.equal(await filter.isReady(), false);
+  worker.emit("exit", 1);
+  assert.equal(await filter.isReady(), false);
+});
+
 test("Privacy Filter labels retain their original categories across the worker boundary", async (t) => {
   const labels = ["account_number", "private_address", "private_email", "private_person", "private_phone", "private_url", "private_date", "secret"];
   const worker = fakeWorker((message, emit) => {

@@ -112,6 +112,10 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
   }
   return Object.freeze({
     version: privacy.version,
+    async isReady() {
+      if (closed) return false;
+      return validHealth(await request({ type: "health" }, 750), privacy.version);
+    },
     async scan(body) {
       if (closed || !validBody(body)) return unavailable();
       if (assertCheckpointUnchanged) {
