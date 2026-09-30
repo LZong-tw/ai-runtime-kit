@@ -1054,6 +1054,9 @@ test("shield doctor degrades a live service when its operational lane is unavail
   });
   assert.equal(code, 1);
   assert.match(output.value(), /state: degraded/);
+  assert.match(output.value(), /operational\.lanes\.0\.lane: subscription/);
+  assert.match(output.value(), /operational\.lanes\.0\.state: unavailable/);
+  assert.doesNotMatch(output.value(), /\[object Object\]/);
 });
 
 test("airkit routes shield commands before catalog loading", async () => {
