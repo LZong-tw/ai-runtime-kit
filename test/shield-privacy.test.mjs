@@ -121,6 +121,23 @@ test("OPF filter accepts the pinned ten-second scan budget", async (t) => {
   assert.equal((await filter.scan(Buffer.from('{"content":"synthetic"}'))).status, "ok");
 });
 
+test("OPF filter accepts a pinned twenty-five-second scan budget", async (t) => {
+  const worker = fakeWorker((message, emit) => {
+    if (message.type === "health") emit(health(message));
+    if (message.type === "scan") emit({ type: "scan", id: message.id, status: "ok", findings: [] });
+  });
+  const extended = { privacy: {
+    ...opfProvision.privacy,
+    worker: { ...opfProvision.privacy.worker, args: [...opfProvision.privacy.worker.args.slice(0, 21), "25000"] },
+  } };
+  const filter = await createPrivacyFilter({
+    provision: extended, spawnWorker: () => worker, validateWorker, validateFile,
+    validateCheckpoint: async () => async () => {},
+  });
+  t.after(() => filter.close());
+  assert.equal((await filter.scan(Buffer.from('{"content":"synthetic"}'))).status, "ok");
+});
+
 test("OPF scan waits beyond the generic two-second deadline when provisioned for ten seconds", async (t) => {
   const worker = fakeWorker((message, emit) => {
     if (message.type === "health") emit(health(message));

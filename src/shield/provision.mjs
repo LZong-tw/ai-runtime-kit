@@ -123,7 +123,7 @@ function validOpfArguments(args, manifest) {
     && args[14] === "--tokenizer" && args[15] === manifest.tokenizer?.path
     && args[16] === "--tokenizer-sha256" && args[17] === manifest.tokenizer?.sha256
     && args[18] === "--startup-timeout-ms" && args[19] === "30000"
-    && args[20] === "--scan-timeout-ms" && ["2000", "10000"].includes(args[21]);
+    && args[20] === "--scan-timeout-ms" && ["2000", "10000", "25000"].includes(args[21]);
 }
 
 function safeIdentifier(value) { return typeof value === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(value); }

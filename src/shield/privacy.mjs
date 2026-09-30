@@ -291,7 +291,7 @@ function validOpfRuntimeArgs(privacy) {
     && args[14] === "--tokenizer" && args[15] === privacy.tokenizer.path
     && args[16] === "--tokenizer-sha256" && args[17] === privacy.tokenizer.sha256
     && args[18] === "--startup-timeout-ms" && args[19] === "30000"
-    && args[20] === "--scan-timeout-ms" && ["2000", "10000"].includes(args[21]);
+    && args[20] === "--scan-timeout-ms" && ["2000", "10000", "25000"].includes(args[21]);
 }
 
 async function validatePrivacyPinnedFile(asset, { label } = {}) {
