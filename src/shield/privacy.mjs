@@ -16,13 +16,14 @@ const KNOWN_LABELS = new Set([
   "private_phone", "private_url", "private_date", "secret",
 ]);
 
-export async function createPrivacyFilter({ provision, spawnWorker = defaultSpawnWorker, validateWorker = validatePrivacyWorkerAsset, validateCheckpoint = attestShieldCheckpoint, validateFile = validatePrivacyPinnedFile, timeoutMs = DEFAULT_TIMEOUT_MS, startupTimeoutMs = DEFAULT_STARTUP_TIMEOUT_MS } = {}) {
+export async function createPrivacyFilter({ provision, spawnWorker = defaultSpawnWorker, validateWorker = validatePrivacyWorkerAsset, validateCheckpoint = attestShieldCheckpoint, validateFile = validatePrivacyPinnedFile, timeoutMs, startupTimeoutMs = DEFAULT_STARTUP_TIMEOUT_MS } = {}) {
   const privacy = assertPrivacyProvision(provision);
+  const scanTimeoutMs = timeoutMs ?? (privacy.checkpoint ? Number(privacy.worker.args[21]) + 1_000 : DEFAULT_TIMEOUT_MS);
   if (typeof spawnWorker !== "function") throw new TypeError("shield privacy worker launcher is required");
   if (typeof validateWorker !== "function") throw new TypeError("shield privacy worker validator is required");
   if (typeof validateCheckpoint !== "function") throw new TypeError("shield privacy checkpoint validator is required");
   if (typeof validateFile !== "function") throw new TypeError("shield privacy file validator is required");
-  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) throw new TypeError("shield privacy worker timeout is invalid");
+  if (!Number.isInteger(scanTimeoutMs) || scanTimeoutMs < 1 || scanTimeoutMs > 30_000) throw new TypeError("shield privacy worker timeout is invalid");
   if (!Number.isInteger(startupTimeoutMs) || startupTimeoutMs < 1 || startupTimeoutMs > 60_000) throw new TypeError("shield privacy startup timeout is invalid");
 
   try { await validateWorker(privacy.worker); } catch { throw new Error("shield privacy worker unavailable"); }
@@ -89,7 +90,7 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
     if (stderrBytes > MAX_FRAME_BYTES) failWorker();
   });
 
-  const request = async (message, deadlineMs = timeoutMs) => {
+  const request = async (message, deadlineMs = scanTimeoutMs) => {
     if (closed) return null;
     const id = randomUUID();
     const payload = JSON.stringify({ ...message, id, protocol: PROTOCOL });
@@ -128,7 +129,7 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
   });
 }
 
-export async function runPrivacyWorkerSelfTest(provision, { spawnWorker = defaultSpawnWorker, validateWorker = validatePrivacyWorkerAsset, validateCheckpoint = attestShieldCheckpoint, validateFile = validatePrivacyPinnedFile, timeoutMs = DEFAULT_TIMEOUT_MS, startupTimeoutMs = DEFAULT_STARTUP_TIMEOUT_MS } = {}) {
+export async function runPrivacyWorkerSelfTest(provision, { spawnWorker = defaultSpawnWorker, validateWorker = validatePrivacyWorkerAsset, validateCheckpoint = attestShieldCheckpoint, validateFile = validatePrivacyPinnedFile, timeoutMs, startupTimeoutMs = DEFAULT_STARTUP_TIMEOUT_MS } = {}) {
   const filter = await createPrivacyFilter({ provision, spawnWorker, validateWorker, validateCheckpoint, validateFile, timeoutMs, startupTimeoutMs });
   try {
     const opf = Boolean(provision?.privacy?.checkpoint);
@@ -286,7 +287,7 @@ function validOpfRuntimeArgs(privacy) {
     && args[14] === "--tokenizer" && args[15] === privacy.tokenizer.path
     && args[16] === "--tokenizer-sha256" && args[17] === privacy.tokenizer.sha256
     && args[18] === "--startup-timeout-ms" && args[19] === "30000"
-    && args[20] === "--scan-timeout-ms" && args[21] === "2000";
+    && args[20] === "--scan-timeout-ms" && ["2000", "10000"].includes(args[21]);
 }
 
 async function validatePrivacyPinnedFile(asset, { label } = {}) {

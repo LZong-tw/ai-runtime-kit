@@ -89,6 +89,40 @@ test("privacy worker assets are revalidated immediately before each worker spawn
   assert.equal(spawns, 0);
 });
 
+test("OPF filter accepts the pinned ten-second scan budget", async (t) => {
+  const worker = fakeWorker((message, emit) => {
+    if (message.type === "health") emit(health(message));
+    if (message.type === "scan") emit({ type: "scan", id: message.id, status: "ok", findings: [] });
+  });
+  const extended = { privacy: {
+    ...opfProvision.privacy,
+    worker: { ...opfProvision.privacy.worker, args: [...opfProvision.privacy.worker.args.slice(0, 21), "10000"] },
+  } };
+  const filter = await createPrivacyFilter({
+    provision: extended, spawnWorker: () => worker, validateWorker, validateFile,
+    validateCheckpoint: async () => async () => {},
+  });
+  t.after(() => filter.close());
+  assert.equal((await filter.scan(Buffer.from('{"content":"synthetic"}'))).status, "ok");
+});
+
+test("OPF scan waits beyond the generic two-second deadline when provisioned for ten seconds", async (t) => {
+  const worker = fakeWorker((message, emit) => {
+    if (message.type === "health") emit(health(message));
+    if (message.type === "scan") setTimeout(() => emit({ type: "scan", id: message.id, status: "ok", findings: [] }), 2_100);
+  });
+  const extended = { privacy: {
+    ...opfProvision.privacy,
+    worker: { ...opfProvision.privacy.worker, args: [...opfProvision.privacy.worker.args.slice(0, 21), "10000"] },
+  } };
+  const filter = await createPrivacyFilter({
+    provision: extended, spawnWorker: () => worker, validateWorker, validateFile,
+    validateCheckpoint: async () => async () => {},
+  });
+  t.after(() => filter.close());
+  assert.equal((await filter.scan(Buffer.from('{"content":"synthetic"}'))).status, "ok");
+});
+
 test("a missing or replaced checkpoint blocks before the worker receives request bytes", async (t) => {
   const worker = fakeWorker((message, emit) => {
     if (message.type === "health") emit(health(message));
