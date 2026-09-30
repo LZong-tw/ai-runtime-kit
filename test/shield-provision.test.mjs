@@ -162,15 +162,17 @@ test("OPF provision pins its model, source, helper, tokenizer and worker argumen
     assert.deepEqual(assertShieldAssetsProvision(preview).privacy.adapter, adapter);
     assert.deepEqual(assertShieldAssetsProvision(preview).privacy.tokenizer, tokenizer);
 
-    const extendedScanManifest = {
-      ...privacyManifest,
-      worker: { ...privacyManifest.worker, args: [...privacyManifest.worker.args.slice(0, 21), "10000"] },
-    };
-    const extended = await provisionShieldAssets({ ...options, io: fixtureIo({
-      privacyManifest: extendedScanManifest,
-      extraBytes: { [adapterPath]: adapterBytes, [tokenizerPath]: tokenizerBytes },
-    }) });
-    assert.equal(extended.privacy.worker.args.at(-1), "10000");
+    for (const scanTimeout of ["10000", "25000"]) {
+      const extendedScanManifest = {
+        ...privacyManifest,
+        worker: { ...privacyManifest.worker, args: [...privacyManifest.worker.args.slice(0, 21), scanTimeout] },
+      };
+      const extended = await provisionShieldAssets({ ...options, io: fixtureIo({
+        privacyManifest: extendedScanManifest,
+        extraBytes: { [adapterPath]: adapterBytes, [tokenizerPath]: tokenizerBytes },
+      }) });
+      assert.equal(extended.privacy.worker.args.at(-1), scanTimeout);
+    }
 
     await assert.rejects(provisionShieldAssets({ ...options, io: fixtureIo({
       privacyManifest: { ...privacyManifest, worker: { ...privacyManifest.worker, args: [...privacyManifest.worker.args.slice(0, 5), "0".repeat(64), ...privacyManifest.worker.args.slice(6)] } },
