@@ -67,6 +67,8 @@ async function createDefaultShieldDependencies(dependencies) {
   const provisionAssets = dependencies.provisionShieldAssets ?? provisionShieldAssets;
   const installPolicy = dependencies.installShieldPolicyProvision ?? installShieldPolicyProvision;
   const ensureReady = dependencies.ensureShieldReady ?? ensureShieldReady;
+  const readOperational = dependencies.readShieldOperationalStatus ?? readShieldOperationalStatus;
+  const readStatus = dependencies.shieldStatus ?? shieldStatus;
   const createLease = dependencies.createShieldDestinationLease ?? createShieldDestinationLease;
   const renewLease = dependencies.renewShieldDestinationLease ?? renewShieldDestinationLease;
   const revokeLease = dependencies.revokeShieldDestinationLease ?? revokeShieldDestinationLease;
@@ -112,7 +114,10 @@ async function createDefaultShieldDependencies(dependencies) {
       return await shieldStatus({ paths: shieldPaths({ env, lane }), io: dependencies.io, runLaunchctl: dependencies.runLaunchctl });
     },
     async doctor({ lane }) {
-      return { ...(await shieldStatus({ paths: shieldPaths({ env, lane }), io: dependencies.io, runLaunchctl: dependencies.runLaunchctl })), operational: await readShieldOperationalStatus({ env }), checked: true };
+      const status = await readStatus({ paths: shieldPaths({ env, lane }), io: dependencies.io, runLaunchctl: dependencies.runLaunchctl });
+      const operational = await readOperational({ env });
+      const selected = operational.lanes?.find((entry) => entry.lane === lane);
+      return { ...status, state: status.state === "healthy" && selected?.state !== "protected" ? "degraded" : status.state, operational, checked: true };
     },
     async privacyProvision({ bundlePath, gitleaksPath, gitleaksRulesPath, policyBundlePath, lane = "subscription", write }) {
       const lanePaths = shieldPaths({ env, lane });
