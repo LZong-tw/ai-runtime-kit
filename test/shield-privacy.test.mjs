@@ -138,6 +138,250 @@ test("OPF filter accepts a pinned twenty-five-second scan budget", async (t) => 
   assert.equal((await filter.scan(Buffer.from('{"content":"synthetic"}'))).status, "ok");
 });
 
+test("OPF sixty-second scans retain their full budget and the parent's one-second reply grace", async (t) => {
+  const worker = fakeWorker((message, emit) => {
+    if (message.type === "health") emit(health(message));
+  });
+  const extended = { privacy: {
+    ...opfProvision.privacy,
+    worker: { ...opfProvision.privacy.worker, args: [...opfProvision.privacy.worker.args.slice(0, 21), "60000"] },
+  } };
+  const filter = await createPrivacyFilter({
+    provision: extended, spawnWorker: () => worker, validateWorker, validateFile,
+    validateCheckpoint: async () => async () => {},
+  });
+  t.after(() => filter.close());
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let settled = false;
+  const scan = filter.scan(Buffer.from('{"content":"synthetic"}')).then((result) => { settled = true; return result; });
+  await flushTasks();
+  t.mock.timers.tick(60_999);
+  await flushTasks();
+  assert.equal(settled, false);
+  const message = worker.messages.find((entry) => entry.type === "scan");
+  emit(worker, { type: "scan", id: message.id, status: "ok", findings: [] });
+  assert.equal((await scan).status, "ok");
+});
+
+test("privacy scans serialize four admitted requests while health bypasses the scan queue", async (t) => {
+  const worker = fakeWorker((message, emit) => {
+    if (message.type === "health") emit(health(message));
+  });
+  const filter = await createPrivacyFilter({ provision, spawnWorker: () => worker, validateWorker });
+  t.after(() => filter.close());
+  const bodies = Array.from({ length: 4 }, (_, index) => Buffer.from(JSON.stringify({ content: `synthetic-${index}` })));
+  const scans = bodies.map((body) => filter.scan(body));
+  await flushTasks();
+  const overflow = await filter.scan(Buffer.from(`{"content":"${sentinel}"}`));
+  assert.equal(overflow.status, "unavailable");
+  assert.doesNotMatch(JSON.stringify(overflow), new RegExp(sentinel));
+  assert.equal(worker.messages.filter((message) => message.type === "scan").length, 1);
+  assert.equal(await filter.isReady(), true);
+  for (const [index, body] of bodies.entries()) {
+    const sent = worker.messages.filter((message) => message.type === "scan");
+    assert.equal(sent.length, index + 1);
+    assert.deepEqual(Buffer.from(sent[index].body, "base64"), body);
+    emit(worker, { type: "scan", id: sent[index].id, status: "ok", findings: [] });
+    assert.equal((await scans[index]).status, "ok");
+    await flushTasks();
+  }
+  assert.equal(new Set(worker.messages.map((message) => message.id)).size, worker.messages.length);
+});
+
+test("expired waiting scans never dispatch and each admitted scan gets its timeout from dispatch", async (t) => {
+  const worker = fakeWorker((message, emit) => {
+    if (message.type === "health") emit(health(message));
+  });
+  const filter = await createPrivacyFilter({ provision, spawnWorker: () => worker, validateWorker, timeoutMs: 100 });
+  t.after(() => filter.close());
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const first = filter.scan(Buffer.from('{"content":"first"}'));
+  const second = filter.scan(Buffer.from('{"content":"second"}'));
+  const expired = filter.scan(Buffer.from(`{"content":"${sentinel}"}`));
+  await flushTasks();
+  assert.equal(worker.messages.filter((message) => message.type === "scan").length, 1);
+  t.mock.timers.tick(80);
+  emit(worker, { type: "scan", id: worker.messages.at(-1).id, status: "ok", findings: [] });
+  assert.equal((await first).status, "ok");
+  await flushTasks();
+  let settled = false;
+  second.then(() => { settled = true; });
+  t.mock.timers.tick(30);
+  await flushTasks();
+  assert.equal((await expired).status, "unavailable");
+  assert.equal(settled, false);
+  emit(worker, { type: "scan", id: worker.messages.at(-1).id, status: "ok", findings: [] });
+  assert.equal((await second).status, "ok");
+  await flushTasks();
+  assert.equal(worker.messages.filter((message) => message.type === "scan").length, 2);
+});
+
+test("privacy close releases active and waiting scans without dispatching retained bodies", async () => {
+  const worker = fakeWorker((message, emit) => {
+    if (message.type === "health") emit(health(message));
+  });
+  const filter = await createPrivacyFilter({ provision, spawnWorker: () => worker, validateWorker });
+  const scans = Array.from({ length: 4 }, () => filter.scan(Buffer.from(`{"content":"${sentinel}"}`)));
+  await flushTasks();
+  filter.close();
+  assert.deepEqual((await Promise.all(scans)).map((result) => result.status), Array(4).fill("unavailable"));
+  assert.equal(worker.messages.filter((message) => message.type === "scan").length, 1);
+  assert.equal((await filter.scan(Buffer.from('{}'))).status, "unavailable");
+  assert.equal(await filter.isReady(), false);
+});
+
+test("privacy transport timeout releases the queue and recovers one freshly validated worker", async (t) => {
+  const workers = [];
+  let validations = 0;
+  const filter = await createPrivacyFilter({
+    provision, timeoutMs: 40,
+    validateWorker: async () => { validations += 1; },
+    spawnWorker: () => {
+      const worker = fakeWorker((message, emit) => {
+        if (message.type === "health") emit(health(message));
+        if (message.type === "scan" && workers.length === 2) emit({ type: "scan", id: message.id, status: "ok", findings: [] });
+      });
+      workers.push(worker);
+      return worker;
+    },
+  });
+  t.after(() => filter.close());
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const failed = Array.from({ length: 4 }, () => filter.scan(Buffer.from(`{"content":"${sentinel}"}`)));
+  await flushTasks();
+  t.mock.timers.tick(40);
+  await flushTasks();
+  assert.deepEqual((await Promise.all(failed)).map((result) => result.status), Array(4).fill("unavailable"));
+  assert.equal(workers[0].messages.filter((message) => message.type === "scan").length, 1);
+  assert.deepEqual(await Promise.all([filter.isReady(), filter.isReady(), filter.isReady()]), [false, false, false]);
+  await flushTasks();
+  assert.equal(await filter.isReady(), true);
+  assert.equal(workers.length, 2);
+  assert.equal(validations, 2);
+  workers[0].stdout.emit("data", "malformed stale generation\n");
+  assert.equal((await filter.scan(Buffer.from('{"content":"fresh"}'))).status, "ok");
+});
+
+test("privacy readiness stays responsive and singleflight through repeated worker startup failures", async (t) => {
+  const workers = [];
+  const filter = await createPrivacyFilter({
+    provision, validateWorker, startupTimeoutMs: 50,
+    spawnWorker: () => {
+      const worker = fakeWorker((message, emit) => {
+        if (message.type === "health" && workers.length === 1) emit(health(message));
+      });
+      workers.push(worker);
+      return worker;
+    },
+  });
+  t.after(() => filter.close());
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  workers[0].emit("exit", 1);
+  for (let attempt = 2; attempt <= 3; attempt += 1) {
+    let settled = false;
+    const readiness = Promise.all(Array.from({ length: 20 }, () => filter.isReady())).then((result) => { settled = true; return result; });
+    await flushTasks();
+    assert.equal(settled, true);
+    assert.deepEqual(await readiness, Array(20).fill(false));
+    assert.equal(workers.length, attempt);
+    t.mock.timers.tick(50);
+    await flushTasks();
+  }
+  filter.close();
+  assert.equal(await filter.isReady(), false);
+  assert.equal(workers.length, 3);
+});
+
+test("an asynchronous worker stdin error fails admitted scans closed and allows a new generation", async (t) => {
+  const workers = [];
+  const filter = await createPrivacyFilter({
+    provision, validateWorker,
+    spawnWorker: () => {
+      const worker = fakeWorker((message, emit) => {
+        if (message.type === "health") emit(health(message));
+        if (message.type === "scan" && workers.length === 2) emit({ type: "scan", id: message.id, status: "ok", findings: [] });
+      });
+      workers.push(worker);
+      return worker;
+    },
+  });
+  t.after(() => filter.close());
+  const scans = Array.from({ length: 4 }, () => filter.scan(Buffer.from(`{"content":"${sentinel}"}`)));
+  await flushTasks();
+  workers[0].stdin.emit("error", Object.assign(new Error("broken pipe"), { code: "EPIPE" }));
+  assert.deepEqual((await Promise.all(scans)).map((result) => result.status), Array(4).fill("unavailable"));
+  assert.equal((await filter.scan(Buffer.from('{"content":"fresh"}'))).status, "ok");
+  workers[0].emit("exit", 1);
+  assert.equal(await filter.isReady(), true);
+  assert.equal(workers.length, 2);
+});
+
+test("startup health followed by immediate worker exit never admits a ready filter", async () => {
+  const worker = fakeWorker((message, emit, worker) => {
+    if (message.type === "health") { emit(health(message)); worker.emit("exit", 1); }
+  });
+  await assert.rejects(createPrivacyFilter({ provision, spawnWorker: () => worker, validateWorker }), /worker unavailable/i);
+});
+
+test("health followed by a broken frame in the same batch never reports ready", async (t) => {
+  let startup = true;
+  const worker = fakeWorker((message, emit, worker) => {
+    if (message.type !== "health") return;
+    if (startup) { startup = false; emit(health(message)); return; }
+    worker.stdout.emit("data", `${JSON.stringify(health(message))}\nmalformed\n`);
+  });
+  const filter = await createPrivacyFilter({ provision, spawnWorker: () => worker, validateWorker });
+  t.after(() => filter.close());
+  assert.equal(await filter.isReady(), false);
+});
+
+test("an idle health timeout retires the hung generation and the next scan can recover", async (t) => {
+  const workers = [];
+  const filter = await createPrivacyFilter({
+    provision, validateWorker,
+    spawnWorker: () => {
+      let startup = true;
+      const worker = fakeWorker((message, emit) => {
+        if (message.type === "health" && (startup || workers.length === 2)) { startup = false; emit(health(message)); }
+        if (message.type === "scan" && workers.length === 2) emit({ type: "scan", id: message.id, status: "ok", findings: [] });
+      });
+      workers.push(worker);
+      return worker;
+    },
+  });
+  t.after(() => filter.close());
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const ready = filter.isReady();
+  await flushTasks();
+  t.mock.timers.tick(750);
+  assert.equal(await ready, false);
+  const scan = filter.scan(Buffer.from('{"content":"fresh"}'));
+  await flushTasks();
+  assert.equal(workers.length, 2);
+  assert.equal((await scan).status, "ok");
+});
+
+test("concurrent readiness probes share a deadline and late health does not invalidate a live scan", async (t) => {
+  let startup = true;
+  const worker = fakeWorker((message, emit) => {
+    if (message.type === "health" && startup) { startup = false; emit(health(message)); }
+  });
+  const filter = await createPrivacyFilter({ provision, spawnWorker: () => worker, validateWorker });
+  t.after(() => filter.close());
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const scan = filter.scan(Buffer.from('{"content":"synthetic"}'));
+  const readiness = Array.from({ length: 20 }, () => filter.isReady());
+  await flushTasks();
+  const probe = worker.messages.filter((message) => message.type === "health").at(-1);
+  t.mock.timers.tick(750);
+  assert.deepEqual(await Promise.all(readiness), Array(20).fill(false));
+  assert.equal(worker.messages.filter((message) => message.type === "health").length, 2);
+  emit(worker, health(probe));
+  const message = worker.messages.find((message) => message.type === "scan");
+  emit(worker, { type: "scan", id: message.id, status: "ok", findings: [] });
+  assert.equal((await scan).status, "ok");
+});
+
 test("OPF scan waits beyond the generic two-second deadline when provisioned for ten seconds", async (t) => {
   const worker = fakeWorker((message, emit) => {
     if (message.type === "health") emit(health(message));
@@ -362,12 +606,16 @@ function health(message) {
   return { type: "health", id: message.id, protocol: "airkit-privacy-ndjson-v1", version: "privacy-1" };
 }
 
+async function flushTasks() {
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
 function fakeWorker(handler) {
   const worker = new EventEmitter();
   worker.stdout = new EventEmitter();
   worker.stderr = new EventEmitter();
   worker.messages = [];
-  worker.stdin = {
+  worker.stdin = Object.assign(new EventEmitter(), {
     write(chunk) {
       const message = JSON.parse(String(chunk).trim());
       worker.messages.push(message);
@@ -375,7 +623,7 @@ function fakeWorker(handler) {
       return true;
     },
     end() {},
-  };
+  });
   worker.kill = () => worker.emit("exit", 0);
   return worker;
 }

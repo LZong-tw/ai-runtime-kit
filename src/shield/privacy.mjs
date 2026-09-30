@@ -10,6 +10,7 @@ const MAX_BODY_BYTES = 1_048_576;
 const MAX_FRAME_BYTES = 1_048_576;
 const DEFAULT_TIMEOUT_MS = 2_000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 30_000;
+const MAX_ADMITTED_SCANS = 4;
 const KNOWN_LABELS = new Set([
   "address", "credit-card", "email", "ip-address", "person", "phone", "ssn", "token",
   "account_number", "private_address", "private_email", "private_person",
@@ -23,111 +24,184 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
   if (typeof validateWorker !== "function") throw new TypeError("shield privacy worker validator is required");
   if (typeof validateCheckpoint !== "function") throw new TypeError("shield privacy checkpoint validator is required");
   if (typeof validateFile !== "function") throw new TypeError("shield privacy file validator is required");
-  if (!Number.isInteger(scanTimeoutMs) || scanTimeoutMs < 1 || scanTimeoutMs > 30_000) throw new TypeError("shield privacy worker timeout is invalid");
+  if (!Number.isInteger(scanTimeoutMs) || scanTimeoutMs < 1 || scanTimeoutMs > (privacy.checkpoint ? 61_000 : 30_000)) throw new TypeError("shield privacy worker timeout is invalid");
   if (!Number.isInteger(startupTimeoutMs) || startupTimeoutMs < 1 || startupTimeoutMs > 60_000) throw new TypeError("shield privacy startup timeout is invalid");
 
-  try { await validateWorker(privacy.worker); } catch { throw new Error("shield privacy worker unavailable"); }
   let assertCheckpointUnchanged;
   let assertSourceUnchanged;
-  if (privacy.checkpoint) {
-    try { assertCheckpointUnchanged = await validateCheckpoint(privacy.checkpoint); } catch { throw new Error("shield privacy checkpoint unavailable"); }
-    if (typeof assertCheckpointUnchanged !== "function") throw new Error("shield privacy checkpoint unavailable");
-    try { assertSourceUnchanged = await validateCheckpoint(privacy.source, { label: "source" }); } catch { throw new Error("shield privacy source unavailable"); }
-    if (typeof assertSourceUnchanged !== "function") throw new Error("shield privacy source unavailable");
-    try {
-      await validateFile(privacy.adapter, { label: "adapter" });
-      await validateFile(privacy.tokenizer, { label: "tokenizer" });
-    } catch { throw new Error("shield privacy pinned file unavailable"); }
-  }
-
-  let worker;
-  try {
-    worker = spawnWorker({
-      command: privacy.checkpoint ? process.execPath : privacy.worker.command,
-      args: privacy.checkpoint ? [privacy.worker.command, ...privacy.worker.args] : privacy.worker.args,
-      shell: false,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-  } catch {
-    throw new Error("shield privacy worker unavailable");
-  }
-  if (!worker?.stdin || !worker?.stdout || typeof worker.stdin.write !== "function" || typeof worker.stdout.on !== "function") {
-    throw new Error("shield privacy worker unavailable");
-  }
-
-  const pending = new Map();
-  let remainder = Buffer.alloc(0);
-  let stderrBytes = 0;
+  let current = null;
+  let starting = null;
+  let readiness = null;
+  let active = null;
+  const queue = [];
   let closed = false;
-  const failAll = () => {
-    for (const entry of pending.values()) entry.resolve(null);
-    pending.clear();
+  const failScans = () => {
+    active?.settle(unavailable());
+    active = null;
+    for (const entry of queue.splice(0)) entry.settle(unavailable());
+  };
+  const stopWorker = (session) => {
+    if (!session || session.stopped) return;
+    session.stopped = true;
+    if (current === session) {
+      current = null;
+      failScans();
+    }
+    failPending(session.pending);
+    try { session.worker.kill?.(); } catch {}
   };
   const close = () => {
-    if (closed) return;
     closed = true;
-    failAll();
-    try { worker.kill?.(); } catch {}
+    stopWorker(current);
+    failScans();
   };
-  const failWorker = () => { close(); };
-  worker.once?.("error", failWorker);
-  worker.once?.("exit", failWorker);
-  worker.stdout.on("data", (chunk) => {
-    if (closed) return;
-    const incomingBytes = Buffer.isBuffer(chunk) || chunk instanceof Uint8Array ? chunk.byteLength : Buffer.byteLength(chunk);
-    if (incomingBytes > MAX_FRAME_BYTES || remainder.byteLength > MAX_FRAME_BYTES - incomingBytes) { failWorker(); return; }
-    const next = Buffer.concat([remainder, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
-    const lines = next.toString("utf8").split("\n");
-    remainder = Buffer.from(lines.pop() ?? "");
-    if (remainder.byteLength > MAX_FRAME_BYTES) { failWorker(); return; }
-    for (const line of lines) {
-      if (Buffer.byteLength(line) > MAX_FRAME_BYTES) { failWorker(); return; }
-      consumeReply(line, pending);
-    }
-  });
-  worker.stderr?.on?.("data", (chunk) => {
-    stderrBytes += Buffer.byteLength(chunk);
-    if (stderrBytes > MAX_FRAME_BYTES) failWorker();
-  });
-
-  const request = async (message, deadlineMs = scanTimeoutMs) => {
-    if (closed) return null;
+  const request = async (session, message, deadlineMs) => {
+    if (closed || !session || session.stopped || current !== session) return null;
     const id = randomUUID();
     const payload = JSON.stringify({ ...message, id, protocol: PROTOCOL });
     if (Buffer.byteLength(payload) > MAX_FRAME_BYTES) return null;
     return await new Promise((resolve) => {
       const timer = setTimeout(() => {
-        pending.delete(id);
+        session.pending.delete(id);
         resolve(null);
+        if (message.type === "scan") stopWorker(session);
       }, deadlineMs);
-      pending.set(id, { expectedType: message.type, resolve: (reply) => { clearTimeout(timer); resolve(reply); } });
-      try { worker.stdin.write(`${payload}\n`); } catch { pending.delete(id); clearTimeout(timer); resolve(null); }
+      session.pending.set(id, { expectedType: message.type, resolve: (reply) => { clearTimeout(timer); resolve(reply); } });
+      try { session.worker.stdin.write(`${payload}\n`); } catch { stopWorker(session); }
     });
   };
-
-  const health = await request({ type: "health" }, startupTimeoutMs);
-  if (!validHealth(health, privacy.version)) {
-    close();
-    throw new Error("shield privacy worker unavailable");
-  }
-  return Object.freeze({
-    version: privacy.version,
-    async isReady() {
-      if (closed) return false;
-      return validHealth(await request({ type: "health" }, 750), privacy.version);
-    },
-    async scan(body) {
-      if (closed || !validBody(body)) return unavailable();
+  const startWorker = async () => {
+    try {
+      try { await validateWorker(privacy.worker); } catch { throw new Error("shield privacy worker unavailable"); }
+      if (privacy.checkpoint) {
+        try { assertCheckpointUnchanged = await validateCheckpoint(privacy.checkpoint); } catch { throw new Error("shield privacy checkpoint unavailable"); }
+        if (typeof assertCheckpointUnchanged !== "function") throw new Error("shield privacy checkpoint unavailable");
+        try { assertSourceUnchanged = await validateCheckpoint(privacy.source, { label: "source" }); } catch { throw new Error("shield privacy source unavailable"); }
+        if (typeof assertSourceUnchanged !== "function") throw new Error("shield privacy source unavailable");
+        try {
+          await validateFile(privacy.adapter, { label: "adapter" });
+          await validateFile(privacy.tokenizer, { label: "tokenizer" });
+        } catch { throw new Error("shield privacy pinned file unavailable"); }
+      }
+    } catch (error) { close(); throw error; }
+    if (closed) return false;
+    let worker;
+    try {
+      worker = spawnWorker({
+        command: privacy.checkpoint ? process.execPath : privacy.worker.command,
+        args: privacy.checkpoint ? [privacy.worker.command, ...privacy.worker.args] : privacy.worker.args,
+        shell: false,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch { return false; }
+    if (!worker?.stdin || !worker?.stdout || typeof worker.stdin.write !== "function" || typeof worker.stdout.on !== "function") {
+      try { worker?.kill?.(); } catch {}
+      return false;
+    }
+    const session = { worker, pending: new Map(), stopped: false };
+    current = session;
+    let remainder = Buffer.alloc(0);
+    let stderrBytes = 0;
+    const failWorker = () => stopWorker(session);
+    worker.once?.("error", failWorker);
+    worker.once?.("exit", failWorker);
+    worker.stdin.on?.("error", failWorker);
+    worker.stdout.on("data", (chunk) => {
+      if (closed || session.stopped || current !== session) return;
+      const incomingBytes = Buffer.isBuffer(chunk) || chunk instanceof Uint8Array ? chunk.byteLength : Buffer.byteLength(chunk);
+      if (incomingBytes > MAX_FRAME_BYTES || remainder.byteLength > MAX_FRAME_BYTES - incomingBytes) { failWorker(); return; }
+      const next = Buffer.concat([remainder, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
+      const lines = next.toString("utf8").split("\n");
+      remainder = Buffer.from(lines.pop() ?? "");
+      for (const line of lines) {
+        if (!consumeReply(line, session.pending)) { failWorker(); return; }
+      }
+    });
+    worker.stderr?.on?.("data", (chunk) => {
+      if (session.stopped) return;
+      stderrBytes += Buffer.byteLength(chunk);
+      if (stderrBytes > MAX_FRAME_BYTES) failWorker();
+    });
+    const health = await request(session, { type: "health" }, startupTimeoutMs);
+    session.ready = !closed && !session.stopped && current === session && validHealth(health, privacy.version);
+    if (!session.ready) stopWorker(session);
+    return session.ready;
+  };
+  const ensureWorker = async () => {
+    if (closed) return false;
+    if (starting) return await starting;
+    if (current?.ready) return true;
+    starting = startWorker().finally(() => { starting = null; });
+    return await starting;
+  };
+  const drain = async () => {
+    if (closed || active || queue.length === 0) return;
+    const entry = queue.shift();
+    active = entry;
+    clearTimeout(entry.timer);
+    let result = unavailable();
+    try {
+      if (!await ensureWorker() || entry.settled) return;
+      const session = current;
       if (assertCheckpointUnchanged) {
         try {
           await assertCheckpointUnchanged();
           await assertSourceUnchanged();
           await validateFile(privacy.adapter, { label: "adapter" });
           await validateFile(privacy.tokenizer, { label: "tokenizer" });
-        } catch { close(); return unavailable(); }
+        } catch { close(); return; }
       }
-      const reply = await request({ type: "scan", body: Buffer.from(body).toString("base64") });
-      return normalizeScanReply(reply);
+      if (entry.settled || closed || current !== session) return;
+      result = normalizeScanReply(await request(session, { type: "scan", body: entry.body.toString("base64") }, scanTimeoutMs));
+    } catch {} finally {
+      entry.settle(result);
+      if (active === entry) active = null;
+      void drain();
+    }
+  };
+  if (!await ensureWorker()) { close(); throw new Error("shield privacy worker unavailable"); }
+  return Object.freeze({
+    version: privacy.version,
+    async isReady() {
+      if (closed) return false;
+      if (!current?.ready) {
+        void ensureWorker().catch(() => {});
+        return false;
+      }
+      if (!readiness) {
+        const session = current;
+        readiness = request(session, { type: "health" }, 750)
+          .then((reply) => {
+            const ready = !closed && !session.stopped && current === session && validHealth(reply, privacy.version);
+            if (!ready && active === null) stopWorker(session);
+            return ready;
+          })
+          .finally(() => { readiness = null; });
+      }
+      return await readiness;
+    },
+    async scan(body) {
+      if (closed || !validBody(body) || queue.length + Number(active !== null) >= MAX_ADMITTED_SCANS) return unavailable();
+      return await new Promise((resolve) => {
+        const entry = {
+          body: Buffer.from(body), settled: false,
+          settle(result) {
+            if (entry.settled) return;
+            entry.settled = true;
+            clearTimeout(entry.timer);
+            entry.body = null;
+            resolve(result);
+          },
+        };
+        // Waiting has its own bounded deadline; scan time begins only at dispatch.
+        entry.timer = setTimeout(() => {
+          const index = queue.indexOf(entry);
+          if (index !== -1) queue.splice(index, 1);
+          entry.settle(unavailable());
+        }, scanTimeoutMs);
+        queue.push(entry);
+        void drain();
+      });
     },
     close,
   });
@@ -153,12 +227,14 @@ export async function runPrivacyWorkerSelfTest(provision, { spawnWorker = defaul
 
 function consumeReply(line, pending) {
   let reply;
-  try { reply = JSON.parse(line); } catch { failPending(pending); return; }
-  if (!isPlainObject(reply) || typeof reply.id !== "string" || typeof reply.type !== "string") { failPending(pending); return; }
+  try { reply = JSON.parse(line); } catch { return false; }
+  if (!isPlainObject(reply) || typeof reply.id !== "string" || typeof reply.type !== "string") return false;
   const entry = pending.get(reply.id);
-  if (!entry || entry.expectedType !== reply.type) { failPending(pending); return; }
+  if (!entry) return true;
+  if (entry.expectedType !== reply.type) return false;
   pending.delete(reply.id);
   entry.resolve(reply);
+  return true;
 }
 
 function failPending(pending) {
@@ -291,7 +367,7 @@ function validOpfRuntimeArgs(privacy) {
     && args[14] === "--tokenizer" && args[15] === privacy.tokenizer.path
     && args[16] === "--tokenizer-sha256" && args[17] === privacy.tokenizer.sha256
     && args[18] === "--startup-timeout-ms" && args[19] === "30000"
-    && args[20] === "--scan-timeout-ms" && ["2000", "10000", "25000"].includes(args[21]);
+    && args[20] === "--scan-timeout-ms" && ["2000", "10000", "25000", "60000"].includes(args[21]);
 }
 
 async function validatePrivacyPinnedFile(asset, { label } = {}) {
