@@ -124,6 +124,8 @@ function enforceSensitiveBlock(input, decision) {
   const hasRestrictedData = input.repositoryClass === "restricted"
     || input.pathClasses.some((pathClass) => pathClass === "environment" || pathClass === "terraform_state" || pathClass === "credential_store" || pathClass === "production_config");
   if (!hasConfirmedSecret && !hasPrivacySecret && !hasRestrictedData) return decision;
+  if (hasPrivacySecret && !hasConfirmedSecret && !hasRestrictedData
+    && input.lane === "subscription" && input.destinationClass === "subscription" && decision.action === "redact") return decision;
   const reasonCodes = [];
   if (hasConfirmedSecret) reasonCodes.push("confirmed-secret");
   if (hasPrivacySecret) reasonCodes.push("privacy-secret");

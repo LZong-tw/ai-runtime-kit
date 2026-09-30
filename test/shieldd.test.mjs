@@ -501,6 +501,100 @@ test("daemon uses the signed OPA policy to redact a non-email Privacy finding be
   assert.notEqual(upstreamBody, original);
 });
 
+test("real gateway requires complete OPF secret redaction proof before forwarding", async (t) => {
+  const original = '{"content":"fixture-token"}';
+  const redacted = '{"content":"[SECRET]"}';
+  const secretRedaction = { label: "secret", count: 1, spans: [{ start: 12, end: 25 }] };
+  const mixedOriginal = '{"content":"fixture-token alice@example.com"}';
+  const mixedFindings = [{ label: "secret", count: 1 }, { label: "private_email", count: 1 }];
+  const cases = [
+    { name: "verified secret", status: 200, body: redacted, transforms: 1 },
+    { name: "verified secret and private email", original: mixedOriginal, reply: { findings: mixedFindings, redactions: [secretRedaction, { label: "private_email", count: 1, spans: [{ start: 26, end: 43 }] }], redactedBody: '{"content":"[SECRET] [PRIVATE_EMAIL]"}' }, status: 200, body: '{"content":"[SECRET] [PRIVATE_EMAIL]"}', transforms: 2 },
+    { name: "unchanged body", reply: { redactedBody: original }, status: 503 },
+    { name: "secret survives elsewhere", reply: { redactedBody: '{"content":"[SECRET]","other":"fixture-token"}' }, status: 503 },
+    { name: "missing replacement body", reply: { redactedBody: undefined }, status: 503 },
+    { name: "replacement is not JSON", reply: { redactedBody: "[SECRET]" }, status: 503 },
+    { name: "missing proof", reply: { redactions: undefined }, status: 503 },
+    { name: "empty proof", reply: { redactions: [] }, status: 503 },
+    { name: "missing spans", reply: { redactions: [{ label: "secret", count: 1 }] }, status: 503 },
+    { name: "out-of-bounds span", reply: { redactions: [{ label: "secret", count: 1, spans: [{ start: 12, end: 100 }] }] }, status: 503 },
+    { name: "finding count exceeds proof", reply: { findings: [{ label: "secret", count: 2 }] }, status: 503 },
+    { name: "proof label does not cover secret", reply: { redactions: [{ ...secretRedaction, label: "private_email" }] }, status: 503 },
+    { name: "mixed finding lacks email proof", original: mixedOriginal, reply: { findings: mixedFindings, redactedBody: '{"content":"[SECRET] [PRIVATE_EMAIL]"}' }, status: 503 },
+    { name: "Gitleaks confirmation", secretFindings: [{ category: "private-key", count: 1 }], status: 403 },
+    { name: "restricted repository", repositoryClass: "restricted", status: 403 },
+    { name: "restricted path", pathClasses: ["terraform_state"], status: 403 },
+    { name: "managed lane", lane: "managed", status: 403 },
+  ];
+  for (const fixture of cases) {
+    await t.test(fixture.name, async (t) => {
+      const upstreamBodies = [];
+      const events = [];
+      let privacyScans = 0;
+      const upstream = createServer((request, response) => {
+        const chunks = [];
+        request.on("data", (chunk) => chunks.push(chunk));
+        request.on("end", () => {
+          upstreamBodies.push(Buffer.concat(chunks).toString("utf8"));
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end('{"ok":true}');
+        });
+      });
+      upstream.listen(0, "127.0.0.1");
+      await once(upstream, "listening");
+      t.after(() => new Promise((resolve) => upstream.close(resolve)));
+      const lane = fixture.lane ?? "subscription";
+      const reply = {
+        status: "ok", findings: [{ label: "secret", count: 1 }],
+        redactions: [secretRedaction], redactedBody: redacted, ...fixture.reply,
+      };
+      const daemon = await startDaemon({
+        config: {
+          ...config, lane, targetClass: lane, targetOrigin: `http://127.0.0.1:${upstream.address().port}`,
+          launcherContext: {
+            ...config.launcherContext, destinationClass: lane,
+            repository: { ...config.launcherContext.repository, trustClass: fixture.repositoryClass ?? "internal" },
+            pathClasses: fixture.pathClasses ?? ["source"],
+          },
+        },
+        paths,
+        readPolicyBundle: async () => signedCompiledPolicyBundle(),
+        createScanner: async () => ({ version: "8.24.0", scan: async () => ({ findings: fixture.secretFindings ?? [] }) }),
+        createPrivacy: async ({ provision }) => createPrivacyFilter({
+          provision,
+          validateWorker: async () => {},
+          spawnWorker: () => fakePrivacyWorker((message, emit) => {
+            if (message.type === "health") emit(privacyHealth(message));
+            else {
+              privacyScans += 1;
+              emit({ ...reply, type: "scan", id: message.id, redactedBody: reply.redactedBody === undefined ? undefined : Buffer.from(reply.redactedBody).toString("base64") });
+            }
+          }),
+        }),
+        createDecisionRecorder: async () => ({ recordShieldDecision: async (event) => { events.push(event); return { durable: "ack" }; } }),
+        writePolicyState: async () => {},
+        writeIdentity: async () => {},
+      });
+      t.after(() => daemon.shield.close());
+      const response = await fetch(`${daemon.shield.origin}/v1/messages`, {
+        method: "POST", headers: { "x-airkit-shield": config.capability }, body: fixture.original ?? original,
+      });
+      assert.equal(response.status, fixture.status);
+      if (fixture.status === 200) {
+        assert.deepEqual(await response.json(), { ok: true });
+        assert.deepEqual(upstreamBodies, [fixture.body]);
+        assert.equal(events[0].action, "redact");
+        assert.equal(events[0].transformCount, fixture.transforms);
+      } else {
+        assert.deepEqual(await response.json(), { error: { code: fixture.status === 403 ? "shield_blocked" : "shield_unavailable" } });
+        assert.deepEqual(upstreamBodies, []);
+      }
+      if (fixture.secretFindings) assert.equal(privacyScans, 0);
+      assert.doesNotMatch(JSON.stringify(events), /fixture-token|alice@example/);
+    });
+  }
+});
+
 test("daemon blocks every privacy worker failure before a real upstream fetch", async (t) => {
   const failures = [
     { name: "unknown", handle(message, reply) { if (message.type === "health") reply(privacyHealth(message)); else reply({ type: "scan", id: message.id, status: "unknown" }); } },
