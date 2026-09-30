@@ -161,7 +161,7 @@ test("policy runtime normalizes a signed policy that tries to approve confirmed 
   });
 });
 
-test("Privacy Filter secret blocks even when the signed policy would redact or approve", async () => {
+test("Privacy Filter secret blocks managed redaction and subscription approval", async () => {
   const policy = await loadTestPolicy({ opa: {
     async loadPolicy() {
       return { evaluate(input) {
@@ -186,6 +186,52 @@ test("Privacy Filter secret blocks even when the signed policy would redact or a
       approvalEligible: false,
       redactions: [],
     });
+  }
+});
+
+test("signed OPA policy can redact OPF-only secrets on the subscription destination", async () => {
+  const policy = await loadShieldPolicy({ bundle: signedBundle({}, compiledWasm), publicKey: keyPair.publicKey });
+  for (const piiFindings of [
+    [{ category: "secret", count: 1 }],
+    [{ category: "private_email", count: 1 }, { category: "secret", count: 1 }],
+  ]) {
+    assert.deepEqual(await policy.evaluate({ ...policyInput, piiFindings }), redactDecision);
+  }
+});
+
+test("OPF secret redaction cannot bypass lane, action, Gitleaks, or restricted-data gates", async () => {
+  const cases = [
+    { name: "subscription redaction", action: "redact", want: "redact", reasons: ["pii-redaction"] },
+    { name: "subscription allow", action: "allow", want: "block", reasons: ["privacy-secret"] },
+    { name: "subscription approval", action: "require_approval", want: "block", reasons: ["privacy-secret"] },
+    { name: "subscription block", action: "block", want: "block", reasons: ["privacy-secret"] },
+    { name: "managed lane", action: "redact", input: { lane: "managed" }, want: "block", reasons: ["privacy-secret"] },
+    { name: "managed destination", action: "redact", input: { destinationClass: "managed" }, want: "block", reasons: ["privacy-secret"] },
+    { name: "Gitleaks plus OPF", action: "redact", input: { secretFindings: [{ category: "private-key", count: 1 }] }, want: "block", reasons: ["confirmed-secret", "privacy-secret"] },
+    { name: "restricted repository", action: "redact", input: { repositoryClass: "restricted" }, want: "block", reasons: ["privacy-secret", "restricted-data"] },
+    ...["environment", "terraform_state", "credential_store", "production_config"].map((pathClass) => ({
+      name: pathClass, action: "redact", input: { pathClasses: [pathClass] }, want: "block", reasons: ["privacy-secret", "restricted-data"],
+    })),
+  ];
+  for (const fixture of cases) {
+    const policy = await loadTestPolicy({ opa: {
+      async loadPolicy() {
+        return { evaluate(input) {
+          if (input.piiFindings.length === 0) return [{ result: allowDecision }];
+          return [{ result: {
+            action: fixture.action,
+            reasonCodes: ["pii-redaction"],
+            approvalEligible: fixture.action === "require_approval",
+            redactions: [],
+          } }];
+        } };
+      },
+    } });
+    assert.deepEqual(await policy.evaluate({
+      ...policyInput, piiFindings: [{ category: "secret", count: 1 }], ...fixture.input,
+    }), {
+      action: fixture.want, reasonCodes: fixture.reasons, approvalEligible: false, redactions: [],
+    }, fixture.name);
   }
 });
 
