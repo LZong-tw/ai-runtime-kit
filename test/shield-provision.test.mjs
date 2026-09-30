@@ -162,7 +162,7 @@ test("OPF provision pins its model, source, helper, tokenizer and worker argumen
     assert.deepEqual(assertShieldAssetsProvision(preview).privacy.adapter, adapter);
     assert.deepEqual(assertShieldAssetsProvision(preview).privacy.tokenizer, tokenizer);
 
-    for (const scanTimeout of ["10000", "25000"]) {
+    for (const scanTimeout of ["10000", "25000", "60000"]) {
       const extendedScanManifest = {
         ...privacyManifest,
         worker: { ...privacyManifest.worker, args: [...privacyManifest.worker.args.slice(0, 21), scanTimeout] },
