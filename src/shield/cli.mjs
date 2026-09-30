@@ -302,7 +302,7 @@ function sanitize(value, key = "", parentKey = "") {
 }
 
 function flatten(value, prefix = "") {
-  if (value && typeof value === "object" && !Array.isArray(value)) {
+  if (value && typeof value === "object") {
     return Object.entries(value).flatMap(([key, entry]) => flatten(entry, `${prefix}${key}.`));
   }
   return [`${prefix.slice(0, -1)}: ${String(value)}`];
