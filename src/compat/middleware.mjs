@@ -20,6 +20,7 @@ const JSON_ERROR = Buffer.from(JSON.stringify({
 
 export async function startCompatibilityMiddleware({
   compatibility,
+  providers = [],
   gatewayOrigin,
   gatewayToken,
   clientToken = gatewayToken,
@@ -42,6 +43,7 @@ export async function startCompatibilityMiddleware({
   const coreClient = createGatewayClient({
     origin: gatewayOrigin,
     token: gatewayToken,
+    providers,
     responseTransformFactory: createGptActivitySseTransform,
   });
   const { policies } = resolveCompatibilityPolicies(

@@ -19,6 +19,7 @@ import { inspectServerToolRequest } from "./server-tools.mjs";
 import { bridgeToolSearch, canApplyToolSearchBudget } from "./tool-search.mjs";
 import { allowlistedUsage } from "../audit/redaction.mjs";
 import { describeStablePrefix } from "./prefix-observability.mjs";
+import { normalizeResponsesThinkingHistory } from "./reasoning-history.mjs";
 
 const TOOL_SEARCH_BRIDGE_NAME = "airkit_tool_search";
 const ADVISOR_BRIDGE_NAME = "airkit_advisor";
@@ -157,8 +158,9 @@ export function createCoreClient({ config, fetchImpl = fetch, readFile = readFil
 // Compatibility handling must use the public CCR gateway so its normal proxy
 // owns routing and request recording. This client deliberately has no access
 // to CCR's core credential or generated configuration file.
-export function createGatewayClient({ origin, token, fetchImpl = fetch, responseTransformFactory = null }) {
+export function createGatewayClient({ origin, token, providers = [], fetchImpl = fetch, responseTransformFactory = null }) {
   const gatewayOrigin = normalizeGatewayOrigin(origin);
+  const providerBindings = structuredClone(providers);
   if (typeof token !== "string" || token.length === 0) {
     throw new Error("CCR gateway authentication is missing or invalid");
   }
@@ -167,6 +169,9 @@ export function createGatewayClient({ origin, token, fetchImpl = fetch, response
     "x-api-key": token,
   });
   const prepareRequest = ({ body, headers, method = "POST", path, signal }) => {
+    if (method === "POST" && path === "/v1/messages") {
+      body = normalizeResponsesThinkingHistory(body, providerBindings);
+    }
     const options = {
       method,
       headers: gatewayHeaders(headers),
@@ -202,6 +207,10 @@ export function createGatewayClient({ origin, token, fetchImpl = fetch, response
       return parseCoreMessageResponse(result);
     },
     async forwardRaw({ body, fallback, headers, method = "POST", response, signal, onResponse, onAttempt }) {
+      body = normalizeResponsesThinkingHistory(body, providerBindings);
+      if (fallback?.body !== undefined) {
+        fallback = { ...fallback, body: normalizeResponsesThinkingHistory(fallback.body, providerBindings) };
+      }
       await onAttempt?.({ phase: "start", body });
       const primaryRequest = prepareRequest({ body, headers, method, path: "/v1/messages", signal });
       const primary = await fetchWithTimeout(

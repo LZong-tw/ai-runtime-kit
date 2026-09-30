@@ -964,6 +964,7 @@ export async function exportOssRelease({ outDir }) {
     "activity.mjs",
     "config.mjs",
     "effort.mjs",
+    "reasoning-history.mjs",
     "fallback.mjs",
     "gateway.mjs",
     "middleware.mjs",
@@ -1544,6 +1545,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
       ? null
       : await (options.startCompatibilityMiddleware ?? startCompatibilityMiddleware)({
         compatibility: managed.compatibility,
+        providers: managed.config.Providers,
         gatewayOrigin,
         gatewayToken,
         auditEmitter: options.auditEmitter ?? null,
@@ -1672,6 +1674,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     const clientToken = options.clientToken ?? randomBytes(24).toString("base64url");
     const middleware = await (options.startCompatibilityMiddleware ?? startCompatibilityMiddleware)({
       compatibility: managed.compatibility,
+      providers: managed.config.Providers,
       gatewayOrigin,
       gatewayToken,
       clientToken,
