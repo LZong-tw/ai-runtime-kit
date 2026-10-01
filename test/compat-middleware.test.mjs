@@ -330,6 +330,114 @@ test("middleware preserves upstream SSE bytes and 429 responses", async (t) => {
   assert.equal(await throttled.text(), '{"error":{"type":"rate_limit_error"}}');
 });
 
+for (const fixture of [
+  { name: "JSON 429", status: 429, retryAfter: "4", wantStatus: 429, wantRetryAfter: "4" },
+  { name: "untyped JSON 429", status: 429, untyped: true, retryAfter: "4", wantStatus: 429, wantRetryAfter: "4" },
+  { name: "malformed 429", status: 429, malformed: true, retryAfter: "4", wantStatus: 429, wantRetryAfter: "4" },
+  {
+    name: "429 with HTTP-date retry guidance",
+    status: 429,
+    retryAfter: "Thu, 01 Oct 2026 00:00:04 GMT",
+    wantStatus: 429,
+    wantRetryAfter: "Thu, 01 Oct 2026 00:00:04 GMT",
+  },
+  { name: "429 without retry guidance", status: 429, wantStatus: 429, wantRetryAfter: "3" },
+  {
+    name: "429 with unsafe headers",
+    status: 429,
+    retryAfter: "not-a-delay",
+    requestId: "unsafe request id",
+    wantRequestId: null,
+    wantStatus: 429,
+    wantRetryAfter: "3",
+  },
+  { name: "JSON 403", status: 403, retryAfter: "4", wantStatus: 403, wantRetryAfter: null },
+  { name: "malformed 403", status: 403, malformed: true, wantStatus: 403, wantRetryAfter: null },
+  { name: "error body without HTTP rejection", status: 200, wantStatus: 502, wantRetryAfter: null },
+  { name: "malformed body without HTTP rejection", status: 200, malformed: true, wantStatus: 502, wantRetryAfter: null },
+  { name: "error body with non-error HTTP status", status: 399, wantStatus: 502, wantRetryAfter: null },
+  { name: "connection failure without HTTP metadata", disconnect: true, wantRequestId: null, wantStatus: 502, wantRetryAfter: null },
+]) {
+  for (const stream of [false, true]) {
+    test(`middleware compatibility executor contains ${fixture.name} (stream=${stream})`, async (t) => {
+      const attempts = [];
+      const upstream = await startFixture(t, async (request, response) => {
+        attempts.push({
+          path: request.url,
+          method: request.method,
+          headers: request.headers,
+          body: JSON.parse(await readBody(request)),
+        });
+        if (fixture.disconnect) {
+          response.destroy();
+          return;
+        }
+        response.writeHead(fixture.status, {
+          "content-type": "application/json",
+          "x-request-id": fixture.requestId ?? "upstream-executor-rejection",
+          "x-upstream-secret": "private-header-marker",
+          ...(fixture.retryAfter === undefined ? {} : { "retry-after": fixture.retryAfter }),
+        });
+        response.end(fixture.malformed
+          ? "not JSON: private-upstream-marker adapter-gateway-token"
+          : JSON.stringify({
+            ...(fixture.untyped ? {} : { type: "error" }),
+            error: { type: "private_upstream_error", message: "private-upstream-marker adapter-gateway-token" },
+            credentials: "private-credential-marker",
+          }));
+      });
+      const adapter = await startAdapter(t, upstream.origin);
+
+      const result = await adapterFetch(adapter.origin, "/v1/messages", {
+        model: "executor-model",
+        max_tokens: 512,
+        messages: [{ role: "user", content: "Search tools." }],
+        stream,
+        tools: [
+          { type: "tool_search_tool_regex_20251119", name: "tool_search_tool_regex" },
+          {
+            name: "get_weather",
+            description: "Get weather",
+            defer_loading: true,
+            input_schema: { type: "object", properties: {} },
+          },
+        ],
+      });
+      const body = await result.text();
+
+      assert.equal(attempts.length, 1, "must not retry or use the fallback provider");
+      assert.equal(attempts[0].path, "/v1/messages");
+      assert.equal(attempts[0].method, "POST");
+      assert.equal(attempts[0].headers["x-api-key"], GATEWAY_TOKEN);
+      assert.equal(attempts[0].headers["x-ccr-core-auth"], undefined);
+      assert.equal(attempts[0].body.model, "executor-model");
+      assert.equal(attempts[0].body.stream, false);
+      assert.deepEqual(attempts[0].body.tools.map(({ name }) => name), ["airkit_tool_search"]);
+      assert.equal(result.status, fixture.wantStatus);
+      assert.equal(result.headers.get("content-type"), "application/json");
+      assert.equal(result.headers.get("retry-after"), fixture.wantRetryAfter);
+      assert.equal(result.headers.get("x-request-id"), fixture.wantRequestId === undefined
+        ? "upstream-executor-rejection"
+        : fixture.wantRequestId);
+      assert.equal(result.headers.get("x-upstream-secret"), null);
+      assert.deepEqual(JSON.parse(body), {
+        error: fixture.wantStatus === 429
+          ? {
+            type: "rate_limit_error",
+            message: "Upstream provider rate limited the request; retry after the indicated delay.",
+          }
+          : {
+            type: "api_error",
+            message: fixture.wantStatus === 403
+              ? "Upstream provider rejected the request"
+              : "compatibility forwarding failed",
+          },
+      });
+      assert.doesNotMatch(body, /private[_-]|adapter-gateway-token|credentials/);
+    });
+  }
+}
+
 test("middleware forwards streamed GPT tool use without fabricating transcript activity", async (t) => {
   const sse = [
     ["message_start", { type: "message_start", message: { model: "gpt-5.6-terra", content: [] } }],
