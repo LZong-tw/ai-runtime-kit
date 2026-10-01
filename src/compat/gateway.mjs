@@ -204,7 +204,15 @@ export function createGatewayClient({ origin, token, providers = [], fetchImpl =
         path: "/v1/messages",
         signal,
       });
-      return parseCoreMessageResponse(result);
+      try {
+        return attachCoreResponseMetadata(await parseCoreMessageResponse(result), result);
+      } catch (error) {
+        throw Object.assign(new Error("CCR gateway returned an invalid Messages response"), {
+          status: result.status,
+          headers: result.headers,
+          cause: error,
+        });
+      }
     },
     async forwardRaw({ body, fallback, headers, method = "POST", response, signal, onResponse, onAttempt }) {
       body = normalizeResponsesThinkingHistory(body, providerBindings);
