@@ -33,8 +33,118 @@ async function fixture(t) {
   });
   const host = { beginRequest: core.beginRequest, transaction: store.transaction };
   const adapter = createNativeAdapter({ validatedContract: contract, controller: host });
-  return { store, key, host, adapter, root, event: { fixtureEvent: { kind: 'stop', key } } };
+  return { store, key, core, host, adapter, root, event: { fixtureEvent: { kind: 'stop', key } } };
 }
+
+async function checkpointStop(f, checkpoint, host = f.host) {
+  const file = path.join(f.root, 'policy-checkpoint');
+  const bytes = Buffer.from(JSON.stringify(checkpoint));
+  await fs.writeFile(file, bytes, { mode: 0o600 });
+  const event = { fixtureEvent: { kind: 'stop', key: f.key,
+    checkpointTail: { path: file, offset: 0, length: bytes.length } } };
+  const out = output();
+  const decision = await runCompletionDispatch({ input: input(event), output: out.stream, controller: host, adapter: f.adapter });
+  return { decision, feedback: out.text(), state: (await f.store.read(f.key)).state };
+}
+
+test('Stop declaration replay and model updates preserve host identity, authority and no-progress budget', async (t) => {
+  const f = await fixture(t);
+  const first = await checkpointStop(f, { version: 1, kind: 'declare', items: [{ ordinal: 1, category: 'report' }] });
+  assert.equal(first.decision.reason, 'pending_work');
+  const proposal = first.state.items[4];
+  const replay = await checkpointStop(f, { version: 1, kind: 'declare', items: [{ ordinal: 1, category: 'report' }] });
+  assert.equal(replay.decision.reason, 'no_progress');
+  assert.equal(replay.state.items[4].itemId, proposal.itemId);
+  const another = await checkpointStop(f, { version: 1, kind: 'declare', items: [{ ordinal: 2, category: 'verification' }] });
+  assert.equal(another.decision.reason, 'no_progress');
+  for (const status of ['verified', 'blocked', 'cancelled']) {
+    const update = await checkpointStop(f, { version: 1, kind: 'update', items: [
+      { itemId: 'item1', status, receiptIds: [] }, { itemId: proposal.itemId, status, receiptIds: [] },
+    ] });
+    assert.equal(update.decision.reason, 'no_progress');
+    assert.equal(update.feedback, '');
+    assert.equal(update.state.items[0].status, 'pending');
+    assert.deepEqual(update.state.items[0].receiptIds, []);
+    assert.equal(update.state.items[4].status, 'pending');
+    assert.equal(update.state.items[4].mustFinish, false);
+    assert.deepEqual(update.state.items[4].requiredTargetIds, []);
+    assert.deepEqual(update.state.receipts, []);
+    assert.deepEqual(update.state.budget, first.state.budget);
+    assert.equal((await f.core.snapshot(f.key.requestId)).validity.progressDigest, first.state.budget.lastProgressDigest);
+  }
+});
+
+test('Stop counts authoritative revision and receipt changes as progress in the shared controller projection', async (t) => {
+  for (const change of ['revision', 'receipt']) {
+    const f = await fixture(t);
+    const stop = () => runCompletionDispatch({ input: input(f.event), output: output().stream, controller: f.host, adapter: f.adapter });
+    assert.equal((await stop()).remaining, 1);
+    const before = (await f.store.read(f.key)).state.budget.lastProgressDigest;
+    await f.store.transaction(f.key, (state) => {
+      if (change === 'revision') state.revision = 'rev2';
+      else {
+        state.receipts.push({ id: 'receipt1', executionId: 'execution1', itemId: 'item1', targetId: 'target',
+          key: { ...f.key }, revision: 'unknown', result: 'failed', startedAt: 1, endedAt: 2 });
+        state.items[0].receiptIds.push('receipt1');
+      }
+    });
+    const snapshot = await f.core.snapshot(f.key.requestId);
+    assert.notEqual(snapshot.validity.progressDigest, before);
+    assert.equal((await stop()).remaining, 0);
+    const state = (await f.store.read(f.key)).state;
+    assert.equal(state.budget.lastProgressDigest, snapshot.validity.progressDigest);
+    assert.equal(state.budget.used, 2);
+  }
+});
+
+test('Stop rejects unknown items and receipt identities with whole real-store rollback and owned error mapping', async (t) => {
+  const f = await fixture(t);
+  const receipt = { id: 'receipt1', executionId: 'execution1', itemId: 'item1', targetId: 'target',
+    key: { ...f.key }, revision: 'unknown', result: 'verified', startedAt: 1, endedAt: 2 };
+  const foreignReceipts = [{ ...receipt, itemId: 'item2' },
+    ...['sessionId', 'workspaceId', 'requestId', 'generation'].map((field) => ({ ...receipt,
+      key: { ...f.key, [field]: field === 'generation' ? 2 : 'foreign' } }))];
+  for (const foreign of [...foreignReceipts, null]) {
+    await f.store.transaction(f.key, (state) => { state.receipts = foreign ? [foreign] : [];
+      state.items[0].receiptIds = []; state.checkpointPresent = false; });
+    const before = (await f.store.read(f.key)).state;
+    let ownedReason;
+    const host = { transaction(key, fn, options) {
+      return f.store.transaction(key, (state) => {
+        try { return fn(state); } catch (error) { ownedReason = error.dispatchReason; throw error; }
+      }, options);
+    } };
+    const result = await checkpointStop(f, { version: 1, kind: 'update', items: [
+      { itemId: 'item2', status: 'blocked', receiptIds: [] },
+      { itemId: 'item1', status: 'verified', receiptIds: ['receipt1'] },
+    ] }, host);
+    assert.equal(ownedReason, 'checkpoint_unknown');
+    assert.equal(result.decision.reason, 'state_unknown');
+    assert.equal(result.feedback, '');
+    assert.deepEqual(result.state, before);
+  }
+  const before = (await f.store.read(f.key)).state;
+  const missing = await checkpointStop(f, { version: 1, kind: 'update', items: [
+    { itemId: 'item1', status: 'blocked', receiptIds: [] }, { itemId: 'unknown-item', status: 'reported', receiptIds: [] },
+  ] });
+  assert.equal(missing.decision.reason, 'state_unknown');
+  assert.deepEqual(missing.state, before);
+});
+
+test('Stop valid receipt claims remain proposals and cannot overwrite authoritative receipt status', async (t) => {
+  const f = await fixture(t);
+  const receipt = { id: 'receipt1', executionId: 'execution1', itemId: 'item1', targetId: 'target',
+    key: { ...f.key }, revision: 'unknown', result: 'verified', startedAt: 1, endedAt: 2 };
+  await f.store.transaction(f.key, (state) => { state.receipts.push(receipt); state.items[0].receiptIds.push('receipt1');
+    state.items[0].status = 'verified'; state.checkpointPresent = false; });
+  const result = await checkpointStop(f, { version: 1, kind: 'update', items: [{ itemId: 'item1', status: 'cancelled', receiptIds: ['receipt1'] }] });
+  assert.equal(result.decision.reason, 'pending_work');
+  assert.deepEqual(result.state.receipts, [receipt]);
+  assert.equal(result.state.items[0].status, 'verified');
+  assert.deepEqual(result.state.items[0].receiptIds, ['receipt1']);
+  assert.deepEqual(result.state.items[0].proposal, { status: 'cancelled', receiptIds: ['receipt1'] });
+  assert.equal(result.state.checkpointPresent, true);
+});
 
 test('Stop atomically debits real store budget and emits at most three safe item IDs', async (t) => {
   const f = await fixture(t); const out = output();
@@ -238,7 +348,9 @@ test('first declare checkpoint creates only model proposals and reconciles at mo
 test('declare ordinal/category conflict rejects the whole transaction without budget debit', async (t) => {
   const f = await fixture(t); const file = path.join(f.root, 'conflicting-checkpoint');
   await f.store.transaction(f.key, (state) => { state.items.push({ itemId: 'proposal1', ordinal: 1,
-    category: 'implementation', source: 'model-proposed', status: 'pending', mustFinish: false, requiredTargetIds: [], receiptIds: [] }); });
+    category: 'implementation', source: 'model-proposed', status: 'pending', mustFinish: false, requiredTargetIds: [], receiptIds: [] });
+    state.checkpointPresent = false; });
+  const before = (await f.store.read(f.key)).state;
   const bytes = Buffer.from(JSON.stringify({ version: 1, kind: 'declare', items: [
     { ordinal: 2, category: 'verification' }, { ordinal: 1, category: 'report' },
   ] }));
@@ -249,21 +361,27 @@ test('declare ordinal/category conflict rejects the whole transaction without bu
   const state = (await f.store.read(f.key)).state;
   assert.equal(state.items.length, 5); assert.equal(state.items[4].category, 'implementation');
   assert.equal(state.budget.used, 0); assert.equal(out.text(), '');
+  assert.deepEqual(state, before);
 });
 
 test('declare cannot exceed the single ledger item capacity', async (t) => {
   const f = await fixture(t); const file = path.join(f.root, 'capacity-checkpoint');
-  await f.store.transaction(f.key, (state) => { state.items.push(...Array.from({ length: 60 }, (_, id) => ({
+  await f.store.transaction(f.key, (state) => { state.checkpointPresent = false;
+    state.items.push(...Array.from({ length: 59 }, (_, id) => ({
     itemId: `extra${id}`, contractId: `extra-contract${id}`, category: 'implementation', source: 'accepted-plan',
     status: 'pending', mustFinish: true, requiredTargetIds: [], receiptIds: [],
   }))); });
-  const bytes = Buffer.from(JSON.stringify({ version: 1, kind: 'declare', items: [{ ordinal: 1, category: 'verification' }] }));
+  const before = (await f.store.read(f.key)).state;
+  const bytes = Buffer.from(JSON.stringify({ version: 1, kind: 'declare', items: [
+    { ordinal: 1, category: 'verification' }, { ordinal: 2, category: 'report' },
+  ] }));
   await fs.writeFile(file, bytes, { mode: 0o600 });
   const event = { fixtureEvent: { kind: 'stop', key: f.key, checkpointTail: { path: file, offset: 0, length: bytes.length } } };
   const out = output();
   assert.equal((await runCompletionDispatch({ input: input(event), output: out.stream, controller: f.host, adapter: f.adapter })).action, 'degraded');
   const state = (await f.store.read(f.key)).state;
-  assert.equal(state.items.length, 64); assert.equal(state.budget.used, 0); assert.equal(out.text(), '');
+  assert.equal(state.items.length, 63); assert.equal(state.budget.used, 0); assert.equal(out.text(), '');
+  assert.deepEqual(state, before);
 });
 
 test('fresh Stop import and execution cannot load audit Keychain or spawn dependencies', async (t) => {

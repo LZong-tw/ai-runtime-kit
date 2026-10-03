@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createCompletionController } from '../src/completion/controller.mjs';
 import { evaluateCompletion } from '../src/completion/evaluator.mjs';
+import { parseCheckpoint } from '../src/completion/checkpoint.mjs';
+import { applyCheckpoint, progressDigest } from '../src/completion/state-operations.mjs';
 
 // A session-serialized, generation-checked store double. Native event and
 // verifier fixtures exercise private composition, not real host provenance.
@@ -55,6 +57,109 @@ function fixture(overrides = {}) {
 }
 
 const event = (nativeEventId = 'event1') => ({ kind: 'user', nativeEventId, sessionId: 's1', workspaceId: 'w1' });
+
+const storeOptions = () => ({ signal: new AbortController().signal, deadline: Date.now() + 1000 });
+const parsed = (checkpoint) => parseCheckpoint(Buffer.from(JSON.stringify(checkpoint)));
+
+test('shared checkpoint operation creates host IDs, replays identity and returns detached task projections', () => {
+  const state = { key: { sessionId: 's1', workspaceId: 'w1', requestId: 'r1', generation: 1 },
+    checkpointPresent: false, items: [], receipts: [] };
+  const checkpoint = parsed({ version: 1, kind: 'declare', items: [{ ordinal: 1, category: 'report' }] });
+  let issued = 0;
+  const options = { createItemId: () => `host${++issued}` };
+  const result = applyCheckpoint(state, checkpoint, options);
+  assert.deepEqual(state.items, [{ itemId: 'host1', ordinal: 1, category: 'report', source: 'model-proposed',
+    status: 'pending', mustFinish: false, requiredTargetIds: [], receiptIds: [] }]);
+  assert.deepEqual(result, { status: 'ok', items: [{ itemId: 'host1', category: 'report', requiredTargetIds: [], mustFinish: false }] });
+  assert.equal(state.checkpointPresent, true);
+  assert.deepEqual(applyCheckpoint(state, checkpoint, options), result);
+  assert.equal(issued, 1);
+  result.items[0].requiredTargetIds.push('untrusted-target');
+  assert.deepEqual(state.items[0].requiredTargetIds, []);
+  applyCheckpoint(state, parsed({ version: 1, kind: 'update', items: [{ itemId: 'host1', status: 'verified', receiptIds: [] }] }), options);
+  assert.deepEqual(state.items[0].proposal, { status: 'verified', receiptIds: [] });
+  assert.equal(state.items[0].status, 'pending');
+  assert.deepEqual(state.items[0].receiptIds, []);
+});
+
+test('shared digest preserves literal SHA256 projection bytes and undefined field omission', () => {
+  const state = { revision: 'rev1', items: [{ itemId: 'host1', status: 'pending', source: 'accepted-plan',
+    requiredTargetIds: ['target1'], receiptIds: [], category: 'implementation', mustFinish: true }], receipts: [] };
+  assert.equal(progressDigest(state), '596d631c512ade08d5fee959f0bb8dd750c0ecfce5311b6b211a2bd7a06b8790');
+  state.items[0].proposal = { status: 'verified', receiptIds: ['claimed'] };
+  state.items.push({ itemId: 'proposal1', source: 'model-proposed', status: 'verified' });
+  assert.equal(progressDigest(state), '596d631c512ade08d5fee959f0bb8dd750c0ecfce5311b6b211a2bd7a06b8790');
+  state.items[0].unresolvedTargetIds = [];
+  assert.equal(progressDigest(state), 'e69df10b77e9331d1972a9e605b47c0bde870e953eae49be048968a9ff077bbc');
+});
+
+test('controller declaration replay preserves identity and conflict rolls back earlier entries', async () => {
+  const { controller, store } = fixture();
+  const { requestId, key } = await controller.beginRequest(event());
+  const declaration = { version: 1, kind: 'declare', items: [{ ordinal: 1, category: 'report' }] };
+  const first = await controller.declareTask(requestId, declaration);
+  assert.deepEqual(await controller.declareTask(requestId, declaration), first);
+  await store.transaction(key, (state) => { state.checkpointPresent = false; }, storeOptions());
+  const before = (await store.read(key, storeOptions())).state;
+  await assert.rejects(controller.declareTask(requestId, { version: 1, kind: 'declare', items: [
+    { ordinal: 2, category: 'verification' }, { ordinal: 1, category: 'implementation' },
+  ] }), (error) => error.message === 'conflicting_declaration' && error.completionInput === true);
+  assert.deepEqual((await store.read(key, storeOptions())).state, before);
+});
+
+test('controller capacity failure rolls back partial declarations and retains dependency classification', async () => {
+  const { controller, store } = fixture();
+  const { requestId, key } = await controller.beginRequest(event());
+  await store.transaction(key, (state) => {
+    state.items = Array.from({ length: 63 }, (_, i) => ({ itemId: `accepted${i}`, contractId: `contract${i}`,
+      category: 'implementation', source: 'accepted-plan', status: 'pending', mustFinish: true, requiredTargetIds: [], receiptIds: [] }));
+  }, storeOptions());
+  const before = (await store.read(key, storeOptions())).state;
+  let ownedError;
+  const transaction = store.transaction;
+  store.transaction = (transactionKey, fn, options) => transaction(transactionKey, (state) => {
+    try { return fn(state); } catch (error) { ownedError = error; throw error; }
+  }, options);
+  assert.deepEqual(await controller.declareTask(requestId, { version: 1, kind: 'declare', items: [
+    { ordinal: 1, category: 'report' }, { ordinal: 2, category: 'verification' },
+  ] }), { status: 'unknown', reason: 'unknown' });
+  assert.equal(ownedError.completionReason, 'item_capacity');
+  assert.equal(ownedError.completionInput, undefined);
+  assert.deepEqual((await store.read(key, storeOptions())).state, before);
+});
+
+test('controller receipt updates require the same item and every RequestKey field without granting authority', async () => {
+  const { controller, store, acceptance } = fixture();
+  const { requestId, key } = await controller.beginRequest(event());
+  const task = await controller.registerTask(requestId, acceptance);
+  const declared = await controller.declareTask(requestId, { version: 1, kind: 'declare', items: [{ ordinal: 1, category: 'report' }] });
+  await controller.runVerification(requestId, task.itemId, 't1');
+  const verified = await controller.snapshot(requestId);
+  for (const status of ['verified', 'blocked', 'cancelled']) {
+    await controller.declareTask(requestId, { version: 1, kind: 'update', items: [{ itemId: task.itemId, status, receiptIds: ['receipt1'] }] });
+    const snapshot = await controller.snapshot(requestId);
+    assert.equal(snapshot.items[0].status, 'verified');
+    assert.deepEqual(snapshot.items[0].receiptIds, ['receipt1']);
+    assert.deepEqual(snapshot.receipts, verified.receipts);
+    assert.equal(snapshot.validity.progressDigest, verified.validity.progressDigest);
+  }
+  for (const foreign of [{ itemId: declared.items[0].itemId },
+    ...['sessionId', 'workspaceId', 'requestId', 'generation'].map((field) => ({ key: { ...key, [field]: field === 'generation' ? 2 : 'foreign' } }))]) {
+    await store.transaction(key, (state) => { Object.assign(state.receipts[0], foreign); state.checkpointPresent = false; }, storeOptions());
+    const before = (await store.read(key, storeOptions())).state;
+    await assert.rejects(controller.declareTask(requestId, { version: 1, kind: 'update', items: [
+      { itemId: declared.items[0].itemId, status: 'blocked', receiptIds: [] },
+      { itemId: task.itemId, status: 'verified', receiptIds: ['receipt1'] },
+    ] }), (error) => error.message === 'unknown_receipt' && error.completionInput === true);
+    assert.deepEqual((await store.read(key, storeOptions())).state, before);
+    await store.transaction(key, (state) => { state.receipts = structuredClone(verified.receipts); }, storeOptions());
+  }
+  const before = (await store.read(key, storeOptions())).state;
+  await assert.rejects(controller.declareTask(requestId, { version: 1, kind: 'update', items: [
+    { itemId: task.itemId, status: 'blocked', receiptIds: [] }, { itemId: 'unknown-item', status: 'reported', receiptIds: [] },
+  ] }), (error) => error.message === 'unknown_item' && error.completionInput === true);
+  assert.deepEqual((await store.read(key, storeOptions())).state, before);
+});
 
 test('controller factory requires trusted private dependencies', () => {
   assert.throws(() => createCompletionController({}), /dependencies/);

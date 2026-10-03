@@ -1,6 +1,7 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { categories, isBoundedId, parseCheckpoint } from './checkpoint.mjs';
 import { hasVerifiedTargets, isValidSnapshot } from './evaluator.mjs';
+import { applyCheckpoint, progressDigest } from './state-operations.mjs';
 
 const unknown = (reason = 'unknown') => ({ status: 'unknown', reason });
 const sameKey = (a, b) => a && b && ['sessionId', 'workspaceId', 'requestId', 'generation'].every((field) => a[field] === b[field]);
@@ -38,14 +39,6 @@ function unavailable(reason) {
 function projectTask(item) {
   return { itemId: item.itemId, category: item.category,
     requiredTargetIds: [...item.requiredTargetIds], mustFinish: item.mustFinish };
-}
-
-function progressDigest(state) {
-  const progress = { revision: state.revision, items: state.items.filter((item) => item.source !== 'model-proposed')
-    .map(({ itemId, status, requiredTargetIds, receiptIds, unresolvedTargetIds }) =>
-      ({ itemId, status, requiredTargetIds, receiptIds, unresolvedTargetIds })),
-    receipts: state.receipts };
-  return createHash('sha256').update(JSON.stringify(progress)).digest('hex');
 }
 
 function validReceipt(produced, targetId) {
@@ -197,30 +190,18 @@ export function createCompletionController({ store, acceptedContracts, verifier,
     catch { inputError('invalid_checkpoint'); }
     const parsed = parseCheckpoint(bytes);
     if (parsed.error) inputError('invalid_checkpoint');
-    const result = await transact(requestId, (state, key) => {
-      const proposed = [];
-      for (const entry of parsed.items) {
-        if (parsed.kind === 'declare') {
-          let item = state.items.find((candidate) => candidate.source === 'model-proposed' && candidate.ordinal === entry.ordinal);
-          if (item && item.category !== entry.category) inputError('conflicting_declaration');
-          if (!item) {
-            if (state.items.length >= 64) unavailable('item_capacity');
-            item = { itemId: randomUUID(), ordinal: entry.ordinal, category: entry.category,
-              source: 'model-proposed', status: 'pending', mustFinish: false, requiredTargetIds: [], receiptIds: [] };
-            state.items.push(item);
-          }
-          proposed.push(projectTask(item));
-        } else {
-          const item = state.items.find((candidate) => candidate.itemId === entry.itemId);
-          if (!item) inputError('unknown_item');
-          if (!entry.receiptIds.every((id) => state.receipts.some((receipt) => receipt.id === id
-            && receipt.itemId === item.itemId && sameKey(receipt.key, key)))) inputError('unknown_receipt');
-          item.proposal = { status: entry.status, receiptIds: [...entry.receiptIds] };
-          proposed.push(projectTask(item));
+    const result = await transact(requestId, (state) => {
+      try {
+        return applyCheckpoint(state, parsed, { createItemId: randomUUID });
+      } catch (error) {
+        switch (error.checkpointReason) {
+          case 'item_capacity': unavailable('item_capacity'); break;
+          case 'conflicting_declaration':
+          case 'unknown_item':
+          case 'unknown_receipt': inputError(error.checkpointReason); break;
+          default: throw error;
         }
       }
-      state.checkpointPresent = true;
-      return { status: 'ok', items: proposed };
     });
     return result.status === 'ok' ? result.result : result;
   }
