@@ -11,6 +11,12 @@ const MAX_FRAME_BYTES = 1_048_576;
 const DEFAULT_TIMEOUT_MS = 2_000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 30_000;
 const MAX_ADMITTED_SCANS = 4;
+const REQUEST_FAILURE = Symbol("privacy request failure");
+const ADAPTER_UNKNOWN_REASONS = new Set([
+  "invalid-prediction", "inconsistent-counts", "invalid-span", "unmapped-span", "cross-field-span",
+  "inconsistent-quoting", "unmapped-finding", "redaction-too-large", "value-survived",
+  "invalid-protocol-graph", "protocol-id-collision", "conflicting-protocol-context", "protocol-id-limit", "adapter-error",
+]);
 const KNOWN_LABELS = new Set([
   "address", "credit-card", "email", "ip-address", "person", "phone", "ssn", "token",
   "account_number", "private_address", "private_email", "private_person",
@@ -35,36 +41,36 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
   let active = null;
   const queue = [];
   let closed = false;
-  const failScans = () => {
-    active?.settle(unavailable());
+  const failScans = (reason = "worker_unavailable") => {
+    active?.settle(unavailable(reason));
     active = null;
-    for (const entry of queue.splice(0)) entry.settle(unavailable());
+    for (const entry of queue.splice(0)) entry.settle(unavailable(reason === "scan_timeout" ? "worker_unavailable" : reason));
   };
-  const stopWorker = (session) => {
+  const stopWorker = (session, reason = "worker_unavailable") => {
     if (!session || session.stopped) return;
     session.stopped = true;
     if (current === session) {
       current = null;
-      failScans();
+      failScans(reason);
     }
-    failPending(session.pending);
+    failPending(session.pending, reason);
     try { session.worker.kill?.(); } catch {}
   };
-  const close = () => {
+  const close = (reason = "worker_closed") => {
     closed = true;
-    stopWorker(current);
-    failScans();
+    stopWorker(current, reason);
+    failScans(reason);
   };
   const request = async (session, message, deadlineMs) => {
-    if (closed || !session || session.stopped || current !== session) return null;
+    if (closed || !session || session.stopped || current !== session) return requestFailure("worker_unavailable");
     const id = randomUUID();
     const payload = JSON.stringify({ ...message, id, protocol: PROTOCOL });
-    if (Buffer.byteLength(payload) > MAX_FRAME_BYTES) return null;
+    if (Buffer.byteLength(payload) > MAX_FRAME_BYTES) return requestFailure("frame_limit");
     return await new Promise((resolve) => {
       const timer = setTimeout(() => {
         session.pending.delete(id);
-        resolve(null);
-        if (message.type === "scan") stopWorker(session);
+        resolve(requestFailure(message.type === "scan" ? "scan_timeout" : "worker_unavailable"));
+        if (message.type === "scan") stopWorker(session, "scan_timeout");
       }, deadlineMs);
       session.pending.set(id, { expectedType: message.type, resolve: (reply) => { clearTimeout(timer); resolve(reply); } });
       try { session.worker.stdin.write(`${payload}\n`); } catch { stopWorker(session); }
@@ -83,7 +89,7 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
           await validateFile(privacy.tokenizer, { label: "tokenizer" });
         } catch { throw new Error("shield privacy pinned file unavailable"); }
       }
-    } catch (error) { close(); throw error; }
+    } catch (error) { close("assets_invalid"); throw error; }
     if (closed) return false;
     let worker;
     try {
@@ -109,18 +115,18 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
     worker.stdout.on("data", (chunk) => {
       if (closed || session.stopped || current !== session) return;
       const incomingBytes = Buffer.isBuffer(chunk) || chunk instanceof Uint8Array ? chunk.byteLength : Buffer.byteLength(chunk);
-      if (incomingBytes > MAX_FRAME_BYTES || remainder.byteLength > MAX_FRAME_BYTES - incomingBytes) { failWorker(); return; }
+      if (incomingBytes > MAX_FRAME_BYTES || remainder.byteLength > MAX_FRAME_BYTES - incomingBytes) { stopWorker(session, "frame_limit"); return; }
       const next = Buffer.concat([remainder, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
       const lines = next.toString("utf8").split("\n");
       remainder = Buffer.from(lines.pop() ?? "");
       for (const line of lines) {
-        if (!consumeReply(line, session.pending)) { failWorker(); return; }
+        if (!consumeReply(line, session.pending)) { stopWorker(session, "protocol_invalid"); return; }
       }
     });
     worker.stderr?.on?.("data", (chunk) => {
       if (session.stopped) return;
       stderrBytes += Buffer.byteLength(chunk);
-      if (stderrBytes > MAX_FRAME_BYTES) failWorker();
+      if (stderrBytes > MAX_FRAME_BYTES) stopWorker(session, "frame_limit");
     });
     const health = await request(session, { type: "health" }, startupTimeoutMs);
     session.ready = !closed && !session.stopped && current === session && validHealth(health, privacy.version);
@@ -139,7 +145,7 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
     const entry = queue.shift();
     active = entry;
     clearTimeout(entry.timer);
-    let result = unavailable();
+    let result = unavailable("worker_unavailable");
     try {
       if (!await ensureWorker() || entry.settled) return;
       const session = current;
@@ -149,7 +155,7 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
           await assertSourceUnchanged();
           await validateFile(privacy.adapter, { label: "adapter" });
           await validateFile(privacy.tokenizer, { label: "tokenizer" });
-        } catch { close(); return; }
+        } catch { close("assets_invalid"); return; }
       }
       if (entry.settled || closed || current !== session) return;
       result = normalizeScanReply(await request(session, { type: "scan", body: entry.body.toString("base64") }, scanTimeoutMs));
@@ -181,7 +187,9 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
       return await readiness;
     },
     async scan(body) {
-      if (closed || !validBody(body) || queue.length + Number(active !== null) >= MAX_ADMITTED_SCANS) return unavailable();
+      if (closed) return unavailable("worker_closed");
+      if (!validBody(body)) return unavailable("body_invalid");
+      if (queue.length + Number(active !== null) >= MAX_ADMITTED_SCANS) return unavailable("admission_limit");
       return await new Promise((resolve) => {
         const entry = {
           body: Buffer.from(body), settled: false,
@@ -197,13 +205,13 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
         entry.timer = setTimeout(() => {
           const index = queue.indexOf(entry);
           if (index !== -1) queue.splice(index, 1);
-          entry.settle(unavailable());
+          entry.settle(unavailable("queue_timeout"));
         }, scanTimeoutMs);
         queue.push(entry);
         void drain();
       });
     },
-    close,
+    close: () => close(),
   });
 }
 
@@ -237,8 +245,8 @@ function consumeReply(line, pending) {
   return true;
 }
 
-function failPending(pending) {
-  for (const entry of pending.values()) entry.resolve(null);
+function failPending(pending, reason) {
+  for (const entry of pending.values()) entry.resolve(requestFailure(reason));
   pending.clear();
 }
 
@@ -247,25 +255,26 @@ function validHealth(reply, version) {
 }
 
 function normalizeScanReply(reply) {
-  if (!isPlainObject(reply) || reply.type !== "scan" || typeof reply.status !== "string") return unavailable();
-  if (reply.status === "unknown") return Object.freeze({ status: "unknown", findings: Object.freeze([]) });
-  if (reply.status !== "ok" || !Array.isArray(reply.findings) || reply.findings.length > 128) return unavailable();
+  if (reply?.[REQUEST_FAILURE] === true) return unavailable(reply.reason);
+  if (!isPlainObject(reply) || reply.type !== "scan" || typeof reply.status !== "string") return unavailable("reply_invalid");
+  if (reply.status === "unknown") return Object.freeze({ status: "unknown", findings: Object.freeze([]), reason: ADAPTER_UNKNOWN_REASONS.has(reply.reason) ? reply.reason : "privacy_unavailable" });
+  if (reply.status !== "ok" || !Array.isArray(reply.findings) || reply.findings.length > 128) return unavailable("reply_invalid");
   const findings = [];
   for (const finding of reply.findings) {
     if (!isPlainObject(finding) || !KNOWN_LABELS.has(finding.label) || !Number.isInteger(finding.count) || finding.count < 1 || finding.count > 1024) {
-      return Object.freeze({ status: "unknown", findings: Object.freeze([]) });
+      return Object.freeze({ status: "unknown", findings: Object.freeze([]), reason: "findings_invalid" });
     }
     findings.push(Object.freeze({ label: finding.label, count: finding.count }));
   }
   const result = { status: "ok", findings: Object.freeze(findings) };
   if (reply.redactions !== undefined) {
     const redactions = normalizeRedactions(reply.redactions);
-    if (redactions === null) return unavailable();
+    if (redactions === null) return unavailable("redaction_invalid");
     result.redactions = redactions;
   }
   if (reply.redactedBody !== undefined) {
     const redactedBody = decodeRedactedBody(reply.redactedBody);
-    if (redactedBody === null) return unavailable();
+    if (redactedBody === null) return unavailable("redaction_invalid");
     result.redactedBody = redactedBody;
   }
   return Object.freeze(result);
@@ -397,7 +406,8 @@ export async function validatePrivacyWorkerAsset(worker, { io = { lstat, readFil
 }
 
 function validBody(body) { return (Buffer.isBuffer(body) || body instanceof Uint8Array) && body.byteLength <= MAX_BODY_BYTES; }
-function unavailable() { return Object.freeze({ status: "unavailable", findings: Object.freeze([]) }); }
+function unavailable(reason = "privacy_unavailable") { return Object.freeze({ status: "unavailable", findings: Object.freeze([]), reason }); }
+function requestFailure(reason) { return { [REQUEST_FAILURE]: true, reason }; }
 function safeIdentifier(value) { return typeof value === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(value); }
 function isAbsoluteCanonical(value) { return typeof value === "string" && value.startsWith("/") && !value.includes("//") && !value.includes("/../") && !value.endsWith("/.."); }
 function isPlainObject(value) { return value !== null && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype; }

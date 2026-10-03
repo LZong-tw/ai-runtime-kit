@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { once } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer, request as httpRequest } from "node:http";
 import { createServer as createNetServer } from "node:net";
@@ -12,9 +12,169 @@ import { startShieldProxy } from "../src/shield/proxy.mjs";
 import { createApprovalBroker } from "../src/shield/approval.mjs";
 import { approvalChannelRegistration, createApprovalChannel } from "../src/shield/approval-channel.mjs";
 import { createDecisionCache } from "../src/shield/decision-cache.mjs";
+import { createPrivacyFilter } from "../src/shield/privacy.mjs";
+import { startShieldDaemon } from "../src/shieldd.mjs";
 
 const CAPABILITY = "c".repeat(32);
 const CONTROL_CAPABILITY = "d".repeat(32);
+
+test("diagnostics are control-only, nondestructive and never forward endpoint variants", async (t) => {
+  let upstreamCalls = 0;
+  const upstream = await startFixture(t, async (_request, response) => { upstreamCalls += 1; response.end('{}'); });
+  const shield = await startShield(t, { targetOrigin: upstream.origin, allowDestinationLeases: true, decide: async () => { throw new Error("private-body credential-secret"); } });
+  const lease = "l".repeat(32);
+  assert.equal((await fetch(`${shield.origin}/_airkit/shield/destination-lease`, {
+    method: "POST", headers: { "x-airkit-shield-control": CONTROL_CAPABILITY },
+    body: JSON.stringify({ capability: lease, targetOrigin: upstream.origin, expiresAt: Date.now() + 30_000 }),
+  })).status, 204);
+  for (const headers of [{}, { "x-airkit-shield": CAPABILITY }, { "x-airkit-shield": lease }, { "x-airkit-shield-control": CAPABILITY }, { "x-airkit-shield-control": "wrong" }]) {
+    const response = await fetch(`${shield.origin}/_airkit/shield/diagnostics`, { headers });
+    assert.equal(response.status, 401);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+  }
+  assert.deepEqual(await readDiagnostics(shield), { failures: [] });
+  for (const method of ["POST", "PUT", "DELETE", "HEAD", "OPTIONS"]) {
+    assert.equal((await fetch(`${shield.origin}/_airkit/shield/diagnostics`, { method, headers: { "x-airkit-shield-control": CONTROL_CAPABILITY } })).status, 403);
+  }
+  for (const path of ["/_airkit/shield/diagnostics?reset=true", "/_airkit/shield/diagnostics/", "/_airkit/shield/diagnostics-extra", "/_airkit/shield/diagnostics/%2e%2e/diagnostics", "/_airkit/shield/diagnostics/../other", "/_airkit/shield/%64iagnostics", "/_airkit/shield/diagnostics%ZZ"]) {
+    const reply = await rawRequest(shield.origin, path, { "x-airkit-shield-control": CONTROL_CAPABILITY, "x-airkit-shield": CAPABILITY }, "", "GET");
+    assert.equal(reply.status, 403, path);
+  }
+  for (let bytes = 1; bytes <= 20; bytes += 1) {
+    const response = await fetch(`${shield.origin}/v1/messages?private=query-secret`, {
+      method: "POST", headers: { "x-airkit-shield": CAPABILITY, authorization: "Bearer credential-secret" }, body: "x".repeat(bytes),
+    });
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { error: { code: "shield_unavailable" } });
+  }
+  const diagnostics = await readDiagnostics(shield);
+  assert.equal(diagnostics.failures.length, 16);
+  assert.deepEqual(diagnostics.failures.map((failure) => failure.bytes), Array.from({ length: 16 }, (_, index) => index + 5));
+  for (const failure of diagnostics.failures) {
+    assert.deepEqual(Object.keys(failure).sort(), ["bytes", "elapsedMs", "reason", "stage"]);
+    assert.equal(failure.stage, "evaluation");
+    assert.equal(failure.reason, "evaluation_unavailable");
+    assert.equal(Number.isInteger(failure.elapsedMs) && failure.elapsedMs >= 0 && failure.elapsedMs <= 3_600_000, true);
+  }
+  assert.deepEqual(await readDiagnostics(shield), diagnostics);
+  assert.doesNotMatch(JSON.stringify(diagnostics), /private|credential|query-secret|authorization|requestId|timestamp|digest/);
+  assert.equal(upstreamCalls, 0);
+  const fresh = await startShield(t, { targetOrigin: upstream.origin, decide: async () => ({ action: "allow" }) });
+  assert.deepEqual(await readDiagnostics(fresh), { failures: [] });
+});
+
+test("diagnostics separate real daemon scan, policy and redaction failures while readiness remains healthy", async (t) => {
+  let upstreamCalls = 0;
+  const upstream = await startFixture(t, async (_request, response) => { upstreamCalls += 1; response.end('{}'); });
+  let mode = "prediction";
+  const worker = new EventEmitter();
+  worker.stdout = new EventEmitter(); worker.stderr = new EventEmitter();
+  worker.kill = () => {};
+  worker.stdin = Object.assign(new EventEmitter(), { write(chunk) {
+    const request = JSON.parse(String(chunk).trim());
+    const reply = request.type === "health"
+      ? { type: "health", id: request.id, protocol: request.protocol, version: "privacy-1" }
+      : mode === "prediction" ? { type: "scan", id: request.id, status: "unknown", reason: "invalid-prediction", private: "prediction-secret" }
+        : mode === "unknown" ? { type: "scan", id: request.id, status: "unknown", reason: "credential-secret" }
+          : { type: "scan", id: request.id, status: "ok", findings: [] };
+    worker.stdout.emit("data", `${JSON.stringify(reply)}\n`);
+  } });
+  const gitleaks = { executable: "/private/fixture/gitleaks", sha256: "a".repeat(64), ruleBundle: { path: "/private/fixture/rules", sha256: "b".repeat(64), version: "rules-1" } };
+  const daemon = await startShieldDaemon({
+    config: { capability: CAPABILITY, controlCapability: CONTROL_CAPABILITY, lane: "subscription", targetOrigin: upstream.origin, gitleaks },
+    paths: { configPath: "/private/fixture/config" },
+    readPolicyBundle: async () => ({ bundle: {}, publicKey: "fixture" }),
+    loadPolicy: async () => ({ version: "policy-1", detectorVersions: { gitleaks: "8", privacy: "privacy-1" }, async evaluate() {
+      if (mode === "policy") throw new Error("policy-secret");
+      return { action: mode === "redaction" ? "redact" : "allow" };
+    } }),
+    readAssetsProvision: async () => ({ gitleaks: { path: gitleaks.executable, sha256: gitleaks.sha256, rules: gitleaks.ruleBundle }, privacy: { version: "privacy-1", worker: { command: "/private/fixture/worker", args: [], sha256: "c".repeat(64) } } }),
+    createScanner: async () => ({ version: "8", async scan() { if (mode === "secret") throw new Error("scanner-secret"); return { findings: [] }; } }),
+    createPrivacy: async (options) => {
+      const privacy = await createPrivacyFilter({ ...options, spawnWorker: () => worker, validateWorker: async () => {} });
+      return { ...privacy, async scan(body) {
+        if (mode === "privacy_throw") throw Object.assign(new Error("worker-private-secret"), { shieldFailure: { stage: "privacy_scan", reason: "credential-secret" } });
+        return privacy.scan(body);
+      } };
+    },
+    createDecisionRecorder: async () => ({ isReady: async () => true, async recordShieldDecision() { if (mode === "audit") throw new Error("audit-secret"); } }),
+    writePolicyState: async () => {}, writeIdentity: async () => {},
+  });
+  t.after(() => daemon.shield.close());
+  for (const [nextMode, stage, reason] of [
+    ["prediction", "privacy_scan", "invalid-prediction"], ["unknown", "privacy_scan", "privacy_unavailable"],
+    ["privacy_throw", "privacy_scan", "privacy_unavailable"],
+    ["secret", "secret_scan", "scanner_unavailable"], ["policy", "policy", "policy_unavailable"],
+    ["redaction", "redaction", "redaction_invalid"], ["audit", "audit", "audit_unavailable"],
+  ]) {
+    mode = nextMode;
+    const response = await fetch(`${daemon.shield.origin}/v1/messages`, { method: "POST", headers: { "x-airkit-shield": CAPABILITY }, body: '{"private":"body-secret"}' });
+    assert.equal(response.status, 503, mode);
+    assert.deepEqual(await response.json(), { error: { code: "shield_unavailable" } });
+    const latest = (await readDiagnostics(daemon.shield)).failures.at(-1);
+    assert.equal(latest.stage, stage, mode); assert.equal(latest.reason, reason, mode);
+    assert.equal(latest.bytes, 25);
+    assert.equal((await fetch(`${daemon.shield.origin}/_airkit/shield/ready`, { headers: { "x-airkit-shield": CAPABILITY } })).status, 204);
+  }
+  assert.equal(upstreamCalls, 0);
+  assert.doesNotMatch(JSON.stringify(await readDiagnostics(daemon.shield)), /body-secret|prediction-secret|credential-secret|scanner-secret|policy-secret|audit-secret|worker-private-secret|fixture|requestId/);
+});
+
+test("diagnostics sanitize arbitrary metadata and separate redaction, audit and upstream failures", async (t) => {
+  const redirect = await startFixture(t, async (_request, response) => { response.writeHead(302, { location: "http://127.0.0.1:1/private-secret" }); response.end(); });
+  for (const [options, stage, reason] of [
+    [{ decide: async () => { throw Object.assign(new Error("credential-secret"), { shieldFailure: { stage: "private-secret", reason: "credential-secret", bytes: Infinity } }); } }, "evaluation", "evaluation_unavailable"],
+    [{ decide: async () => { throw Object.assign(new Error("credential-secret"), { shieldFailure: { stage: "privacy_scan", reason: "transport_unavailable" } }); } }, "evaluation", "evaluation_unavailable"],
+    [{ decide: async () => ({ action: "redact", redactedBody: Buffer.from("private-secret") }) }, "redaction", "redaction_invalid"],
+    [{ decide: async () => ({ action: "allow" }), recordShieldDecision: async () => { throw new Error("credential-secret"); } }, "audit", "audit_unavailable"],
+    [{ decide: async () => ({ action: "allow" }), targetOrigin: "http://127.0.0.1:1" }, "upstream", "transport_unavailable"],
+    [{ decide: async () => ({ action: "allow" }), targetOrigin: redirect.origin }, "upstream", "redirect_blocked"],
+    [{ decide: async () => ({ action: "allow" }), targetOrigin: undefined, allowDestinationLeases: true }, "upstream", "target_unavailable"],
+  ]) {
+    const shield = await startShield(t, { targetOrigin: redirect.origin, ...options });
+    const response = await fetch(`${shield.origin}/v1/messages`, { method: "POST", headers: { "x-airkit-shield": CAPABILITY }, body: "{}" });
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { error: { code: "shield_unavailable" } });
+    const diagnostics = await readDiagnostics(shield);
+    assert.equal(diagnostics.failures.length, 1);
+    assert.equal(diagnostics.failures[0].stage, stage); assert.equal(diagnostics.failures[0].reason, reason);
+    assert.doesNotMatch(JSON.stringify(diagnostics), /private-secret|credential-secret|Infinity/);
+  }
+});
+
+test("diagnostics record incomplete body reads without retaining partially received content", async (t) => {
+  const upstream = await startFixture(t, async (_request, response) => { assert.fail("an incomplete body must never forward"); response.end(); });
+  const shield = await startShield(t, { targetOrigin: upstream.origin, decide: async () => assert.fail("an incomplete body must never be evaluated") });
+  const url = new URL(shield.origin);
+  const client = httpRequest({ host: url.hostname, port: url.port, method: "POST", path: "/v1/messages", headers: { "x-airkit-shield": CAPABILITY, expect: "100-continue", "content-length": "100" } });
+  client.on("error", () => {});
+  client.flushHeaders();
+  await once(client, "continue");
+  client.write("private-partial-secret");
+  const closed = new Promise((resolve) => client.once("close", resolve));
+  client.destroy();
+  await closed;
+  let diagnostics;
+  for (let attempts = 0; attempts < 10; attempts += 1) {
+    diagnostics = await readDiagnostics(shield);
+    if (diagnostics.failures.length > 0) break;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(diagnostics.failures.length, 1);
+  assert.equal(diagnostics.failures[0].stage, "body_read");
+  assert.equal(diagnostics.failures[0].reason, "body_read_failed");
+  assert.doesNotMatch(JSON.stringify(diagnostics), /private-partial-secret/);
+});
+
+async function readDiagnostics(shield) {
+  const response = await fetch(`${shield.origin}/_airkit/shield/diagnostics`, { headers: { "x-airkit-shield-control": CONTROL_CAPABILITY } });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(response.headers.get("content-type"), "application/json");
+  const text = await response.text();
+  assert.equal(Buffer.byteLength(text) < 4096, true);
+  return JSON.parse(text);
+}
 
 test("proxy forwards only after allow and never emits OAuth", async (t) => {
   const events = [];
@@ -222,6 +382,10 @@ test("oversized inspection is blocked before contacting upstream", async (t) => 
   assert.equal(result.status, 403);
   assert.deepEqual(await result.json(), { error: { code: "shield_blocked" } });
   assert.equal(upstreamCalls, 0);
+  const diagnostic = (await readDiagnostics(shield)).failures.at(-1);
+  assert.equal(diagnostic.stage, "body_read");
+  assert.equal(diagnostic.reason, "body_too_large");
+  assert.equal(diagnostic.bytes, 1_048_576);
 });
 
 test("zero-body liveness probes forward to upstream without a policy decision", async (t) => {
@@ -888,13 +1052,13 @@ async function startFixture(t, handler) {
   return { origin: `http://127.0.0.1:${address.port}` };
 }
 
-function rawRequest(origin, path, headers, body) {
+function rawRequest(origin, path, headers, body, method = "POST") {
   const target = new URL(origin);
   return new Promise((resolve, reject) => {
     const client = httpRequest({
       host: target.hostname,
       port: target.port,
-      method: "POST",
+      method,
       path,
       headers: { ...headers, "content-length": String(Buffer.byteLength(body)) },
     }, async (response) => {

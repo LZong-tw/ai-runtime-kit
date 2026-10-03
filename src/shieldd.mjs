@@ -12,7 +12,7 @@ import { createGitleaksScanner } from "./shield/gitleaks.mjs";
 import { readShieldPolicyProvision } from "./shield/policy-bundle.mjs";
 import { loadShieldPolicy } from "./shield/policy.mjs";
 import { createPrivacyFilter, isVerifiedRedaction } from "./shield/privacy.mjs";
-import { startShieldProxy } from "./shield/proxy.mjs";
+import { createShieldFailure as shieldFailure, startShieldProxy } from "./shield/proxy.mjs";
 import { createDecisionCache } from "./shield/decision-cache.mjs";
 import { defaultShieldLauncherContext, readShieldConfig } from "./shield/service.mjs";
 import { createShieldDecisionRecorder } from "./shield/audit.mjs";
@@ -79,22 +79,35 @@ export async function startShieldDaemon({
       destinationClass,
     };
     const facts = classifyShieldRequest({ body, launcherContext });
-    const secretScan = await scanner.scan(body);
-    const confirmedSecret = secretScan.findings.length > 0;
-    const privacyScan = confirmedSecret ? { status: "ok", findings: [] } : await privacy.scan(body);
-    if (privacyScan.status !== "ok") throw new Error("shield privacy worker unavailable");
-    const decision = await policy.evaluate({
-      lane: config.lane,
-      destinationClass,
-      interactive: facts.interactive,
-      repositoryClass: facts.repositoryClass,
-      pathClasses: facts.pathClasses,
-      secretFindings: secretScan.findings,
-      piiFindings: canonicalPrivacyFindings(privacyScan.findings),
-    });
-    if (confirmedSecret && decision.action !== "block") throw new Error("shield confirmed secret must be blocked");
+    let secretScan;
+    let confirmedSecret;
+    try {
+      secretScan = await scanner.scan(body);
+      confirmedSecret = secretScan.findings.length > 0;
+    } catch { throw shieldFailure("secret_scan", "scanner_unavailable", "shield secret scanner unavailable"); }
+    let privacyScan;
+    try {
+      privacyScan = confirmedSecret ? { status: "ok", findings: [] } : await privacy.scan(body);
+    } catch { throw shieldFailure("privacy_scan", "privacy_unavailable", "shield privacy worker unavailable"); }
+    if (privacyScan?.status !== "ok") throw shieldFailure("privacy_scan", privacyScan?.reason, "shield privacy worker unavailable");
+    let piiFindings;
+    try { piiFindings = canonicalPrivacyFindings(privacyScan.findings); }
+    catch { throw shieldFailure("privacy_scan", "findings_invalid", "shield privacy findings are invalid"); }
+    let decision;
+    try {
+      decision = await policy.evaluate({
+        lane: config.lane,
+        destinationClass,
+        interactive: facts.interactive,
+        repositoryClass: facts.repositoryClass,
+        pathClasses: facts.pathClasses,
+        secretFindings: secretScan.findings,
+        piiFindings,
+      });
+    } catch { throw shieldFailure("policy", "policy_unavailable", "shield policy unavailable"); }
+    if (confirmedSecret && decision.action !== "block") throw shieldFailure("policy", "secret_block_invalid", "shield confirmed secret must be blocked");
     if (decision.action === "redact" && !isVerifiedRedaction({ original: body, result: privacyScan })) {
-      throw new Error("shield privacy redaction is invalid");
+      throw shieldFailure("redaction", "redaction_invalid", "shield privacy redaction is invalid");
     }
     return {
       ...decision,
