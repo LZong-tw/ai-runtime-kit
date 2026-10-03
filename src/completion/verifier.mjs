@@ -2,12 +2,14 @@ import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { isBoundedId } from './checkpoint.mjs';
 
 const unknown = () => ({ status: 'unknown' });
 const text = (value) => typeof value === 'string' && value.length > 0 && !value.includes('\0');
 const identity = (a, b) => a.dev === b.dev && a.ino === b.ino;
 const unchanged = (a, b) => identity(a, b) && a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
+const observerEntry = fileURLToPath(import.meta.url);
 
 function acceptedTarget(target) {
   if (!isBoundedId(target?.id) || !text(target.executable) || !text(target.cwd) || !path.isAbsolute(target.cwd)
@@ -24,7 +26,7 @@ function check(signal, deadline) {
   if (signal?.aborted || Date.now() >= deadline) throw new Error('observation_unavailable');
 }
 
-async function revision(target, signal, deadline = Date.now() + target.timeoutMs) {
+async function readRevision(target, signal, deadline) {
   check(signal, deadline);
   const root = await fs.promises.realpath(target.cwd);
   const rootInfo = await fs.promises.lstat(root);
@@ -75,6 +77,64 @@ async function revision(target, signal, deadline = Date.now() + target.timeoutMs
     hash.update(JSON.stringify([token, missing ? 'missing' : 'file', digest]));
   }
   return hash.digest('hex');
+}
+
+async function revision(target, signal, deadline = Date.now() + target.timeoutMs) {
+  check(signal, deadline);
+  const observation = { cwd: target.cwd, files: target.files, deadline };
+  if (Buffer.byteLength(JSON.stringify(observation)) > 65536) throw new Error('observation_unavailable');
+  const env = { ...process.env };
+  delete env.NODE_OPTIONS;
+  delete env.NODE_PATH;
+  delete env.NODE_V8_COVERAGE;
+  const child = spawn(process.execPath, [observerEntry, '--completion-observer'],
+    { shell: false, stdio: ['ignore', 'ignore', 'ignore', 'ipc'], env });
+  let timer;
+  let stopped = false;
+  let failed = false;
+  let observed;
+  const stop = () => { stopped = true; child.kill('SIGKILL'); };
+  try {
+    const terminal = await new Promise((resolve) => {
+      child.once('error', () => { failed = true; stop(); });
+      child.once('close', (code, childSignal) => resolve({ code, childSignal }));
+      child.once('disconnect', () => { if (!observed) stop(); });
+      child.on('message', (message) => {
+        if (observed || signal?.aborted || Date.now() >= deadline
+          || message?.status !== 'ok' || Object.keys(message).length !== 2
+          || typeof message.revision !== 'string' || !/^[a-f0-9]{64}$/.test(message.revision)) { stop(); return; }
+        observed = message.revision;
+      });
+      signal?.addEventListener('abort', stop, { once: true });
+      timer = setTimeout(stop, Math.max(0, deadline - Date.now()));
+      if (signal?.aborted) stop();
+      else child.send(observation, (error) => { if (error) { failed = true; stop(); } });
+    });
+    if (stopped || failed || terminal.code !== 0 || terminal.childSignal || !observed) throw new Error('observation_unavailable');
+    check(signal, deadline);
+    return observed;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', stop);
+  }
+}
+
+// Only an explicitly launched IPC child enters observer mode; ordinary imports
+// never install a message handler or read files.
+if (process.argv[1] === observerEntry && process.argv[2] === '--completion-observer' && typeof process.send === 'function') {
+  process.once('disconnect', () => process.exit(0));
+  process.once('message', async (message) => {
+    let result = unknown();
+    try {
+      if (!message || Object.keys(message).length !== 3 || Buffer.byteLength(JSON.stringify(message)) > 65536
+        || !Number.isFinite(message.deadline) || message.deadline > Date.now() + 2147483647) throw new Error('observation_unavailable');
+      const target = acceptedTarget({ id: 'observer', executable: process.execPath, argv: [], cwd: message.cwd,
+        files: message.files, timeoutMs: 1, sideEffectFree: true });
+      if (!target) throw new Error('observation_unavailable');
+      result = { status: 'ok', revision: await readRevision(target, undefined, message.deadline) };
+    } catch { /* The IPC response contains no source, path or raw error. */ }
+    if (process.connected) process.send(result, () => { if (process.connected) process.disconnect(); });
+  });
 }
 
 async function authorized(authorize, key, target, signal, deadline) {
