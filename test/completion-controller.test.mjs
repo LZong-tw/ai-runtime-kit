@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createCompletionController } from '../src/completion/controller.mjs';
+import { evaluateCompletion } from '../src/completion/evaluator.mjs';
 
 // A session-serialized, generation-checked store double. Native event and
 // verifier fixtures exercise private composition, not real host provenance.
@@ -63,7 +64,8 @@ test('native event is idempotent across controller restart, feedback cannot rese
   const { controller, dependencies, store } = fixture();
   const first = await controller.beginRequest(event());
   assert.equal(first.status, 'ok');
-  await store.transaction(first.key, (state) => { state.budget.used = 1; state.budget.remaining = 1; },
+  await store.transaction(first.key, (state) => { state.budget.used = 1; state.budget.remaining = 1;
+    state.budget.firstInterventionAt = Date.now(); state.budget.lastProgressDigest = 'baseline'; },
     { signal: new AbortController().signal, deadline: Date.now() + 1000 });
   const restarted = createCompletionController(dependencies);
   assert.equal((await restarted.snapshot(first.requestId)).validity.status, 'unknown_identity');
@@ -80,7 +82,8 @@ test('new genuine user generation preserves pending work and resets only new bud
   const { controller, acceptance, store } = fixture();
   const first = await controller.beginRequest(event());
   const task = await controller.registerTask(first.requestId, acceptance);
-  await store.transaction(first.key, (state) => { state.budget.used = 2; state.budget.remaining = 0; },
+  await store.transaction(first.key, (state) => { state.budget.used = 2; state.budget.remaining = 0;
+    state.budget.firstInterventionAt = Date.now(); state.budget.lastProgressDigest = 'baseline'; },
     { signal: new AbortController().signal, deadline: Date.now() + 1000 });
   const next = await controller.beginRequest(event('event2'));
   assert.equal(next.key.generation, 2);
@@ -182,7 +185,8 @@ test('model switches preserve request budget and model proposals do not count as
   const before = await controller.snapshot(key.requestId);
   await controller.declareTask(key.requestId, { version: 1, kind: 'declare', items: [{ ordinal: 1, category: 'report' }] });
   assert.equal((await controller.snapshot(key.requestId)).validity.progressDigest, before.validity.progressDigest);
-  await store.transaction(key, (state) => { state.budget.used = 1; state.budget.remaining = 1; },
+  await store.transaction(key, (state) => { state.budget.used = 1; state.budget.remaining = 1;
+    state.budget.firstInterventionAt = Date.now(); state.budget.lastProgressDigest = 'baseline'; },
     { signal: new AbortController().signal, deadline: Date.now() + 1000 });
   dependencies.routeJoin.resolve = async (observation, joinedKey) => ({ status: 'ok', key: joinedKey,
     providerId: 'fixture-provider', modelId: 'claude-opus', modelFamily: 'claude' });
@@ -202,7 +206,8 @@ test('older duplicate after a new request cannot create a generation or refresh 
   const { controller, dependencies, store } = fixture();
   await controller.beginRequest(event());
   const next = await controller.beginRequest(event('event2'));
-  await store.transaction(next.key, (state) => { state.budget.used = 2; state.budget.remaining = 0; },
+  await store.transaction(next.key, (state) => { state.budget.used = 2; state.budget.remaining = 0;
+    state.budget.firstInterventionAt = Date.now(); state.budget.lastProgressDigest = 'baseline'; },
     { signal: new AbortController().signal, deadline: Date.now() + 1000 });
   const restarted = createCompletionController(dependencies);
   assert.equal((await restarted.beginRequest(event())).reason, 'stale_event');
@@ -216,6 +221,7 @@ test('native event capacity rejects new generation and retains prior budget', as
   await store.transaction(current.key, (state) => {
     state.seenNativeEventIds = Array.from({ length: 128 }, (_, i) => `event${i + 1}`);
     state.budget.used = 2; state.budget.remaining = 0;
+    state.budget.firstInterventionAt = Date.now(); state.budget.lastProgressDigest = 'baseline';
   }, { signal: new AbortController().signal, deadline: Date.now() + 1000 });
   assert.equal((await controller.beginRequest(event('event129'))).reason, 'capacity');
   assert.equal((await controller.snapshot(current.requestId)).budget.used, 2);
@@ -319,4 +325,44 @@ test('malformed stored state yields bounded unknown snapshot and cannot reset ge
   assert.deepEqual(snapshot.items, []);
   assert.equal(snapshot.budget.remaining, 0);
   assert.equal((await controller.beginRequest(event('event2'))).status, 'unknown');
+});
+
+test('unknown target remains unresolved after another target succeeds and only its new proof restores completion', async () => {
+  const { dependencies, acceptance, store } = fixture();
+  const contract = { ...acceptance, requiredTargetIds: ['t1', 't2'],
+    targets: [acceptance.targets[0], { ...acceptance.targets[0], id: 't2' }] };
+  let execution = 0;
+  let unknownT1 = false;
+  const controller = createCompletionController({ ...dependencies, acceptedContracts: new Set([contract]),
+    verifier: { async run({ target }) {
+      if (target.id === 't1' && unknownT1) return { status: 'unknown' };
+      execution++;
+      return { executionId: `e${execution}`, receipt: { id: `receipt${execution}`,
+        executionId: `e${execution}`, targetId: target.id, revision: 'revision1',
+        result: 'verified', startedAt: execution, endedAt: execution } };
+    } } });
+  const { requestId, key } = await controller.beginRequest(event());
+  const task = await controller.registerTask(requestId, contract);
+  await controller.bindRoute(requestId, {});
+  await controller.declareTask(requestId, { version: 1, kind: 'update',
+    items: [{ itemId: task.itemId, status: 'reported', receiptIds: [] }] });
+  await store.transaction(key, (state) => { state.enabled = true; state.mode = 'enforce'; },
+    { signal: new AbortController().signal, deadline: Date.now() + 1000 });
+  await controller.runVerification(requestId, task.itemId, 't1');
+  await controller.runVerification(requestId, task.itemId, 't2');
+  assert.equal(evaluateCompletion(await controller.snapshot(requestId)).action, 'allow');
+  unknownT1 = true;
+  await controller.runVerification(requestId, task.itemId, 't1');
+  await controller.runVerification(requestId, task.itemId, 't2');
+  const unresolved = await controller.snapshot(requestId);
+  assert.equal(unresolved.coverage, 'unknown');
+  assert.equal(unresolved.items[0].status, 'pending');
+  assert.notEqual(evaluateCompletion(unresolved).action, 'allow');
+  assert.equal(unresolved.receipts.length, 3);
+  unknownT1 = false;
+  await controller.runVerification(requestId, task.itemId, 't1');
+  const recovered = await controller.snapshot(requestId);
+  assert.equal(recovered.coverage, 'verified');
+  assert.equal(recovered.items[0].status, 'verified');
+  assert.equal(evaluateCompletion(recovered).action, 'allow');
 });

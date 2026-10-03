@@ -42,7 +42,8 @@ function projectTask(item) {
 
 function progressDigest(state) {
   const progress = { revision: state.revision, items: state.items.filter((item) => item.source !== 'model-proposed')
-    .map(({ itemId, status, requiredTargetIds, receiptIds }) => ({ itemId, status, requiredTargetIds, receiptIds })),
+    .map(({ itemId, status, requiredTargetIds, receiptIds, unresolvedTargetIds }) =>
+      ({ itemId, status, requiredTargetIds, receiptIds, unresolvedTargetIds })),
     receipts: state.receipts };
   return createHash('sha256').update(JSON.stringify(progress)).digest('hex');
 }
@@ -155,7 +156,7 @@ export function createCompletionController({ store, acceptedContracts, verifier,
         && item.status !== 'cancelled' && !hasVerifiedTargets(item, state))
         .map((item) => ({ itemId: randomUUID(), contractId: item.contractId, category: item.category,
           source: item.source, requiredTargetIds: [...item.requiredTargetIds], mustFinish: item.mustFinish,
-          status: 'pending', receiptIds: [] }));
+          status: 'pending', receiptIds: [], unresolvedTargetIds: [...(item.unresolvedTargetIds ?? [])] }));
       const seen = [...(state.seenNativeEventIds ?? []), event.nativeEventId];
       Object.assign(state, { key, nativeEventId: event.nativeEventId, seenNativeEventIds: seen,
         enabled: false, mode: 'shadow', coverage: 'unknown', modelFamily: 'unknown',
@@ -181,7 +182,7 @@ export function createCompletionController({ store, acceptedContracts, verifier,
       if (state.items.length >= 64) unavailable('item_capacity');
       const item = { itemId: randomUUID(), contractId: contract.contractId, category: contract.category,
         requiredTargetIds: [...contract.requiredTargetIds], mustFinish: contract.mustFinish,
-        source: contract.source, status: 'pending', receiptIds: [] };
+        source: contract.source, status: 'pending', receiptIds: [], unresolvedTargetIds: [] };
       state.items.push(item);
       state.executionTask = true;
       state.safeWorkRemaining = true;
@@ -234,7 +235,12 @@ export function createCompletionController({ store, acceptedContracts, verifier,
     const produced = await bounded(({ signal }) => verifier.run({ key: structuredClone(current.state.key),
       item: structuredClone(item), target: structuredClone(target), signal }), target.timeoutMs + 1000);
     if (!validReceipt(produced, targetId)) {
-      await transact(requestId, (state) => { state.verifierCoverage = 'unknown'; state.coverage = 'unknown'; });
+      await transact(requestId, (state) => {
+        const liveItem = state.items.find((candidate) => candidate.itemId === itemId);
+        liveItem.unresolvedTargetIds = [...new Set([...(liveItem.unresolvedTargetIds ?? []), targetId])];
+        liveItem.status = 'pending';
+        state.verifierCoverage = 'unknown'; state.coverage = 'unknown';
+      });
       return unknown('verification_unknown');
     }
     const result = await transact(requestId, (state, key) => {
@@ -246,9 +252,15 @@ export function createCompletionController({ store, acceptedContracts, verifier,
       state.receipts.push(receipt);
       const liveItem = state.items.find((candidate) => candidate.itemId === itemId);
       liveItem.receiptIds.push(id);
+      if (receiptResult === 'unknown') {
+        liveItem.unresolvedTargetIds = [...new Set([...(liveItem.unresolvedTargetIds ?? []), targetId])];
+      } else if (receiptResult === 'verified') {
+        liveItem.unresolvedTargetIds = (liveItem.unresolvedTargetIds ?? []).filter((id) => id !== targetId);
+      }
       if (receiptResult === 'verified') state.revision = revision;
       liveItem.status = hasVerifiedTargets(liveItem, state) ? 'verified' : 'pending';
-      state.verifierCoverage = receiptResult === 'unknown' ? 'unknown' : 'verified';
+      state.verifierCoverage = receiptResult === 'unknown' || state.items.some((item) => item.unresolvedTargetIds?.length)
+        ? 'unknown' : 'verified';
       state.coverage = state.route && state.verifierCoverage === 'verified' ? 'verified' : 'unknown';
       return { status: 'ok', executionId: produced.executionId, receiptId: id };
     });

@@ -99,8 +99,8 @@ test('model assertions and stale receipt cannot complete accepted verification',
 test('continuation is bounded by budget, window, progress, recursion and upstream errors', () => {
   const base = makeSnapshot().budget;
   const cases = [
-    [{ budget: { ...base, used: 2, remaining: 0 } }, 'budget_exhausted'],
-    [{ budget: { ...base, used: 1, remaining: 1, firstInterventionAt: 0 }, validity: { status: 'valid', now: 600000, progressDigest: 'p2' } }, 'window_expired'],
+    [{ budget: { ...base, used: 2, remaining: 0, firstInterventionAt: 0, lastProgressDigest: 'p0' } }, 'budget_exhausted'],
+    [{ budget: { ...base, used: 1, remaining: 1, firstInterventionAt: 0, lastProgressDigest: 'p0' }, validity: { status: 'valid', now: 600000, progressDigest: 'p2' } }, 'window_expired'],
     [{ budget: { ...base, used: 1, remaining: 1, firstInterventionAt: 0, lastProgressDigest: 'p1' } }, 'no_progress'],
     [{ stopHookActive: true }, 'stop_hook_active'],
     [{ upstreamError: { status: 429 } }, 'upstream_error'],
@@ -156,4 +156,26 @@ test('a later failed, stale or unknown receipt supersedes earlier success', () =
     assert.equal(evaluateCompletion(makeSnapshot({ items: [item], receipts: [good,
       { ...good, id: 'r2', executionId: 'e2', result, startedAt: 2, endedAt: 3 }] })).action, 'continue');
   }
+});
+
+test('consumed budget without intervention time or progress baseline degrades', () => {
+  const initial = makeSnapshot().budget;
+  for (const overrides of [
+    { firstInterventionAt: null, lastProgressDigest: null },
+    { firstInterventionAt: 0, lastProgressDigest: null },
+    { firstInterventionAt: null, lastProgressDigest: 'p0' },
+  ]) {
+    const decision = evaluateCompletion(makeSnapshot({ budget: { ...initial, used: 1, remaining: 1, ...overrides } }));
+    assert.equal(decision.action, 'degraded');
+    assert.equal(decision.reason, 'state_invalid');
+  }
+});
+
+test('authoritative external blocker allows before missing checkpoint reconciliation', () => {
+  const blocked = { ...makeSnapshot().items[0], status: 'blocked' };
+  const decision = evaluateCompletion(makeSnapshot({ items: [blocked], safeWorkRemaining: false, checkpointPresent: false }));
+  assert.equal(decision.action, 'allow');
+  assert.equal(decision.reason, 'external_blocker');
+  assert.equal(evaluateCompletion(makeSnapshot({ items: [blocked,
+    { ...blocked, itemId: 'i2', status: 'pending' }], checkpointPresent: false })).action, 'continue');
 });
