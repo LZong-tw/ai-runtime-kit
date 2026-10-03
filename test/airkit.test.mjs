@@ -15,6 +15,7 @@ import {
   processCompletionGuardHook,
   processContextHook,
   processSubagentOutputHook,
+  renderHeartbeatManagedFiles,
 } from "../src/context-heartbeat.mjs";
 import {
   processSubagentObservabilityHook,
@@ -4176,7 +4177,14 @@ test("AirClaude renders an additive session plugin for the heartbeat", async () 
       "SubagentStop",
       "UserPromptSubmit",
     ]);
-    assert.equal(renderedHooks.Stop, undefined, "AirKit does not install a generic completion Stop hook");
+    assert.equal(renderedHooks.Stop, undefined, "completion remains off without explicit shadow opt-in");
+    const shadowPlan = buildLaunchPlan(catalog, "launch-example", { configDir, completionMode: "shadow" });
+    assert.ok(shadowPlan.files.managedFiles.some((file) => file.path.endsWith("/scripts/completion/hook.mjs")));
+    const shadowHooks = JSON.parse(renderHeartbeatManagedFiles(configDir, undefined, { completionMode: "shadow" }).find((file) => file.path.endsWith("/hooks/hooks.json")).content).hooks;
+    assert.equal(shadowHooks.Stop.length, 1);
+    assert.ok(shadowHooks.Stop.some((entry) => JSON.stringify(entry).includes("completion/hook.mjs")));
+    const disabledHooks = JSON.parse(renderHeartbeatManagedFiles(configDir).find((file) => file.path.endsWith("/hooks/hooks.json")).content).hooks;
+    assert.equal(disabledHooks.Stop, undefined);
     const hookInput = JSON.stringify({
       hook_event_name: "UserPromptSubmit",
       prompt: "ordinary prompt",
