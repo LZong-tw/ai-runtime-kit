@@ -1,18 +1,12 @@
 import fs from 'node:fs';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { isBoundedId, parseCheckpoint } from './checkpoint.mjs';
 import { evaluateCompletion, isValidSnapshot } from './evaluator.mjs';
+import { applyCheckpoint, progressDigest } from './state-operations.mjs';
 
 const degraded = (reason) => ({ action: 'degraded', reason, itemIds: [], remaining: 0 });
 const sameKey = (a, b) => a && b && ['sessionId', 'workspaceId', 'requestId', 'generation'].every((field) => a[field] === b[field]);
 const failure = (reason) => { throw Object.assign(new Error(reason), { dispatchReason: reason }); };
-
-function progressDigest(state) {
-  return createHash('sha256').update(JSON.stringify({ revision: state.revision,
-    items: state.items.filter((item) => item.source !== 'model-proposed')
-      .map(({ itemId, status, requiredTargetIds, receiptIds, unresolvedTargetIds }) =>
-        ({ itemId, status, requiredTargetIds, receiptIds, unresolvedTargetIds })), receipts: state.receipts })).digest('hex');
-}
 
 function readInput(input, signal, check) {
   if (!input?.read || input.readableObjectMode || input.readableEncoding) {
@@ -91,27 +85,6 @@ async function readCheckpoint(tail, check, signal) {
   finally { signal.removeEventListener('abort', onAbort); await close(); }
 }
 
-function applyCheckpoint(state, checkpoint) {
-  if (!checkpoint) return;
-  for (const entry of checkpoint.items) {
-    if (checkpoint.kind === 'declare') {
-      const existing = state.items.find((item) => item.source === 'model-proposed' && item.ordinal === entry.ordinal);
-      if (existing && existing.category !== entry.category) failure('checkpoint_unknown');
-      if (!existing) {
-        if (state.items.length >= 64) failure('checkpoint_unknown');
-        state.items.push({ itemId: randomUUID(), ordinal: entry.ordinal, category: entry.category,
-          source: 'model-proposed', status: 'pending', mustFinish: false, requiredTargetIds: [], receiptIds: [] });
-      }
-      continue;
-    }
-    const item = state.items.find((candidate) => candidate.itemId === entry.itemId);
-    if (!item || !entry.receiptIds.every((id) => state.receipts.some((receipt) => receipt.id === id
-      && receipt.itemId === item.itemId && sameKey(receipt.key, state.key)))) failure('checkpoint_unknown');
-    item.proposal = { status: entry.status, receiptIds: [...entry.receiptIds] };
-  }
-  state.checkpointPresent = true;
-}
-
 /** One absolute Stop deadline; only the injected private host can mutate its ledger. */
 export async function runCompletionDispatch({ input, output, controller, adapter, clock = Date.now } = {}) {
   const abort = new AbortController();
@@ -135,7 +108,19 @@ export async function runCompletionDispatch({ input, output, controller, adapter
     const result = await controller.transaction(observation.key, (state) => {
       check();
       if (!sameKey(state.key, observation.key)) failure('state_invalid');
-      applyCheckpoint(state, checkpoint);
+      if (checkpoint) {
+        try {
+          applyCheckpoint(state, checkpoint, { createItemId: randomUUID });
+        } catch (error) {
+          switch (error.checkpointReason) {
+            case 'conflicting_declaration':
+            case 'item_capacity':
+            case 'unknown_item':
+            case 'unknown_receipt': failure('checkpoint_unknown'); break;
+            default: throw error;
+          }
+        }
+      }
       const now = clock();
       const snapshot = { ...state, validity: { ...state.validity, now, progressDigest: progressDigest(state) } };
       if (!isValidSnapshot(snapshot)) failure('state_invalid');
