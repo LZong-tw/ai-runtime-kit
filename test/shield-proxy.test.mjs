@@ -40,6 +40,14 @@ test("diagnostics are control-only, nondestructive and never forward endpoint va
     const reply = await rawRequest(shield.origin, path, { "x-airkit-shield-control": CONTROL_CAPABILITY, "x-airkit-shield": CAPABILITY }, "", "GET");
     assert.equal(reply.status, 403, path);
   }
+  for (const path of ["/x/../_airkit/shield/diagnostics?x=%ZZ", "/_airkit/shield/%64iagnostics?x=%ZZ"]) {
+    for (const headers of [{ "x-airkit-shield": CAPABILITY }, { "x-airkit-shield": lease }]) {
+      const reply = await rawRequest(shield.origin, path, headers, "", "GET");
+      assert.equal(reply.status, 401, path);
+    }
+    const reply = await rawRequest(shield.origin, path, { "x-airkit-shield-control": CONTROL_CAPABILITY }, "", "GET");
+    assert.equal(reply.status, 403, path);
+  }
   for (let bytes = 1; bytes <= 20; bytes += 1) {
     const response = await fetch(`${shield.origin}/v1/messages?private=query-secret`, {
       method: "POST", headers: { "x-airkit-shield": CAPABILITY, authorization: "Bearer credential-secret" }, body: "x".repeat(bytes),

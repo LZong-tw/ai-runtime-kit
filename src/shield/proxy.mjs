@@ -309,12 +309,15 @@ async function handleShieldRequest({ request, response, capability, controlCapab
 
 function isDiagnosticsPath(value) {
   if (typeof value !== "string") return false;
-  if (value.startsWith(DIAGNOSTICS_PATH)) return true;
+  const paths = [value.split(/[?#]/, 1)[0]];
   try {
-    return decodeURIComponent(value).startsWith(DIAGNOSTICS_PATH)
-      || decodeURIComponent(new URL(value, "http://shield.local").pathname).startsWith(DIAGNOSTICS_PATH);
-  }
-  catch { return value.startsWith(DIAGNOSTICS_PATH); }
+    paths.push(new URL(value, "http://shield.local").pathname);
+  } catch {}
+  return paths.some((path) => {
+    if (path.startsWith(DIAGNOSTICS_PATH)) return true;
+    try { return decodeURIComponent(path).startsWith(DIAGNOSTICS_PATH); }
+    catch { return false; }
+  });
 }
 
 function recordFailure(failures, { stage, reason, bytes, elapsedMs }) {
