@@ -40,8 +40,30 @@ test('conflicting transport identity and unsupported model cannot establish elig
   const route = { key, transportRequestId: 't1', provider: 'p1', model: 'gpt-6.1-sol' };
   assert.equal(join.observe({ fixtureEvent: route }).status, 'ok');
   assert.equal(join.observe({ fixtureEvent: { ...route, model: 'claude-sonnet-4-6' } }).status, 'unknown');
-  assert.equal((await join.resolve({ key, transportRequestId: 't1' }, key)).status, 'unknown');
+  assert.equal((await join.resolve(route, key)).status, 'unknown');
+  assert.equal(join.observe({ fixtureEvent: route }).status, 'unknown');
+  assert.equal((await join.resolve(route, key)).status, 'unknown');
   assert.equal(join.observe({ fixtureEvent: { ...route, transportRequestId: 't2', model: 'totally-gpt-like' } }).status, 'unknown');
+});
+
+test('GPT 5.6 has GPT family coverage only through its exact accepted route binding', async () => {
+  const join = createRouteJoin({ validatedContract: contract });
+  const route = { key, transportRequestId: 't56', provider: 'p1', model: 'gpt-5.6-sol' };
+  assert.equal(join.observe({ fixtureEvent: route }).status, 'ok');
+  const result = await join.resolve(route, key);
+  assert.equal(result.status, 'ok'); assert.equal(result.modelFamily, 'gpt');
+  assert.equal((await join.resolve({ ...route, model: 'gpt-5_6-sol' }, key)).status, 'unknown');
+  assert.equal((await join.resolve({ ...route, transportRequestId: 'other' }, key)).status, 'unknown');
+});
+
+test('an unsupported-model identity conflict permanently poisons the original complete route tuple', async () => {
+  const join = createRouteJoin({ validatedContract: contract });
+  const route = { key, transportRequestId: 't1', provider: 'p1', model: 'gpt-6.1-sol' };
+  assert.equal(join.observe({ fixtureEvent: route }).status, 'ok');
+  assert.equal(join.observe({ fixtureEvent: { ...route, model: 'unsupported-model' } }).status, 'unknown');
+  assert.equal((await join.resolve(route, key)).status, 'unknown');
+  assert.equal(join.observe({ fixtureEvent: route }).status, 'unknown');
+  assert.equal((await join.resolve(route, key)).status, 'unknown');
 });
 
 async function fixture(t, mustFinish = true) {
@@ -93,7 +115,7 @@ test('changing GPT to Claude suspends GPT policy and switching back preserves in
   const f = await fixture(t);
   await f.store.transaction(f.key, (state) => { state.enabled = true; state.mode = 'enforce'; state.verifierCoverage = 'verified';
     state.budget = { used: 1, remaining: 1, firstInterventionAt: Date.now(), lastProgressDigest: 'prior', unknownReconciled: false }; });
-  for (const [transportRequestId, model, family] of [['t1', 'gpt-6.1-sol', 'gpt'], ['t2', 'claude-sonnet-4-6', 'claude'], ['t3', 'gpt-6.1-sol', 'gpt']]) {
+  for (const [transportRequestId, model, family] of [['t0', 'gpt-5.6-sol', 'gpt'], ['t1', 'gpt-6.1-sol', 'gpt'], ['t2', 'claude-sonnet-4-6', 'claude'], ['t3', 'gpt-6.1-sol', 'gpt']]) {
     assert.equal(f.join.observe({ fixtureEvent: { key: f.key, transportRequestId, provider: 'p1', model } }).status, 'ok');
     assert.equal((await f.core.bindRoute(f.key.requestId, { key: f.key, transportRequestId, provider: 'p1', model })).status, 'ok');
     const snapshot = await f.core.snapshot(f.key.requestId);

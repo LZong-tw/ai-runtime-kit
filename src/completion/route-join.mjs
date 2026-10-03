@@ -8,7 +8,7 @@ const sameKey = (a, b) => validKey(a) && validKey(b)
   && ['sessionId', 'workspaceId', 'requestId', 'generation'].every((field) => a[field] === b[field]);
 
 function family(model) {
-  if (/^gpt-6(?:\.1)?(?:-(?:sol|astra|luna))?$/.test(model)) return 'gpt';
+  if (/^gpt-(?:5\.6|6(?:\.1)?)(?:-(?:sol|astra|luna))?$/.test(model)) return 'gpt';
   if (/^claude-(?:sonnet|opus|haiku)-[0-9]+(?:-[0-9]+)*$/.test(model)) return 'claude';
   return 'unknown';
 }
@@ -23,13 +23,14 @@ export function createRouteJoin({ validatedContract } = {}) {
     let event;
     try { event = validatedContract.decode(payload); } catch { return unknown(); }
     if (!validKey(event?.key) || !isBoundedId(event.transportRequestId) || !isBoundedId(event.provider)
-      || typeof event.model !== 'string' || event.model.length > 128 || family(event.model) === 'unknown') return unknown();
+      || typeof event.model !== 'string' || event.model.length > 128) return unknown();
     const prior = bindings.get(event.transportRequestId);
     if (bindings.has(event.transportRequestId) && (!prior || !sameKey(prior.key, event.key)
       || prior.providerId !== event.provider || prior.rawModel !== event.model)) {
       bindings.set(event.transportRequestId, null);
       return unknown();
     }
+    if (family(event.model) === 'unknown') return unknown();
     if (!bindings.has(event.transportRequestId) && bindings.size >= 128) return unknown();
     bindings.set(event.transportRequestId, { key: structuredClone(event.key), providerId: event.provider,
       modelId: `model-${createHash('sha256').update(event.model).digest('hex')}`,
