@@ -89,6 +89,58 @@ test("Privacy Filter labels retain their original categories across the worker b
   assert.deepEqual(result.findings, labels.map((label) => ({ label, count: 1 })));
 });
 
+test("privacy unknown reasons preserve only the pinned adapter's fixed codes", async (t) => {
+  const allowed = ["invalid-prediction", "inconsistent-counts", "invalid-span", "unmapped-span", "cross-field-span", "inconsistent-quoting", "unmapped-finding", "redaction-too-large", "value-survived", "invalid-protocol-graph", "protocol-id-collision", "conflicting-protocol-context", "protocol-id-limit", "adapter-error"];
+  for (const reason of [...allowed, sentinel, null, {}, 42, "scan_timeout", undefined]) {
+    const worker = fakeWorker((message, emit) => {
+      if (message.type === "health") emit(health(message));
+      if (message.type === "scan") emit({ type: "scan", id: message.id, status: "unknown", reason, body: sentinel });
+    });
+    const filter = await createPrivacyFilter({ provision, spawnWorker: () => worker, validateWorker });
+    t.after(() => filter.close());
+    const result = await filter.scan(Buffer.from(JSON.stringify({ content: sentinel })));
+    assert.deepEqual(result, { status: "unknown", findings: [], reason: allowed.includes(reason) ? reason : "privacy_unavailable" });
+    assert.doesNotMatch(JSON.stringify(result), new RegExp(sentinel));
+    assert.equal(await filter.isReady(), true);
+  }
+});
+
+test("privacy distinguishes body, admission, frame, queue, timeout and protocol failures without raw data", async (t) => {
+  const worker = fakeWorker((message, emit) => { if (message.type === "health") emit(health(message)); });
+  const filter = await createPrivacyFilter({ provision, spawnWorker: () => worker, validateWorker, timeoutMs: 100 });
+  t.after(() => filter.close());
+  assert.equal((await filter.scan(Buffer.alloc(1_048_577))).reason, "body_invalid");
+  assert.equal((await filter.scan(Buffer.alloc(786_400))).reason, "frame_limit");
+  const first = filter.scan(Buffer.from('{}'));
+  const waiting = Array.from({ length: 3 }, () => filter.scan(Buffer.from(JSON.stringify({ content: sentinel }))));
+  assert.equal((await filter.scan(Buffer.from('{}'))).reason, "admission_limit");
+  await flushTasks();
+  worker.stdout.emit("data", `${sentinel}\n`);
+  assert.equal((await first).reason, "protocol_invalid");
+  assert.deepEqual((await Promise.all(waiting)).map((result) => result.reason), Array(3).fill("protocol_invalid"));
+  assert.doesNotMatch(JSON.stringify(await Promise.all(waiting)), new RegExp(sentinel));
+  filter.close();
+  assert.equal((await filter.scan(Buffer.from('{}'))).reason, "worker_closed");
+
+  const timedWorker = fakeWorker((message, emit) => { if (message.type === "health") emit(health(message)); });
+  const timed = await createPrivacyFilter({ provision, spawnWorker: () => timedWorker, validateWorker, timeoutMs: 100 });
+  t.after(() => timed.close());
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const active = timed.scan(Buffer.from('{}'));
+  const queued = timed.scan(Buffer.from('{}'));
+  await flushTasks();
+  t.mock.timers.tick(100);
+  assert.equal((await queued).reason, "queue_timeout");
+  assert.equal((await active).reason, "scan_timeout");
+  const nextActive = timed.scan(Buffer.from('{}'));
+  await flushTasks();
+  t.mock.timers.tick(10);
+  const nextQueued = timed.scan(Buffer.from('{}'));
+  t.mock.timers.tick(90);
+  assert.equal((await nextActive).reason, "scan_timeout");
+  assert.equal((await nextQueued).reason, "worker_unavailable", "a waiting request must not inherit another scan's timeout diagnosis");
+});
+
 test("privacy worker assets are revalidated immediately before each worker spawn", async () => {
   let validations = 0;
   let spawns = 0;
@@ -453,6 +505,7 @@ test("OPF source, adapter and tokenizer drift fail closed before scan bytes", as
     ready = true;
     const result = await filter.scan(Buffer.from(`{"content":"${sentinel}"}`));
     assert.equal(result.status, "unavailable", changed);
+    assert.equal(result.reason, "assets_invalid", changed);
     assert.equal(worker.messages.filter((message) => message.type === "scan").length, 0, changed);
   }
   await assert.rejects(createPrivacyFilter({
@@ -536,12 +589,14 @@ test("privacy self-test rejects unchanged or category-incomplete replacement bod
 
 test("privacy worker timeout, exit, malformed reply, unknown labels, and oversized output fail closed without raw data", async (t) => {
   const cases = [
-    { name: "timeout", handler: (message, emit) => { if (message.type === "health") emit(health(message)); }, expected: "unavailable" },
-    { name: "exit", handler: (message, emit, worker) => message.type === "health" ? emit(health(message)) : worker.emit("exit", 1), expected: "unavailable" },
-    { name: "malformed", handler: (message, emit) => message.type === "health" ? emit(health(message)) : emit({ type: "scan", id: message.id, status: "ok", findings: "bad" }), expected: "unavailable" },
-    { name: "mismatched", handler: (message, emit) => message.type === "health" ? emit(health(message)) : emit({ type: "scan", id: "different", status: "ok", findings: [] }), expected: "unavailable" },
-    { name: "unknown", handler: (message, emit) => message.type === "health" ? emit(health(message)) : emit({ type: "scan", id: message.id, status: "ok", findings: [{ label: "mystery", count: 1 }] }), expected: "unknown" },
-    { name: "oversized", handler: (message, emit, worker) => message.type === "health" ? emit(health(message)) : worker.stdout.emit("data", "x".repeat(1_048_577)), expected: "unavailable" },
+    { name: "timeout", handler: (message, emit) => { if (message.type === "health") emit(health(message)); }, expected: "unavailable", reason: "scan_timeout" },
+    { name: "exit", handler: (message, emit, worker) => message.type === "health" ? emit(health(message)) : worker.emit("exit", 1), expected: "unavailable", reason: "worker_unavailable" },
+    { name: "malformed", handler: (message, emit) => message.type === "health" ? emit(health(message)) : emit({ type: "scan", id: message.id, status: "ok", findings: "bad" }), expected: "unavailable", reason: "reply_invalid" },
+    { name: "mismatched", handler: (message, emit) => message.type === "health" ? emit(health(message)) : emit({ type: "scan", id: "different", status: "ok", findings: [] }), expected: "unavailable", reason: "scan_timeout" },
+    { name: "unknown", handler: (message, emit) => message.type === "health" ? emit(health(message)) : emit({ type: "scan", id: message.id, status: "ok", findings: [{ label: "mystery", count: 1 }] }), expected: "unknown", reason: "findings_invalid" },
+    { name: "oversized", handler: (message, emit, worker) => message.type === "health" ? emit(health(message)) : worker.stdout.emit("data", "x".repeat(1_048_577)), expected: "unavailable", reason: "frame_limit" },
+    { name: "invalid redaction", handler: (message, emit) => message.type === "health" ? emit(health(message)) : emit({ type: "scan", id: message.id, status: "ok", findings: [], redactions: [{ label: sentinel, count: 1 }] }), expected: "unavailable", reason: "redaction_invalid" },
+    { name: "invalid replacement", handler: (message, emit) => message.type === "health" ? emit(health(message)) : emit({ type: "scan", id: message.id, status: "ok", findings: [], redactedBody: sentinel }), expected: "unavailable", reason: "redaction_invalid" },
   ];
 
   for (const fixture of cases) {
@@ -550,6 +605,7 @@ test("privacy worker timeout, exit, malformed reply, unknown labels, and oversiz
     t.after(() => filter.close());
     const result = await filter.scan(Buffer.from(`{"content":"${sentinel}"}`));
     assert.equal(result.status, fixture.expected, fixture.name);
+    assert.equal(result.reason, fixture.reason, fixture.name);
     assert.equal(result.redactedBody, undefined, fixture.name);
     assert.doesNotMatch(JSON.stringify(result), new RegExp(sentinel), fixture.name);
   }

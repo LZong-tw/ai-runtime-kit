@@ -4,6 +4,23 @@ import { readApprovalChannelRegistration, requestApprovalChannel } from "./appro
 import { classifyShieldRequest } from "./classify.mjs";
 
 const INSPECTION_MAX_BYTES = 1_048_576;
+const DIAGNOSTICS_PATH = "/_airkit/shield/diagnostics";
+const FAILURE_REASONS = new Map([
+  ["body_read", new Set(["body_read_failed", "body_too_large"])],
+  ["evaluation", new Set(["evaluation_unavailable"])],
+  ["secret_scan", new Set(["scanner_unavailable"])],
+  ["privacy_scan", new Set([
+    "privacy_unavailable", "worker_closed", "body_invalid", "admission_limit", "frame_limit", "queue_timeout",
+    "scan_timeout", "worker_unavailable", "protocol_invalid", "assets_invalid", "reply_invalid", "findings_invalid", "redaction_invalid",
+    "invalid-prediction", "inconsistent-counts", "invalid-span", "unmapped-span", "cross-field-span",
+    "inconsistent-quoting", "unmapped-finding", "redaction-too-large", "value-survived",
+    "invalid-protocol-graph", "protocol-id-collision", "conflicting-protocol-context", "protocol-id-limit", "adapter-error",
+  ])],
+  ["policy", new Set(["policy_unavailable", "secret_block_invalid"])],
+  ["redaction", new Set(["redaction_invalid"])],
+  ["audit", new Set(["audit_unavailable"])],
+  ["upstream", new Set(["target_unavailable", "transport_unavailable", "redirect_blocked"])],
+]);
 const INTERNAL_HEADERS = new Set([
   "connection",
   "content-length",
@@ -21,6 +38,7 @@ const INTERNAL_HEADERS = new Set([
   "x-forwarded-proto",
   "x-original-url",
   "x-airkit-shield",
+  "x-airkit-shield-control",
   "x-airkit-shield-approval",
   "x-airkit-shield-approval-socket",
 ]);
@@ -44,8 +62,9 @@ export async function startShieldProxy({ capability, controlCapability, targetOr
   }
   const approvalRegistration = { channel: null };
   const destinationLeases = new Map();
+  const failures = [];
   const server = createServer((request, response) => {
-    void handleShieldRequest({ request, response, capability, controlCapability, target, allowDestinationLeases, destinationLeases, decide, decisionCache, decisionContext, approvalBroker, recordShieldDecision: record, isReady, approvalRegistration, now });
+    void handleShieldRequest({ request, response, capability, controlCapability, target, allowDestinationLeases, destinationLeases, decide, decisionCache, decisionContext, approvalBroker, recordShieldDecision: record, isReady, approvalRegistration, now, failures });
   });
   await listenLoopback(server, port);
   const address = server.address();
@@ -59,8 +78,22 @@ export async function startShieldProxy({ capability, controlCapability, targetOr
   };
 }
 
-async function handleShieldRequest({ request, response, capability, controlCapability, target, allowDestinationLeases, destinationLeases, decide, decisionCache, decisionContext, approvalBroker, recordShieldDecision, isReady, approvalRegistration, now }) {
+async function handleShieldRequest({ request, response, capability, controlCapability, target, allowDestinationLeases, destinationLeases, decide, decisionCache, decisionContext, approvalBroker, recordShieldDecision, isReady, approvalRegistration, now, failures }) {
   const startedAt = Date.now();
+  const fail = (stage, reason, bytes = 0) => recordFailure(failures, { stage, reason, bytes, elapsedMs: Date.now() - startedAt });
+  if (isDiagnosticsPath(request.url)) {
+    request.resume();
+    response.setHeader("cache-control", "no-store");
+    if (!capabilityMatches(request.headers["x-airkit-shield-control"], controlCapability)) {
+      await finish(response, { status: 401, code: "shield_unauthorized" }); return;
+    }
+    if (request.method !== "GET" || request.url !== DIAGNOSTICS_PATH) {
+      await finish(response, { status: 403, code: "shield_blocked" }); return;
+    }
+    const body = Buffer.from(JSON.stringify({ failures }));
+    response.writeHead(200, { "content-type": "application/json", "content-length": String(body.byteLength), "cache-control": "no-store" });
+    response.end(body); return;
+  }
   const isApprovalRegistration = request.url === "/_airkit/shield/approval-channel" && (request.method === "POST" || request.method === "DELETE");
   const isLeaseRequest = request.url === "/_airkit/shield/destination-lease" && (request.method === "POST" || request.method === "DELETE");
   if (isLeaseRequest) {
@@ -116,6 +149,7 @@ async function handleShieldRequest({ request, response, capability, controlCapab
       const lifecycle = requestLifecycleSignal(request, response);
       if (lifecycle.signal.aborted) return;
       if (requestTarget === null) {
+        fail("upstream", "target_unavailable");
         await finish(response, { status: 503, code: "shield_unavailable" });
         return;
       }
@@ -127,6 +161,7 @@ async function handleShieldRequest({ request, response, capability, controlCapab
           signal: lifecycle.signal,
         });
         if (upstream.status >= 300 && upstream.status < 400) {
+          fail("upstream", "redirect_blocked");
           await discardResponse(upstream);
           await finish(response, { status: 503, code: "shield_unavailable" });
           return;
@@ -134,6 +169,7 @@ async function handleShieldRequest({ request, response, capability, controlCapab
         writeUpstreamHeaders(response, upstream);
         await streamResponse(upstream, response, lifecycle.signal);
       } catch {
+        fail("upstream", "transport_unavailable");
         if (!response.headersSent) {
           await finish(response, { status: 503, code: "shield_unavailable" });
         } else if (!response.destroyed) {
@@ -187,10 +223,12 @@ async function handleShieldRequest({ request, response, capability, controlCapab
   try {
     inspection = await readInspection(request);
   } catch {
+    fail("body_read", "body_read_failed");
     await finish(response, { status: 503, code: "shield_unavailable" });
     return;
   }
   if (inspection.tooLarge) {
+    fail("body_read", "body_too_large", inspection.bytes);
     await finish(response, { status: 403, code: "shield_blocked" });
     return;
   }
@@ -202,7 +240,10 @@ async function handleShieldRequest({ request, response, capability, controlCapab
     decision = decisionCache === null || launcherContext !== null
       ? await evaluate()
       : await cachedDecision({ decisionCache, decisionContext, body: inspection.body, evaluate });
-  } catch {
+  } catch (error) {
+    const failure = error?.shieldFailure;
+    if (FAILURE_REASONS.get(failure?.stage)?.has(failure?.reason)) fail(failure.stage, failure.reason, inspection.bytes);
+    else fail("evaluation", "evaluation_unavailable", inspection.bytes);
     await finish(response, { status: 503, code: "shield_unavailable" });
     return;
   }
@@ -212,6 +253,7 @@ async function handleShieldRequest({ request, response, capability, controlCapab
   if (decision?.action === "redact") {
     const redactedBody = validateRedactedBody(decision.redactedBody);
     if (redactedBody === null) {
+      fail("redaction", "redaction_invalid", inspection.bytes);
       await finish(response, { status: 503, code: "shield_unavailable" });
       return;
     }
@@ -225,6 +267,7 @@ async function handleShieldRequest({ request, response, capability, controlCapab
   try {
     await recordShieldDecision(auditDecision);
   } catch {
+    fail("audit", "audit_unavailable", inspection.bytes);
     await finish(response, { status: 503, code: "shield_unavailable" });
     return;
   }
@@ -235,7 +278,10 @@ async function handleShieldRequest({ request, response, capability, controlCapab
   if (lifecycle.signal.aborted) return;
 
   try {
-    if (requestTarget === null) throw new Error("shield destination lease is required");
+    if (requestTarget === null) {
+      fail("upstream", "target_unavailable", inspection.bytes);
+      await finish(response, { status: 503, code: "shield_unavailable" }); return;
+    }
     const upstream = await fetch(new URL(path, requestTarget), {
       method: request.method,
       headers: forwardHeaders(request.headers),
@@ -244,6 +290,7 @@ async function handleShieldRequest({ request, response, capability, controlCapab
       signal: lifecycle.signal,
     });
     if (upstream.status >= 300 && upstream.status < 400) {
+      fail("upstream", "redirect_blocked", inspection.bytes);
       await discardResponse(upstream);
       await finish(response, { status: 503, code: "shield_unavailable" });
       return;
@@ -251,12 +298,41 @@ async function handleShieldRequest({ request, response, capability, controlCapab
     writeUpstreamHeaders(response, upstream);
     await streamResponse(upstream, response, lifecycle.signal);
   } catch {
+    fail("upstream", "transport_unavailable", inspection.bytes);
     if (!response.headersSent) {
       await finish(response, { status: 503, code: "shield_unavailable" });
     } else if (!response.destroyed) {
       response.destroy();
     }
   }
+}
+
+function isDiagnosticsPath(value) {
+  if (typeof value !== "string") return false;
+  if (value.startsWith(DIAGNOSTICS_PATH)) return true;
+  try {
+    return decodeURIComponent(value).startsWith(DIAGNOSTICS_PATH)
+      || decodeURIComponent(new URL(value, "http://shield.local").pathname).startsWith(DIAGNOSTICS_PATH);
+  }
+  catch { return value.startsWith(DIAGNOSTICS_PATH); }
+}
+
+function recordFailure(failures, { stage, reason, bytes, elapsedMs }) {
+  if (!FAILURE_REASONS.get(stage)?.has(reason)) return;
+  const bounded = (value, max) => Number.isFinite(value) ? Math.min(max, Math.max(0, Math.floor(value))) : 0;
+  failures.push({ stage, reason, bytes: bounded(bytes, INSPECTION_MAX_BYTES), elapsedMs: bounded(elapsedMs, 3_600_000) });
+  if (failures.length > 16) failures.shift();
+}
+
+export function createShieldFailure(stage, reason, message) {
+  const defaults = {
+    body_read: "body_read_failed", evaluation: "evaluation_unavailable", secret_scan: "scanner_unavailable",
+    privacy_scan: "privacy_unavailable", policy: "policy_unavailable", redaction: "redaction_invalid",
+    audit: "audit_unavailable", upstream: "transport_unavailable",
+  };
+  const safeStage = FAILURE_REASONS.has(stage) ? stage : "evaluation";
+  const safeReason = FAILURE_REASONS.get(safeStage).has(reason) ? reason : defaults[safeStage];
+  return Object.assign(new Error(message), { shieldFailure: { stage: safeStage, reason: safeReason } });
 }
 
 async function cachedDecision({ decisionCache, decisionContext, body, evaluate }) {
