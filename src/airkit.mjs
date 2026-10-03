@@ -954,6 +954,7 @@ export async function exportOssRelease({ outDir }) {
   await copyFile(join(here, "context-observability.mjs"), join(outDir, "src", "context-observability.mjs"));
   await copyFile(join(here, "subagent-observability.mjs"), join(outDir, "src", "subagent-observability.mjs"));
   await copyDirectory(join(here, "audit"), join(outDir, "src", "audit"));
+  await copyDirectory(join(here, "completion"), join(outDir, "src", "completion"));
   await copyFile(join(here, "auditd.mjs"), join(outDir, "src", "auditd.mjs"));
   await chmod(join(outDir, "src", "auditd.mjs"), 0o755);
   await copyDirectory(join(here, "shield"), join(outDir, "src", "shield"));
@@ -1021,7 +1022,7 @@ export function planInstall(catalog, profileName, options = {}) {
   const configDir = resolve(options.configDir ?? defaultConfigDir());
   const ccrConfig = join(configDir, "ccr", `${profile.name}.json`);
   const shellSnippet = join(configDir, "shell", `${profile.name}.zsh`);
-  const managedFiles = renderManagedFiles(profile, { configDir }).map((file) => ({
+  const managedFiles = renderManagedFiles(profile, { configDir, completionMode: options.completionMode }).map((file) => ({
     label: file.label,
     path: file.path,
   }));
@@ -1046,7 +1047,7 @@ export async function installProfile(catalog, profileName, options = {}) {
 
   await mkdir(dirname(plan.files.ccrConfig), { recursive: true });
   await mkdir(dirname(plan.files.shellSnippet), { recursive: true });
-  const rendered = renderProfile(catalog, profileName, { configDir: plan.configDir, ccrConfigPath: plan.files.ccrConfig });
+  const rendered = renderProfile(catalog, profileName, { configDir: plan.configDir, ccrConfigPath: plan.files.ccrConfig, completionMode: options.completionMode });
   await writeTextFile(plan.files.ccrConfig, rendered.ccrConfig, { force: plan.force });
   await writeTextFile(plan.files.shellSnippet, rendered.shellSnippet, { force: plan.force });
   for (const file of rendered.managedFiles) {
@@ -1058,7 +1059,7 @@ export async function installProfile(catalog, profileName, options = {}) {
 
 export async function updateProfile(catalog, profileName, options = {}) {
   const plan = planInstall(catalog, profileName, options);
-  const rendered = renderProfile(catalog, profileName, { configDir: plan.configDir, ccrConfigPath: plan.files.ccrConfig });
+  const rendered = renderProfile(catalog, profileName, { configDir: plan.configDir, ccrConfigPath: plan.files.ccrConfig, completionMode: options.completionMode });
   const previewDir = options.previewDir
     ? resolve(options.previewDir)
     : await mkdtemp(join(tmpdir(), `airkit-${profileName}-update-`));
@@ -1223,7 +1224,7 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
   const contextWindow = catalogContextWindow(catalog, defaultRoute.provider, defaultRoute.model);
   const claudeModel = resolveClaudeLaunchModel(profile, contextWindow);
   const launchVars = launchTemplateVars(profile, configDir, mode, ccrConfig, claudeModel);
-  const basePlan = planInstall(catalog, profileName, { configDir, write: true, force: true });
+  const basePlan = planInstall(catalog, profileName, { configDir, write: true, force: true, completionMode: options.completionMode });
   const managedProfileId = `airkit-${slug(profile.name)}-${slug(mode)}`;
   const gatewayEndpoint = profileGatewayEndpoint(ccrConfig);
   const renderedLaunchArgs = (launch.args ?? []).map((arg) => renderTemplateValue(arg, launchVars));
@@ -1470,6 +1471,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
   const rendered = renderProfile(catalog, profileName, {
     configDir: plan.configDir,
     ccrConfigPath: plan.files.ccrConfig,
+    completionMode: options.completionMode,
   });
   const files = await planLaunchFiles(plan, rendered);
 
@@ -1791,7 +1793,7 @@ export async function runExternalClientCli(client, argv = process.argv.slice(2),
 export async function doctorProfile(catalog, profileName, options = {}) {
   const profile = findProfile(catalog, profileName);
   const plan = planInstall(catalog, profileName, options);
-  const expected = renderProfile(catalog, profileName, { configDir: plan.configDir, ccrConfigPath: plan.files.ccrConfig });
+  const expected = renderProfile(catalog, profileName, { configDir: plan.configDir, ccrConfigPath: plan.files.ccrConfig, completionMode: options.completionMode });
   const files = {
     ccrConfig: await checkRenderedFile(plan.files.ccrConfig, expected.ccrConfig, "CCR config"),
     shellSnippet: await checkRenderedFile(plan.files.shellSnippet, expected.shellSnippet, "shell snippet"),
@@ -3087,7 +3089,7 @@ function renderProfile(catalog, profileName, options = {}) {
   return {
     ccrConfig: `${JSON.stringify(buildCcrConfig(catalog, profileName, { configDir }), null, 2)}\n`,
     shellSnippet: buildShellSnippet(catalog, profileName, options),
-    managedFiles: renderManagedFiles(profile, { configDir }),
+    managedFiles: renderManagedFiles(profile, { configDir, completionMode: options.completionMode }),
   };
 }
 
@@ -4022,7 +4024,7 @@ function renderManagedFiles(profile, options = {}) {
 
   const binary = profile.launch?.binary ?? profile.shell?.wrappers?.[0]?.command;
   const heartbeat = profile.ccr && shouldAppendReusableRuntimeLessons(binary)
-    ? renderHeartbeatManagedFiles(configDir)
+    ? renderHeartbeatManagedFiles(configDir, undefined, { completionMode: options.completionMode })
     : [];
 
   return [...explicit, ...heartbeat];

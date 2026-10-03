@@ -331,7 +331,7 @@ async function createAuditHookEmitter(env) {
   }
 }
 
-export function renderHeartbeatManagedFiles(configDir, runtimeModuleUrl = import.meta.url) {
+export function renderHeartbeatManagedFiles(configDir, runtimeModuleUrl = import.meta.url, { completionMode = "off" } = {}) {
   const root = join(configDir, "plugins", "airkit-context");
   const statuslinePath = join(root, "scripts", "subagent-statusline.mjs");
   const manifest = {
@@ -388,7 +388,15 @@ export function renderHeartbeatManagedFiles(configDir, runtimeModuleUrl = import
       }],
     },
   };
-  const script = `import { runHeartbeatHook } from ${JSON.stringify(runtimeModuleUrl)};\nawait runHeartbeatHook();\n`;
+  const completionShadow = completionMode === "shadow";
+  if (completionShadow) {
+    hooks.hooks.Stop = [{ hooks: [{
+      args: ["${CLAUDE_PLUGIN_ROOT}/scripts/completion/hook.mjs"],
+      command: "node",
+      type: "command",
+    }] }];
+  }
+  const script = `import { runHeartbeatHook } from ${JSON.stringify(runtimeModuleUrl)};\nawait runHeartbeatHook(${completionShadow ? '{ env: { ...process.env, AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS: "0" } }' : ""});\n`;
   const statuslineScript = `import { runShieldStatusline } from ${JSON.stringify(new URL("./shield/statusline-state.mjs", runtimeModuleUrl).href)};\nawait runShieldStatusline();\n`;
   const settings = {
     subagentStatusLine: {
@@ -429,6 +437,12 @@ export function renderHeartbeatManagedFiles(configDir, runtimeModuleUrl = import
       path: statuslinePath,
       relativePath: "plugins/airkit-context/scripts/subagent-statusline.mjs",
     },
+    ...(completionShadow ? [{
+      content: `import { runCompletionHook } from ${JSON.stringify(new URL("./completion/hook.mjs", runtimeModuleUrl).href)};\nawait runCompletionHook({ mode: "shadow" });\n`,
+      label: "AirClaude completion shadow hook",
+      path: join(root, "scripts", "completion", "hook.mjs"),
+      relativePath: "plugins/airkit-context/scripts/completion/hook.mjs",
+    }] : []),
   ];
 }
 
