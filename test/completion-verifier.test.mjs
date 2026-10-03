@@ -63,14 +63,18 @@ fs.promises.realpath = async (...args) => {
   return original(...args);
 };\n`);
   const originalSpawn = childProcess.spawn;
-  const patchedSpawn = t.mock.method(childProcess, 'spawn', (executable, argv, options) =>
-    originalSpawn(executable, ['--import', preload, ...argv], options));
+  const children = [];
+  const patchedSpawn = t.mock.method(childProcess, 'spawn', (executable, argv, options) => {
+    const child = originalSpawn(executable, ['--import', preload, ...argv], options);
+    children.push(child);
+    return child;
+  });
   syncBuiltinESMExports();
   t.after(() => {
     patchedSpawn.mock.restore();
     syncBuiltinESMExports();
   });
-  return { ...fixtureState, marker, finished, preload, originalSpawn };
+  return { ...fixtureState, marker, finished, preload, originalSpawn, children };
 }
 
 test('cancellation terminates and awaits a stalled observation instead of abandoning I/O', async (t) => {
@@ -231,11 +235,124 @@ test('abort while authority is pending never launches after authority later appr
   await assert.rejects(fs.access(path.join(workspace, 'spawned')), { code: 'ENOENT' });
 });
 
-test('one deadline bounds authorization and owned execution together', async (t) => {
-  const { target, run } = await fixture(t, { authorize: async () => { await delay(150); return true; } });
+test('pre-observation expiry has no execution receipt and awaits its owned observer', async (t) => {
+  const { workspace, target, run, finished, children } = await stalledObservation(t);
   target.timeoutMs = 200;
-  target.argv = ['-e', 'setTimeout(() => process.exit(0), 150)'];
-  assert.equal((await run()).receipt.result, 'failed');
+  target.argv = ['-e', 'require("node:fs").writeFileSync("spawned", "yes"); setTimeout(() => process.exit(0), 150)'];
+  const result = await run();
+  assert.deepEqual(result, { status: 'unknown' });
+  assert.equal(result.receipt, undefined);
+  assert.equal(children.length, 1, 'the real observer must be launched, but the target must not');
+  const [{ pid, signalCode }] = children;
+  assert.notEqual(pid, process.pid);
+  assert.equal(signalCode, 'SIGKILL');
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  await assert.rejects(fs.access(finished), { code: 'ENOENT' });
+  await assert.rejects(fs.access(path.join(workspace, 'spawned')), { code: 'ENOENT' });
+  assert.equal(JSON.stringify(result).includes(workspace), false);
+});
+
+test('one deadline bounds authorization and owned execution together', async (t) => {
+  let approve;
+  let authorityEntered;
+  const entered = new Promise((resolve) => { authorityEntered = resolve; });
+  const { workspace, target, run } = await fixture(t, { authorize: () => {
+    authorityEntered();
+    return new Promise((resolve) => { approve = resolve; });
+  } });
+  const clockFile = path.join(workspace, 'logical-clock');
+  const preload = path.join(workspace, 'observer-clock.mjs');
+  const now = 1_000_000;
+  await fs.writeFile(clockFile, String(now));
+  await fs.writeFile(preload, `import fs from 'node:fs';
+Date.now = () => Number(fs.readFileSync(${JSON.stringify(clockFile)}, 'utf8'));\n`);
+  target.timeoutMs = 200;
+  target.argv = ['-e', `const fs = require('node:fs');
+process.on('SIGTERM', () => {});
+fs.writeFileSync('execution-ready', String(process.pid));
+const wait = setInterval(() => {
+  if (fs.existsSync('allow-success')) {
+    fs.writeFileSync('late-success', 'unexpected abandoned execution');
+    clearInterval(wait);
+    process.exit(0);
+  }
+}, 5);`];
+  const originalSpawn = childProcess.spawn;
+  const children = [];
+  const patched = t.mock.method(childProcess, 'spawn', (executable, argv, options) => {
+    const observer = argv.includes('--completion-observer');
+    const child = originalSpawn(executable, observer ? ['--import', preload, ...argv] : argv, options);
+    const owned = { child, observer, terminal: new Promise((resolve) => child.once('close', resolve)) };
+    children.push(owned);
+    return child;
+  });
+  syncBuiltinESMExports();
+  const wallSetTimeout = globalThis.setTimeout;
+  const wallClearTimeout = globalThis.clearTimeout;
+  const abort = new AbortController();
+  let watchdog;
+  let pending;
+  let exercising;
+  // Only deadline scheduling is virtual. Both children, filesystem reads, IPC,
+  // signal delivery, and terminal events remain real and separately wall-bounded.
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now });
+  const logicalSetTimeout = globalThis.setTimeout;
+  const deadlines = [];
+  globalThis.setTimeout = (callback, milliseconds, ...args) => {
+    deadlines.push(milliseconds);
+    return logicalSetTimeout(callback, milliseconds, ...args);
+  };
+  try {
+    const exercise = async () => {
+      pending = run({ signal: abort.signal });
+      await entered;
+      await fs.writeFile(clockFile, String(now + 150));
+      t.mock.timers.tick(150);
+      approve(true);
+      const pid = Number(await ready(path.join(workspace, 'execution-ready')));
+      assert.equal(children.length, 2, 'authorization and real pre-observation must reach execution');
+      const [observation, execution] = children;
+      assert.equal(observation.observer, true);
+      assert.equal(observation.child.exitCode, 0);
+      assert.equal(execution.observer, false);
+      assert.equal(execution.child.pid, pid);
+      process.kill(pid, 0);
+      assert.deepEqual(deadlines, [200, 50, 50], 'authorization, observation and execution share the original deadline');
+      await fs.writeFile(clockFile, String(now + 200));
+      t.mock.timers.tick(50);
+      t.mock.timers.tick(100); // The real target ignores SIGTERM; advance the owned SIGKILL grace.
+      await execution.terminal;
+      assert.equal(execution.child.signalCode, 'SIGKILL');
+      assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+      await fs.writeFile(path.join(workspace, 'allow-success'), 'yes');
+      const result = await pending;
+      assert.equal(result.receipt.result, 'failed');
+      assert.equal(result.receipt.executionId, result.executionId);
+      assert.equal(result.receipt.targetId, 'test-1');
+      assert.equal(children.length, 2, 'an expired deadline must not start a post-observer');
+      await assert.rejects(fs.access(path.join(workspace, 'late-success')), { code: 'ENOENT' });
+      for (const secret of [workspace, 'execution-ready', 'allow-success', 'late-success', 'process.exit']) {
+        assert.equal(JSON.stringify(result).includes(secret), false);
+      }
+    };
+    exercising = exercise();
+    await Promise.race([exercising, new Promise((_, reject) => {
+      watchdog = wallSetTimeout(() => reject(new Error('real owned phases exceeded the wall-clock watchdog')), 3000);
+    })]);
+  } finally {
+    wallClearTimeout(watchdog);
+    abort.abort();
+    for (const { child } of children) {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    }
+    await Promise.all(children.map(({ terminal }) => terminal));
+    await pending?.catch(() => {});
+    await exercising?.catch(() => {});
+    globalThis.setTimeout = logicalSetTimeout;
+    t.mock.timers.reset();
+    patched.mock.restore();
+    syncBuiltinESMExports();
+  }
 });
 
 test('exit one fails even when stdout claims PASS and no output or command is returned', async (t) => {
