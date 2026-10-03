@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import childProcess, { execFileSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { syncBuiltinESMExports } from 'node:module';
 import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import { createCompletionController } from '../src/completion/controller.mjs';
 import { createCompletionStore } from '../src/completion/store.mjs';
 import { evaluateCompletion, hasVerifiedTargets } from '../src/completion/evaluator.mjs';
@@ -34,6 +36,135 @@ async function ready(file) {
   }
   assert.fail('owned child did not become ready');
 }
+
+async function stalledObservation(t) {
+  const fixtureState = await fixture(t);
+  const { workspace } = fixtureState;
+  const marker = path.join(workspace, 'observer-pid');
+  const finished = path.join(workspace, 'observation-finished');
+  const preload = path.join(workspace, 'stall-observation.mjs');
+  const originalRealpath = fs.realpath;
+  const stall = async (...args) => {
+    await fs.writeFile(marker, String(process.pid));
+    await delay(1400);
+    await fs.writeFile(finished, 'unexpected abandoned work');
+    return originalRealpath(...args);
+  };
+  // Original implementation ran reads in the host; future owned child loads
+  // the same stalled real dependency, rather than bypassing the regression.
+  t.mock.method(fs, 'realpath', stall);
+  await fs.writeFile(preload, `import fs from 'node:fs';
+import { setTimeout as delay } from 'node:timers/promises';
+const original = fs.promises.realpath;
+fs.promises.realpath = async (...args) => {
+  await fs.promises.writeFile(${JSON.stringify(marker)}, String(process.pid));
+  await delay(1400);
+  await fs.promises.writeFile(${JSON.stringify(finished)}, 'unexpected abandoned work');
+  return original(...args);
+};\n`);
+  const originalSpawn = childProcess.spawn;
+  const patchedSpawn = t.mock.method(childProcess, 'spawn', (executable, argv, options) =>
+    originalSpawn(executable, ['--import', preload, ...argv], options));
+  syncBuiltinESMExports();
+  t.after(() => {
+    patchedSpawn.mock.restore();
+    syncBuiltinESMExports();
+  });
+  return { ...fixtureState, marker, finished, preload, originalSpawn };
+}
+
+test('cancellation terminates and awaits a stalled observation instead of abandoning I/O', async (t) => {
+  const { marker, finished, verifier, target } = await stalledObservation(t);
+  const abort = new AbortController();
+  const pending = verifier.observeRevision({ key, target, signal: abort.signal });
+  const pid = Number(await ready(marker));
+  const stoppedAt = performance.now();
+  abort.abort();
+  const result = await pending;
+  assert.equal(result.status, 'unknown');
+  assert.ok(performance.now() - stoppedAt < 500, 'abort must not await the 1400ms stalled read');
+  assert.notEqual(pid, process.pid, 'filesystem I/O must belong to an owned observer child');
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  await assert.rejects(fs.access(finished), { code: 'ENOENT' });
+});
+
+test('run deadline terminates and awaits stalled pre-observation without starting the target', async (t) => {
+  const { workspace, marker, finished, target, run } = await stalledObservation(t);
+  target.timeoutMs = 500;
+  target.argv = ['-e', 'require("node:fs").writeFileSync("spawned", "yes")'];
+  const startedAt = performance.now();
+  const pending = run();
+  const pid = Number(await ready(marker));
+  const result = await pending;
+  assert.equal(result.status, 'unknown');
+  assert.ok(performance.now() - startedAt < 1000, 'deadline must not await the 1400ms stalled read');
+  assert.notEqual(pid, process.pid, 'filesystem I/O must belong to an owned observer child');
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  await assert.rejects(fs.access(finished), { code: 'ENOENT' });
+  await assert.rejects(fs.access(path.join(workspace, 'spawned')), { code: 'ENOENT' });
+});
+
+test('observer exits pending I/O when its owning IPC connection shuts down', async (t) => {
+  const { target, marker, finished, preload, originalSpawn } = await stalledObservation(t);
+  const entry = fileURLToPath(new URL('../src/completion/verifier.mjs', import.meta.url));
+  const child = originalSpawn(process.execPath, ['--import', preload, entry, '--completion-observer'],
+    { shell: false, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
+  const terminal = new Promise((resolve) => child.once('exit', resolve));
+  child.send({ cwd: target.cwd, files: target.files, deadline: Date.now() + 5000 });
+  const pid = Number(await ready(marker));
+  const stoppedAt = performance.now();
+  child.disconnect();
+  await terminal;
+  assert.ok(performance.now() - stoppedAt < 500, 'owner shutdown must not await the stalled read');
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  await assert.rejects(fs.access(finished), { code: 'ENOENT' });
+});
+
+test('malformed or disconnected observer replies terminate the owned child without disclosing data', async (t) => {
+  for (const mode of ['malformed', 'disconnected']) {
+    await t.test(mode, async (t) => {
+      const { target, verifier } = await fixture(t);
+      const originalSpawn = childProcess.spawn;
+      let pid;
+      const script = `process.once('message', () => {
+        ${mode === 'malformed' ? 'process.send({status:"ok",revision:"secret source contents",path:"secret path"})' : 'process.disconnect()'};
+        setInterval(() => {}, 1000);
+      });`;
+      const patched = t.mock.method(childProcess, 'spawn', (executable, argv, options) => {
+        const child = originalSpawn(process.execPath, ['-e', script], options);
+        pid = child.pid;
+        return child;
+      });
+      syncBuiltinESMExports();
+      t.after(() => { patched.mock.restore(); syncBuiltinESMExports(); });
+      const result = await verifier.observeRevision({ key, target });
+      assert.equal(result.status, 'unknown');
+      assert.equal(JSON.stringify(result).includes('secret'), false);
+      assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+    });
+  }
+});
+
+test('observer ignores ambient Node preloads and ordinary imports never enter worker mode', async (t) => {
+  const { workspace, target, verifier } = await fixture(t);
+  const marker = path.join(workspace, 'ambient-loaded');
+  const preload = path.join(workspace, 'ambient.mjs');
+  await fs.writeFile(preload, `import fs from 'node:fs'; fs.writeFileSync(${JSON.stringify(marker)}, 'bad preload');`);
+  const previous = process.env.NODE_OPTIONS;
+  process.env.NODE_OPTIONS = `--import=${preload}`;
+  try {
+    assert.equal((await verifier.observeRevision({ key, target })).status, 'ok');
+    await assert.rejects(fs.access(marker), { code: 'ENOENT' });
+  } finally {
+    if (previous === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = previous;
+  }
+  const imported = execFileSync(process.execPath, ['--input-type=module', '-e',
+    `await import(${JSON.stringify(new URL('../src/completion/verifier.mjs', import.meta.url).href)}); console.log(process.listenerCount('message'));`],
+  { encoding: 'utf8' });
+  assert.equal(imported.trim(), '0');
+});
 
 test('exit zero binds opaque IDs and a content revision to the owned execution', async (t) => {
   const { run } = await fixture(t, { clock: () => 42 });
