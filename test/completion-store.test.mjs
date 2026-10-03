@@ -12,6 +12,15 @@ const key = { sessionId: 'session1', workspaceId: 'workspace1', requestId: 'requ
 const options = () => ({ deadline: Date.now() + 1000 });
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+async function waitForEvent(promise, name) {
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`timed out waiting for ${name}`)), 1000);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
 function ledger(requestKey = key) {
   return { key: { ...requestKey }, nativeEventId: 'event1', seenNativeEventIds: ['event1'],
     enabled: false, mode: 'shadow', coverage: 'unknown', modelFamily: 'unknown',
@@ -213,18 +222,67 @@ test('expired or aborted shared deadlines never invoke a mutating callback', asy
 });
 
 test('deadline releases owned lock and a delayed callback cannot overwrite a new generation', async (t) => {
-  const { store } = fixture(t);
-  await initialize(store);
-  let release;
+  let now = Date.now();
+  // Hold the test clock during setup; the store still owns its real 30 ms callback timer.
+  const { root, store } = fixture(t, { clock: () => now });
+  assert.equal((await initialize(store)).status, 'ok');
+  const entered = Promise.withResolvers();
+  const gate = Promise.withResolvers();
+  const exited = Promise.withResolvers();
+  t.after(() => gate.resolve());
   const pending = store.transaction(key, async (state) => {
-    await new Promise((resolve) => { release = resolve; });
+    entered.resolve();
+    await gate.promise;
     state.cancelled = true;
-  }, { deadline: Date.now() + 30 });
-  assert.equal((await pending).status, 'deadline');
+    exited.resolve();
+  }, { deadline: now + 30 });
+  await waitForEvent(entered.promise, 'delayed callback entry');
+  assert.equal(fs.existsSync(path.join(root, '.completion-v1.lock')), true);
+  assert.deepEqual(await waitForEvent(pending, 'natural callback deadline'), { status: 'deadline', reason: 'deadline' });
+  assert.equal(fs.existsSync(path.join(root, '.completion-v1.lock')), false);
+  now += 30;
   const next = { ...key, generation: 2, requestId: 'request2' };
-  assert.equal((await store.transaction(key, (state) => Object.assign(state, ledger(next)), options())).status, 'ok');
-  release(); await delay(30);
-  assert.deepEqual((await store.read(next, options())).state, ledger(next));
+  assert.equal((await store.transaction(key, (state) => Object.assign(state, ledger(next)), { deadline: now + 1000 })).status, 'ok');
+  const committed = fs.readFileSync(statePath(root), 'utf8');
+  gate.resolve();
+  await waitForEvent(exited.promise, 'expired callback mutation');
+  assert.deepEqual((await store.read(next, { deadline: now + 1000 })).state, ledger(next));
+  assert.equal(fs.readFileSync(statePath(root), 'utf8'), committed);
+});
+
+test('deadline during real state read never enters the callback and releases its owned lock', async (t) => {
+  let now = Date.now();
+  const { root, store } = fixture(t, { clock: () => now });
+  assert.equal((await initialize(store)).status, 'ok');
+  const file = statePath(root);
+  const before = fs.readFileSync(file, 'utf8');
+  const reading = Promise.withResolvers();
+  const gate = Promise.withResolvers();
+  t.after(() => gate.resolve());
+  const open = fs.promises.open;
+  t.mock.method(fs.promises, 'open', async (...args) => {
+    const handle = await open(...args);
+    if (args[0] === file) {
+      const read = handle.read.bind(handle);
+      handle.read = async (...readArgs) => {
+        const result = await read(...readArgs);
+        reading.resolve();
+        await gate.promise;
+        return result;
+      };
+    }
+    return handle;
+  });
+  let invoked = false;
+  const pending = store.transaction(key, () => { invoked = true; }, { deadline: now + 30 });
+  await waitForEvent(reading.promise, 'real state read');
+  assert.equal(fs.existsSync(path.join(root, '.completion-v1.lock')), true);
+  now += 30;
+  gate.resolve();
+  assert.deepEqual(await waitForEvent(pending, 'deadline before callback entry'), { status: 'deadline', reason: 'deadline' });
+  assert.equal(invoked, false);
+  assert.equal(fs.readFileSync(file, 'utf8'), before);
+  assert.equal(fs.readdirSync(root).some((name) => name.endsWith('.lock') || name.endsWith('.tmp')), false);
 });
 
 test('two real processes contend on a lock and unknown expired locks are never reclaimed', async (t) => {
