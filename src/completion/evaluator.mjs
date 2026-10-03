@@ -16,7 +16,11 @@ export function isValidSnapshot(snapshot) {
       && item.requiredTargetIds.length <= 128 && item.requiredTargetIds.every(isBoundedId)
       && new Set(item.requiredTargetIds).size === item.requiredTargetIds.length
       && Array.isArray(item.receiptIds) && item.receiptIds.length <= 128 && item.receiptIds.every(isBoundedId)
-      && new Set(item.receiptIds).size === item.receiptIds.length)
+      && new Set(item.receiptIds).size === item.receiptIds.length
+      && (item.unresolvedTargetIds === undefined || (Array.isArray(item.unresolvedTargetIds)
+        && item.unresolvedTargetIds.length <= 128
+        && item.unresolvedTargetIds.every((id) => item.requiredTargetIds.includes(id))
+        && new Set(item.unresolvedTargetIds).size === item.unresolvedTargetIds.length)))
     && Array.isArray(receipts) && receipts.length <= 128
     && receipts.every((receipt) => receipt && ['id', 'executionId', 'itemId', 'targetId', 'revision']
       .every((field) => isBoundedId(receipt[field])) && receipt.key
@@ -28,9 +32,10 @@ export function isValidSnapshot(snapshot) {
     && budget && Number.isInteger(budget.used) && budget.used >= 0 && budget.used <= 2
     && Number.isInteger(budget.remaining) && budget.remaining === 2 - budget.used
     && typeof budget.unknownReconciled === 'boolean'
-    && (budget.firstInterventionAt === null || (Number.isFinite(budget.firstInterventionAt)
-      && budget.firstInterventionAt <= validity?.now))
-    && (budget.lastProgressDigest === null || isBoundedId(budget.lastProgressDigest))
+    && (budget.used === 0
+      ? budget.firstInterventionAt === null && budget.lastProgressDigest === null
+      : Number.isFinite(budget.firstInterventionAt) && budget.firstInterventionAt <= validity?.now
+        && isBoundedId(budget.lastProgressDigest))
     && isBoundedId(snapshot.revision) && validity?.status === 'valid'
     && Number.isFinite(validity.now) && isBoundedId(validity.progressDigest)
     && ['enabled', 'cancelled', 'awaitingAuthority', 'safeWorkRemaining', 'executionTask', 'checkpointPresent', 'stopHookActive']
@@ -39,6 +44,7 @@ export function isValidSnapshot(snapshot) {
 
 export function hasVerifiedTargets(item, snapshot) {
   if (item.source === 'model-proposed' || item.requiredTargetIds.length === 0) return false;
+  if (item.unresolvedTargetIds?.length) return false;
   return item.requiredTargetIds.every((targetId) => {
     const receipt = snapshot.receipts.findLast((candidate) => candidate?.itemId === item.itemId
       && candidate.targetId === targetId && sameKey(candidate.key, snapshot.key));
@@ -73,8 +79,10 @@ export function evaluateCompletion(snapshot) {
   const unknown = snapshot.items.filter((item) => item.source === 'model-proposed');
   const missing = snapshot.executionTask && !snapshot.checkpointPresent;
   // 4. A genuine blocker does not hide other safe work.
+  const blocked = snapshot.items.some((item) => item.source !== 'model-proposed' && item.status === 'blocked');
+  if (blocked && !snapshot.safeWorkRemaining) return decide('allow', 'external_blocker');
   if (!pending.length && !unknown.length && !missing) return decide('allow',
-    snapshot.items.some((item) => item.source !== 'model-proposed' && item.status === 'blocked') ? 'external_blocker' : 'complete');
+    blocked ? 'external_blocker' : 'complete');
   if (!snapshot.safeWorkRemaining && !missing && !unknown.length) return decide('allow', 'external_blocker');
   // 5/6. Determine a concrete next check, then apply all continuation bounds.
   const reason = missing ? 'checkpoint_missing' : pending.length ? 'pending_work' : 'reconciliation_required';
