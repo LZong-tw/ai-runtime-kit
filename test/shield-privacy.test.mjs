@@ -101,7 +101,7 @@ test("privacy unknown reasons preserve only the pinned worker and adapter's fixe
     const result = await filter.scan(Buffer.from(JSON.stringify({ content: sentinel })));
     assert.deepEqual(result, { status: "unknown", findings: [], reason: allowed.includes(reason) ? reason : "privacy_unavailable" });
     assert.doesNotMatch(JSON.stringify(result), new RegExp(sentinel));
-    if (["model_killed", "model_error"].includes(reason)) {
+    if (["model_killed", "model_error", "model_timeout"].includes(reason)) {
       assert.equal(await filter.isReady(), false);
       await flushTasks();
     }
@@ -456,12 +456,34 @@ test("model recovery health is singleflight and does not spend the next scan's i
   assert.equal((await next).status, "ok");
 });
 
+test("a model timeout from a worker without the cooperative-timeout capability keeps the not-ready health path", async (t) => {
+  for (const capabilities of [undefined, "cooperative-timeout", ["model_killed"], { 0: "cooperative-timeout" }]) {
+    let timedOut = false;
+    let kills = 0;
+    const worker = fakeWorker((message, emit) => {
+      if (message.type === "health") emit(capabilities === undefined ? health(message) : { ...health(message), capabilities });
+      if (message.type !== "scan") return;
+      if (!timedOut) { timedOut = true; emit({ type: "scan", id: message.id, status: "unknown", reason: "model_timeout" }); return; }
+      emit({ type: "scan", id: message.id, status: "ok", findings: [] });
+    });
+    worker.kill = () => { kills += 1; worker.emit("exit", 0); };
+    const filter = await createPrivacyFilter({ provision, validateWorker, timeoutMs: 100, spawnWorker: () => worker });
+    t.after(() => filter.close());
+    assert.equal((await filter.scan(Buffer.from('{}'))).reason, "model_timeout");
+    assert.equal(await filter.isReady(), false, JSON.stringify(capabilities));
+    await flushTasks();
+    assert.equal((await filter.scan(Buffer.from('{"content":"next"}'))).status, "ok");
+    assert.deepEqual(worker.messages.map((message) => message.type), ["health", "scan", "health", "scan"]);
+    assert.equal(kills, 0);
+  }
+});
+
 test("a worker-reported model timeout keeps the same ready worker without a health round trip", async (t) => {
   let timedOut = false;
   let spawns = 0;
   let kills = 0;
   const worker = fakeWorker((message, emit) => {
-    if (message.type === "health") emit(health(message));
+    if (message.type === "health") emit(cooperativeHealth(message));
     if (message.type !== "scan") return;
     if (!timedOut) { timedOut = true; emit({ type: "scan", id: message.id, status: "unknown", reason: "model_timeout" }); return; }
     emit({ type: "scan", id: message.id, status: "ok", findings: [] });
@@ -481,7 +503,7 @@ test("queued scans dispatch to the same worker after the active scan reports mod
   let startup = true;
   let kills = 0;
   const worker = fakeWorker((message, emit) => {
-    if (message.type === "health" && startup) { startup = false; emit(health(message)); }
+    if (message.type === "health" && startup) { startup = false; emit(cooperativeHealth(message)); }
   });
   worker.kill = () => { kills += 1; worker.emit("exit", 0); };
   const filter = await createPrivacyFilter({ provision, validateWorker, timeoutMs: 5_000, startupTimeoutMs: 200, spawnWorker: () => worker });
@@ -931,6 +953,10 @@ test("checkpoint startup digest and per-scan metadata detect same-size inode rep
 
 function health(message) {
   return { type: "health", id: message.id, protocol: "airkit-privacy-ndjson-v1", version: "privacy-1" };
+}
+
+function cooperativeHealth(message) {
+  return { ...health(message), capabilities: ["cooperative-timeout"] };
 }
 
 async function flushTasks() {
