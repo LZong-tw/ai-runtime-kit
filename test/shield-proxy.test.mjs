@@ -83,7 +83,7 @@ test("diagnostics separate real daemon scan, policy and redaction failures while
     const reply = request.type === "health"
       ? { type: "health", id: request.id, protocol: request.protocol, version: "privacy-1" }
       : mode === "prediction" ? { type: "scan", id: request.id, status: "unknown", reason: "invalid-prediction", private: "prediction-secret" }
-        : ["model_timeout", "model_error", "redaction-projection-limit", "redaction-match-limit", "redaction-body-limit", "redaction-frame-limit"].includes(mode) ? { type: "scan", id: request.id, status: "unknown", reason: mode, private: "worker-private-secret" }
+        : ["model_timeout", "model_error", "model_killed", "protocol-graph-mutation", "protocol-control-mutation", "signed-block-mutation", "redaction-projection-limit", "redaction-match-limit", "redaction-body-limit", "redaction-frame-limit"].includes(mode) ? { type: "scan", id: request.id, status: "unknown", reason: mode, private: "worker-private-secret" }
         : mode === "unknown" ? { type: "scan", id: request.id, status: "unknown", reason: "credential-secret" }
           : { type: "scan", id: request.id, status: "ok", findings: [] };
     worker.stdout.emit("data", `${JSON.stringify(reply)}\n`);
@@ -112,7 +112,9 @@ test("diagnostics separate real daemon scan, policy and redaction failures while
   t.after(() => daemon.shield.close());
   for (const [nextMode, stage, reason] of [
     ["prediction", "privacy_scan", "invalid-prediction"], ["unknown", "privacy_scan", "privacy_unavailable"],
-    ["model_timeout", "privacy_scan", "model_timeout"], ["model_error", "privacy_scan", "model_error"],
+    ["model_timeout", "privacy_scan", "model_timeout"], ["model_error", "privacy_scan", "model_error"], ["model_killed", "privacy_scan", "model_killed"],
+    ["protocol-graph-mutation", "privacy_scan", "protocol-graph-mutation"], ["protocol-control-mutation", "privacy_scan", "protocol-control-mutation"],
+    ["signed-block-mutation", "privacy_scan", "signed-block-mutation"],
     ["redaction-projection-limit", "privacy_scan", "redaction-projection-limit"], ["redaction-match-limit", "privacy_scan", "redaction-match-limit"],
     ["redaction-body-limit", "privacy_scan", "redaction-body-limit"], ["redaction-frame-limit", "privacy_scan", "redaction-frame-limit"],
     ["privacy_throw", "privacy_scan", "privacy_unavailable"],
@@ -127,7 +129,7 @@ test("diagnostics separate real daemon scan, policy and redaction failures while
     assert.equal(latest.stage, stage, mode); assert.equal(latest.reason, reason, mode);
     assert.equal(latest.bytes, 25);
     const ready = () => fetch(`${daemon.shield.origin}/_airkit/shield/ready`, { headers: { "x-airkit-shield": CAPABILITY } });
-    if (["model_timeout", "model_error"].includes(mode)) assert.equal((await ready()).status, 503);
+    if (["model_killed", "model_error"].includes(mode)) assert.equal((await ready()).status, 503);
     assert.equal((await ready()).status, 204);
   }
   assert.equal(upstreamCalls, 0);
