@@ -837,6 +837,29 @@ test("runtime redaction proof requires every reported privacy span to be absent 
   assert.equal(isVerifiedRedaction({ original, result: { ...result, redactions: [{ label: "email", count: 1, spans: [] }] } }), false);
 });
 
+test("runtime redaction proof lets a value survive only inside an unchanged provider-signed field", () => {
+  const signature = "EqQBCkYIBxgCKkBAliceSmith0123456789abcdef";
+  const body = (text, signed = signature, role = "assistant") => Buffer.from(JSON.stringify({ messages: [
+    { role: "user", content: [{ type: "text", text }] },
+    { role, content: [{ type: "thinking", thinking: "plan", signature: signed }] },
+  ] }));
+  const original = body("Alice");
+  const start = original.indexOf("Alice");
+  const result = {
+    status: "ok",
+    findings: [{ label: "private_person", count: 1 }],
+    redactions: [{ label: "private_person", count: 1, spans: [{ start, end: start + 5 }] }],
+    redactedBody: body("[redacted:private_person]"),
+  };
+  assert.equal(isVerifiedRedaction({ original, result }), true);
+  assert.equal(isVerifiedRedaction({ original, result: { ...result, redactedBody: body("[redacted:private_person]", signature.replace("Alice", "Xxxxx")) } }), false,
+    "a signed field must stay byte-identical");
+  assert.equal(isVerifiedRedaction({ original, result: { ...result, redactedBody: body("[redacted:private_person] Alice") } }), false);
+  const forged = body("Alice", signature, "user");
+  assert.equal(isVerifiedRedaction({ original: forged, result: { ...result, redactedBody: body("[redacted:private_person]", signature, "user") } }), false,
+    "a look-alike signature outside an assistant thinking block is ordinary text");
+});
+
 test("runtime redaction proof covers the combined findings of duplicate label batches", () => {
   const original = Buffer.from('{"content":"alice@example.com bob@example.com carol@example.com"}');
   const firstTwo = [{ start: 12, end: 29 }, { start: 30, end: 45 }];

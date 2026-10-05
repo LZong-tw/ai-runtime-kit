@@ -21,6 +21,8 @@ const ADAPTER_UNKNOWN_REASONS = new Set([
   "model_timeout", "model_error", "model_killed",
   "redaction-projection-limit", "redaction-match-limit", "redaction-body-limit", "redaction-frame-limit",
 ]);
+const OPAQUE_VALUE = /^[A-Za-z0-9+/=_-]{16,}$/;
+const PROTOCOL_ID = /^[a-zA-Z0-9_-]+$/;
 const KNOWN_LABELS = new Set([
   "address", "credit-card", "email", "ip-address", "person", "phone", "ssn", "token",
   "account_number", "private_address", "private_email", "private_person",
@@ -351,17 +353,71 @@ export function isVerifiedRedaction({ original, result } = {}) {
   if (!Array.isArray(result.findings) || !Array.isArray(result.redactions)) return false;
   const requiredCounts = new Map();
   for (const finding of result.findings) requiredCounts.set(finding.label, (requiredCounts.get(finding.label) ?? 0) + finding.count);
+  const before = opaqueValues(Buffer.from(original));
+  const after = opaqueValues(result.redactedBody);
+  if (!before || !after || before.length !== after.length
+    || before.some(([path, value], index) => after[index][0] !== path || after[index][1] !== value)) return false;
+  // Provider-signed values travel unscanned, so an original value may survive only inside one of them.
+  const visible = withoutTokens(result.redactedBody, after.map(([, value]) => Buffer.from(JSON.stringify(value))));
   const counts = new Map();
   for (const redaction of result.redactions) {
     if (!Array.isArray(redaction.spans) || redaction.spans.length !== redaction.count) return false;
     for (const span of redaction.spans) {
       if (!Number.isInteger(span.start) || !Number.isInteger(span.end) || span.start < 0 || span.end <= span.start || span.end > original.byteLength) return false;
       const originalValue = Buffer.from(original).subarray(span.start, span.end);
-      if (result.redactedBody.includes(originalValue)) return false;
+      if (visible.includes(originalValue)) return false;
     }
     counts.set(redaction.label, (counts.get(redaction.label) ?? 0) + redaction.count);
   }
   return [...requiredCounts].every(([label, count]) => counts.get(label) >= count);
+}
+
+// Exact-path table shared in meaning with the OPF adapter's collectOpaqueValues; kept independent on purpose.
+function opaqueValues(body) {
+  let root;
+  try { root = JSON.parse(body.toString("utf8")); } catch { return null; }
+  const entries = [];
+  const add = (path, value, pattern = OPAQUE_VALUE) => { if (typeof value === "string" && pattern.test(value)) entries.push([path, value]); };
+  const base64Source = (block, path) => {
+    if (["image", "document"].includes(block?.type) && block?.source?.type === "base64") add(`${path}.source.data`, block.source.data);
+  };
+  const each = (value, visit) => { if (Array.isArray(value)) value.forEach(visit); };
+  each(root?.messages, (message, messageIndex) => each(message?.content, (block, blockIndex) => {
+    const path = `${messageIndex}.${blockIndex}`;
+    const type = typeof block?.type === "string" ? block.type : undefined;
+    base64Source(block, path);
+    if (message.role === "user" && type === "tool_result") each(block.content, (nested, index) => base64Source(nested, `${path}.content.${index}`));
+    if (message.role !== "assistant") return;
+    if (type === "thinking") add(`${path}.signature`, block.signature);
+    else if (type === "redacted_thinking") add(`${path}.data`, block.data);
+    else if (type === "server_tool_use" || type === "mcp_tool_use") add(`${path}.id`, block.id, PROTOCOL_ID);
+    else if (type?.endsWith("_tool_result") && type !== "tool_result") {
+      add(`${path}.tool_use_id`, block.tool_use_id, PROTOCOL_ID);
+      if (type === "web_search_tool_result") each(block.content, (item, index) => {
+        if (item?.type === "web_search_result") add(`${path}.content.${index}.encrypted_content`, item.encrypted_content);
+      });
+    } else if (type === "text") each(block.citations, (citation, index) => {
+      if (citation?.type === "web_search_result_location") add(`${path}.citations.${index}.encrypted_index`, citation.encrypted_index);
+    });
+  }));
+  return entries;
+}
+
+function withoutTokens(body, tokens) {
+  let pieces = [body];
+  for (const token of tokens) {
+    pieces = pieces.flatMap((piece) => {
+      const parts = [];
+      let from = 0;
+      for (let at = piece.indexOf(token); at >= 0; at = piece.indexOf(token, from)) {
+        parts.push(piece.subarray(from, at));
+        from = at + token.length;
+      }
+      parts.push(piece.subarray(from));
+      return parts;
+    });
+  }
+  return Buffer.concat(pieces.flatMap((piece, index) => index ? [Buffer.from([0]), piece] : [piece]));
 }
 
 function decodeRedactedBody(value) {
