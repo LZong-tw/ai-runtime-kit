@@ -4,9 +4,9 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { repairCcrCodexProfiles } from "../src/codex-takeover-guard.mjs";
@@ -138,6 +138,68 @@ export function isSupportedCcrVersion(version) {
   return major === 3 && (minor > 0 || patch >= 18);
 }
 
+export async function installStagedCcrPackage({ isolatedRoot, stagedPackage, copy = cp }) {
+  const temporaryRoots = await Promise.all([tmpdir(), "/tmp"].map((path) => realpath(path)));
+  const root = await realpath(isolatedRoot);
+  assert.ok(basename(root).startsWith("airkit-ccr3-e2e-")
+    && temporaryRoots.some((path) => isBelow(path, root)), "invalid isolated fixture root");
+  assert.ok(isAbsolute(stagedPackage), "expected an absolute temporary staged package path");
+  const source = await realpath(stagedPackage);
+  assert.ok(temporaryRoots.some((path) => isBelow(path, source))
+    && !isBelow(root, source) && !isBelow(source, root) && source !== root,
+    "expected a temporary staged package outside the fixture");
+  const packageDir = join(root, "runtime", "node_modules", "@musistudio", "claude-code-router");
+  assert.equal(await realpath(packageDir), packageDir, "fixture package path must not escape through symlinks");
+  const backupPath = `${packageDir}.original-fixture`;
+  const failedPath = `${packageDir}.failed-staged-copy`;
+  for (const path of [backupPath, failedPath]) {
+    const existing = await lstat(path).catch((error) => {
+      if (error.code !== "ENOENT") throw error;
+      return null;
+    });
+    assert.equal(existing, null, "fixture package backup path already exists");
+  }
+  await assertContainedPackageTree(source);
+  await assertStagedPackageIdentity(source);
+  await rename(packageDir, backupPath);
+  try {
+    await copy(source, packageDir, { recursive: true, dereference: false, verbatimSymlinks: true });
+    await assertContainedPackageTree(packageDir);
+    await assertStagedPackageIdentity(packageDir);
+  } catch (error) {
+    await rename(packageDir, failedPath).catch((renameError) => {
+      if (renameError.code !== "ENOENT") throw renameError;
+    });
+    await rename(backupPath, packageDir);
+    throw error;
+  }
+  return { backupPath, packageDir, ccrVersion: "3.0.18", gatewayVersion: "1.0.21" };
+}
+
+function isBelow(root, path) {
+  const suffix = relative(root, path);
+  return suffix !== "" && suffix !== ".." && !suffix.startsWith(`../`) && !isAbsolute(suffix);
+}
+
+async function assertContainedPackageTree(root, directory = root) {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isSymbolicLink()) {
+      assert.ok(!isAbsolute(await readlink(path)) && isBelow(root, await realpath(path)),
+        "staged package symlink escapes its package tree");
+    } else if (entry.isDirectory()) {
+      await assertContainedPackageTree(root, path);
+    }
+  }
+}
+
+async function assertStagedPackageIdentity(root) {
+  const ccr = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+  const gateway = JSON.parse(await readFile(join(root, "node_modules", "@the-next-ai", "ai-gateway", "package.json"), "utf8"));
+  assert.ok(ccr.name === "@musistudio/claude-code-router" && ccr.version === "3.0.18"
+    && gateway.name === "@the-next-ai/ai-gateway" && gateway.version === "1.0.21", "invalid staged package identity");
+}
+
 export async function verifyDangerousCodexPersistence({
   ccr,
   dangerousProfile,
@@ -230,6 +292,8 @@ async function main() {
       packageArchive,
     ], env, 120_000);
     assert.equal(install.status, 0, `isolated npm install failed: ${install.stderr}`);
+    const stagedPackage = process.env.AIRKIT_CCR_E2E_STAGED_PACKAGE;
+    const stagedRuntime = stagedPackage ? await installStagedCcrPackage({ isolatedRoot: root, stagedPackage }) : null;
 
     const ccr = join(runtimeRoot, "node_modules", ".bin", "ccr");
     const fakeBin = join(root, "fake-bin");
@@ -239,6 +303,10 @@ async function main() {
     env.PATH = `${fakeBin}:${dirname(ccr)}:${env.PATH ?? ""}`;
     const ccrPackage = JSON.parse(await readFile(
       join(runtimeRoot, "node_modules", "@musistudio", "claude-code-router", "package.json"),
+      "utf8",
+    ));
+    const gatewayPackage = JSON.parse(await readFile(
+      join(stagedRuntime?.packageDir ?? runtimeRoot, "node_modules", "@the-next-ai", "ai-gateway", "package.json"),
       "utf8",
     ));
     assert.equal(
@@ -398,6 +466,15 @@ async function main() {
     assert.equal(Object.keys(compatibilityPolicies).length, 6);
 
     assert.equal(payload.content?.[0]?.text, "FAKE_PROVIDER_OK");
+    for (const [scenario, usage] of Object.entries(payload.usageScenarios ?? {})) {
+      assert.deepEqual(usage, {
+        input_tokens: 3,
+        cache_read_input_tokens: 110289,
+        cache_creation_input_tokens: 19179,
+        output_tokens: 324,
+      }, `native Anthropic ${scenario} usage must stay separated`);
+    }
+    assert.deepEqual(Object.keys(payload.usageScenarios ?? {}), ["native-json", "native-sse"]);
     assert.equal(payload.compatibilityMcp?.serverInfo?.name, "airkit-compatibility");
     assert.equal(payload.compatibilityMcp?.protocolVersion, "2025-03-26");
     assert.equal(payload.ambientSentinel, undefined, "ambient controller env leaked into the CCR/Claude child");
@@ -425,7 +502,9 @@ async function main() {
     assert.equal(responsesLaunch.child.exitCode ?? responsesLaunch.child.status, 0, "Responses launch failed");
     const responseContinuation = JSON.parse(await readFile(env.FAKE_CLAUDE_RESULT_FILE, "utf8"));
     assert.equal(responseContinuation.content?.[0]?.text, "FAKE_RESPONSES_OK");
-    const responsesRequests = JSON.parse(await readFile(fakeProvider.requestFile, "utf8"))
+    const allProviderRequests = JSON.parse(await readFile(fakeProvider.requestFile, "utf8"));
+    const responsesRequests = allProviderRequests
+      .filter(({ body }) => !JSON.stringify(body.input ?? []).includes("usage-"))
       .filter(({ url }) => url === "/v1/responses");
     assert.equal(responsesRequests.length, 2, "Responses tool cycle must make two upstream requests");
     const [responseProviderRequest, responseToolResult] = responsesRequests;
@@ -435,8 +514,29 @@ async function main() {
     assert.equal(responseProviderRequest.body.reasoning?.effort, "high", "Responses request lost reasoning effort");
     assert.match(JSON.stringify(responseToolResult.body.input), /function_call_output/);
 
+    assert.deepEqual(Object.keys(responseContinuation.usageScenarios ?? {}), [
+      "cold-json", "cold-sse", "mixed-json", "mixed-sse",
+    ]);
+    for (const [scenario, usage] of Object.entries(responseContinuation.usageScenarios)) {
+      assert.deepEqual(usage, {
+        input_tokens: 3,
+        cache_read_input_tokens: scenario.startsWith("cold") ? 0 : 110289,
+        cache_creation_input_tokens: scenario.startsWith("cold") ? 129356 : 19179,
+        output_tokens: 324,
+      }, `Responses ${scenario} usage must not double-count cached input`);
+    }
+    const usageRequests = allProviderRequests.filter(({ body }) => /usage-(cold|mixed|native)/.test(JSON.stringify(body)));
+    assert.equal(usageRequests.length, 6, "usage fixtures must each reach the real CCR provider route once");
+    for (const { url, body } of usageRequests) {
+      const native = JSON.stringify(body).includes("usage-native");
+      assert.equal(url, native ? "/v1/messages" : "/v1/responses");
+      assert.equal(body.model, native ? "claude-sonnet" : "gpt-fixture");
+    }
+
     process.stdout.write(`${JSON.stringify({
       ccrVersion: ccrPackage.version,
+      gatewayVersion: gatewayPackage.version,
+      stagedPackageCopied: stagedRuntime !== null,
       compatibilityPolicies,
       fakeProviderResponse: payload.content[0].text,
       gateway: endpoint.origin,
@@ -446,6 +546,7 @@ async function main() {
       namedProfile: managedProfileId,
       nativeRequestLogs,
       responsesToolContinuation: responseContinuation.content[0].text,
+      usageScenarios: { ...payload.usageScenarios, ...responseContinuation.usageScenarios },
       realHomeAccessDenied: true,
       realHomeReferenced: false,
       sqliteFiles: sqliteAfterInit.length,
@@ -837,6 +938,76 @@ const server = createServer((request, response) => {
       response.end(JSON.stringify({ error: { message: "unexpected fixture model" } }));
       return;
     }
+    const usageMarker = JSON.stringify(body).match(/usage-(cold|mixed|native)/)?.[1];
+    if (usageMarker) {
+      const native = usageMarker === "native";
+      if (request.url !== (native ? "/v1/messages" : "/v1/responses")) {
+        response.writeHead(422).end("usage fixture used the wrong protocol");
+        return;
+      }
+      const usage = native ? {
+        input_tokens: 3,
+        cache_read_input_tokens: 110289,
+        cache_creation_input_tokens: 19179,
+        output_tokens: 324,
+      } : {
+        input_tokens: usageMarker === "cold" ? 129359 : 129471,
+        input_tokens_details: {
+          cached_tokens: usageMarker === "cold" ? 0 : 110289,
+          cache_write_tokens: usageMarker === "cold" ? 129356 : 19179,
+        },
+        output_tokens: 324,
+        total_tokens: usageMarker === "cold" ? 129683 : 129795,
+      };
+      const payload = native ? {
+        id: "msg_usage",
+        type: "message",
+        role: "assistant",
+        model: body.model,
+        content: [{ type: "text", text: "FAKE_USAGE_OK" }],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage,
+      } : {
+        id: "resp_usage",
+        object: "response",
+        created_at: 1,
+        status: "completed",
+        model: body.model,
+        output: [{
+          id: "msg_usage",
+          type: "message",
+          status: "completed",
+          role: "assistant",
+          content: [{ type: "output_text", text: "FAKE_USAGE_OK", annotations: [] }],
+        }],
+        usage,
+      };
+      if (!body.stream) {
+        response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(payload));
+        return;
+      }
+      const events = native ? [
+        { type: "message_start", message: { ...payload, content: [], stop_reason: null, usage: { ...usage, output_tokens: 0 } } },
+        { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "FAKE_USAGE_OK" } },
+        { type: "content_block_stop", index: 0 },
+        { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage },
+        { type: "message_stop" },
+      ] : [
+        { type: "response.created", response: { ...payload, status: "in_progress", output: [], usage: null } },
+        { type: "response.output_item.added", output_index: 0, item: { ...payload.output[0], status: "in_progress", content: [] } },
+        { type: "response.content_part.added", item_id: "msg_usage", output_index: 0, content_index: 0, part: { type: "output_text", text: "", annotations: [] } },
+        { type: "response.output_text.delta", item_id: "msg_usage", output_index: 0, content_index: 0, delta: "FAKE_USAGE_OK" },
+        { type: "response.output_text.done", item_id: "msg_usage", output_index: 0, content_index: 0, text: "FAKE_USAGE_OK" },
+        { type: "response.content_part.done", item_id: "msg_usage", output_index: 0, content_index: 0, part: payload.output[0].content[0] },
+        { type: "response.output_item.done", output_index: 0, item: payload.output[0] },
+        { type: "response.completed", response: payload },
+      ];
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end(events.map((event, sequence_number) => "event: " + event.type + "\\n" + "data: " + JSON.stringify({ ...event, sequence_number }) + "\\n\\n").join(""));
+      return;
+    }
     if (request.url === "/v1/responses") {
       const continuation = JSON.stringify(body.input ?? []).includes("function_call_output");
       const output = continuation
@@ -1064,7 +1235,13 @@ if (launchMode === "responses") {
   if (!response.ok || responseContinuation.content?.[0]?.text !== "FAKE_RESPONSES_OK") {
     throw new Error("Responses route did not complete a Claude tool continuation");
   }
-  await writeFile(process.env.FAKE_CLAUDE_RESULT_FILE, JSON.stringify(responseContinuation));
+  const usageScenarios = {};
+  for (const scenario of ["cold", "mixed"]) {
+    for (const stream of [false, true]) {
+      usageScenarios[scenario + (stream ? "-sse" : "-json")] = await requestUsage("usage-" + scenario, stream, headers);
+    }
+  }
+  await writeFile(process.env.FAKE_CLAUDE_RESULT_FILE, JSON.stringify({ ...responseContinuation, usageScenarios }));
   process.exit(0);
 }
 const response = await fetch(new URL("/v1/messages", baseUrl), {
@@ -1183,6 +1360,13 @@ for (const family of fallbackFamilies) {
     }
   }
 }
+const usageScenarios = {};
+for (const stream of [false, true]) {
+  usageScenarios["native" + (stream ? "-sse" : "-json")] = await requestUsage("usage-native", stream, {
+    "content-type": "application/json",
+    "x-api-key": gatewayToken,
+  }, { tools: [{ type: "web_fetch_20260209" }] });
+}
 const mcpResponse = await fetch(process.env.AIRKIT_COMPATIBILITY_MCP_URL, {
   method: "POST",
   headers: {
@@ -1211,7 +1395,45 @@ await writeFile(process.env.FAKE_CLAUDE_RESULT_FILE, JSON.stringify({
   gatewayBaseUrl: baseUrl,
   launchModel: model,
   nativeMarkers,
+  usageScenarios,
 }));
+
+async function requestUsage(marker, stream, headers, extraBody = {}) {
+  const response = await fetch(new URL("/v1/messages", baseUrl), {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model,
+      max_tokens: 512,
+      messages: [{ role: "user", content: marker }],
+      stream,
+      ...extraBody,
+    }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) throw new Error("usage fixture failed: HTTP " + response.status);
+  let usage;
+  if (!stream) {
+    const payload = await response.json();
+    if (payload.content?.[0]?.text !== "FAKE_USAGE_OK") throw new Error("usage JSON fixture lost content");
+    usage = payload.usage;
+  } else {
+    if (!(response.headers.get("content-type") ?? "").includes("text/event-stream")) {
+      throw new Error("usage SSE fixture was not streamed");
+    }
+    const events = (await response.text()).split(/\\r?\\n/).filter((line) => line.startsWith("data: "))
+      .map((line) => JSON.parse(line.slice(6)));
+    const start = events.find((event) => event.type === "message_start");
+    const delta = events.findLast((event) => event.type === "message_delta");
+    if (!start || !delta || !events.some((event) => event.type === "message_stop")) {
+      throw new Error("usage SSE fixture lost Anthropic lifecycle events");
+    }
+    if (!events.some((event) => event.delta?.text === "FAKE_USAGE_OK")) throw new Error("usage SSE fixture lost content");
+    usage = { ...start.message.usage, ...delta.usage };
+  }
+  return Object.fromEntries(["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens"]
+    .filter((name) => Object.hasOwn(usage ?? {}, name)).map((name) => [name, usage[name]]));
+}
 
 async function findSettingsFiles(root) {
   const matches = [];

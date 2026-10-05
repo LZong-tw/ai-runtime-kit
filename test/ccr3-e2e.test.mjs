@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, relative, resolve } from "node:path";
 import test from "node:test";
 import * as airkitRuntime from "../src/airkit.mjs";
 import { inspectPendingServerHistory } from "../src/compat/server-history.mjs";
@@ -194,6 +195,152 @@ test("failed isolated CCR verification retains its root for diagnosis", async ()
   assert.deepEqual(removed, []);
   assert.deepEqual(reports, ["Isolated E2E artifacts retained at /tmp/airkit-failed\n"]);
 });
+
+test("staged CCR replacement copies the exact dependency tree and preserves the original fixture package", async () => {
+  const fixture = await createStagedPackageFixture();
+  try {
+    await mkdir(join(fixture.stage, "node_modules", ".bin"), { recursive: true });
+    await symlink("../@the-next-ai/ai-gateway/package.json", join(fixture.stage, "node_modules", ".bin", "fixture"));
+    const result = await verifier.installStagedCcrPackage({ isolatedRoot: fixture.root, stagedPackage: fixture.stage });
+
+    assert.equal(await readFile(join(fixture.destination, "stage-marker"), "utf8"), "exact staged tree");
+    assert.equal(await readFile(join(result.backupPath, "original-marker"), "utf8"), "original fixture");
+    assert.equal(await readFile(join(fixture.stage, "stage-marker"), "utf8"), "exact staged tree");
+    assert.equal(JSON.parse(await readFile(join(fixture.destination, "node_modules", ".bin", "fixture"), "utf8")).version, "1.0.21");
+    assert.equal(result.ccrVersion, "3.0.18");
+    assert.equal(result.gatewayVersion, "1.0.21");
+  } finally {
+    await rm(fixture.root, { force: true, recursive: true });
+    await rm(fixture.stage, { force: true, recursive: true });
+  }
+});
+
+test("staged CCR replacement rejects package identity mismatch before modifying the fixture", async () => {
+  for (const change of [
+    { path: "package.json", name: "unexpected-package", version: "3.0.18" },
+    { path: "package.json", name: "@musistudio/claude-code-router", version: "3.1.1" },
+    { path: "node_modules/@the-next-ai/ai-gateway/package.json", name: "@the-next-ai/ai-gateway", version: "1.0.15" },
+  ]) {
+    const fixture = await createStagedPackageFixture();
+    try {
+      await writeFile(join(fixture.stage, change.path), JSON.stringify({ name: change.name, version: change.version }));
+      await assert.rejects(verifier.installStagedCcrPackage({ isolatedRoot: fixture.root, stagedPackage: fixture.stage }), /staged package identity/);
+      assert.equal(await readFile(join(fixture.destination, "original-marker"), "utf8"), "original fixture");
+    } finally {
+      await rm(fixture.root, { force: true, recursive: true });
+      await rm(fixture.stage, { force: true, recursive: true });
+    }
+  }
+});
+
+test("staged CCR replacement rejects non-fixture roots and real-home stage paths", async () => {
+  const fixture = await createStagedPackageFixture();
+  try {
+    await assert.rejects(verifier.installStagedCcrPackage({ isolatedRoot: tmpdir(), stagedPackage: fixture.stage }), /isolated fixture root/);
+    await assert.rejects(verifier.installStagedCcrPackage({ isolatedRoot: fixture.root, stagedPackage: resolve(import.meta.dirname, "..") }), /temporary staged package/);
+    assert.equal(await readFile(join(fixture.destination, "original-marker"), "utf8"), "original fixture");
+  } finally {
+    await rm(fixture.root, { force: true, recursive: true });
+    await rm(fixture.stage, { force: true, recursive: true });
+  }
+});
+
+test("staged CCR replacement rejects a source containing the fixture before any mutation", async () => {
+  const fixture = await createStagedPackageFixture();
+  const root = await mkdtemp(join(fixture.stage, "airkit-ccr3-e2e-"));
+  const destination = join(root, "runtime", "node_modules", "@musistudio", "claude-code-router");
+  try {
+    await mkdir(destination, { recursive: true });
+    await writeFile(join(destination, "original-marker"), "original fixture");
+    await assert.rejects(verifier.installStagedCcrPackage({
+      isolatedRoot: root,
+      stagedPackage: fixture.stage,
+      copy: async () => { throw new Error("copy must not start"); },
+    }), /temporary staged package/);
+    assert.equal(await readFile(join(destination, "original-marker"), "utf8"), "original fixture");
+    await assert.rejects(readFile(join(`${destination}.original-fixture`, "original-marker")), { code: "ENOENT" });
+    assert.equal(await readFile(join(fixture.stage, "stage-marker"), "utf8"), "exact staged tree");
+  } finally {
+    await rm(fixture.root, { force: true, recursive: true });
+    await rm(fixture.stage, { force: true, recursive: true });
+  }
+});
+
+test("staged CCR replacement rejects escaping source symlinks before modifying the fixture", async () => {
+  for (const absolute of [true, false]) {
+    const fixture = await createStagedPackageFixture();
+    try {
+      const target = join(fixture.destination, "original-marker");
+      await symlink(absolute ? target : relative(fixture.stage, target), join(fixture.stage, "escaping-link"));
+      await assert.rejects(verifier.installStagedCcrPackage({ isolatedRoot: fixture.root, stagedPackage: fixture.stage }), /staged package symlink/);
+      assert.equal(await readFile(join(fixture.destination, "original-marker"), "utf8"), "original fixture");
+    } finally {
+      await rm(fixture.root, { force: true, recursive: true });
+      await rm(fixture.stage, { force: true, recursive: true });
+    }
+  }
+});
+
+test("staged CCR replacement never overwrites an existing recoverable backup", async () => {
+  const fixture = await createStagedPackageFixture();
+  try {
+    await mkdir(`${fixture.destination}.original-fixture`);
+    await writeFile(join(`${fixture.destination}.original-fixture`, "backup-marker"), "preserve prior evidence");
+    await assert.rejects(verifier.installStagedCcrPackage({ isolatedRoot: fixture.root, stagedPackage: fixture.stage }), /backup path already exists/);
+    assert.equal(await readFile(join(`${fixture.destination}.original-fixture`, "backup-marker"), "utf8"), "preserve prior evidence");
+    assert.equal(await readFile(join(fixture.destination, "original-marker"), "utf8"), "original fixture");
+  } finally {
+    await rm(fixture.root, { force: true, recursive: true });
+    await rm(fixture.stage, { force: true, recursive: true });
+  }
+});
+
+test("staged CCR replacement rejects an escaping destination package symlink", async () => {
+  const fixture = await createStagedPackageFixture();
+  try {
+    await rm(fixture.destination, { force: true, recursive: true });
+    await symlink(fixture.stage, fixture.destination);
+    await assert.rejects(verifier.installStagedCcrPackage({ isolatedRoot: fixture.root, stagedPackage: fixture.stage }), /fixture package path/);
+    assert.equal(await readFile(join(fixture.stage, "stage-marker"), "utf8"), "exact staged tree");
+  } finally {
+    await rm(fixture.root, { force: true, recursive: true });
+    await rm(fixture.stage, { force: true, recursive: true });
+  }
+});
+
+test("staged CCR replacement restores the fixture after a partial copy failure", async () => {
+  const fixture = await createStagedPackageFixture();
+  try {
+    await assert.rejects(verifier.installStagedCcrPackage({
+      isolatedRoot: fixture.root,
+      stagedPackage: fixture.stage,
+      copy: async (_source, destination) => {
+        await mkdir(destination);
+        await writeFile(join(destination, "partial-marker"), "retained partial copy");
+        throw new Error("fixture copy failure");
+      },
+    }), /fixture copy failure/);
+    assert.equal(await readFile(join(fixture.destination, "original-marker"), "utf8"), "original fixture");
+    assert.equal(await readFile(join(`${fixture.destination}.failed-staged-copy`, "partial-marker"), "utf8"), "retained partial copy");
+    assert.equal(await readFile(join(fixture.stage, "stage-marker"), "utf8"), "exact staged tree");
+  } finally {
+    await rm(fixture.root, { force: true, recursive: true });
+    await rm(fixture.stage, { force: true, recursive: true });
+  }
+});
+
+async function createStagedPackageFixture() {
+  const root = await mkdtemp(join(tmpdir(), "airkit-ccr3-e2e-"));
+  const stage = await mkdtemp(join(tmpdir(), "airkit-ccr-stage-test-"));
+  const destination = join(root, "runtime", "node_modules", "@musistudio", "claude-code-router");
+  await mkdir(destination, { recursive: true });
+  await mkdir(join(stage, "node_modules", "@the-next-ai", "ai-gateway"), { recursive: true });
+  await writeFile(join(stage, "package.json"), JSON.stringify({ name: "@musistudio/claude-code-router", version: "3.0.18" }));
+  await writeFile(join(stage, "node_modules", "@the-next-ai", "ai-gateway", "package.json"), JSON.stringify({ name: "@the-next-ai/ai-gateway", version: "1.0.21" }));
+  await writeFile(join(stage, "stage-marker"), "exact staged tree");
+  await writeFile(join(destination, "original-marker"), "original fixture");
+  return { destination, root, stage };
+}
 
 test("successful isolated CCR verification removes its root", async () => {
   const removed = [];
