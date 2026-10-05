@@ -15,6 +15,7 @@ const FAILURE_REASONS = new Map([
     "invalid-prediction", "inconsistent-counts", "invalid-span", "unmapped-span", "cross-field-span",
     "inconsistent-quoting", "unmapped-finding", "redaction-too-large", "value-survived",
     "invalid-protocol-graph", "protocol-id-collision", "conflicting-protocol-context", "protocol-id-limit", "adapter-error",
+    "model_timeout", "model_error",
   ])],
   ["policy", new Set(["policy_unavailable", "secret_block_invalid"])],
   ["redaction", new Set(["redaction_invalid"])],
