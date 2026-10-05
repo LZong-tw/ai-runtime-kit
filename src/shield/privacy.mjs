@@ -85,7 +85,7 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
     const health = await request(session, { type: "health" }, startupBudgetMs);
     session.ready = !closed && !session.stopped && current === session && validHealth(health, privacy.version);
     session.cooperativeTimeout = session.ready && Array.isArray(health.capabilities) && health.capabilities.includes("cooperative-timeout");
-    if (!session.ready) stopWorker(session);
+    if (!session.ready && !(current === session && !closed && recoveringHealth(health))) stopWorker(session);
     return session.ready;
   };
   // The full tree digest runs once per filter; respawns re-attest against its metadata snapshot.
@@ -217,7 +217,7 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
             const ready = !closed && !session.stopped && current === session && validHealth(reply, privacy.version);
             if (!ready) {
               session.ready = false;
-              if (reply?.[REQUEST_FAILURE] !== true) stopWorker(session, "protocol_invalid");
+              if (reply?.[REQUEST_FAILURE] !== true && !recoveringHealth(reply)) stopWorker(session, "protocol_invalid");
             }
             return ready;
           })
@@ -291,6 +291,11 @@ function failPending(pending, reason) {
 
 function validHealth(reply, version) {
   return isPlainObject(reply) && reply.type === "health" && reply.protocol === PROTOCOL && reply.version === version;
+}
+
+// A worker backing off a failed model restart stays alive and answers health with exactly this shape.
+function recoveringHealth(reply) {
+  return isPlainObject(reply) && reply.type === "health" && reply.status === "unknown" && Object.keys(reply).length === 3;
 }
 
 function normalizeScanReply(reply) {
