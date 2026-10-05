@@ -16,7 +16,8 @@ const ADAPTER_UNKNOWN_REASONS = new Set([
   "invalid-prediction", "inconsistent-counts", "invalid-span", "unmapped-span", "cross-field-span",
   "inconsistent-quoting", "unmapped-finding", "redaction-too-large", "value-survived",
   "invalid-protocol-graph", "protocol-id-collision", "conflicting-protocol-context", "protocol-id-limit", "adapter-error",
-  "model_timeout", "model_error",
+  "protocol-graph-mutation", "protocol-control-mutation", "signed-block-mutation",
+  "model_timeout", "model_error", "model_killed",
   "redaction-projection-limit", "redaction-match-limit", "redaction-body-limit", "redaction-frame-limit",
 ]);
 const KNOWN_LABELS = new Set([
@@ -180,7 +181,8 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
       }
       if (entry.settled || closed || current !== session) return;
       result = normalizeScanReply(await request(session, { type: "scan", body: entry.body.toString("base64") }, scanTimeoutMs));
-      if (result.status === "unknown" && ["model_timeout", "model_error"].includes(result.reason)) session.ready = false;
+      // A cooperative model_timeout leaves the worker and its window cache usable; only a killed or failed model needs a health round trip.
+      if (result.status === "unknown" && ["model_killed", "model_error"].includes(result.reason)) session.ready = false;
     } catch {} finally {
       entry.settle(result);
       if (active === entry) active = null;
