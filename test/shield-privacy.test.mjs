@@ -478,6 +478,48 @@ test("model recovery health is singleflight and does not spend the next scan's i
   assert.equal((await next).status, "ok");
 });
 
+test("a worker backing off a failed model restart stays alive until its health recovers", async (t) => {
+  let phase = "ready";
+  let spawns = 0;
+  let kills = 0;
+  const worker = fakeWorker((message, emit) => {
+    if (message.type === "health") emit(phase === "backoff" ? { type: "health", id: message.id, status: "unknown" } : cooperativeHealth(message));
+    if (message.type !== "scan") return;
+    if (phase === "ready") { phase = "backoff"; emit({ type: "scan", id: message.id, status: "unknown", reason: "model_killed" }); return; }
+    emit({ type: "scan", id: message.id, status: "ok", findings: [] });
+  });
+  worker.kill = () => { kills += 1; worker.emit("exit", 0); };
+  const filter = await createPrivacyFilter({ provision, validateWorker, timeoutMs: 100, spawnWorker: () => { spawns += 1; return worker; } });
+  t.after(() => filter.close());
+  assert.equal((await filter.scan(Buffer.from('{}'))).reason, "model_killed");
+  assert.equal((await filter.scan(Buffer.from('{"content":"during"}'))).reason, "worker_unavailable");
+  assert.equal(await filter.isReady(), false);
+  await flushTasks();
+  assert.equal(kills, 0, "a recovering worker keeps its process and boot digest");
+  phase = "recovered";
+  assert.equal((await filter.scan(Buffer.from('{"content":"after"}'))).status, "ok");
+  assert.equal(await filter.isReady(), true);
+  assert.equal(spawns, 1);
+  assert.equal(kills, 0);
+});
+
+test("health replies that only resemble the recovering shape still stop the worker", async (t) => {
+  for (const reply of [{ status: "unknown", reason: "x" }, { status: "ok" }, { status: "unknown", protocol: "airkit-privacy-ndjson-v1" }]) {
+    let started = false;
+    let kills = 0;
+    const worker = fakeWorker((message, emit) => {
+      if (message.type !== "health") return;
+      emit(started ? { type: "health", id: message.id, ...reply } : cooperativeHealth(message));
+      started = true;
+    });
+    worker.kill = () => { kills += 1; worker.emit("exit", 0); };
+    const filter = await createPrivacyFilter({ provision, validateWorker, timeoutMs: 100, spawnWorker: () => worker });
+    t.after(() => filter.close());
+    assert.equal(await filter.isReady(), false, JSON.stringify(reply));
+    assert.equal(kills, 1, JSON.stringify(reply));
+  }
+});
+
 test("a model timeout from a worker without the cooperative-timeout capability keeps the not-ready health path", async (t) => {
   for (const capabilities of [undefined, "cooperative-timeout", ["model_killed"], { 0: "cooperative-timeout" }]) {
     let timedOut = false;
