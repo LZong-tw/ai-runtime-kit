@@ -83,7 +83,7 @@ test("diagnostics separate real daemon scan, policy and redaction failures while
     const reply = request.type === "health"
       ? { type: "health", id: request.id, protocol: request.protocol, version: "privacy-1" }
       : mode === "prediction" ? { type: "scan", id: request.id, status: "unknown", reason: "invalid-prediction", private: "prediction-secret" }
-        : ["model_timeout", "model_error", "model_killed", "protocol-graph-mutation", "protocol-control-mutation", "signed-block-mutation", "redaction-projection-limit", "redaction-match-limit", "redaction-body-limit", "redaction-frame-limit"].includes(mode) ? { type: "scan", id: request.id, status: "unknown", reason: mode, private: "worker-private-secret" }
+        : ["model_timeout", "model_error", "model_killed", "protocol-graph-mutation", "protocol-control-mutation", "signed-block-mutation", "invalid-source-provenance", "json-key-collision", "invalid-json-topology", "redaction-projection-limit", "redaction-match-limit", "redaction-body-limit", "redaction-frame-limit"].includes(mode) ? { type: "scan", id: request.id, status: "unknown", reason: mode, private: "worker-private-secret" }
         : mode === "unknown" ? { type: "scan", id: request.id, status: "unknown", reason: "credential-secret" }
           : { type: "scan", id: request.id, status: "ok", findings: [] };
     worker.stdout.emit("data", `${JSON.stringify(reply)}\n`);
@@ -115,6 +115,8 @@ test("diagnostics separate real daemon scan, policy and redaction failures while
     ["model_timeout", "privacy_scan", "model_timeout"], ["model_error", "privacy_scan", "model_error"], ["model_killed", "privacy_scan", "model_killed"],
     ["protocol-graph-mutation", "privacy_scan", "protocol-graph-mutation"], ["protocol-control-mutation", "privacy_scan", "protocol-control-mutation"],
     ["signed-block-mutation", "privacy_scan", "signed-block-mutation"],
+    ["invalid-source-provenance", "privacy_scan", "invalid-source-provenance"], ["json-key-collision", "privacy_scan", "json-key-collision"],
+    ["invalid-json-topology", "privacy_scan", "invalid-json-topology"],
     ["redaction-projection-limit", "privacy_scan", "redaction-projection-limit"], ["redaction-match-limit", "privacy_scan", "redaction-match-limit"],
     ["redaction-body-limit", "privacy_scan", "redaction-body-limit"], ["redaction-frame-limit", "privacy_scan", "redaction-frame-limit"],
     ["privacy_throw", "privacy_scan", "privacy_unavailable"],

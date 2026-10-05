@@ -90,7 +90,7 @@ test("Privacy Filter labels retain their original categories across the worker b
 });
 
 test("privacy unknown reasons preserve only the pinned worker and adapter's fixed codes", async (t) => {
-  const allowed = ["invalid-prediction", "inconsistent-counts", "invalid-span", "unmapped-span", "cross-field-span", "inconsistent-quoting", "unmapped-finding", "redaction-too-large", "value-survived", "invalid-protocol-graph", "protocol-id-collision", "conflicting-protocol-context", "protocol-id-limit", "adapter-error", "model_timeout", "model_error", "model_killed", "protocol-graph-mutation", "protocol-control-mutation", "signed-block-mutation", "redaction-projection-limit", "redaction-match-limit", "redaction-body-limit", "redaction-frame-limit"];
+  const allowed = ["invalid-prediction", "inconsistent-counts", "invalid-span", "unmapped-span", "cross-field-span", "inconsistent-quoting", "unmapped-finding", "redaction-too-large", "value-survived", "invalid-protocol-graph", "protocol-id-collision", "conflicting-protocol-context", "protocol-id-limit", "adapter-error", "model_timeout", "model_error", "model_killed", "protocol-graph-mutation", "protocol-control-mutation", "signed-block-mutation", "invalid-source-provenance", "json-key-collision", "invalid-json-topology", "redaction-projection-limit", "redaction-match-limit", "redaction-body-limit", "redaction-frame-limit"];
   for (const reason of [...allowed, sentinel, null, {}, 42, "scan_timeout", undefined]) {
     const worker = fakeWorker((message, emit) => {
       if (message.type === "health") emit(health(message));
@@ -106,6 +106,28 @@ test("privacy unknown reasons preserve only the pinned worker and adapter's fixe
       await flushTasks();
     }
     assert.equal(await filter.isReady(), true);
+  }
+});
+
+test("every reason the pinned OPF adapter and worker emit survives the privacy boundary", async (t) => {
+  const adapterReasons = [
+    "invalid-prediction", "inconsistent-counts", "invalid-span", "unmapped-span", "cross-field-span", "inconsistent-quoting",
+    "unmapped-finding", "redaction-projection-limit", "redaction-match-limit", "redaction-body-limit", "value-survived",
+    "invalid-protocol-graph", "protocol-id-collision", "conflicting-protocol-context", "protocol-id-limit",
+    "invalid-source-provenance", "json-key-collision", "invalid-json-topology",
+    "protocol-graph-mutation", "protocol-control-mutation", "signed-block-mutation",
+  ];
+  const workerReasons = ["adapter-error", "model_timeout", "model_error", "model_killed"];
+  let reason;
+  const worker = fakeWorker((message, emit) => {
+    if (message.type === "health") emit(cooperativeHealth(message));
+    if (message.type === "scan") emit({ type: "scan", id: message.id, status: "unknown", reason });
+  });
+  const filter = await createPrivacyFilter({ provision, spawnWorker: () => worker, validateWorker });
+  t.after(() => filter.close());
+  for (reason of [...adapterReasons, ...workerReasons]) {
+    assert.equal((await filter.scan(Buffer.from('{}'))).reason, reason);
+    if (!await filter.isReady()) await flushTasks();
   }
 });
 

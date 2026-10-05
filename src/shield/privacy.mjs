@@ -17,6 +17,7 @@ const ADAPTER_UNKNOWN_REASONS = new Set([
   "inconsistent-quoting", "unmapped-finding", "redaction-too-large", "value-survived",
   "invalid-protocol-graph", "protocol-id-collision", "conflicting-protocol-context", "protocol-id-limit", "adapter-error",
   "protocol-graph-mutation", "protocol-control-mutation", "signed-block-mutation",
+  "invalid-source-provenance", "json-key-collision", "invalid-json-topology",
   "model_timeout", "model_error", "model_killed",
   "redaction-projection-limit", "redaction-match-limit", "redaction-body-limit", "redaction-frame-limit",
 ]);
