@@ -860,6 +860,27 @@ test("runtime redaction proof lets a value survive only inside an unchanged prov
     "a look-alike signature outside an assistant thinking block is ordinary text");
 });
 
+test("runtime redaction proof stays linear in the number of provider-signed fields", () => {
+  const citations = Array.from({ length: 12_000 }, (_, index) =>
+    ({ type: "web_search_result_location", encrypted_index: `Alice${String(index).padStart(16, "0")}` }));
+  const body = (text) => Buffer.from(JSON.stringify({ messages: [
+    { role: "user", content: [{ type: "text", text }] },
+    { role: "assistant", content: [{ type: "text", text: "cited", citations }] },
+  ] }));
+  const original = body("Alice");
+  const start = original.indexOf("Alice");
+  const result = {
+    status: "ok",
+    findings: [{ label: "private_person", count: 1 }],
+    redactions: [{ label: "private_person", count: 1, spans: [{ start, end: start + 5 }] }],
+    redactedBody: body("[redacted:private_person]"),
+  };
+  const started = performance.now();
+  assert.equal(isVerifiedRedaction({ original, result }), true);
+  assert.ok(performance.now() - started < 5_000, "verification must not scale with the square of the opaque entry count");
+  assert.equal(isVerifiedRedaction({ original, result: { ...result, redactedBody: body("[redacted:private_person] Alice") } }), false);
+});
+
 test("runtime redaction proof covers the combined findings of duplicate label batches", () => {
   const original = Buffer.from('{"content":"alice@example.com bob@example.com carol@example.com"}');
   const firstTwo = [{ start: 12, end: 29 }, { start: 30, end: 45 }];

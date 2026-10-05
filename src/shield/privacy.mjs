@@ -358,7 +358,7 @@ export function isVerifiedRedaction({ original, result } = {}) {
   if (!before || !after || before.length !== after.length
     || before.some(([path, value], index) => after[index][0] !== path || after[index][1] !== value)) return false;
   // Provider-signed values travel unscanned, so an original value may survive only inside one of them.
-  const visible = withoutTokens(result.redactedBody, after.map(([, value]) => Buffer.from(JSON.stringify(value))));
+  const visible = withoutTokens(result.redactedBody, new Set(after.map(([, value]) => JSON.stringify(value))));
   const counts = new Map();
   for (const redaction of result.redactions) {
     if (!Array.isArray(redaction.spans) || redaction.spans.length !== redaction.count) return false;
@@ -403,20 +403,22 @@ function opaqueValues(body) {
   return entries;
 }
 
+// One pass over the body's string literals: a body with thousands of opaque entries must not stall the event loop.
+// Tokens are ASCII JSON literals, so a latin1 view compares them exactly; a match nested in an escaped quote never counts.
 function withoutTokens(body, tokens) {
-  let pieces = [body];
-  for (const token of tokens) {
-    pieces = pieces.flatMap((piece) => {
-      const parts = [];
-      let from = 0;
-      for (let at = piece.indexOf(token); at >= 0; at = piece.indexOf(token, from)) {
-        parts.push(piece.subarray(from, at));
-        from = at + token.length;
-      }
-      parts.push(piece.subarray(from));
-      return parts;
-    });
+  const pieces = [];
+  let from = 0;
+  for (let at = body.indexOf(0x22); at >= 0;) {
+    let end = at + 1;
+    while (end < body.length && body[end] !== 0x22) end += body[end] === 0x5c ? 2 : 1;
+    if (end >= body.length) break;
+    if (tokens.has(body.toString("latin1", at, end + 1))) {
+      pieces.push(body.subarray(from, at));
+      from = end + 1;
+    }
+    at = body.indexOf(0x22, end + 1);
   }
+  pieces.push(body.subarray(from));
   return Buffer.concat(pieces.flatMap((piece, index) => index ? [Buffer.from([0]), piece] : [piece]));
 }
 
