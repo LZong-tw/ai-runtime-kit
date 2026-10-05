@@ -129,7 +129,7 @@ test("diagnostics separate real daemon scan, policy and redaction failures while
     assert.equal(latest.stage, stage, mode); assert.equal(latest.reason, reason, mode);
     assert.equal(latest.bytes, 25);
     const ready = () => fetch(`${daemon.shield.origin}/_airkit/shield/ready`, { headers: { "x-airkit-shield": CAPABILITY } });
-    if (["model_killed", "model_error"].includes(mode)) assert.equal((await ready()).status, 503);
+    if (["model_killed", "model_error", "model_timeout"].includes(mode)) assert.equal((await ready()).status, 503);
     assert.equal((await ready()).status, 204);
   }
   assert.equal(upstreamCalls, 0);

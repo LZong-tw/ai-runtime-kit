@@ -83,6 +83,7 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
   const waitForHealth = async (session) => {
     const health = await request(session, { type: "health" }, startupBudgetMs);
     session.ready = !closed && !session.stopped && current === session && validHealth(health, privacy.version);
+    session.cooperativeTimeout = session.ready && Array.isArray(health.capabilities) && health.capabilities.includes("cooperative-timeout");
     if (!session.ready) stopWorker(session);
     return session.ready;
   };
@@ -191,8 +192,8 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
       }
       if (entry.settled || closed || current !== session) return;
       result = normalizeScanReply(await request(session, { type: "scan", body: entry.body.toString("base64") }, scanTimeoutMs));
-      // A cooperative model_timeout leaves the worker and its window cache usable; only a killed or failed model needs a health round trip.
-      if (result.status === "unknown" && ["model_killed", "model_error"].includes(result.reason)) session.ready = false;
+      // Only a worker that advertises cooperative timeouts keeps its model and window cache alive across model_timeout.
+      if (result.status === "unknown" && (["model_killed", "model_error"].includes(result.reason) || (result.reason === "model_timeout" && !session.cooperativeTimeout))) session.ready = false;
     } catch {} finally {
       entry.settle(result);
       if (active === entry) active = null;
