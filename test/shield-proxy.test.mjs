@@ -83,7 +83,7 @@ test("diagnostics separate real daemon scan, policy and redaction failures while
     const reply = request.type === "health"
       ? { type: "health", id: request.id, protocol: request.protocol, version: "privacy-1" }
       : mode === "prediction" ? { type: "scan", id: request.id, status: "unknown", reason: "invalid-prediction", private: "prediction-secret" }
-        : ["model_timeout", "model_error"].includes(mode) ? { type: "scan", id: request.id, status: "unknown", reason: mode, private: "worker-private-secret" }
+        : ["model_timeout", "model_error", "redaction-projection-limit", "redaction-match-limit", "redaction-body-limit", "redaction-frame-limit"].includes(mode) ? { type: "scan", id: request.id, status: "unknown", reason: mode, private: "worker-private-secret" }
         : mode === "unknown" ? { type: "scan", id: request.id, status: "unknown", reason: "credential-secret" }
           : { type: "scan", id: request.id, status: "ok", findings: [] };
     worker.stdout.emit("data", `${JSON.stringify(reply)}\n`);
@@ -113,6 +113,8 @@ test("diagnostics separate real daemon scan, policy and redaction failures while
   for (const [nextMode, stage, reason] of [
     ["prediction", "privacy_scan", "invalid-prediction"], ["unknown", "privacy_scan", "privacy_unavailable"],
     ["model_timeout", "privacy_scan", "model_timeout"], ["model_error", "privacy_scan", "model_error"],
+    ["redaction-projection-limit", "privacy_scan", "redaction-projection-limit"], ["redaction-match-limit", "privacy_scan", "redaction-match-limit"],
+    ["redaction-body-limit", "privacy_scan", "redaction-body-limit"], ["redaction-frame-limit", "privacy_scan", "redaction-frame-limit"],
     ["privacy_throw", "privacy_scan", "privacy_unavailable"],
     ["secret", "secret_scan", "scanner_unavailable"], ["policy", "policy", "policy_unavailable"],
     ["redaction", "redaction", "redaction_invalid"], ["audit", "audit", "audit_unavailable"],
