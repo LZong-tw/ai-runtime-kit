@@ -16,6 +16,7 @@ const ADAPTER_UNKNOWN_REASONS = new Set([
   "invalid-prediction", "inconsistent-counts", "invalid-span", "unmapped-span", "cross-field-span",
   "inconsistent-quoting", "unmapped-finding", "redaction-too-large", "value-survived",
   "invalid-protocol-graph", "protocol-id-collision", "conflicting-protocol-context", "protocol-id-limit", "adapter-error",
+  "model_timeout", "model_error",
 ]);
 const KNOWN_LABELS = new Set([
   "address", "credit-card", "email", "ip-address", "person", "phone", "ssn", "token",
@@ -23,15 +24,16 @@ const KNOWN_LABELS = new Set([
   "private_phone", "private_url", "private_date", "secret",
 ]);
 
-export async function createPrivacyFilter({ provision, spawnWorker = defaultSpawnWorker, validateWorker = validatePrivacyWorkerAsset, validateCheckpoint = attestShieldCheckpoint, validateFile = validatePrivacyPinnedFile, timeoutMs, startupTimeoutMs = DEFAULT_STARTUP_TIMEOUT_MS } = {}) {
+export async function createPrivacyFilter({ provision, spawnWorker = defaultSpawnWorker, validateWorker = validatePrivacyWorkerAsset, validateCheckpoint = attestShieldCheckpoint, validateFile = validatePrivacyPinnedFile, timeoutMs, startupTimeoutMs } = {}) {
   const privacy = assertPrivacyProvision(provision);
+  const startupBudgetMs = startupTimeoutMs ?? (privacy.checkpoint ? 60_000 : DEFAULT_STARTUP_TIMEOUT_MS);
   const scanTimeoutMs = timeoutMs ?? (privacy.checkpoint ? Number(privacy.worker.args[21]) + 1_000 : DEFAULT_TIMEOUT_MS);
   if (typeof spawnWorker !== "function") throw new TypeError("shield privacy worker launcher is required");
   if (typeof validateWorker !== "function") throw new TypeError("shield privacy worker validator is required");
   if (typeof validateCheckpoint !== "function") throw new TypeError("shield privacy checkpoint validator is required");
   if (typeof validateFile !== "function") throw new TypeError("shield privacy file validator is required");
   if (!Number.isInteger(scanTimeoutMs) || scanTimeoutMs < 1 || scanTimeoutMs > (privacy.checkpoint ? 61_000 : 30_000)) throw new TypeError("shield privacy worker timeout is invalid");
-  if (!Number.isInteger(startupTimeoutMs) || startupTimeoutMs < 1 || startupTimeoutMs > 60_000) throw new TypeError("shield privacy startup timeout is invalid");
+  if (!Number.isInteger(startupBudgetMs) || startupBudgetMs < 1 || startupBudgetMs > 60_000) throw new TypeError("shield privacy startup timeout is invalid");
 
   let assertCheckpointUnchanged;
   let assertSourceUnchanged;
@@ -76,21 +78,31 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
       try { session.worker.stdin.write(`${payload}\n`); } catch { stopWorker(session); }
     });
   };
-  const startWorker = async () => {
+  const waitForHealth = async (session) => {
+    const health = await request(session, { type: "health" }, startupBudgetMs);
+    session.ready = !closed && !session.stopped && current === session && validHealth(health, privacy.version);
+    if (!session.ready) stopWorker(session);
+    return session.ready;
+  };
+  const startWorker = async (attempt) => {
+    let checkpointUnchanged;
+    let sourceUnchanged;
     try {
       try { await validateWorker(privacy.worker); } catch { throw new Error("shield privacy worker unavailable"); }
       if (privacy.checkpoint) {
-        try { assertCheckpointUnchanged = await validateCheckpoint(privacy.checkpoint); } catch { throw new Error("shield privacy checkpoint unavailable"); }
-        if (typeof assertCheckpointUnchanged !== "function") throw new Error("shield privacy checkpoint unavailable");
-        try { assertSourceUnchanged = await validateCheckpoint(privacy.source, { label: "source" }); } catch { throw new Error("shield privacy source unavailable"); }
-        if (typeof assertSourceUnchanged !== "function") throw new Error("shield privacy source unavailable");
+        try { checkpointUnchanged = await validateCheckpoint(privacy.checkpoint); } catch { throw new Error("shield privacy checkpoint unavailable"); }
+        if (typeof checkpointUnchanged !== "function") throw new Error("shield privacy checkpoint unavailable");
+        try { sourceUnchanged = await validateCheckpoint(privacy.source, { label: "source" }); } catch { throw new Error("shield privacy source unavailable"); }
+        if (typeof sourceUnchanged !== "function") throw new Error("shield privacy source unavailable");
         try {
           await validateFile(privacy.adapter, { label: "adapter" });
           await validateFile(privacy.tokenizer, { label: "tokenizer" });
         } catch { throw new Error("shield privacy pinned file unavailable"); }
       }
-    } catch (error) { close("assets_invalid"); throw error; }
-    if (closed) return false;
+    } catch (error) { if (!attempt.expired) close("assets_invalid"); throw error; }
+    if (closed || attempt.expired) return false;
+    assertCheckpointUnchanged = checkpointUnchanged;
+    assertSourceUnchanged = sourceUnchanged;
     let worker;
     try {
       worker = spawnWorker({
@@ -105,6 +117,7 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
       return false;
     }
     const session = { worker, pending: new Map(), stopped: false };
+    attempt.session = session;
     current = session;
     let remainder = Buffer.alloc(0);
     let stderrBytes = 0;
@@ -128,16 +141,23 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
       stderrBytes += Buffer.byteLength(chunk);
       if (stderrBytes > MAX_FRAME_BYTES) stopWorker(session, "frame_limit");
     });
-    const health = await request(session, { type: "health" }, startupTimeoutMs);
-    session.ready = !closed && !session.stopped && current === session && validHealth(health, privacy.version);
-    if (!session.ready) stopWorker(session);
-    return session.ready;
+    return await waitForHealth(session);
   };
   const ensureWorker = async () => {
     if (closed) return false;
     if (starting) return await starting;
     if (current?.ready) return true;
-    starting = startWorker().finally(() => { starting = null; });
+    const attempt = { session: current, expired: false };
+    let timer;
+    const deadline = new Promise((resolve) => {
+      timer = setTimeout(() => {
+        attempt.expired = true;
+        stopWorker(attempt.session);
+        resolve(false);
+      }, startupBudgetMs);
+    });
+    starting = Promise.race([current ? waitForHealth(current) : startWorker(attempt), deadline])
+      .finally(() => { clearTimeout(timer); starting = null; });
     return await starting;
   };
   const drain = async () => {
@@ -159,6 +179,7 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
       }
       if (entry.settled || closed || current !== session) return;
       result = normalizeScanReply(await request(session, { type: "scan", body: entry.body.toString("base64") }, scanTimeoutMs));
+      if (result.status === "unknown" && ["model_timeout", "model_error"].includes(result.reason)) session.ready = false;
     } catch {} finally {
       entry.settle(result);
       if (active === entry) active = null;
@@ -179,7 +200,10 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
         readiness = request(session, { type: "health" }, 750)
           .then((reply) => {
             const ready = !closed && !session.stopped && current === session && validHealth(reply, privacy.version);
-            if (!ready && active === null) stopWorker(session);
+            if (!ready) {
+              session.ready = false;
+              if (reply?.[REQUEST_FAILURE] !== true) stopWorker(session, "protocol_invalid");
+            }
             return ready;
           })
           .finally(() => { readiness = null; });
@@ -215,7 +239,7 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
   });
 }
 
-export async function runPrivacyWorkerSelfTest(provision, { spawnWorker = defaultSpawnWorker, validateWorker = validatePrivacyWorkerAsset, validateCheckpoint = attestShieldCheckpoint, validateFile = validatePrivacyPinnedFile, timeoutMs, startupTimeoutMs = DEFAULT_STARTUP_TIMEOUT_MS } = {}) {
+export async function runPrivacyWorkerSelfTest(provision, { spawnWorker = defaultSpawnWorker, validateWorker = validatePrivacyWorkerAsset, validateCheckpoint = attestShieldCheckpoint, validateFile = validatePrivacyPinnedFile, timeoutMs, startupTimeoutMs } = {}) {
   const filter = await createPrivacyFilter({ provision, spawnWorker, validateWorker, validateCheckpoint, validateFile, timeoutMs, startupTimeoutMs });
   try {
     const opf = Boolean(provision?.privacy?.checkpoint);
