@@ -503,6 +503,49 @@ test("queued scans dispatch to the same worker after the active scan reports mod
   assert.equal(kills, 0);
 });
 
+test("OPF respawns reuse the first checkpoint attestation and close on metadata drift", async (t) => {
+  for (const drift of [false, true]) {
+    const workers = [];
+    const hashes = { checkpoint: 0, source: 0 };
+    const asserts = { checkpoint: 0, source: 0 };
+    let exited = false;
+    const filter = await createPrivacyFilter({
+      provision: opfProvision, validateWorker, validateFile,
+      validateCheckpoint: async (_asset, { label = "checkpoint" } = {}) => {
+        hashes[label] += 1;
+        return async () => {
+          asserts[label] += 1;
+          if (drift && exited) throw new Error("checkpoint metadata changed");
+        };
+      },
+      spawnWorker: () => {
+        const worker = fakeWorker((message, emit) => {
+          if (message.type === "health") emit(health(message));
+          if (message.type === "scan") emit({ type: "scan", id: message.id, status: "ok", findings: [] });
+        });
+        workers.push(worker);
+        return worker;
+      },
+    });
+    t.after(() => filter.close());
+    assert.equal((await filter.scan(Buffer.from('{"content":"first"}'))).status, "ok");
+    assert.deepEqual(asserts, { checkpoint: 1, source: 1 });
+    exited = true;
+    workers[0].emit("exit", 1);
+    const result = await filter.scan(Buffer.from(`{"content":"${sentinel}"}`));
+    assert.deepEqual(hashes, { checkpoint: 1, source: 1 }, `drift=${drift}`);
+    if (drift) {
+      assert.equal(result.reason, "assets_invalid");
+      assert.equal(workers.length, 1);
+      assert.equal((await filter.scan(Buffer.from('{}'))).reason, "worker_closed");
+      continue;
+    }
+    assert.equal(result.status, "ok");
+    assert.equal(workers.length, 2);
+    assert.deepEqual(asserts, { checkpoint: 3, source: 3 });
+  }
+});
+
 test("recovery startup deadline and malformed health both fail closed before scan dispatch", async (t) => {
   for (const failure of ["deadline", "malformed", "exit"]) {
     let recovering = false;

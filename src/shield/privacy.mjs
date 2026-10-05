@@ -86,16 +86,28 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
     if (!session.ready) stopWorker(session);
     return session.ready;
   };
+  // The full tree digest runs once per filter; respawns re-attest against its metadata snapshot.
   const startWorker = async (attempt) => {
-    let checkpointUnchanged;
-    let sourceUnchanged;
     try {
       try { await validateWorker(privacy.worker); } catch { throw new Error("shield privacy worker unavailable"); }
       if (privacy.checkpoint) {
-        try { checkpointUnchanged = await validateCheckpoint(privacy.checkpoint); } catch { throw new Error("shield privacy checkpoint unavailable"); }
-        if (typeof checkpointUnchanged !== "function") throw new Error("shield privacy checkpoint unavailable");
-        try { sourceUnchanged = await validateCheckpoint(privacy.source, { label: "source" }); } catch { throw new Error("shield privacy source unavailable"); }
-        if (typeof sourceUnchanged !== "function") throw new Error("shield privacy source unavailable");
+        if (assertCheckpointUnchanged) {
+          try {
+            await assertCheckpointUnchanged();
+            await assertSourceUnchanged();
+          } catch { throw new Error("shield privacy checkpoint changed"); }
+        } else {
+          let checkpointUnchanged;
+          let sourceUnchanged;
+          try { checkpointUnchanged = await validateCheckpoint(privacy.checkpoint); } catch { throw new Error("shield privacy checkpoint unavailable"); }
+          if (typeof checkpointUnchanged !== "function") throw new Error("shield privacy checkpoint unavailable");
+          try { sourceUnchanged = await validateCheckpoint(privacy.source, { label: "source" }); } catch { throw new Error("shield privacy source unavailable"); }
+          if (typeof sourceUnchanged !== "function") throw new Error("shield privacy source unavailable");
+          if (!assertCheckpointUnchanged) {
+            assertCheckpointUnchanged = checkpointUnchanged;
+            assertSourceUnchanged = sourceUnchanged;
+          }
+        }
         try {
           await validateFile(privacy.adapter, { label: "adapter" });
           await validateFile(privacy.tokenizer, { label: "tokenizer" });
@@ -103,8 +115,6 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
       }
     } catch (error) { if (!attempt.expired) close("assets_invalid"); throw error; }
     if (closed || attempt.expired) return false;
-    assertCheckpointUnchanged = checkpointUnchanged;
-    assertSourceUnchanged = sourceUnchanged;
     let worker;
     try {
       worker = spawnWorker({
