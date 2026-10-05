@@ -17,6 +17,7 @@ const ADAPTER_UNKNOWN_REASONS = new Set([
   "inconsistent-quoting", "unmapped-finding", "redaction-too-large", "value-survived",
   "invalid-protocol-graph", "protocol-id-collision", "conflicting-protocol-context", "protocol-id-limit", "adapter-error",
   "model_timeout", "model_error",
+  "redaction-projection-limit", "redaction-match-limit", "redaction-body-limit", "redaction-frame-limit",
 ]);
 const KNOWN_LABELS = new Set([
   "address", "credit-card", "email", "ip-address", "person", "phone", "ssn", "token",
@@ -329,6 +330,8 @@ function normalizeSpans(value, count) {
 export function isVerifiedRedaction({ original, result } = {}) {
   if (!validBody(original) || result?.status !== "ok" || !Buffer.isBuffer(result.redactedBody) || result.redactedBody.equals(Buffer.from(original))) return false;
   if (!Array.isArray(result.findings) || !Array.isArray(result.redactions)) return false;
+  const requiredCounts = new Map();
+  for (const finding of result.findings) requiredCounts.set(finding.label, (requiredCounts.get(finding.label) ?? 0) + finding.count);
   const counts = new Map();
   for (const redaction of result.redactions) {
     if (!Array.isArray(redaction.spans) || redaction.spans.length !== redaction.count) return false;
@@ -339,7 +342,7 @@ export function isVerifiedRedaction({ original, result } = {}) {
     }
     counts.set(redaction.label, (counts.get(redaction.label) ?? 0) + redaction.count);
   }
-  return result.findings.every((finding) => counts.get(finding.label) >= finding.count);
+  return [...requiredCounts].every(([label, count]) => counts.get(label) >= count);
 }
 
 function decodeRedactedBody(value) {

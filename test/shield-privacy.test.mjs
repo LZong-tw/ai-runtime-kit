@@ -90,7 +90,7 @@ test("Privacy Filter labels retain their original categories across the worker b
 });
 
 test("privacy unknown reasons preserve only the pinned worker and adapter's fixed codes", async (t) => {
-  const allowed = ["invalid-prediction", "inconsistent-counts", "invalid-span", "unmapped-span", "cross-field-span", "inconsistent-quoting", "unmapped-finding", "redaction-too-large", "value-survived", "invalid-protocol-graph", "protocol-id-collision", "conflicting-protocol-context", "protocol-id-limit", "adapter-error", "model_timeout", "model_error"];
+  const allowed = ["invalid-prediction", "inconsistent-counts", "invalid-span", "unmapped-span", "cross-field-span", "inconsistent-quoting", "unmapped-finding", "redaction-too-large", "value-survived", "invalid-protocol-graph", "protocol-id-collision", "conflicting-protocol-context", "protocol-id-limit", "adapter-error", "model_timeout", "model_error", "redaction-projection-limit", "redaction-match-limit", "redaction-body-limit", "redaction-frame-limit"];
   for (const reason of [...allowed, sentinel, null, {}, 42, "scan_timeout", undefined]) {
     const worker = fakeWorker((message, emit) => {
       if (message.type === "health") emit(health(message));
@@ -659,6 +659,54 @@ test("runtime redaction proof requires every reported privacy span to be absent 
   assert.equal(isVerifiedRedaction({ original, result }), true);
   assert.equal(isVerifiedRedaction({ original, result: { ...result, redactedBody: Buffer.from('{"content":"alice@example.com (reviewed)"}') } }), false);
   assert.equal(isVerifiedRedaction({ original, result: { ...result, redactions: [{ label: "email", count: 1, spans: [] }] } }), false);
+});
+
+test("runtime redaction proof covers the combined findings of duplicate label batches", () => {
+  const original = Buffer.from('{"content":"alice@example.com bob@example.com carol@example.com"}');
+  const firstTwo = [{ start: 12, end: 29 }, { start: 30, end: 45 }];
+  const last = { start: 46, end: 63 };
+  const result = {
+    status: "ok",
+    findings: [{ label: "email", count: 2 }, { label: "email", count: 1 }],
+    redactions: [{ label: "email", count: 2, spans: firstTwo }, { label: "email", count: 1, spans: [last] }],
+    redactedBody: Buffer.from('{"content":"[EMAIL] [EMAIL] [EMAIL]"}'),
+  };
+  assert.equal(isVerifiedRedaction({ original, result }), true, "all three findings have proof across two batches");
+  assert.equal(isVerifiedRedaction({ original, result: { ...result, redactions: [{ label: "email", count: 2, spans: firstTwo }] } }), false, "two proofs cannot cover three findings even when each batch count is at most two");
+});
+
+test("summed runtime proof preserves missing-label rejection and extra proof coverage", () => {
+  const original = Buffer.from('{"content":"alice@example.com bob@example.com carol@example.com"}');
+  const spans = [{ start: 12, end: 29 }, { start: 30, end: 45 }, { start: 46, end: 63 }];
+  const result = {
+    status: "ok",
+    findings: [{ label: "email", count: 1 }, { label: "email", count: 1 }],
+    redactions: [{ label: "email", count: 3, spans }],
+    redactedBody: Buffer.from('{"content":"[EMAIL] [EMAIL] [EMAIL]"}'),
+  };
+  assert.equal(isVerifiedRedaction({ original, result }), true, "three proofs still cover two combined findings");
+  assert.equal(isVerifiedRedaction({ original, result: { ...result, findings: [...result.findings, { label: "phone", count: 1 }] } }), false);
+  assert.equal(isVerifiedRedaction({ original, result: { ...result, redactions: [...result.redactions, { label: "phone", count: 1, spans: [spans[0]] }] } }), true);
+});
+
+test("privacy normalization accepts complete same-label proof batches above 1024 total", async (t) => {
+  const original = Buffer.from(JSON.stringify({ content: "alice@example.com ".repeat(1025) }));
+  const spans = Array.from({ length: 1025 }, (_, index) => ({ start: 12 + index * 18, end: 29 + index * 18 }));
+  const worker = fakeWorker((message, emit) => {
+    if (message.type === "health") emit(health(message));
+    if (message.type === "scan") emit({
+      type: "scan", id: message.id, status: "ok",
+      findings: [{ label: "email", count: 1024 }, { label: "email", count: 1 }],
+      redactions: [{ label: "email", count: 1024, spans: spans.slice(0, 1024) }, { label: "email", count: 1, spans: spans.slice(1024) }],
+      redactedBody: Buffer.from(JSON.stringify({ content: "[EMAIL] ".repeat(1025) })).toString("base64"),
+    });
+  });
+  const filter = await createPrivacyFilter({ provision, validateWorker, spawnWorker: () => worker });
+  t.after(() => filter.close());
+  const result = await filter.scan(original);
+  assert.equal(result.status, "ok");
+  assert.deepEqual(result.findings, [{ label: "email", count: 1024 }, { label: "email", count: 1 }]);
+  assert.equal(isVerifiedRedaction({ original, result }), true);
 });
 
 test("privacy provision self-test requires deterministic supported-label redaction", async () => {
