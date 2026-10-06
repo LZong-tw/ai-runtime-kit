@@ -56,6 +56,20 @@ test('GPT 5.6 has GPT family coverage only through its exact accepted route bind
   assert.equal((await join.resolve({ ...route, transportRequestId: 'other' }, key)).status, 'unknown');
 });
 
+test('every catalog-routed GPT 5.6 id is covered exactly, including the dated terra snapshot', async () => {
+  const join = createRouteJoin({ validatedContract: contract });
+  const models = ['gpt-5.6', 'gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-terra-2026-08-05'];
+  for (const [index, model] of models.entries()) {
+    const route = { key, transportRequestId: `c${index}`, provider: 'p1', model };
+    assert.equal(join.observe({ fixtureEvent: route }).status, 'ok', model);
+    assert.equal((await join.resolve(route, key)).modelFamily, 'gpt', model);
+  }
+  for (const [index, model] of ['gpt-5.6-terrax', 'gpt-5.6-terra-latest', 'gpt-5.6-terra-2026-8-5',
+    'gpt-5.6-sol-2026-08-05', 'openai/gpt-5.6-terra', 'gpt-5.6-terra-2026-08-05-preview'].entries()) {
+    assert.equal(join.observe({ fixtureEvent: { key, transportRequestId: `n${index}`, provider: 'p1', model } }).status, 'unknown', model);
+  }
+});
+
 test('an unsupported-model identity conflict permanently poisons the original complete route tuple', async () => {
   const join = createRouteJoin({ validatedContract: contract });
   const route = { key, transportRequestId: 't1', provider: 'p1', model: 'gpt-6.1-sol' };
