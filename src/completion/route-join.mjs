@@ -9,6 +9,8 @@ const sameKey = (a, b) => validKey(a) && validKey(b)
 
 function family(model) {
   if (/^gpt-(?:5\.6|6(?:\.1)?)(?:-(?:sol|astra|luna))?$/.test(model)) return 'gpt';
+  // Terra is the GPT 5.6 default route; the catalog also prices its dated snapshot.
+  if (/^gpt-5\.6-terra(?:-[0-9]{4}-[0-9]{2}-[0-9]{2})?$/.test(model)) return 'gpt';
   if (/^claude-(?:sonnet|opus|haiku)-[0-9]+(?:-[0-9]+)*$/.test(model)) return 'claude';
   return 'unknown';
 }
