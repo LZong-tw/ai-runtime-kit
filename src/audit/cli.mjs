@@ -116,6 +116,16 @@ async function runAuditQueryCli(argv, dependencies) {
   return exitCodeFor(result?.state);
 }
 
+// Collapses `audit status` to the two states Shield's operational report understands.
+export async function readAuditHealth(dependencies = {}) {
+  try {
+    const { state } = await (dependencies.audit ?? await createDefaultAuditDependencies(dependencies)).status();
+    return state === "healthy" ? "healthy" : "unavailable";
+  } catch {
+    return "unavailable";
+  }
+}
+
 async function createDefaultAuditDependencies(dependencies = {}) {
   const env = dependencies.env ?? process.env;
   const [{ createMasterKeyProvider }, { resolveAuditPaths }, service, storeModule, retention, exporter, revealExport, reveal] = await Promise.all([
