@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createCompletionController } from '../src/completion/controller.mjs';
-import { evaluateCompletion } from '../src/completion/evaluator.mjs';
+import { evaluateCompletion, hasVerifiedTargets } from '../src/completion/evaluator.mjs';
 import { parseCheckpoint } from '../src/completion/checkpoint.mjs';
 import { applyCheckpoint, progressDigest } from '../src/completion/state-operations.mjs';
+import { verifierDeadlineMs } from '../src/completion/verifier.mjs';
 
 // A session-serialized, generation-checked store double. Native event and
 // verifier fixtures exercise private composition, not real host provenance.
@@ -254,7 +255,8 @@ test('only actual trusted verifier produces bound metadata receipt', async () =>
   assert.equal(snapshot.receipts[0].id, 'receipt1');
   assert.deepEqual(snapshot.receipts[0].key, key);
   assert.equal(snapshot.receipts[0].itemId, task.itemId);
-  assert.equal(snapshot.revision, 'revision1');
+  assert.deepEqual(snapshot.items[0].targetRevisions, { t1: 'revision1' });
+  assert.equal(snapshot.revision, 'unknown');
 });
 
 test('unknown and malformed verifier results cannot establish verification', async () => {
@@ -320,16 +322,23 @@ test('older duplicate after a new request cannot create a generation or refresh 
   assert.equal((await restarted.snapshot(next.requestId)).budget.used, 2);
 });
 
-test('native event capacity rejects new generation and retains prior budget', async () => {
+test('native event window slides past 128 events and still rejects recent replays', async () => {
   const { controller, store } = fixture();
   const current = await controller.beginRequest(event());
   await store.transaction(current.key, (state) => {
     state.seenNativeEventIds = Array.from({ length: 128 }, (_, i) => `event${i + 1}`);
-    state.budget.used = 2; state.budget.remaining = 0;
-    state.budget.firstInterventionAt = Date.now(); state.budget.lastProgressDigest = 'baseline';
-  }, { signal: new AbortController().signal, deadline: Date.now() + 1000 });
-  assert.equal((await controller.beginRequest(event('event129'))).reason, 'capacity');
-  assert.equal((await controller.snapshot(current.requestId)).budget.used, 2);
+    state.nativeEventId = 'event128';
+  }, storeOptions());
+  const next = await controller.beginRequest(event('event129'));
+  assert.equal(next.status, 'ok');
+  assert.equal(next.key.generation, 2);
+  const saved = await store.read({ sessionId: 's1', workspaceId: 'w1' }, storeOptions());
+  assert.equal(saved.state.seenNativeEventIds.length, 128);
+  assert.equal(saved.state.seenNativeEventIds[0], 'event2');
+  assert.equal(saved.state.seenNativeEventIds.at(-1), 'event129');
+  assert.equal((await controller.beginRequest(event('event128'))).reason, 'stale_event');
+  // Only the bounded window is remembered: an evicted ID is indistinguishable from a new event.
+  assert.equal((await controller.beginRequest(event('event1'))).key.generation, 3);
 });
 
 test('concurrent genuine new requests do not overwrite a committed generation', async () => {
@@ -470,4 +479,132 @@ test('unknown target remains unresolved after another target succeeds and only i
   assert.equal(recovered.coverage, 'verified');
   assert.equal(recovered.items[0].status, 'verified');
   assert.equal(evaluateCompletion(recovered).action, 'allow');
+});
+
+// Each fixture target's revision digests only its own files, as the real verifier does.
+function digestVerifier({ gate } = {}) {
+  let execution = 0;
+  return { async run({ target }) {
+    execution++;
+    const id = execution;
+    if (gate) await gate(target);
+    return { executionId: `e${id}`, receipt: { id: `receipt${id}`, executionId: `e${id}`, targetId: target.id,
+      revision: `digest-${target.files.join('-').replaceAll('.', '_')}`, result: 'verified', startedAt: id, endedAt: id } };
+  } };
+}
+
+async function enforce(controller, store, requestId, key, task) {
+  await controller.bindRoute(requestId, {});
+  await controller.declareTask(requestId, { version: 1, kind: 'update',
+    items: [{ itemId: task.itemId, status: 'reported', receiptIds: [] }] });
+  await store.transaction(key, (state) => { state.enabled = true; state.mode = 'enforce'; }, storeOptions());
+}
+
+test('one item with targets over different file sets reaches verified completion', async () => {
+  const { dependencies, acceptance, store } = fixture();
+  const contract = { ...acceptance, requiredTargetIds: ['t1', 't2'],
+    targets: [acceptance.targets[0], { ...acceptance.targets[0], id: 't2', files: ['other.mjs'] }] };
+  const controller = createCompletionController({ ...dependencies, acceptedContracts: new Set([contract]),
+    verifier: digestVerifier() });
+  const { requestId, key } = await controller.beginRequest(event());
+  const task = await controller.registerTask(requestId, contract);
+  await enforce(controller, store, requestId, key, task);
+  assert.equal((await controller.runVerification(requestId, task.itemId, 't1')).status, 'ok');
+  assert.equal((await controller.runVerification(requestId, task.itemId, 't2')).status, 'ok');
+  const snapshot = await controller.snapshot(requestId);
+  assert.equal(snapshot.items[0].status, 'verified');
+  assert.deepEqual(snapshot.items[0].targetRevisions, { t1: 'digest-fixture_mjs', t2: 'digest-other_mjs' });
+  assert.equal(evaluateCompletion(snapshot).action, 'allow');
+});
+
+test('a workspace observation after per-target proofs invalidates every target, not only the newest', async () => {
+  const { dependencies, acceptance, store } = fixture();
+  const contract = { ...acceptance, requiredTargetIds: ['t1', 't2'],
+    targets: [acceptance.targets[0], { ...acceptance.targets[0], id: 't2', files: ['other.mjs'] }] };
+  const controller = createCompletionController({ ...dependencies, acceptedContracts: new Set([contract]),
+    verifier: digestVerifier() });
+  const { requestId, key } = await controller.beginRequest(event());
+  const task = await controller.registerTask(requestId, contract);
+  await enforce(controller, store, requestId, key, task);
+  assert.equal((await controller.runVerification(requestId, task.itemId, 't1')).status, 'ok');
+  assert.equal((await controller.runVerification(requestId, task.itemId, 't2')).status, 'ok');
+  assert.equal(evaluateCompletion(await controller.snapshot(requestId)).action, 'allow');
+  await store.transaction(key, (state) => { state.revision = 'observed-after-pass'; }, storeOptions());
+  const after = await controller.snapshot(requestId);
+  assert.equal(hasVerifiedTargets(after.items[0], after), false);
+  assert.notEqual(evaluateCompletion(after).action, 'allow');
+});
+
+test('verifying another contract target with the same id and other files does not regress the first item', async () => {
+  const { dependencies, acceptance } = fixture();
+  const other = { ...acceptance, contractId: 'c2', targets: [{ ...acceptance.targets[0], files: ['other.mjs'] }] };
+  const controller = createCompletionController({ ...dependencies, acceptedContracts: new Set([acceptance, other]),
+    verifier: digestVerifier() });
+  const { requestId } = await controller.beginRequest(event());
+  const first = await controller.registerTask(requestId, acceptance);
+  const second = await controller.registerTask(requestId, other);
+  await controller.runVerification(requestId, first.itemId, 't1');
+  assert.equal((await controller.runVerification(requestId, second.itemId, 't1')).status, 'ok');
+  const snapshot = await controller.snapshot(requestId);
+  assert.deepEqual(snapshot.items.map((item) => item.status), ['verified', 'verified']);
+  assert.deepEqual(snapshot.items.map((item) => hasVerifiedTargets(item, snapshot)), [true, true]);
+  assert.equal(snapshot.revision, 'unknown');
+});
+
+test('concurrent verifications of targets over different file sets both commit', async () => {
+  const { dependencies, acceptance, store } = fixture();
+  const contract = { ...acceptance, requiredTargetIds: ['t1', 't2'],
+    targets: [acceptance.targets[0], { ...acceptance.targets[0], id: 't2', files: ['other.mjs'] }] };
+  const started = [];
+  const release = Promise.withResolvers();
+  const controller = createCompletionController({ ...dependencies, acceptedContracts: new Set([contract]),
+    verifier: digestVerifier({ gate: async (target) => { started.push(target.id); await release.promise; } }) });
+  const { requestId, key } = await controller.beginRequest(event());
+  const task = await controller.registerTask(requestId, contract);
+  await enforce(controller, store, requestId, key, task);
+  const runs = [controller.runVerification(requestId, task.itemId, 't1'), controller.runVerification(requestId, task.itemId, 't2')];
+  while (started.length < 2) await new Promise((resolve) => setImmediate(resolve));
+  release.resolve();
+  assert.deepEqual((await Promise.all(runs)).map((result) => result.status), ['ok', 'ok']);
+  const snapshot = await controller.snapshot(requestId);
+  assert.equal(snapshot.receipts.length, 2);
+  assert.equal(evaluateCompletion(snapshot).action, 'allow');
+});
+
+test('verification racing a newer proof of the same target cannot commit its older revision', async () => {
+  const gates = [Promise.withResolvers(), Promise.withResolvers()];
+  let calls = 0;
+  const { controller, acceptance } = fixture({ verifier: { async run() {
+    const id = ++calls;
+    await gates[id - 1].promise;
+    return { executionId: `e${id}`, receipt: { id: `receipt${id}`, executionId: `e${id}`, targetId: 't1',
+      revision: `revision${id}`, result: 'verified', startedAt: id, endedAt: id } };
+  } } });
+  const { requestId } = await controller.beginRequest(event());
+  const task = await controller.registerTask(requestId, acceptance);
+  const older = controller.runVerification(requestId, task.itemId, 't1');
+  const newer = controller.runVerification(requestId, task.itemId, 't1');
+  while (calls < 2) await new Promise((resolve) => setImmediate(resolve));
+  gates[1].resolve();
+  assert.equal((await newer).status, 'ok');
+  gates[0].resolve();
+  assert.equal((await older).status, 'unknown');
+  const snapshot = await controller.snapshot(requestId);
+  assert.deepEqual(snapshot.receipts.map((receipt) => receipt.id), ['receipt2']);
+  assert.deepEqual(snapshot.items[0].targetRevisions, { t1: 'revision2' });
+  assert.equal(snapshot.items[0].status, 'verified');
+});
+
+test('the outer bound admits a clean run that uses its pre- and post-observation budgets', async () => {
+  const { dependencies, acceptance } = fixture();
+  // timeoutMs 100: the verifier may take 100 + 100 + 100 + kill grace, which the old timeoutMs + 1000 bound cut off.
+  const slow = { async run() {
+    await new Promise((resolve) => setTimeout(resolve, verifierDeadlineMs(acceptance.targets[0].timeoutMs) + 800));
+    return { executionId: 'e1', receipt: { id: 'receipt1', executionId: 'e1', targetId: 't1',
+      revision: 'revision1', result: 'verified', startedAt: 1, endedAt: 2 } };
+  } };
+  const controller = createCompletionController({ ...dependencies, verifier: slow });
+  const { requestId } = await controller.beginRequest(event());
+  const task = await controller.registerTask(requestId, acceptance);
+  assert.equal((await controller.runVerification(requestId, task.itemId, 't1')).status, 'ok');
 });

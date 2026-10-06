@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { createCompletionStore } from '../src/completion/store.mjs';
@@ -285,7 +286,7 @@ test('deadline during real state read never enters the callback and releases its
   assert.equal(fs.readdirSync(root).some((name) => name.endsWith('.lock') || name.endsWith('.tmp')), false);
 });
 
-test('two real processes contend on a lock and unknown expired locks are never reclaimed', async (t) => {
+test('two real processes contend on a lock and an ownerless lock is reclaimed only after it ages out', async (t) => {
   const { root, store } = fixture(t);
   await initialize(store);
   const moduleUrl = pathToFileURL(path.resolve('src/completion/store.mjs')).href;
@@ -305,9 +306,92 @@ test('two real processes contend on a lock and unknown expired locks are never r
   assert.equal(JSON.parse((await holder.done).split('\n').at(-1)).status, 'ok');
   const lockPath = path.join(root, lock);
   fs.writeFileSync(lockPath, 'unknown-lock', { mode: 0o600 });
-  fs.utimesSync(lockPath, new Date(0), new Date(0));
-  assert.equal((await store.transaction(key, () => {}, options())).status, 'degraded');
+  assert.deepEqual(await store.transaction(key, () => {}, options()), { status: 'degraded', reason: 'lock_busy' });
   assert.equal(fs.readFileSync(lockPath, 'utf8'), 'unknown-lock');
+  fs.utimesSync(lockPath, new Date(0), new Date(0));
+  assert.equal((await store.transaction(key, () => {}, options())).status, 'ok');
+  assert.equal(fs.existsSync(lockPath), false);
+});
+
+const lockFile = (root) => path.join(root, '.completion-v1.lock');
+const writeLock = (root, owner) => fs.writeFileSync(lockFile(root), JSON.stringify(owner), { mode: 0o600 });
+
+async function deadPid() {
+  const exited = child('');
+  const { pid } = exited.process;
+  await exited.done;
+  return pid;
+}
+
+test('a held lock records its owner pid and creation time', async (t) => {
+  const now = Date.now();
+  const { root, store } = fixture(t, { clock: () => now });
+  await initialize(store);
+  let owner;
+  await store.transaction(key, () => { owner = JSON.parse(fs.readFileSync(lockFile(root), 'utf8')); }, { deadline: now + 1000 });
+  assert.deepEqual(owner, { pid: process.pid, createdAt: now });
+});
+
+test('a lock left by a dead owner is reclaimed by transaction and prune', async (t) => {
+  const { root, store } = fixture(t);
+  await initialize(store);
+  const pid = await deadPid();
+  writeLock(root, { pid, createdAt: Date.now() });
+  assert.equal((await store.transaction(key, (state) => { state.cancelled = true; }, options())).status, 'ok');
+  assert.equal((await store.read(key, options())).state.cancelled, true);
+  writeLock(root, { pid, createdAt: Date.now() });
+  assert.deepEqual(await store.prune(), { status: 'ok', removed: 0 });
+  assert.deepEqual(fs.readdirSync(root).filter((name) => !name.endsWith('.json')), []);
+});
+
+test('a live owner keeps its lock until the age bound expires', async (t) => {
+  let now = Date.now();
+  const { root, store } = fixture(t, { clock: () => now });
+  await initialize(store);
+  const holder = child('await new Promise((resolve) => process.stdin.once("data", resolve));');
+  t.after(() => { holder.process.stdin.end('release'); return holder.done; });
+  writeLock(root, { pid: holder.process.pid, createdAt: now });
+  assert.deepEqual(await store.transaction(key, () => {}, { deadline: now + 1000 }), { status: 'degraded', reason: 'lock_busy' });
+  writeLock(root, { pid: process.pid, createdAt: now });
+  assert.deepEqual(await store.prune({ now }), { status: 'degraded', reason: 'lock_busy' });
+  assert.deepEqual(JSON.parse(fs.readFileSync(lockFile(root), 'utf8')), { pid: process.pid, createdAt: now });
+  now += 10 * 60 * 1000;
+  assert.equal((await store.transaction(key, () => {}, { deadline: now + 1000 })).status, 'ok');
+  assert.equal(fs.existsSync(lockFile(root)), false);
+});
+
+test('unsafe locks are never followed or reclaimed even with a dead owner', async (t) => {
+  const { parent, root, store } = fixture(t);
+  await initialize(store);
+  const pid = await deadPid();
+  const outside = path.join(parent, 'outside-lock');
+  fs.writeFileSync(outside, JSON.stringify({ pid, createdAt: 0 }), { mode: 0o600 });
+  fs.symlinkSync(outside, lockFile(root));
+  assert.equal((await store.transaction(key, () => {}, options())).status, 'degraded');
+  assert.equal(fs.lstatSync(lockFile(root)).isSymbolicLink(), true);
+  assert.equal(fs.existsSync(outside), true);
+  fs.unlinkSync(lockFile(root));
+  writeLock(root, { pid, createdAt: 0 });
+  fs.chmodSync(lockFile(root), 0o644);
+  assert.equal((await store.transaction(key, () => {}, options())).status, 'degraded');
+  assert.equal(fs.existsSync(lockFile(root)), true);
+});
+
+test('reclaim that races a newer owner restores the newer lock instead of removing it', async (t) => {
+  const { root, store } = fixture(t);
+  await initialize(store);
+  writeLock(root, { pid: await deadPid(), createdAt: Date.now() });
+  const newer = JSON.stringify({ pid: process.pid, createdAt: Date.now() });
+  const rename = fs.renameSync;
+  t.mock.method(fs, 'renameSync', (from, to) => {
+    // Another contender reclaims the stale lock and creates its own between inspection and rename.
+    if (from === lockFile(root)) { fs.unlinkSync(from); fs.writeFileSync(from, newer, { mode: 0o600 }); }
+    return rename(from, to);
+  });
+  assert.deepEqual(await store.transaction(key, () => {}, options()), { status: 'degraded', reason: 'lock_busy' });
+  assert.equal(fs.readFileSync(lockFile(root), 'utf8'), newer);
+  assert.equal(fs.lstatSync(lockFile(root)).nlink, 1);
+  assert.deepEqual(fs.readdirSync(root).filter((name) => !name.endsWith('.json')), ['.completion-v1.lock']);
 });
 
 test('actual controller recovers ledger after restart and preserves unresolved proof', async (t) => {
@@ -325,6 +409,55 @@ test('actual controller recovers ledger after restart and preserves unresolved p
   const restarted = createCompletionController({ store: createCompletionStore({ root }), ...dependencies });
   assert.equal((await restarted.beginRequest(event)).requestId, begun.requestId);
   assert.deepEqual((await restarted.snapshot(begun.requestId)).items[0].unresolvedTargetIds, ['target1']);
+});
+
+test('per-target revisions over different file sets survive a real store restart', async (t) => {
+  const { root, store } = fixture(t);
+  const target = { id: 'target1', executable: 'fixture', argv: [], cwd: '/fixture', files: ['a.mjs'], timeoutMs: 100, sideEffectFree: true };
+  const acceptance = { contractId: 'contract1', category: 'verification', requiredTargetIds: ['target1', 'target2'], mustFinish: true,
+    targets: [target, { ...target, id: 'target2', files: ['b.mjs'] }] };
+  let execution = 0;
+  const dependencies = { acceptedContracts: new Set([acceptance]), routeJoin: { async resolve() { return {}; } },
+    verifier: { async run({ target: { id, files } }) {
+      execution++;
+      return { executionId: `execution${execution}`, receipt: { id: `receipt${execution}`, executionId: `execution${execution}`,
+        targetId: id, revision: `digest-${files[0].replace('.', '_')}`, result: 'verified', startedAt: 1, endedAt: 2 } };
+    } } };
+  const controller = createCompletionController({ store, ...dependencies });
+  const event = { kind: 'user', nativeEventId: 'event1', sessionId: key.sessionId, workspaceId: key.workspaceId };
+  const begun = await controller.beginRequest(event);
+  const task = await controller.registerTask(begun.requestId, acceptance);
+  assert.equal((await controller.runVerification(begun.requestId, task.itemId, 'target1')).status, 'ok');
+  assert.equal((await controller.runVerification(begun.requestId, task.itemId, 'target2')).status, 'ok');
+  const restarted = createCompletionController({ store: createCompletionStore({ root }), ...dependencies });
+  assert.equal((await restarted.beginRequest(event)).requestId, begun.requestId);
+  const [item] = (await restarted.snapshot(begun.requestId)).items;
+  assert.deepEqual(item.targetRevisions, { target1: 'digest-a_mjs', target2: 'digest-b_mjs' });
+  assert.equal(item.status, 'verified');
+});
+
+test('per-target revisions are bounded to required targets and bounded IDs and paired with their observation', async (t) => {
+  const { store } = fixture(t);
+  const item = { itemId: 'item1', contractId: 'contract1', category: 'verification', source: 'accepted-plan',
+    status: 'pending', mustFinish: true, requiredTargetIds: ['target1'], receiptIds: [] };
+  await initialize(store, key, (state) => { state.items = [item]; });
+  const prior = (await store.read(key, options())).state;
+  const observed = { target1: 'observation1' };
+  for (const [targetRevisions, targetObservedAt] of [[{ target2: 'revision1' }, { target2: 'observation1' }],
+    [{ target1: 'not a bounded id' }, observed], [['revision1'], observed], ['target1', observed], [null, observed],
+    [{ target1: 'revision1' }, undefined], [undefined, observed], [{ target1: 'revision1' }, { target1: 'not a bounded id' }]]) {
+    assert.equal((await store.transaction(key, (state) => {
+      state.items[0].targetRevisions = targetRevisions;
+      state.items[0].targetObservedAt = targetObservedAt;
+    }, options())).status, 'degraded');
+    assert.deepEqual((await store.read(key, options())).state, prior);
+  }
+  assert.equal((await store.transaction(key, (state) => {
+    state.items[0].targetRevisions = { target1: 'revision1' };
+    state.items[0].targetObservedAt = observed;
+  }, options())).status, 'ok');
+  const stored = (await store.read(key, options())).state.items[0];
+  assert.deepEqual([stored.targetRevisions, stored.targetObservedAt], [{ target1: 'revision1' }, observed]);
 });
 
 test('bounded real reads stop at 65537 bytes and accept a 65536-byte valid file', async (t) => {
@@ -499,4 +632,23 @@ test('sparse metadata arrays cannot serialize into a ledger that fails after res
     assert.equal((await store.transaction(key, mutate, options())).status, 'degraded');
     assert.deepEqual((await store.read(key, options())).state, ledger());
   }
+});
+
+test('stale crash debris is swept instead of filling the directory, while fresh debris and foreign files stay', async (t) => {
+  const { root, store } = fixture(t);
+  assert.equal((await initialize(store)).status, 'ok');
+  const debris = (suffix) => path.join(root, `.completion-v1-${randomUUID()}.${suffix}`);
+  const old = new Date(Date.now() - 10 * 60 * 1000);
+  const stale = Array.from({ length: 1100 }, (_, index) => debris(index % 2 ? 'tmp' : 'reclaim'));
+  for (const file of stale) { fs.writeFileSync(file, '', { mode: 0o600 }); fs.utimesSync(file, old, old); }
+  const fresh = debris('tmp');
+  fs.writeFileSync(fresh, '', { mode: 0o600 });
+  const foreign = path.join(root, '.completion-v1-not-a-uuid.tmp');
+  fs.writeFileSync(foreign, '', { mode: 0o600 });
+  fs.utimesSync(foreign, old, old);
+  const next = { ...key, sessionId: 'session2' };
+  assert.equal((await initialize(store, next)).status, 'ok');
+  assert.equal(stale.some((file) => fs.existsSync(file)), false);
+  assert.equal(fs.existsSync(fresh), true);
+  assert.equal(fs.existsSync(foreign), true);
 });

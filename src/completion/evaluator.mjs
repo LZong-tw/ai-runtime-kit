@@ -4,6 +4,26 @@ function sameKey(a, b) {
   return a && b && ['sessionId', 'workspaceId', 'requestId', 'generation'].every((field) => a[field] === b[field]);
 }
 
+const targetMap = (item, map) => map === undefined || (map !== null && typeof map === 'object'
+  && [Object.prototype, null].includes(Object.getPrototypeOf(map)) && Array.isArray(item.requiredTargetIds)
+  && Object.entries(map).every(([targetId, revision]) => item.requiredTargetIds.includes(targetId) && isBoundedId(revision)));
+
+// Each target's revision digests only its own files, so the proven revision is kept per target, beside
+// the workspace observation (`state.revision`) current when it was proven. A proof stays fresh only while
+// that value is unchanged, so a host must write a value that changes whenever any required target's files
+// change (an epoch per observation, or a digest over every target's files), never one target's own digest.
+export function validTargetRevisions(item) {
+  const { targetRevisions, targetObservedAt } = item ?? {};
+  return targetMap(item, targetRevisions) && targetMap(item, targetObservedAt)
+    && Object.keys(targetRevisions ?? {}).length === Object.keys(targetObservedAt ?? {}).length
+    && Object.keys(targetRevisions ?? {}).every((targetId) => Object.hasOwn(targetObservedAt, targetId));
+}
+
+function freshReceipt(item, targetId, receipt, snapshot) {
+  if (!item.targetRevisions || !Object.hasOwn(item.targetRevisions, targetId)) return receipt.revision === snapshot.revision;
+  return receipt.revision === item.targetRevisions[targetId] && item.targetObservedAt[targetId] === snapshot.revision;
+}
+
 export function isValidSnapshot(snapshot) {
   if (!snapshot || typeof snapshot !== 'object') return false;
   const { key, items, receipts, budget, validity } = snapshot;
@@ -20,7 +40,8 @@ export function isValidSnapshot(snapshot) {
       && (item.unresolvedTargetIds === undefined || (Array.isArray(item.unresolvedTargetIds)
         && item.unresolvedTargetIds.length <= 128
         && item.unresolvedTargetIds.every((id) => item.requiredTargetIds.includes(id))
-        && new Set(item.unresolvedTargetIds).size === item.unresolvedTargetIds.length)))
+        && new Set(item.unresolvedTargetIds).size === item.unresolvedTargetIds.length))
+      && validTargetRevisions(item))
     && Array.isArray(receipts) && receipts.length <= 128
     && receipts.every((receipt) => receipt && ['id', 'executionId', 'itemId', 'targetId', 'revision']
       .every((field) => isBoundedId(receipt[field])) && receipt.key
@@ -49,7 +70,7 @@ export function hasVerifiedTargets(item, snapshot) {
     const receipt = snapshot.receipts.findLast((candidate) => candidate?.itemId === item.itemId
       && candidate.targetId === targetId && sameKey(candidate.key, snapshot.key));
     return receipt && item.receiptIds.includes(receipt.id) && isBoundedId(receipt.id)
-      && isBoundedId(receipt.executionId) && receipt.revision === snapshot.revision
+      && isBoundedId(receipt.executionId) && freshReceipt(item, targetId, receipt, snapshot)
       && receipt.result === 'verified' && Number.isFinite(receipt.startedAt)
       && Number.isFinite(receipt.endedAt) && receipt.endedAt >= receipt.startedAt;
   });
