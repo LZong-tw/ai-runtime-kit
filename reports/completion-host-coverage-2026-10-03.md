@@ -4,7 +4,7 @@
 
 ## 單次真實宿主觀測
 
-以已核准的 `/Users/untionglim/.local/bin/claude` 執行一次 synthetic loopback batch。Version 在 containment 內實際觀測為 **2.1.288**。Sandbox 證明真實 home 內容讀取被拒絕、external TEST-NET connection 被拒絕，以及只使用該 batch 的 loopback endpoint。
+以已核准的 `~/.local/bin/claude` 執行一次 synthetic loopback batch。Version 在 containment 內實際觀測為 **2.1.288**。Sandbox 證明真實 home 內容讀取被拒絕、external TEST-NET connection 被拒絕，以及只使用該 batch 的 loopback endpoint。
 
 執行指令：
 

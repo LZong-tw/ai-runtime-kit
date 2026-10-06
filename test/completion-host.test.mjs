@@ -94,7 +94,7 @@ test('core coverage keeps missing deliverables and must-finish agents pending in
 test('actual Claude capture requires explicit opt-in and preserves unknown enforcing gates', {
   skip: process.env.AIRKIT_VERIFY_COMPLETION_HOST !== '1' ? 'Native capture not requested; skip is not native PASS.' : false,
 }, async () => {
-  const result = await runCompletionCapture({ claudePath: '/Users/untionglim/.local/bin/claude', mode: 'isolated-enforce' });
+  const result = await runCompletionCapture({ mode: 'isolated-enforce' });
   assert.equal(result.coverage.enforcing, false);
   assert.equal(result.coverage.nativeAcceptance, false);
   assert.equal(result.coverage.exactTransportJoin, false);
