@@ -138,7 +138,7 @@ async function aggregate(events, result) {
   }
 }
 
-export async function runCompletionCapture({ claudePath = '/Users/untionglim/.local/bin/claude', mode = 'shadow', home, baseUrl } = {}) {
+export async function runCompletionCapture({ claudePath = join(homedir(), '.local', 'bin', 'claude'), mode = 'shadow', home, baseUrl } = {}) {
   validateConstraints({ mode, home, baseUrl });
   const deadline = Date.now() + BATCH_MS;
   const result = summary();
