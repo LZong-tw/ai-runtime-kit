@@ -45,10 +45,12 @@ const AUDIT_QUERY_SQL = Object.freeze({
     UNION ALL SELECT 'collector', source, reason, recorded_at, NULL, NULL, NULL FROM collector_gaps
     ORDER BY recorded_at`,
   shield_decisions: `SELECT logical_request_id, session_id, lane, destination_class, policy_version,
-    gitleaks_version, privacy_version, action, reasons, transform_count, decision_source, override, elapsed_ms, observed_at
+    gitleaks_version, privacy_version, action, reasons, transform_count, decision_source, override, elapsed_ms, observed_at,
+    image_version, image_count, image_transform_count, document_count, media_outcome
     FROM shield_decisions ORDER BY observed_at, event_id`,
   shield_decision: `SELECT logical_request_id, session_id, lane, destination_class, policy_version,
-    gitleaks_version, privacy_version, action, reasons, transform_count, decision_source, override, elapsed_ms, observed_at
+    gitleaks_version, privacy_version, action, reasons, transform_count, decision_source, override, elapsed_ms, observed_at,
+    image_version, image_count, image_transform_count, document_count, media_outcome
     FROM shield_decisions WHERE logical_request_id = ? ORDER BY observed_at, event_id`,
   shield_policy_transitions: `SELECT logical_request_id, session_id, lane, destination_class, policy_version,
     gitleaks_version, privacy_version, action, reasons, transform_count, decision_source, override, elapsed_ms, observed_at

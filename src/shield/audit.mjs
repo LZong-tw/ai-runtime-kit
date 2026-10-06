@@ -1,4 +1,4 @@
-import { createAuditEvent } from "../audit/event.mjs";
+import { createAuditEvent, validateAuditEvent } from "../audit/event.mjs";
 import { encryptAuditValue } from "../audit/crypto.mjs";
 
 const ACTIONS = new Set(["allow", "block", "redact", "require_approval", "unavailable", "unauthorized", "transition"]);
@@ -6,6 +6,14 @@ const LANES = new Set(["managed", "subscription", "unknown"]);
 const DESTINATION_CLASSES = new Set(["managed", "subscription", "unknown"]);
 const DECISION_KEYS = ["action", "bundleVersion", "decisionSource", "destinationClass", "detectorVersions", "elapsedMs", "lane", "override", "reasonCodes", "requestId", "transformCount"];
 const DECISION_SOURCES = new Set(["evaluated", "cache_hit", "coalesced"]);
+// Optional on decisions only; omitted keys stay absent so pre-media auditd keeps accepting the event.
+const MEDIA_KEYS = Object.freeze({
+  imageVersion: "image_version",
+  imageCount: "image_count",
+  imageTransformCount: "image_transform_count",
+  documentCount: "document_count",
+  mediaOutcome: "media_outcome",
+});
 
 export function buildShieldDecisionEvent(decision, { now = () => new Date() } = {}) {
   return buildShieldEvent("shield_decision", decision, { now });
@@ -16,10 +24,10 @@ export function buildShieldPolicyTransitionEvent(transition, { now = () => new D
 }
 
 function buildShieldEvent(eventKind, decision, { now }) {
-  const metadata = assertShieldDecisionMetadata(decision);
+  const metadata = assertShieldDecisionMetadata(decision, { media: eventKind === "shield_decision" });
   const observedAt = now();
   if (!(observedAt instanceof Date) || Number.isNaN(observedAt.getTime())) throw new TypeError("shield audit clock is invalid");
-  return createAuditEvent({
+  const event = createAuditEvent({
     source: "airkit-shield",
     source_version: "1",
     logical_request_id: metadata.requestId,
@@ -38,8 +46,14 @@ function buildShieldEvent(eventKind, decision, { now }) {
       decision_source: metadata.decisionSource,
       override: metadata.override,
       elapsed_ms: metadata.elapsedMs,
+      ...Object.fromEntries(Object.entries(MEDIA_KEYS)
+        .filter(([key]) => Object.hasOwn(metadata, key))
+        .map(([key, column]) => [column, metadata[key]])),
     },
   });
+  // The ack path has no spool to validate for us; refuse here rather than let auditd reject it later.
+  validateAuditEvent(event);
+  return event;
 }
 
 export function createShieldDecisionRecorder({ client = null, spool = null, masterKey = null, now } = {}) {
@@ -105,11 +119,11 @@ export async function recordShieldDecision(decision, dependencies) {
   return createShieldDecisionRecorder(dependencies).recordShieldDecision(decision);
 }
 
-export function assertShieldDecisionMetadata(value) {
+export function assertShieldDecisionMetadata(value, { media = false } = {}) {
   const normalized = isPlainObject(value) && !Object.hasOwn(value, "decisionSource")
     ? { ...value, decisionSource: "evaluated" }
     : value;
-  if (!isPlainObject(normalized) || !hasExactKeys(normalized, DECISION_KEYS)
+  if (!isPlainObject(normalized) || !hasAllowedKeys(normalized, DECISION_KEYS, media ? Object.keys(MEDIA_KEYS) : [])
     || typeof normalized.requestId !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(normalized.requestId)
     || !LANES.has(normalized.lane) || !DESTINATION_CLASSES.has(normalized.destinationClass)
     || typeof normalized.bundleVersion !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(normalized.bundleVersion)
@@ -131,6 +145,9 @@ export function assertShieldDecisionMetadata(value) {
     decisionSource: normalized.decisionSource,
     override: normalized.override,
     elapsedMs: normalized.elapsedMs,
+    ...Object.fromEntries(Object.keys(MEDIA_KEYS)
+      .filter((key) => Object.hasOwn(normalized, key))
+      .map((key) => [key, normalized[key]])),
   });
 }
 
@@ -140,10 +157,9 @@ function unavailable() {
   return error;
 }
 
-function hasExactKeys(value, expected) {
-  const keys = Object.keys(value).sort();
-  const ordered = [...expected].sort();
-  return keys.length === ordered.length && keys.every((key, index) => key === ordered[index]);
+function hasAllowedKeys(value, required, optional) {
+  const allowed = new Set([...required, ...optional]);
+  return required.every((key) => Object.hasOwn(value, key)) && Object.keys(value).every((key) => allowed.has(key));
 }
 
 function validReasonCodes(value) {

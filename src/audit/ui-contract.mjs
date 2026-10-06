@@ -36,12 +36,14 @@ const QUERY_FIELDS = Object.freeze({
   shield_decisions: [
     "logical_request_id", "session_id", "lane", "destination_class", "policy_version",
     "gitleaks_version", "privacy_version", "action", "reasons", "transform_count", "decision_source", "override",
-    "elapsed_ms", "observed_at",
+    "elapsed_ms", "observed_at", "image_version", "image_count", "image_transform_count", "document_count",
+    "media_outcome",
   ],
   shield_decision: [
     "logical_request_id", "session_id", "lane", "destination_class", "policy_version",
     "gitleaks_version", "privacy_version", "action", "reasons", "transform_count", "decision_source", "override",
-    "elapsed_ms", "observed_at",
+    "elapsed_ms", "observed_at", "image_version", "image_count", "image_transform_count", "document_count",
+    "media_outcome",
   ],
   shield_policy_transitions: [
     "logical_request_id", "session_id", "lane", "destination_class", "policy_version",
