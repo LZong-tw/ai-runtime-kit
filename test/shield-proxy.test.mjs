@@ -71,6 +71,14 @@ test("diagnostics are control-only, nondestructive and never forward endpoint va
   assert.deepEqual(await readDiagnostics(fresh), { failures: [] });
 });
 
+test("diagnostics include recent scan counts only when a scan stats source is configured", async (t) => {
+  const upstream = await startFixture(t, async (_request, response) => { response.end('{}'); });
+  const scans = [{ status: "ok", reason: null, hits: 2, misses: 1, elapsedMs: 40 }];
+  const shield = await startShield(t, { targetOrigin: upstream.origin, decide: async () => ({ action: "allow" }), scanStats: () => scans });
+  assert.deepEqual(await readDiagnostics(shield), { failures: [], scans });
+  await assert.rejects(startShield(t, { targetOrigin: upstream.origin, decide: async () => ({ action: "allow" }), scanStats: scans }), /scan stats source is invalid/);
+});
+
 test("diagnostics separate real daemon scan, policy and redaction failures while readiness remains healthy", async (t) => {
   let upstreamCalls = 0;
   const upstream = await startFixture(t, async (_request, response) => { upstreamCalls += 1; response.end('{}'); });
@@ -136,6 +144,9 @@ test("diagnostics separate real daemon scan, policy and redaction failures while
   }
   assert.equal(upstreamCalls, 0);
   assert.doesNotMatch(JSON.stringify(await readDiagnostics(daemon.shield)), /body-secret|prediction-secret|credential-secret|scanner-secret|policy-secret|audit-secret|worker-private-secret|fixture|requestId/);
+  const { scans } = await readDiagnostics(daemon.shield);
+  assert.equal(Array.isArray(scans) && scans.length > 0 && scans.length <= 32, true);
+  for (const scan of scans) assert.deepEqual(Object.keys(scan).sort(), ["elapsedMs", "hits", "misses", "reason", "status"]);
 });
 
 test("diagnostics sanitize arbitrary metadata and separate redaction, audit and upstream failures", async (t) => {

@@ -11,6 +11,8 @@ const MAX_FRAME_BYTES = 1_048_576;
 const DEFAULT_TIMEOUT_MS = 2_000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 30_000;
 const MAX_ADMITTED_SCANS = 4;
+const RECENT_SCANS = 32;
+const MAX_WINDOW_COUNT = 65_536;
 const REQUEST_FAILURE = Symbol("privacy request failure");
 const ADAPTER_UNKNOWN_REASONS = new Set([
   "invalid-prediction", "inconsistent-counts", "invalid-span", "unmapped-span", "cross-field-span",
@@ -47,6 +49,7 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
   let readiness = null;
   let active = null;
   const queue = [];
+  const recent = [];
   let closed = false;
   const failScans = (reason = "worker_unavailable") => {
     active?.settle(unavailable(reason));
@@ -182,6 +185,8 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
     active = entry;
     clearTimeout(entry.timer);
     let result = unavailable("worker_unavailable");
+    let cache = null;
+    const dispatchedAt = Date.now();
     try {
       if (!await ensureWorker() || entry.settled) return;
       const session = current;
@@ -194,10 +199,13 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
         } catch { close("assets_invalid"); return; }
       }
       if (entry.settled || closed || current !== session) return;
-      result = normalizeScanReply(await request(session, { type: "scan", body: entry.body.toString("base64") }, scanTimeoutMs));
+      const reply = await request(session, { type: "scan", body: entry.body.toString("base64") }, scanTimeoutMs);
+      result = normalizeScanReply(reply);
+      cache = windowCounts(reply);
       // Only a worker that advertises cooperative timeouts keeps its model and window cache alive across model_timeout.
       if (result.status === "unknown" && (["model_killed", "model_error"].includes(result.reason) || (result.reason === "model_timeout" && !session.cooperativeTimeout))) session.ready = false;
     } catch {} finally {
+      recordScan(recent, { status: result.status, reason: result.reason ?? null, cache, elapsedMs: Date.now() - dispatchedAt });
       entry.settle(result);
       if (active === entry) active = null;
       void drain();
@@ -252,6 +260,8 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
         void drain();
       });
     },
+    // Numbers and allowlisted reasons only, so diagnostics can show cache behaviour without any content.
+    recentScans: () => recent.map((scan) => ({ ...scan })),
     close: () => close(),
   });
 }
@@ -298,6 +308,17 @@ function validHealth(reply, version) {
 // A worker backing off a failed model restart stays alive and answers health with exactly this shape.
 function recoveringHealth(reply) {
   return isPlainObject(reply) && reply.type === "health" && reply.status === "unknown" && Object.keys(reply).length === 3;
+}
+
+function windowCounts(reply) {
+  const cache = reply?.cache;
+  const count = (value) => Number.isSafeInteger(value) && value >= 0 && value <= MAX_WINDOW_COUNT;
+  return isPlainObject(cache) && count(cache.hits) && count(cache.misses) ? { hits: cache.hits, misses: cache.misses } : null;
+}
+
+function recordScan(recent, { status, reason, cache, elapsedMs }) {
+  recent.push({ status, reason, hits: cache?.hits ?? null, misses: cache?.misses ?? null, elapsedMs: Math.min(3_600_000, Math.max(0, Math.floor(elapsedMs))) });
+  if (recent.length > RECENT_SCANS) recent.shift();
 }
 
 function normalizeScanReply(reply) {
