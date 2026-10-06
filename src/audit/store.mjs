@@ -11,7 +11,7 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import { isShieldAuditEvent, validateAuditEvent } from "./event.mjs";
+import { SHIELD_MEDIA_KEYS, isShieldAuditEvent, validateAuditEvent } from "./event.mjs";
 import { encryptAuditValue } from "./crypto.mjs";
 import { AUDIT_MIGRATIONS, checksumMigration } from "./migrations.mjs";
 
@@ -267,13 +267,14 @@ export function openAuditStore(options = {}) {
     const duplicate = db.prepare(`SELECT event_id FROM ${table} WHERE event_id = ?`).get(event.event_id);
     if (duplicate) return { status: "duplicate" };
     const payload = event.payload;
+    const mediaColumns = table === "shield_decisions" ? SHIELD_MEDIA_KEYS : [];
     execTransaction(db, () => {
       db.prepare(`
         INSERT INTO ${table} (
           event_id, logical_request_id, session_id, lane, destination_class, policy_version,
           gitleaks_version, privacy_version, action, reasons, transform_count, decision_source, override,
-          elapsed_ms, observed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          elapsed_ms, observed_at${mediaColumns.map((column) => `, ${column}`).join("")}
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${", ?".repeat(mediaColumns.length)})
       `).run(
         event.event_id,
         event.logical_request_id,
@@ -290,6 +291,7 @@ export function openAuditStore(options = {}) {
         payload.override ? 1 : 0,
         payload.elapsed_ms,
         event.observed_at,
+        ...mediaColumns.map((column) => payload[column] ?? null),
       );
     });
     return { status: "committed" };
