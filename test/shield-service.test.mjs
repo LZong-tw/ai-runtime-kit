@@ -17,6 +17,7 @@ import {
   readShieldConfig,
   startShieldService,
   stopShieldService,
+  uninstallShieldService,
   transitionShieldPolicy,
 } from "../src/shield/service.mjs";
 import { invalidateShieldPolicyBinding, shieldPaths, writeShieldConfig, writeShieldIdentity, writeShieldPolicyState } from "../src/shield/paths.mjs";
@@ -645,6 +646,51 @@ test("shield stop only unloads its own job and preserves shield state", async ()
   assert.equal(result.stopped, true);
   assert.deepEqual(calls, [["bootout", paths.launchdTarget]]);
 });
+
+test("shield uninstall previews, then removes only its own LaunchAgent and keeps lane state", async () => {
+  const { paths } = fixture();
+  const plist = renderedPlist(paths.serviceLabel);
+  const calls = [];
+  const unlinked = [];
+  const io = {
+    async lstat(path) { assert.equal(path, paths.launchAgentPath); return { isFile: () => true, uid: 501 }; },
+    async readFile() { return plist; },
+    async unlink(path) { unlinked.push(path); },
+  };
+  const runLaunchctl = async (args) => { calls.push(args); return { ok: true }; };
+  const preview = await uninstallShieldService({ paths, io, runLaunchctl, uid: 501 });
+  assert.deepEqual({ installed: preview.installed, removed: preview.removed }, { installed: true, removed: false });
+  assert.deepEqual(preview.operations.map((entry) => entry.op), ["bootout", "unlink"]);
+  assert.deepEqual([calls, unlinked], [[], []]);
+  const result = await uninstallShieldService({ paths, io, runLaunchctl, uid: 501, write: true });
+  assert.equal(result.removed, true);
+  assert.deepEqual(calls, [["bootout", paths.launchdTarget]]);
+  assert.deepEqual(unlinked, [paths.launchAgentPath]);
+});
+
+test("shield uninstall is a no-op when absent and refuses plists it does not own", async () => {
+  const { paths } = fixture();
+  const calls = [];
+  const runLaunchctl = async (args) => { calls.push(args); return { ok: true }; };
+  const unlink = async () => { throw new Error("must not unlink"); };
+  const absent = await uninstallShieldService({ paths, runLaunchctl, write: true, uid: 501,
+    io: { async lstat() { throw Object.assign(new Error("missing"), { code: "ENOENT" }); }, unlink } });
+  assert.deepEqual({ installed: absent.installed, removed: absent.removed }, { installed: false, removed: false });
+  for (const [stat, plist, pattern] of [
+    [{ isFile: () => false, uid: 501 }, renderedPlist(paths.serviceLabel), /not a regular file/],
+    [{ isFile: () => true, uid: 0 }, renderedPlist(paths.serviceLabel), /not a regular file owned by this user/],
+    [{ isFile: () => true, uid: 501 }, renderedPlist("com.example.other"), /does not belong/],
+    [{ isFile: () => true, uid: 501 }, "not a plist", /does not belong/],
+  ]) {
+    await assert.rejects(uninstallShieldService({ paths, runLaunchctl, write: true, uid: 501,
+      io: { async lstat() { return stat; }, async readFile() { return plist; }, unlink } }), pattern);
+  }
+  assert.deepEqual(calls, []);
+});
+
+function renderedPlist(label) {
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n  <key>Label</key>\n  <string>${label}</string>\n</dict>\n</plist>\n`;
+}
 
 test("AirKit keeps capability out of argv and injects Claude's Shield transport environment", async () => {
   const calls = [];

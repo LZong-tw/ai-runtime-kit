@@ -15,6 +15,7 @@ import {
   launchShieldChild,
   startShieldService,
   stopShieldService,
+  uninstallShieldService,
   transitionShieldPolicy,
   renewShieldDestinationLease,
   revokeShieldDestinationLease,
@@ -43,6 +44,7 @@ export async function runShieldCli(argv = [], dependencies = {}) {
 
 const SHIELD_COMMANDS = Object.freeze({
   install: (argv, shield) => shield.install(parseInstall(argv)),
+  uninstall: (argv, shield) => shield.uninstall(parseInstall(argv, "shield uninstall")),
   start: (argv, shield) => shield.start(parseLaneCommand(argv, "shield start")),
   stop: (argv, shield) => shield.stop(parseLaneCommand(argv, "shield stop")),
   status: (argv, shield) => shield.status(parseLaneCommand(argv, "shield status")),
@@ -101,6 +103,10 @@ async function createDefaultShieldDependencies(dependencies) {
       };
       const service = await installService({ ...common, paths: lanePaths, config, write });
       return { state: write ? "degraded" : "preview", exitCode: write ? 1 : 0, write, lane, service: { label: service.label, planned: true } };
+    },
+    async uninstall({ write, lane }) {
+      const service = await uninstallShieldService({ ...common, paths: shieldPaths({ env, lane }), write });
+      return { state: write || !service.installed ? "stopped" : "preview", exitCode: 0, write, lane, service };
     },
     async start({ lane }) {
       await startShieldService({ ...common, paths: shieldPaths({ env, lane }) });
@@ -226,7 +232,7 @@ function parseLaunch(argv) {
 
 function isLoopbackTarget(value) { try { const url = new URL(value); return url.protocol === "http:" && url.hostname === "127.0.0.1" && Number.isInteger(Number(url.port)) && Number(url.port) > 0 && url.pathname === "/" && !url.search && !url.hash; } catch { return false; } }
 
-function parseInstall(argv) {
+function parseInstall(argv, command = "shield install") {
   let write = false;
   let lane = "subscription";
   for (let index = 0; index < argv.length; index += 1) {
@@ -234,7 +240,7 @@ function parseInstall(argv) {
     if (argv[index] === "--lane" && (lane === "subscription" || index === 0) && (argv[index + 1] === "subscription" || argv[index + 1] === "managed")) {
       lane = argv[index + 1]; index += 1; continue;
     }
-    throw new Error("usage: shield install [--lane subscription|managed] [--write]");
+    throw new Error(`usage: ${command} [--lane subscription|managed] [--write]`);
   }
   return { write, lane };
 }
@@ -284,7 +290,7 @@ function parsePolicyInstall(argv) {
 }
 
 function renderShieldHelp() {
-  return `Commands:\n  shield install [--lane subscription|managed] [--write]\n  shield start [--lane subscription|managed]\n  shield stop [--lane subscription|managed]\n  shield status [--lane subscription|managed]\n  shield doctor [--lane subscription|managed]\n  shield policy <status [--lane subscription|managed]|install --bundle /absolute/policy-bundle --public-key /absolute/policy-public-key [--lane subscription|managed] [--write]>\n  shield privacy provision --bundle /absolute/privacy-manifest --gitleaks /absolute/gitleaks --gitleaks-rules /absolute/gitleaks-rules.toml [--policy-bundle /absolute/policy-bundle] [--lane subscription|managed] [--write]\n  shield launch --lane subscription|managed [--target http://127.0.0.1:port] -- command [args...]\n`;
+  return `Commands:\n  shield install [--lane subscription|managed] [--write]\n  shield uninstall [--lane subscription|managed] [--write]\n  shield start [--lane subscription|managed]\n  shield stop [--lane subscription|managed]\n  shield status [--lane subscription|managed]\n  shield doctor [--lane subscription|managed]\n  shield policy <status [--lane subscription|managed]|install --bundle /absolute/policy-bundle --public-key /absolute/policy-public-key [--lane subscription|managed] [--write]>\n  shield privacy provision --bundle /absolute/privacy-manifest --gitleaks /absolute/gitleaks --gitleaks-rules /absolute/gitleaks-rules.toml [--policy-bundle /absolute/policy-bundle] [--lane subscription|managed] [--write]\n  shield launch --lane subscription|managed [--target http://127.0.0.1:port] -- command [args...]\n`;
 }
 
 function renderShieldResult(command, result = {}) {

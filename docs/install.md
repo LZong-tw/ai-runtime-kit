@@ -43,7 +43,10 @@ airkit shield doctor --lane managed
 `install` is preview-only unless `--write` is present, and refuses to start if
 that lane lacks either valid policy or Privacy/Gitleaks provisioning. Stop a
 lane without deleting its private state with
-`airkit shield stop --lane managed`.
+`airkit shield stop --lane managed`. A lane you no longer use keeps coming back
+at login until `airkit shield uninstall --lane managed --write` removes its
+LaunchAgent; pins, policy and config stay, so a later install needs no
+re-provisioning.
 
 `--gitleaks-rules` is the Gitleaks configuration TOML you author. AirKit ships
 no rules, so that file alone decides what counts as a secret. It is digest-pinned
