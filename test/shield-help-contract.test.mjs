@@ -41,3 +41,23 @@ test("airkit and shield help expose the documented Shield command contract", asy
     for (const command of SHIELD_COMMANDS) assert.match(output.value(), new RegExp(command.replace(/[|()[\].?+*^$\\]/g, "\\$&")));
   }
 });
+
+test("shield uninstall previews by default, exits 0, hides paths and rejects an ambiguous lane", async () => {
+  const seen = [];
+  const shield = { async uninstall(options) {
+    seen.push(options);
+    return { state: options.write ? "stopped" : "preview", exitCode: 0, write: options.write, lane: options.lane,
+      service: { label: `com.airkit.shield.${options.lane}`, installed: true, removed: options.write, operations: [{ op: "unlink", path: "/private/plist" }] } };
+  } };
+  const output = capture();
+  assert.equal(await runShieldCli(["uninstall", "--lane", "managed"], { stdout: output.stdout, shield }), 0);
+  assert.deepEqual(seen, [{ write: false, lane: "managed" }]);
+  assert.match(output.value(), /state: preview/);
+  assert.doesNotMatch(output.value(), /\/private\/plist/);
+  assert.equal(await runShieldCli(["uninstall", "--write"], { stdout: capture().stdout, shield }), 0);
+  assert.deepEqual(seen[1], { write: true, lane: "subscription" });
+  for (const argv of [["uninstall", "--lane", "subscription", "--lane", "managed"], ["uninstall", "--lane", "managed", "--lane", "subscription"], ["uninstall", "--lane", "other"]]) {
+    await assert.rejects(runShieldCli(argv, { stdout: capture().stdout, shield }), /usage: shield uninstall/);
+  }
+  assert.equal(seen.length, 2);
+});

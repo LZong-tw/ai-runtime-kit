@@ -673,9 +673,17 @@ test("shield uninstall is a no-op when absent and refuses plists it does not own
   const calls = [];
   const runLaunchctl = async (args) => { calls.push(args); return { ok: true }; };
   const unlink = async () => { throw new Error("must not unlink"); };
-  const absent = await uninstallShieldService({ paths, runLaunchctl, write: true, uid: 501,
-    io: { async lstat() { throw Object.assign(new Error("missing"), { code: "ENOENT" }); }, unlink } });
+  const missing = { async lstat() { throw Object.assign(new Error("missing"), { code: "ENOENT" }); }, unlink };
+  assert.equal((await uninstallShieldService({ paths, runLaunchctl, uid: 501, io: missing })).installed, false);
+  assert.deepEqual(calls, [], "preview never unloads");
+  const absent = await uninstallShieldService({ paths, runLaunchctl, write: true, uid: 501, io: missing });
   assert.deepEqual({ installed: absent.installed, removed: absent.removed }, { installed: false, removed: false });
+  assert.deepEqual(calls.splice(0), [["bootout", paths.launchdTarget]], "a hand-deleted plist can leave its job loaded");
+  const owned = { async lstat() { return { isFile: () => true, uid: 501 }; }, async readFile() { return renderedPlist(paths.serviceLabel); }, unlink };
+  await assert.rejects(uninstallShieldService({ paths, runLaunchctl, write: true, uid: 502, io: owned }), /is not this user's gui\/502/);
+  await assert.rejects(uninstallShieldService({ paths, write: true, uid: 501, io: owned,
+    runLaunchctl: async () => ({ ok: false, stderr: "Boot-out failed: 1: Operation not permitted" }) }), /launchctl bootout failed: Boot-out failed: 1: Operation not permitted/,
+    "an untolerated bootout failure keeps the plist so a rerun can finish");
   for (const [stat, plist, pattern] of [
     [{ isFile: () => false, uid: 501 }, renderedPlist(paths.serviceLabel), /not a regular file/],
     [{ isFile: () => true, uid: 0 }, renderedPlist(paths.serviceLabel), /not a regular file owned by this user/],
