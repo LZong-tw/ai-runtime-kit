@@ -1105,12 +1105,40 @@ test("shield doctor degrades a live service when its operational lane is unavail
     stdout: output.stdout,
     shieldStatus: async () => ({ state: "healthy", service: { active: true }, identity: { present: true } }),
     readShieldOperationalStatus: async () => ({ state: "unavailable", lanes: [{ lane: "subscription", state: "unavailable" }] }),
+    readAuditHealth: async () => "unavailable",
   });
   assert.equal(code, 1);
   assert.match(output.value(), /state: degraded/);
   assert.match(output.value(), /operational\.lanes\.0\.lane: subscription/);
   assert.match(output.value(), /operational\.lanes\.0\.state: unavailable/);
   assert.doesNotMatch(output.value(), /\[object Object\]/);
+});
+
+test("shield doctor reports the probed audit health instead of a fixed unavailable", async () => {
+  for (const audit of ["healthy", "unavailable"]) {
+    const seen = [];
+    const output = capture();
+    await runShieldCli(["doctor", "--lane", "subscription"], {
+      stdout: output.stdout,
+      shieldStatus: async () => ({ state: "healthy", service: { active: true }, identity: { present: true } }),
+      readShieldOperationalStatus: async (options) => {
+        seen.push(options.audit);
+        return { state: "protected", lanes: [{ lane: "subscription", state: "protected", audit: options.audit }] };
+      },
+      readAuditHealth: async () => audit,
+    });
+    assert.deepEqual(seen, [audit]);
+    assert.match(output.value(), new RegExp(`operational\\.lanes\\.0\\.audit: ${audit}`));
+  }
+});
+
+test("audit health collapses every non-healthy or failing status to unavailable", async () => {
+  const { readAuditHealth } = await import("../src/audit/cli.mjs");
+  const status = (value) => ({ audit: { status: async () => { if (value instanceof Error) throw value; return { state: value }; } } });
+  assert.equal(await readAuditHealth(status("healthy")), "healthy");
+  for (const value of ["degraded", "blocked", "stopped", undefined, new Error("socket gone")]) {
+    assert.equal(await readAuditHealth(status(value)), "unavailable");
+  }
 });
 
 test("airkit routes shield commands before catalog loading", async () => {

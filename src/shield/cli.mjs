@@ -71,6 +71,7 @@ async function createDefaultShieldDependencies(dependencies) {
   const ensureReady = dependencies.ensureShieldReady ?? ensureShieldReady;
   const readOperational = dependencies.readShieldOperationalStatus ?? readShieldOperationalStatus;
   const readStatus = dependencies.shieldStatus ?? shieldStatus;
+  const readAuditHealth = dependencies.readAuditHealth ?? (async () => (await import("../audit/cli.mjs")).readAuditHealth({ env }));
   const createLease = dependencies.createShieldDestinationLease ?? createShieldDestinationLease;
   const renewLease = dependencies.renewShieldDestinationLease ?? renewShieldDestinationLease;
   const revokeLease = dependencies.revokeShieldDestinationLease ?? revokeShieldDestinationLease;
@@ -121,7 +122,7 @@ async function createDefaultShieldDependencies(dependencies) {
     },
     async doctor({ lane }) {
       const status = await readStatus({ paths: shieldPaths({ env, lane }), io: dependencies.io, runLaunchctl: dependencies.runLaunchctl });
-      const operational = await readOperational({ env });
+      const operational = await readOperational({ env, audit: await readAuditHealth() });
       const selected = operational.lanes?.find((entry) => entry.lane === lane);
       return { ...status, state: status.state === "healthy" && selected?.state !== "protected" ? "degraded" : status.state, operational, checked: true };
     },
