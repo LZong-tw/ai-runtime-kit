@@ -133,6 +133,7 @@ export async function startShieldDaemon({
       decisionContext: { lane: config.lane, destinationClass, policyVersion: policy.version, detectorVersions: policy.detectorVersions },
       recordShieldDecision: recorder.recordShieldDecision,
       isReady: async () => Boolean(await recorder.isReady?.() ?? true) && Boolean(await privacy.isReady?.()),
+      scanStats: privacy.recentScans ? () => privacy.recentScans() : null,
     });
     await writeIdentity({
       paths,

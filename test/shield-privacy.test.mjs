@@ -57,6 +57,44 @@ test("persistent privacy worker health-checks then returns a validated redacted 
   assert.equal(worker.messages.filter((entry) => entry.type === "scan").length, 1);
 });
 
+test("recent scans keep only bounded window cache counts, status and allowlisted reasons", async (t) => {
+  const replies = [
+    { status: "ok", findings: [], cache: { hits: 3, misses: 1 } },
+    { status: "unknown", reason: "model_timeout", cache: { hits: 0, misses: 2 } },
+    { status: "ok", findings: [], cache: { hits: -1, misses: 1 } },
+    { status: "ok", findings: [], cache: { hits: 1, misses: 65_537 } },
+    { status: "ok", findings: [], cache: { hits: 1.5, misses: 0, private: sentinel } },
+    { status: "unknown", reason: sentinel },
+  ];
+  let next = 0;
+  const worker = fakeWorker((message, emit) => {
+    if (message.type === "health") emit({ ...health(message), capabilities: ["cooperative-timeout"] });
+    if (message.type === "scan") emit({ type: "scan", id: message.id, ...replies[next++ % replies.length] });
+  });
+  const filter = await createPrivacyFilter({ provision, spawnWorker: () => worker, validateWorker });
+  t.after(() => filter.close());
+  assert.deepEqual(filter.recentScans(), []);
+  for (let index = 0; index < replies.length; index += 1) {
+    const result = await filter.scan(Buffer.from('{}'));
+    assert.equal("cache" in result, false);
+  }
+  const scans = filter.recentScans();
+  assert.deepEqual(scans.map(({ elapsedMs, ...scan }) => scan), [
+    { status: "ok", reason: null, hits: 3, misses: 1 },
+    { status: "unknown", reason: "model_timeout", hits: 0, misses: 2 },
+    { status: "ok", reason: null, hits: null, misses: null },
+    { status: "ok", reason: null, hits: null, misses: null },
+    { status: "ok", reason: null, hits: null, misses: null },
+    { status: "unknown", reason: "privacy_unavailable", hits: null, misses: null },
+  ]);
+  for (const scan of scans) assert.equal(Number.isInteger(scan.elapsedMs) && scan.elapsedMs >= 0, true);
+  assert.doesNotMatch(JSON.stringify(scans), new RegExp(sentinel));
+  scans[0].hits = 99;
+  assert.equal(filter.recentScans()[0].hits, 3);
+  for (let index = 0; index < 40; index += 1) await filter.scan(Buffer.from('{}'));
+  assert.equal(filter.recentScans().length, 32);
+});
+
 test("privacy readiness probes the live worker and fails closed after exit", async (t) => {
   let healthy = true;
   const worker = fakeWorker((message, emit) => {
