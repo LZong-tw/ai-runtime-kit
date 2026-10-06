@@ -205,8 +205,9 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
       // Only a worker that advertises cooperative timeouts keeps its model and window cache alive across model_timeout.
       if (result.status === "unknown" && (["model_killed", "model_error"].includes(result.reason) || (result.reason === "model_timeout" && !session.cooperativeTimeout))) session.ready = false;
     } catch {} finally {
-      recordScan(recent, { status: result.status, reason: result.reason ?? null, cache, elapsedMs: Date.now() - dispatchedAt });
       entry.settle(result);
+      // Record what the caller actually received; close() or a stopped worker may have settled it first.
+      recordScan(recent, { status: entry.outcome.status, reason: entry.outcome.reason ?? null, cache: entry.outcome === result ? cache : null, elapsedMs: Date.now() - dispatchedAt });
       if (active === entry) active = null;
       void drain();
     }
@@ -245,6 +246,7 @@ export async function createPrivacyFilter({ provision, spawnWorker = defaultSpaw
           settle(result) {
             if (entry.settled) return;
             entry.settled = true;
+            entry.outcome = result;
             clearTimeout(entry.timer);
             entry.body = null;
             resolve(result);

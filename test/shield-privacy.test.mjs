@@ -660,6 +660,9 @@ test("OPF respawns reuse the first checkpoint attestation and close on metadata 
     assert.deepEqual(hashes, { checkpoint: 1, source: 1 }, `drift=${drift}`);
     if (drift) {
       assert.equal(result.reason, "assets_invalid");
+      // The ring keeps the reason close() delivered, not the drain default; drain records once startup unwinds.
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.deepEqual(filter.recentScans().map(({ status, reason }) => [status, reason]), [["ok", null], ["unavailable", "assets_invalid"]]);
       assert.equal(workers.length, 1);
       assert.equal((await filter.scan(Buffer.from('{}'))).reason, "worker_closed");
       continue;
