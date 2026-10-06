@@ -97,6 +97,65 @@ function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+function migrationsBefore(id) {
+  const index = AUDIT_MIGRATIONS.findIndex((migration) => migration.id === id);
+  assert.ok(index > 0, `unknown migration ${id}`);
+  return AUDIT_MIGRATIONS.slice(0, index);
+}
+
+function seedLegacyDatabase(databasePath, migrations, seed) {
+  const legacy = new DatabaseSync(databasePath);
+  try {
+    legacy.exec(`CREATE TABLE audit_migrations (
+      id TEXT PRIMARY KEY,
+      checksum TEXT NOT NULL,
+      applied_at TEXT,
+      started_at TEXT NOT NULL
+    )`);
+    for (const migration of migrations) {
+      legacy.exec(migration.statements.join(";\n"));
+      legacy.prepare(`INSERT INTO audit_migrations (id, checksum, applied_at, started_at)
+        VALUES (?, ?, '2026-08-13T01:00:00.000Z', '2026-08-13T01:00:00.000Z')`)
+        .run(migration.id, checksumMigration(migration));
+    }
+    seed?.(legacy);
+  } finally {
+    legacy.close();
+  }
+}
+
+// The decision INSERT as it stood before the media columns existed; a rolled-back
+// writer must keep working against a database the newer store already migrated.
+const PRE_MEDIA_SHIELD_DECISION_INSERT = `INSERT INTO shield_decisions (
+  event_id, logical_request_id, session_id, lane, destination_class, policy_version,
+  gitleaks_version, privacy_version, action, reasons, transform_count, decision_source, override,
+  elapsed_ms, observed_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+
+const SHIELD_MEDIA_COLUMNS = ["image_version", "image_count", "image_transform_count", "document_count", "media_outcome"];
+
+function shieldDecisionEvent(eventId, payload = {}) {
+  return createAuditEvent({
+    event_id: eventId,
+    source: "airkit-shield",
+    source_version: "1",
+    logical_request_id: `${eventId}-request`,
+    client: "airkit-shield",
+    event_kind: "shield_decision",
+    payload: {
+      lane: "subscription", destination_class: "subscription", policy_version: "policy-1",
+      gitleaks_version: "8.24.3", privacy_version: "privacy-1", action: "redact",
+      reasons: ["policy_redact"], transform_count: 3, decision_source: "evaluated", override: false, elapsed_ms: 2,
+      ...payload,
+    },
+  });
+}
+
+function shieldMediaRow(store, eventId) {
+  const row = store.query(`SELECT ${SHIELD_MEDIA_COLUMNS.join(", ")} FROM shield_decisions WHERE event_id = ?`, [eventId])[0];
+  return row ? { ...row } : null;
+}
+
 test("shield audit events persist only the allowlisted metadata table", async () => {
   await withRoot(async (paths) => {
     const store = openTestStore(paths);
@@ -157,21 +216,7 @@ test("shield audit events persist only the allowlisted metadata table", async ()
 
 test("pre-fix Shield decision-source migration history upgrades immutably to coalesced", async () => {
   await withRoot(async (paths) => {
-    const preFixMigrations = AUDIT_MIGRATIONS.filter((migration) => migration.id !== "006_shield_decision_source_coalesced");
-    const legacy = new DatabaseSync(paths.databasePath);
-    try {
-      legacy.exec(`CREATE TABLE audit_migrations (
-        id TEXT PRIMARY KEY,
-        checksum TEXT NOT NULL,
-        applied_at TEXT,
-        started_at TEXT NOT NULL
-      )`);
-      for (const migration of preFixMigrations) {
-        legacy.exec(migration.statements.join(";\n"));
-        legacy.prepare(`INSERT INTO audit_migrations (id, checksum, applied_at, started_at)
-          VALUES (?, ?, '2026-08-13T01:00:00.000Z', '2026-08-13T01:00:00.000Z')`)
-          .run(migration.id, checksumMigration(migration));
-      }
+    seedLegacyDatabase(paths.databasePath, migrationsBefore("006_shield_decision_source_coalesced"), (legacy) => {
       legacy.prepare(`INSERT INTO shield_decisions (
         event_id, logical_request_id, session_id, lane, destination_class, policy_version,
         gitleaks_version, privacy_version, action, reasons, transform_count, decision_source,
@@ -180,9 +225,7 @@ test("pre-fix Shield decision-source migration history upgrades immutably to coa
         .run("legacy-shield-event", "legacy-shield-request", null, "managed", "managed", "policy-1",
           "gitleaks-1", "privacy-1", "allow", "policy_allow", 0, "cache_hit", 0, 1,
           "2026-08-13T01:00:00.000Z");
-    } finally {
-      legacy.close();
-    }
+    });
 
     const store = openTestStore(paths);
     try {
@@ -206,6 +249,83 @@ test("pre-fix Shield decision-source migration history upgrades immutably to coa
       assert.equal(store.query("SELECT decision_source FROM shield_decisions WHERE event_id = ?", ["coalesced-shield-event"])[0].decision_source, "coalesced");
     } finally {
       store.close();
+    }
+  });
+});
+
+test("shield decisions persist optional media counters and leave them NULL for old payloads", async () => {
+  await withRoot(async (paths) => {
+    const store = openTestStore(paths);
+    try {
+      assert.deepEqual(await store.ingestEvent(shieldDecisionEvent("media-event", {
+        image_version: "image-0123456789ab", image_count: 2, image_transform_count: 2, document_count: 0, media_outcome: "scanned",
+      })), { status: "committed" });
+      assert.deepEqual(shieldMediaRow(store, "media-event"), {
+        image_version: "image-0123456789ab", image_count: 2, image_transform_count: 2, document_count: 0, media_outcome: "scanned",
+      });
+
+      assert.deepEqual(await store.ingestEvent(shieldDecisionEvent("legacy-shape-event")), { status: "committed" });
+      assert.deepEqual(shieldMediaRow(store, "legacy-shape-event"), {
+        image_version: null, image_count: null, image_transform_count: null, document_count: null, media_outcome: null,
+      });
+
+      await assert.rejects(store.ingestEvent(shieldDecisionEvent("media-url-event", { image_url: "https://images.example/a.png" })), /shield metadata/i);
+      assert.equal(shieldMediaRow(store, "media-url-event"), null);
+      const transitionColumns = store.query("SELECT name FROM pragma_table_info('shield_policy_transitions')").map((row) => row.name);
+      for (const column of SHIELD_MEDIA_COLUMNS) assert.equal(transitionColumns.includes(column), false, column);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+test("shield media migration adds nullable columns without rewriting rows and keeps the old writer working", async () => {
+  await withRoot(async (paths) => {
+    seedLegacyDatabase(paths.databasePath, migrationsBefore("007_shield_media_audit"), (legacy) => {
+      legacy.prepare(PRE_MEDIA_SHIELD_DECISION_INSERT)
+        .run("pre-media-event", "pre-media-request", null, "subscription", "subscription", "policy-1",
+          "8.24.3", "privacy-1", "block", "confirmed_secret", 0, "coalesced", 0, 4,
+          "2026-08-13T01:00:00.000Z");
+    });
+
+    const store = openTestStore(paths);
+    try {
+      assert.equal(store.query("SELECT value FROM schema_meta WHERE key = 'audit_schema_version'")[0].value, "7");
+      assert.deepEqual({ ...store.query(`SELECT action, reasons, decision_source, elapsed_ms, observed_at
+        FROM shield_decisions WHERE event_id = ?`, ["pre-media-event"])[0] }, {
+        action: "block", reasons: "confirmed_secret", decision_source: "coalesced", elapsed_ms: 4, observed_at: "2026-08-13T01:00:00.000Z",
+      });
+      assert.deepEqual(shieldMediaRow(store, "pre-media-event"), {
+        image_version: null, image_count: null, image_transform_count: null, document_count: null, media_outcome: null,
+      });
+    } finally {
+      store.close();
+    }
+
+    // Rollback proof: the pre-change writer's column list still inserts into the migrated table,
+    // and the new CHECK constraints refuse values the validator would never emit.
+    const migrated = new DatabaseSync(paths.databasePath);
+    try {
+      migrated.prepare(PRE_MEDIA_SHIELD_DECISION_INSERT)
+        .run("rolled-back-event", "rolled-back-request", null, "managed", "managed", "policy-1",
+          "8.24.3", "privacy-1", "allow", "policy_allow", 0, "evaluated", 0, 1,
+          "2026-08-13T03:00:00.000Z");
+      assert.deepEqual({ ...migrated.prepare(`SELECT ${SHIELD_MEDIA_COLUMNS.join(", ")} FROM shield_decisions WHERE event_id = ?`)
+        .get("rolled-back-event") }, {
+        image_version: null, image_count: null, image_transform_count: null, document_count: null, media_outcome: null,
+      });
+      assert.throws(() => migrated.prepare(`INSERT INTO shield_decisions (
+        event_id, logical_request_id, lane, destination_class, policy_version, gitleaks_version, privacy_version,
+        action, reasons, transform_count, override, elapsed_ms, observed_at, media_outcome
+      ) VALUES ('bad-outcome', 'r', 'managed', 'managed', 'p', 'g', 'v', 'allow', 'x', 0, 0, 1, '2026-08-13T03:00:00.000Z', 'allowed')`).run(),
+      /CHECK constraint/);
+      assert.throws(() => migrated.prepare(`INSERT INTO shield_decisions (
+        event_id, logical_request_id, lane, destination_class, policy_version, gitleaks_version, privacy_version,
+        action, reasons, transform_count, override, elapsed_ms, observed_at, image_count
+      ) VALUES ('bad-count', 'r', 'managed', 'managed', 'p', 'g', 'v', 'allow', 'x', 0, 0, 1, '2026-08-13T03:00:00.000Z', -1)`).run(),
+      /CHECK constraint/);
+    } finally {
+      migrated.close();
     }
   });
 });

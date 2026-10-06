@@ -47,6 +47,13 @@ const SHIELD_PAYLOAD_KEYS = [
   "lane", "destination_class", "policy_version", "gitleaks_version", "privacy_version",
   "action", "reasons", "transform_count", "decision_source", "override", "elapsed_ms",
 ];
+// Media counters are optional so pre-media emitters stay valid; only decisions carry them,
+// and they never describe content (no URLs, file ids, bytes, OCR text or regions).
+const SHIELD_MEDIA_COUNT_KEYS = ["image_count", "image_transform_count", "document_count"];
+export const SHIELD_MEDIA_KEYS = Object.freeze(["image_version", ...SHIELD_MEDIA_COUNT_KEYS, "media_outcome"]);
+const SHIELD_MEDIA_OUTCOMES = new Set(["none", "blocked_document", "blocked_source", "blocked_scan", "blocked_secret", "scanned"]);
+// Set by provisioning from the worker source digest; anything else could smuggle an id or secret into the audit row.
+const SHIELD_IMAGE_VERSION = /^image-[0-9a-f]{12}$/;
 
 export class AuditEventError extends Error {
   constructor(message) {
@@ -148,7 +155,7 @@ export function validateAuditEvent(event) {
   }
 
   const payload = SHIELD_EVENT_KINDS.has(event.event_kind)
-    ? validateShieldMetadata(event.payload)
+    ? validateShieldMetadata(event.payload, event.event_kind)
     : cloneJsonSafeValue(event.payload ?? null, "payload");
   let encodedPayload;
   try {
@@ -180,19 +187,29 @@ export function isShieldAuditEvent(event) {
   return SHIELD_EVENT_KINDS.has(event?.event_kind);
 }
 
-function validateShieldMetadata(payload) {
+function validateShieldMetadata(payload, eventKind) {
   const normalized = isPlainRecord(payload) && !Object.hasOwn(payload, "decision_source")
     ? { ...payload, decision_source: "evaluated" }
     : payload;
-  if (!isPlainRecord(normalized) || !hasExactKeys(normalized, SHIELD_PAYLOAD_KEYS)
+  const optionalKeys = eventKind === "shield_decision" ? SHIELD_MEDIA_KEYS : [];
+  if (!isPlainRecord(normalized) || !hasRequiredKeys(normalized, SHIELD_PAYLOAD_KEYS, optionalKeys)
     || !SHIELD_LANES.has(normalized.lane) || !SHIELD_LANES.has(normalized.destination_class)
     || !isShieldOpaqueId(normalized.policy_version) || !isShieldOpaqueId(normalized.gitleaks_version) || !isShieldOpaqueId(normalized.privacy_version)
     || !SHIELD_ACTIONS.has(normalized.action) || !Array.isArray(normalized.reasons)
     || normalized.reasons.length < 1 || normalized.reasons.length > 32 || !normalized.reasons.every(isShieldOpaqueId)
-    || !Number.isInteger(normalized.transform_count) || normalized.transform_count < 0 || normalized.transform_count > 1_000_000
+    || !isShieldCount(normalized.transform_count)
     || !SHIELD_DECISION_SOURCES.has(normalized.decision_source)
-    || typeof normalized.override !== "boolean" || !Number.isFinite(normalized.elapsed_ms) || normalized.elapsed_ms < 0 || normalized.elapsed_ms > 3_600_000) {
+    || typeof normalized.override !== "boolean" || !Number.isFinite(normalized.elapsed_ms) || normalized.elapsed_ms < 0 || normalized.elapsed_ms > 3_600_000
+    || (Object.hasOwn(normalized, "image_version") && (typeof normalized.image_version !== "string" || !SHIELD_IMAGE_VERSION.test(normalized.image_version)))
+    || SHIELD_MEDIA_COUNT_KEYS.some((key) => Object.hasOwn(normalized, key) && !isShieldCount(normalized[key]))
+    || (Object.hasOwn(normalized, "media_outcome") && !SHIELD_MEDIA_OUTCOMES.has(normalized.media_outcome))
+    || (normalized.media_outcome?.startsWith?.("blocked_") && normalized.action !== "block")
+    || (Object.hasOwn(normalized, "image_transform_count") && normalized.image_transform_count > normalized.transform_count)) {
     throwInvalid("shield metadata is invalid");
+  }
+  const media = {};
+  for (const key of SHIELD_MEDIA_KEYS) {
+    if (Object.hasOwn(normalized, key)) media[key] = normalized[key];
   }
   return Object.freeze({
     lane: normalized.lane,
@@ -206,13 +223,17 @@ function validateShieldMetadata(payload) {
     decision_source: normalized.decision_source,
     override: normalized.override,
     elapsed_ms: normalized.elapsed_ms,
+    ...media,
   });
 }
 
-function hasExactKeys(value, expected) {
-  const keys = Object.keys(value).sort();
-  const allowed = [...expected].sort();
-  return keys.length === allowed.length && keys.every((key, index) => key === allowed[index]);
+function hasRequiredKeys(value, required, optional) {
+  const allowed = new Set([...required, ...optional]);
+  return required.every((key) => Object.hasOwn(value, key)) && Object.keys(value).every((key) => allowed.has(key));
+}
+
+function isShieldCount(value) {
+  return Number.isInteger(value) && value >= 0 && value <= 1_000_000;
 }
 
 export function isShieldOpaqueId(value) {

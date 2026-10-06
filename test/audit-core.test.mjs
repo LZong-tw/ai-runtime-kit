@@ -93,6 +93,106 @@ test("valid audit events preserve the approved envelope and reject unknown kinds
   );
 });
 
+function shieldDecision(payload = {}, overrides = {}) {
+  return createFixture({
+    source: "airkit-shield",
+    source_version: "1",
+    source_event_id: null,
+    event_kind: "shield_decision",
+    logical_request_id: "shield-request-1",
+    attempt_id: null,
+    session_id: null,
+    client: "airkit-shield",
+    payload: {
+      lane: "subscription",
+      destination_class: "subscription",
+      policy_version: "policy-1",
+      gitleaks_version: "8.24.3",
+      privacy_version: "privacy-1",
+      action: "redact",
+      reasons: ["policy_redact"],
+      transform_count: 2,
+      decision_source: "evaluated",
+      override: false,
+      elapsed_ms: 3,
+      ...payload,
+    },
+    ...overrides,
+  });
+}
+
+const SHIELD_MEDIA_PAYLOAD = Object.freeze({
+  image_version: "image-0123456789ab",
+  image_count: 2,
+  image_transform_count: 2,
+  document_count: 0,
+  media_outcome: "scanned",
+});
+
+test("shield decisions accept payloads with and without the optional media keys", () => {
+  const legacy = validateAuditEvent(shieldDecision());
+  for (const key of Object.keys(SHIELD_MEDIA_PAYLOAD)) {
+    assert.equal(Object.hasOwn(legacy.payload, key), false, key);
+  }
+
+  const media = validateAuditEvent(shieldDecision(SHIELD_MEDIA_PAYLOAD));
+  assert.deepEqual({
+    image_version: media.payload.image_version,
+    image_count: media.payload.image_count,
+    image_transform_count: media.payload.image_transform_count,
+    document_count: media.payload.document_count,
+    media_outcome: media.payload.media_outcome,
+  }, SHIELD_MEDIA_PAYLOAD);
+  assert.equal(Object.isFrozen(media.payload), true);
+
+  const blocked = validateAuditEvent(shieldDecision({ action: "block", document_count: 1, media_outcome: "blocked_document" }));
+  assert.equal(blocked.payload.media_outcome, "blocked_document");
+  assert.equal(Object.hasOwn(blocked.payload, "image_count"), false);
+
+  for (const outcome of ["none", "blocked_document", "blocked_source", "blocked_scan", "blocked_secret", "scanned"]) {
+    const action = outcome.startsWith("blocked_") ? "block" : "redact";
+    assert.equal(validateAuditEvent(shieldDecision({ action, media_outcome: outcome })).payload.media_outcome, outcome);
+  }
+});
+
+test("shield media audit keys reject unbounded, non-enum and content-bearing values", () => {
+  const invalid = [
+    { media_outcome: "allowed" },
+    { media_outcome: null },
+    { image_count: -1 },
+    { image_count: 1.5 },
+    { image_count: "3" },
+    { image_transform_count: 1_000_001 },
+    { document_count: Number.NaN },
+    { image_version: "https://images.example/a.png" },
+    { image_version: "file_011CNha8iCJcU1wXNR6q1V8w" },
+    { image_version: "AKIAIOSFODNN7EXAMPLE" },
+    { image_version: "image-0123456789AB" },
+    { action: "redact", media_outcome: "blocked_document" },
+    { action: "allow", media_outcome: "blocked_secret" },
+    { transform_count: 0, image_transform_count: 1 },
+    { image_version: "v".repeat(129) },
+    { image_version: "" },
+    { image_url: "https://images.example/a.png" },
+    { file_id: "file_abc" },
+    { ocr_text: "hunter2" },
+    { rects: [[0, 0, 1, 1]] },
+  ];
+  for (const payload of invalid) {
+    assert.throws(
+      () => validateAuditEvent(shieldDecision(payload)),
+      (error) => error instanceof AuditEventError && /shield metadata/.test(error.message),
+      JSON.stringify(payload),
+    );
+  }
+  assert.throws(
+    () => validateAuditEvent(shieldDecision({ action: "transition", reasons: ["policy_replaced"], media_outcome: "none" }, {
+      event_kind: "shield_policy_transition",
+    })),
+    (error) => error instanceof AuditEventError && /shield metadata/.test(error.message),
+  );
+});
+
 test("event payload validation rejects non JSON-safe values with audit errors", () => {
   const cyclic = {};
   cyclic.self = cyclic;

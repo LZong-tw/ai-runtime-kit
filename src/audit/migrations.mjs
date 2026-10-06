@@ -610,6 +610,20 @@ const SHIELD_DECISION_SOURCE_COALESCED_STATEMENTS = Object.freeze([
   `INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('audit_schema_version', '6')`,
 ]);
 
+const SHIELD_MEDIA_AUDIT_STATEMENTS = Object.freeze([
+  `ALTER TABLE shield_decisions ADD COLUMN image_version TEXT
+    CHECK (image_version IS NULL OR length(image_version) > 0)`,
+  `ALTER TABLE shield_decisions ADD COLUMN image_count INTEGER
+    CHECK (image_count IS NULL OR image_count >= 0)`,
+  `ALTER TABLE shield_decisions ADD COLUMN image_transform_count INTEGER
+    CHECK (image_transform_count IS NULL OR image_transform_count >= 0)`,
+  `ALTER TABLE shield_decisions ADD COLUMN document_count INTEGER
+    CHECK (document_count IS NULL OR document_count >= 0)`,
+  `ALTER TABLE shield_decisions ADD COLUMN media_outcome TEXT
+    CHECK (media_outcome IS NULL OR media_outcome IN ('none', 'blocked_document', 'blocked_source', 'blocked_scan', 'blocked_secret', 'scanned'))`,
+  `INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('audit_schema_version', '7')`,
+]);
+
 export const AUDIT_MIGRATIONS = Object.freeze([
   Object.freeze({
     id: "001_initial_audit_store",
@@ -640,6 +654,11 @@ export const AUDIT_MIGRATIONS = Object.freeze([
     id: "006_shield_decision_source_coalesced",
     statements: SHIELD_DECISION_SOURCE_COALESCED_STATEMENTS,
     checksum: checksumStatements(SHIELD_DECISION_SOURCE_COALESCED_STATEMENTS),
+  }),
+  Object.freeze({
+    id: "007_shield_media_audit",
+    statements: SHIELD_MEDIA_AUDIT_STATEMENTS,
+    checksum: checksumStatements(SHIELD_MEDIA_AUDIT_STATEMENTS),
   }),
 ]);
 
