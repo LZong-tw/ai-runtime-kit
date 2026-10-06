@@ -6,6 +6,7 @@ import { runShieldCli } from "../src/shield/cli.mjs";
 
 const SHIELD_COMMANDS = [
   "shield install [--lane subscription|managed] [--write]",
+  "shield uninstall [--lane subscription|managed] [--write]",
   "shield start",
   "shield stop",
   "shield status",
@@ -29,7 +30,7 @@ test("airkit and shield help expose the documented Shield command contract", asy
     });
 
     assert.equal(code, 0);
-    assert.match(output.value(), /shield <install\|start\|stop\|status\|doctor\|policy\|privacy\|launch> \[options\]/);
+    assert.match(output.value(), /shield <install\|uninstall\|start\|stop\|status\|doctor\|policy\|privacy\|launch> \[options\]/);
   }
 
   for (const argv of [[], ["help"], ["-h"], ["--help"]]) {

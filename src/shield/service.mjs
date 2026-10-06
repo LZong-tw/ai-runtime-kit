@@ -119,6 +119,27 @@ export async function stopShieldService({ paths, runLaunchctl = defaultLaunchctl
   return { label: SHIELD_SERVICE_LABEL, stopped: true };
 }
 
+// Removes only the lane's LaunchAgent so a retired lane stops coming back at login.
+// Pins, policy and config stay, so a later install needs no re-provisioning.
+export async function uninstallShieldService({ paths, write = false, io = defaultIo, runLaunchctl = defaultLaunchctl, uid = process.getuid?.() } = {}) {
+  assertShieldPaths(paths);
+  let stat;
+  try {
+    stat = await io.lstat(paths.launchAgentPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return { label: paths.serviceLabel, installed: false, removed: false };
+    throw error;
+  }
+  if (!stat.isFile() || (uid !== undefined && stat.uid !== uid)) throw new Error(`shield launch plist is not a regular file owned by this user: ${paths.launchAgentPath}`);
+  const plist = await io.readFile(paths.launchAgentPath, "utf8");
+  const label = plist.match(/<key>Label<\/key>\s*<string>([^<]*)<\/string>/)?.[1];
+  if (label !== paths.serviceLabel) throw new Error(`shield launch plist does not belong to ${paths.serviceLabel}: ${paths.launchAgentPath}`);
+  if (!write) return { label: paths.serviceLabel, installed: true, removed: false, operations: [{ op: "bootout", target: paths.launchdTarget }, { op: "unlink", path: paths.launchAgentPath }] };
+  await launch(runLaunchctl, ["bootout", paths.launchdTarget], true);
+  await io.unlink(paths.launchAgentPath);
+  return { label: paths.serviceLabel, installed: true, removed: true };
+}
+
 export async function transitionShieldPolicy({ paths, installPolicy, io = defaultIo, runLaunchctl = defaultLaunchctl, inspectService = inspectShieldService, stopService = stopShieldService, startService = startShieldService, isProcessAlive = defaultIsProcessAlive, probeShield = defaultProbeShield, ensureReady = ensureShieldReady, recordShieldPolicyTransition = null } = {}) {
   if (typeof installPolicy !== "function") throw new TypeError("shield policy transition installer is required");
   if (recordShieldPolicyTransition !== null && typeof recordShieldPolicyTransition !== "function") {
