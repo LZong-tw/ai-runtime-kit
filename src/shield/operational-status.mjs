@@ -4,6 +4,9 @@ import { shieldLauncherDescriptors } from "./launchers.mjs";
 
 const LANES = Object.freeze(["subscription", "managed"]);
 const HEALTH = new Set(["healthy", "unavailable"]);
+// What the proxy can inspect, independent of lane health. Base64 images and documents under the body
+// limit are forwarded without OCR or text extraction, so the gap is reported rather than implied away.
+const CONTENT_COVERAGE = Object.freeze({ text: "scanned", images: "unscanned", documents: "unscanned" });
 
 export async function readShieldOperationalStatus({
   env = process.env,
@@ -32,6 +35,7 @@ export async function readShieldOperationalStatus({
   return {
     state: lanes.some((lane) => lane.state === "protected") ? "protected" : "unavailable",
     lanes,
+    content_coverage: { ...CONTENT_COVERAGE },
     declared_coverage: descriptors.filter((descriptor) => descriptor.coverage === "protected").map(({ coverage: _coverage, ...descriptor }) => descriptor),
     declared_bypasses: descriptors.filter((descriptor) => descriptor.coverage === "bypass").map(({ coverage: _coverage, launcher, bypassReason }) => ({ launcher, reason: bypassReason })),
   };

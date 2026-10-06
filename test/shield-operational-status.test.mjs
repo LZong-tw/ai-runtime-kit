@@ -51,6 +51,7 @@ test("operational Shield status reports each lane from verified local state and 
         audit: "healthy",
       },
     ],
+    content_coverage: { text: "scanned", images: "unscanned", documents: "unscanned" },
     declared_coverage: [{ launcher: "airclaude", lanes: ["managed"], hop_chain: ["airclaude", "shield", "managed"] }],
     declared_bypasses: [{ launcher: "claude", reason: "direct_client" }],
   });

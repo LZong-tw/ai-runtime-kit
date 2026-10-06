@@ -40,6 +40,11 @@ airkit shield status --lane managed
 airkit shield doctor --lane managed
 ```
 
+`doctor` reports `content_coverage`: text is scanned, but `images` and
+`documents` are `unscanned`. Base64 images and PDFs under the 1 MiB body limit
+are forwarded without OCR or text extraction; Gitleaks only sees text that is
+plain after base64 decoding. Do not treat a `protected` lane as covering them.
+
 `install` is preview-only unless `--write` is present, and refuses to start if
 that lane lacks either valid policy or Privacy/Gitleaks provisioning. Stop a
 lane without deleting its private state with
