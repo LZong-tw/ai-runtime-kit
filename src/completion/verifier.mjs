@@ -10,6 +10,13 @@ const text = (value) => typeof value === 'string' && value.length > 0 && !value.
 const identity = (a, b) => a.dev === b.dev && a.ino === b.ino;
 const unchanged = (a, b) => identity(a, b) && a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
 const observerEntry = fileURLToPath(import.meta.url);
+// Observations get their own small budget so the command keeps its full
+// timeoutMs; a run is capped at budget + timeoutMs + kill grace + budget.
+const observerBudgetMs = 2000;
+const killGraceMs = 100;
+
+/** Longest a run can take, so a caller's outer bound never cuts off a clean run. */
+export const verifierDeadlineMs = (timeoutMs) => 2 * Math.min(observerBudgetMs, timeoutMs) + timeoutMs + killGraceMs;
 
 function acceptedTarget(target) {
   if (!isBoundedId(target?.id) || !text(target.executable) || !text(target.cwd) || !path.isAbsolute(target.cwd)
@@ -159,8 +166,13 @@ async function authorized(authorize, key, target, signal, deadline) {
 
 async function execute(target, signal, deadline) {
   let child;
-  try { child = spawn(target.executable, target.argv, { cwd: target.cwd, shell: false, stdio: 'ignore' }); }
+  // The target leads its own process group so a stop reaches every descendant.
+  try { child = spawn(target.executable, target.argv, { cwd: target.cwd, shell: false, stdio: 'ignore', detached: true }); }
   catch { return { error: true }; }
+  const group = (name) => {
+    if (!child.pid) return;
+    try { process.kill(-child.pid, name); } catch { /* The whole group has already exited. */ }
+  };
   let timer;
   let force;
   let stopReason;
@@ -168,8 +180,8 @@ async function execute(target, signal, deadline) {
   const stop = (reason) => {
     if (stopReason) return;
     stopReason = reason;
-    child.kill('SIGTERM');
-    force = setTimeout(() => child.kill('SIGKILL'), 100);
+    group('SIGTERM');
+    force = setTimeout(() => group('SIGKILL'), killGraceMs);
   };
   const onAbort = () => stop('cancelled');
   try {
@@ -184,6 +196,9 @@ async function execute(target, signal, deadline) {
     clearTimeout(timer);
     clearTimeout(force);
     signal?.removeEventListener('abort', onAbort);
+    // The leader closing does not end the group: reap descendants that ignored
+    // SIGTERM or outlived a clean exit before the revision is observed again.
+    group('SIGKILL');
   }
 }
 
@@ -203,22 +218,27 @@ export function createOwnedVerifier({ authorize, clock = Date.now } = {}) {
   async function run({ key, target, signal } = {}) {
     const accepted = acceptedTarget(target);
     if (!accepted) return unknown();
-    const deadline = Date.now() + accepted.timeoutMs;
-    if (!await authorized(authorize, key, accepted, signal, deadline)) return unknown();
+    const budget = Math.min(observerBudgetMs, accepted.timeoutMs);
+    const prepared = Date.now() + budget;
+    if (!await authorized(authorize, key, accepted, signal, prepared)) return unknown();
     let before;
-    try { before = await revision(accepted, signal, deadline); }
+    try { before = await revision(accepted, signal, prepared); }
     catch { return unknown(); }
     if (signal?.aborted) return unknown();
     const startedAt = clock();
     if (!Number.isFinite(startedAt)) return unknown();
     const executionId = randomUUID();
-    const terminal = await execute(accepted, signal, deadline);
+    const terminal = await execute(accepted, signal, Date.now() + accepted.timeoutMs);
+    const clean = !terminal.error && !terminal.stopReason && !terminal.childSignal && terminal.code === 0;
     let after;
-    try { after = await revision(accepted, signal, deadline); } catch { /* An unreadable or cancelled observation cannot verify. */ }
+    // Only a clean exit can verify, so only it pays for the post-observation.
+    if (clean && !signal?.aborted) {
+      try { after = await revision(accepted, signal, Date.now() + budget); } catch { /* An unreadable or cancelled observation cannot verify. */ }
+    }
     let result = 'failed';
     if (terminal.stopReason === 'cancelled' || signal?.aborted) result = 'cancelled';
     else if (terminal.error) result = 'unknown';
-    else if (terminal.stopReason === 'timeout' || terminal.childSignal || terminal.code !== 0) result = 'failed';
+    else if (!clean) result = 'failed';
     else if (!after) result = 'unknown';
     else result = before === after ? 'verified' : 'stale';
     const endedAt = clock();

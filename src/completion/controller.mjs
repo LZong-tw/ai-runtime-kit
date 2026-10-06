@@ -2,7 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { categories, isBoundedId, parseCheckpoint } from './checkpoint.mjs';
 import { hasVerifiedTargets, isValidSnapshot } from './evaluator.mjs';
 import { applyCheckpoint, progressDigest } from './state-operations.mjs';
+import { verifierDeadlineMs } from './verifier.mjs';
 
+const SEEN_EVENTS = 128;
 const unknown = (reason = 'unknown') => ({ status: 'unknown', reason });
 const sameKey = (a, b) => a && b && ['sessionId', 'workspaceId', 'requestId', 'generation'].every((field) => a[field] === b[field]);
 const validKey = (key) => key && ['sessionId', 'workspaceId', 'requestId'].every((field) => isBoundedId(key[field]))
@@ -53,7 +55,7 @@ function validLedger(state) {
   return state && isValidSnapshot({ ...state,
     validity: { ...state.validity, now: Date.now(), progressDigest: 'uncomputed' } })
     && isBoundedId(state.nativeEventId) && Array.isArray(state.seenNativeEventIds)
-    && state.seenNativeEventIds.length <= 128 && state.seenNativeEventIds.every(isBoundedId)
+    && state.seenNativeEventIds.length <= SEEN_EVENTS && state.seenNativeEventIds.every(isBoundedId)
     && new Set(state.seenNativeEventIds).size === state.seenNativeEventIds.length
     && state.seenNativeEventIds.includes(state.nativeEventId)
     && state.items.every((item) => item.source === 'model-proposed' || isBoundedId(item.contractId));
@@ -137,7 +139,7 @@ export function createCompletionController({ store, acceptedContracts, verifier,
       return { status: 'ok', requestId: prior.state.key.requestId, key: structuredClone(prior.state.key) };
     }
     if (prior.state?.seenNativeEventIds.includes(event.nativeEventId)) return unknown('stale_event');
-    if (requestKeys.size >= 128 || (prior.state?.seenNativeEventIds.length ?? 0) >= 128) return unknown('capacity');
+    if (requestKeys.size >= 128) return unknown('capacity');
     const key = { ...sessionKey, requestId: randomUUID(), generation: (prior.state?.key.generation ?? 0) + 1 };
     if (!validKey(key)) return unknown('state_invalid');
     const expected = prior.state?.key ?? key;
@@ -150,7 +152,8 @@ export function createCompletionController({ store, acceptedContracts, verifier,
         .map((item) => ({ itemId: randomUUID(), contractId: item.contractId, category: item.category,
           source: item.source, requiredTargetIds: [...item.requiredTargetIds], mustFinish: item.mustFinish,
           status: 'pending', receiptIds: [], unresolvedTargetIds: [...(item.unresolvedTargetIds ?? [])] }));
-      const seen = [...(state.seenNativeEventIds ?? []), event.nativeEventId];
+      // A sliding window: replays of recent events are rejected, evicted IDs read as new events.
+      const seen = [...(state.seenNativeEventIds ?? []), event.nativeEventId].slice(-SEEN_EVENTS);
       Object.assign(state, { key, nativeEventId: event.nativeEventId, seenNativeEventIds: seen,
         enabled: false, mode: 'shadow', coverage: 'unknown', modelFamily: 'unknown',
         cancelled: false, awaitingAuthority: false, safeWorkRemaining: pending.some((item) => item.source !== 'model-proposed'),
@@ -214,7 +217,7 @@ export function createCompletionController({ store, acceptedContracts, verifier,
     const target = contract?.targets.find((candidate) => candidate.id === targetId);
     if (!item || !target || !target.sideEffectFree || !item.requiredTargetIds.includes(targetId)) inputError('unaccepted_target');
     const produced = await bounded(({ signal }) => verifier.run({ key: structuredClone(current.state.key),
-      item: structuredClone(item), target: structuredClone(target), signal }), target.timeoutMs + 1000);
+      item: structuredClone(item), target: structuredClone(target), signal }), verifierDeadlineMs(target.timeoutMs) + 1000);
     if (!validReceipt(produced, targetId)) {
       await transact(requestId, (state) => {
         const liveItem = state.items.find((candidate) => candidate.itemId === itemId);
@@ -224,21 +227,27 @@ export function createCompletionController({ store, acceptedContracts, verifier,
       });
       return unknown('verification_unknown');
     }
+    const proven = (candidate) => (candidate?.targetRevisions && Object.hasOwn(candidate.targetRevisions, targetId)
+      ? candidate.targetRevisions[targetId] : undefined);
     const result = await transact(requestId, (state, key) => {
-      if (state.revision !== current.state.revision) unavailable('stale_revision');
+      const liveItem = state.items.find((candidate) => candidate.itemId === itemId);
+      // An authoritative workspace change or a newer proof of this same target supersedes this run.
+      if (state.revision !== current.state.revision || proven(liveItem) !== proven(item)) unavailable('stale_revision');
       if (state.receipts.length >= 128 || state.receipts.some((receipt) => receipt.id === produced.receipt.id)) unavailable('receipt_capacity');
       const { id, executionId, revision, result: receiptResult, startedAt, endedAt } = produced.receipt;
       const receipt = { id, executionId, targetId, revision, result: receiptResult, startedAt, endedAt,
         itemId, key: structuredClone(key) };
       state.receipts.push(receipt);
-      const liveItem = state.items.find((candidate) => candidate.itemId === itemId);
       liveItem.receiptIds.push(id);
       if (receiptResult === 'unknown') {
         liveItem.unresolvedTargetIds = [...new Set([...(liveItem.unresolvedTargetIds ?? []), targetId])];
       } else if (receiptResult === 'verified') {
         liveItem.unresolvedTargetIds = (liveItem.unresolvedTargetIds ?? []).filter((id) => id !== targetId);
       }
-      if (receiptResult === 'verified') state.revision = revision;
+      if (receiptResult === 'verified') {
+        liveItem.targetRevisions = { ...liveItem.targetRevisions, [targetId]: revision };
+        liveItem.targetObservedAt = { ...liveItem.targetObservedAt, [targetId]: state.revision };
+      }
       liveItem.status = hasVerifiedTargets(liveItem, state) ? 'verified' : 'pending';
       state.verifierCoverage = receiptResult === 'unknown' || state.items.some((item) => item.unresolvedTargetIds?.length)
         ? 'unknown' : 'verified';

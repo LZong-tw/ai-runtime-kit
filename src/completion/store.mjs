@@ -2,11 +2,16 @@ import fs from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { isBoundedId, taskStatuses } from './checkpoint.mjs';
-import { isValidSnapshot } from './evaluator.mjs';
+import { isValidSnapshot, validTargetRevisions } from './evaluator.mjs';
 
 const MAX_BYTES = 65536;
 const TTL = 7 * 24 * 60 * 60 * 1000;
+// Far above any transaction deadline; a holder that outlives it fails closed with lock_lost.
+const LOCK_STALE_MS = 5 * 60 * 1000;
+const LOCK_BYTES = 256;
 const STATE_NAME = /^completion-v1-[a-f0-9]{64}\.json$/;
+// Left behind by a writer or reclaimer that crashed mid-step.
+const DEBRIS_NAME = /^\.completion-v1-[0-9a-f-]{36}\.(?:tmp|reclaim)$/;
 const READ_FLAGS = fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK;
 const WRITE_FLAGS = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW;
 const booleans = ['enabled', 'cancelled', 'awaitingAuthority', 'safeWorkRemaining', 'executionTask', 'checkpointPresent', 'stopHookActive'];
@@ -30,7 +35,8 @@ function normalize(state, now) {
   const items = Array.from(state.items, (item) => {
     if (!item || (item.source !== 'model-proposed' && !isBoundedId(item.contractId))
       || !ids(item.requiredTargetIds) || !ids(item.receiptIds)
-      || (item.unresolvedTargetIds !== undefined && !ids(item.unresolvedTargetIds))) fail('state_invalid');
+      || (item.unresolvedTargetIds !== undefined && !ids(item.unresolvedTargetIds))
+      || !validTargetRevisions(item)) fail('state_invalid');
     const normalized = { itemId: item.itemId, category: item.category, source: item.source, status: item.status,
       mustFinish: item.mustFinish, requiredTargetIds: item.requiredTargetIds, receiptIds: item.receiptIds };
     if (item.source !== 'model-proposed') normalized.contractId = item.contractId;
@@ -43,6 +49,8 @@ function normalize(state, now) {
       normalized.proposal = { status: item.proposal.status, receiptIds: item.proposal.receiptIds };
     }
     if (item.unresolvedTargetIds !== undefined) normalized.unresolvedTargetIds = item.unresolvedTargetIds;
+    if (item.targetRevisions !== undefined) normalized.targetRevisions = Object.fromEntries(Object.entries(item.targetRevisions));
+    if (item.targetObservedAt !== undefined) normalized.targetObservedAt = Object.fromEntries(Object.entries(item.targetObservedAt));
     return normalized;
   });
   const receipts = Array.from(state.receipts, (receipt) => {
@@ -80,7 +88,11 @@ function decode(bytes, now) {
   return { updatedAt: envelope.updatedAt, state: normalize(envelope.state, now) };
 }
 
-/** One bounded ledger; an unknown lock always degrades instead of being reclaimed. */
+/**
+ * One bounded ledger under one lock that records its owner pid and creation time. A safe lock is
+ * reclaimed only once its owner is gone (ESRCH) or it is older than LOCK_STALE_MS; an ownerless
+ * lock (a crash between create and write) only by its mtime age. Unsafe locks always degrade.
+ */
 export function createCompletionStore({ root, clock = Date.now, ownerUid = process.getuid() } = {}) {
   if (typeof root !== 'string' || !path.isAbsolute(root) || typeof clock !== 'function'
     || !Number.isInteger(ownerUid) || ownerUid < 0) throw new Error('invalid_store_options');
@@ -161,18 +173,70 @@ export function createCompletionStore({ root, clock = Date.now, ownerUid = proce
     } finally { if (fd !== undefined) fs.closeSync(fd); }
   }
 
-  function acquire(expectedRoot, options) {
-    check(options); verifyRoot(expectedRoot);
+  function createLock(expectedRoot) {
+    const lock = { fd: fs.openSync(lockPath, WRITE_FLAGS, 0o600) };
+    try {
+      lock.info = fs.fstatSync(lock.fd);
+      safeFile(lock.info);
+      const owner = Buffer.from(JSON.stringify({ pid: process.pid, createdAt: clock() }));
+      if (fs.writeSync(lock.fd, owner, 0, owner.length, 0) !== owner.length) fail('io_failure');
+      return lock;
+    } catch (error) {
+      release(lock, expectedRoot);
+      throw error;
+    }
+  }
+
+  function abandoned(fd, info) {
+    const bytes = Buffer.alloc(LOCK_BYTES + 1);
+    const length = fs.readSync(fd, bytes, 0, bytes.length, 0);
+    let owner;
+    try { owner = length <= LOCK_BYTES ? JSON.parse(bytes.subarray(0, length).toString('utf8')) : undefined; }
+    catch { /* Ownerless: only its age can release it. */ }
+    if (!Number.isSafeInteger(owner?.pid) || owner.pid <= 0 || !Number.isFinite(owner.createdAt)) {
+      return clock() - info.mtimeMs > LOCK_STALE_MS;
+    }
+    if (clock() - owner.createdAt > LOCK_STALE_MS) return true;
+    if (owner.pid === process.pid) return false;
+    try { process.kill(owner.pid, 0); return false; }
+    catch (error) { return error.code === 'ESRCH'; }
+  }
+
+  function reclaim(expectedRoot) {
     let fd;
     try {
-      fd = fs.openSync(lockPath, WRITE_FLAGS, 0o600);
+      fd = fs.openSync(lockPath, READ_FLAGS);
       const info = fs.fstatSync(fd);
       safeFile(info);
-      return { fd, info };
+      if (!abandoned(fd, info)) return false;
+      verifyRoot(expectedRoot);
+      // Renaming lets exactly one contender claim this entry; it is removed only if it is the inode inspected.
+      const moved = path.join(root, `.completion-v1-${randomUUID()}.reclaim`);
+      fs.renameSync(lockPath, moved);
+      const current = fs.lstatSync(moved);
+      if (current.dev === info.dev && current.ino === info.ino) {
+        fs.unlinkSync(moved);
+        return true;
+      }
+      // A newer owner's lock was moved: put it back without clobbering. If that fails its owner fails closed on verifyLock.
+      try { fs.linkSync(moved, lockPath); } catch { /* A third owner already holds the path. */ }
+      fs.unlinkSync(moved);
+      return false;
     } catch (error) {
-      if (fd !== undefined) fs.closeSync(fd);
-      if (error.code === 'EEXIST') fail('lock_busy');
+      if (error.code === 'ENOENT') return true;
+      if (error.code === 'ELOOP') fail('unsafe_state');
       throw error;
+    } finally { if (fd !== undefined) fs.closeSync(fd); }
+  }
+
+  function acquire(expectedRoot, options) {
+    for (let attempt = 0; ; attempt++) {
+      check(options); verifyRoot(expectedRoot);
+      try { return createLock(expectedRoot); }
+      catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+        if (attempt > 0 || !reclaim(expectedRoot)) fail('lock_busy');
+      }
     }
   }
 
@@ -191,15 +255,28 @@ export function createCompletionStore({ root, clock = Date.now, ownerUid = proce
     if (current.dev !== lock.info.dev || current.ino !== lock.info.ino) fail('lock_lost');
   }
 
+  // Callers hold the lock, so no live writer owns a temp file; a reclaim file is removed only once it is stale.
+  function sweptDebris(name) {
+    if (!DEBRIS_NAME.test(name)) return false;
+    try {
+      const info = fs.lstatSync(path.join(root, name));
+      if (!info.isFile() || info.uid !== ownerUid || info.nlink !== 1 || clock() - info.mtimeMs <= LOCK_STALE_MS) return false;
+      fs.unlinkSync(path.join(root, name));
+      return true;
+    } catch { return false; }
+  }
+
   function entries(options, expectedRoot) {
     check(options); verifyRoot(expectedRoot);
     const directory = fs.opendirSync(root);
     const names = [];
-    let count = 0;
+    let count = 0; let scanned = 0;
     try {
       let entry;
       while ((entry = directory.readSync())) {
         check(options);
+        if (++scanned > 4096) fail('directory_capacity');
+        if (sweptDebris(entry.name)) continue;
         if (++count > 1024) fail('directory_capacity');
         if (STATE_NAME.test(entry.name)) names.push(entry.name);
         if (names.length > 128) fail('session_capacity');
