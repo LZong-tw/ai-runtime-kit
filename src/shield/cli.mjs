@@ -234,15 +234,15 @@ function isLoopbackTarget(value) { try { const url = new URL(value); return url.
 
 function parseInstall(argv, command = "shield install") {
   let write = false;
-  let lane = "subscription";
+  let lane = null;
   for (let index = 0; index < argv.length; index += 1) {
     if (argv[index] === "--write" && !write) { write = true; continue; }
-    if (argv[index] === "--lane" && (lane === "subscription" || index === 0) && (argv[index + 1] === "subscription" || argv[index + 1] === "managed")) {
+    if (argv[index] === "--lane" && lane === null && (argv[index + 1] === "subscription" || argv[index + 1] === "managed")) {
       lane = argv[index + 1]; index += 1; continue;
     }
     throw new Error(`usage: ${command} [--lane subscription|managed] [--write]`);
   }
-  return { write, lane };
+  return { write, lane: lane ?? "subscription" };
 }
 
 function parseLaneCommand(argv, command) {

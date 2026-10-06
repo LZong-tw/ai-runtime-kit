@@ -123,12 +123,16 @@ export async function stopShieldService({ paths, runLaunchctl = defaultLaunchctl
 // Pins, policy and config stay, so a later install needs no re-provisioning.
 export async function uninstallShieldService({ paths, write = false, io = defaultIo, runLaunchctl = defaultLaunchctl, uid = process.getuid?.() } = {}) {
   assertShieldPaths(paths);
+  // Bootout must reach the domain the job actually runs in, or unlink would leave it loaded until logout.
+  if (write && uid !== undefined && paths.launchdDomain !== `gui/${uid}`) throw new Error(`shield launchd domain ${paths.launchdDomain} is not this user's gui/${uid}`);
   let stat;
   try {
     stat = await io.lstat(paths.launchAgentPath);
   } catch (error) {
-    if (error?.code === "ENOENT") return { label: paths.serviceLabel, installed: false, removed: false };
-    throw error;
+    if (error?.code !== "ENOENT") throw error;
+    // A plist deleted by hand can leave its KeepAlive job loaded; unload it too.
+    if (write) await launch(runLaunchctl, ["bootout", paths.launchdTarget], true);
+    return { label: paths.serviceLabel, installed: false, removed: false };
   }
   if (!stat.isFile() || (uid !== undefined && stat.uid !== uid)) throw new Error(`shield launch plist is not a regular file owned by this user: ${paths.launchAgentPath}`);
   const plist = await io.readFile(paths.launchAgentPath, "utf8");
