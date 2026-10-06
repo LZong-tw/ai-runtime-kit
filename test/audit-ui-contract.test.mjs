@@ -291,6 +291,29 @@ test("Shield UI and status projections preserve accounting-neutral protection st
   assert.deepEqual(projectShieldStatus({ state: "protected", raw_prompt: "shield-raw-sentinel" }), { state: "protected" });
 });
 
+test("Shield UI decision rows project the media counters and nothing else new", async () => {
+  const base = {
+    logical_request_id: "request-1", session_id: null, lane: "subscription", destination_class: "subscription",
+    policy_version: "policy-1", gitleaks_version: "8.24.3", privacy_version: "privacy-1", action: "redact",
+    reasons: "policy_redact", transform_count: 3, decision_source: "evaluated", override: false, elapsed_ms: 5,
+    observed_at: "2026-10-06T00:00:00.000Z",
+  };
+  const media = { image_version: "image-0123456789ab", image_count: 2, image_transform_count: 1, document_count: 0, media_outcome: "scanned" };
+  const adapter = createAuditUiAdapter({
+    async query() {
+      return { state: "healthy", rows: [{ ...base, ...media, ocr_text: "shield-raw-sentinel", image_url: "https://images.example/a.png" }] };
+    },
+    async status() { return { state: "healthy" }; },
+  });
+  for (const [name, args] of [["shield_decisions", []], ["shield_decision", ["request-1"]]]) {
+    const result = await adapter.query(name, args);
+    assert.deepEqual(result.rows, [{ ...base, ...media }], name);
+    assert.doesNotMatch(JSON.stringify(result), /sentinel|images\.example/);
+  }
+  const transitions = await adapter.query("shield_policy_transitions");
+  assert.equal(Object.hasOwn(transitions.rows[0], "media_outcome"), false);
+});
+
 test("Shield UI rejects non-opaque detail identifiers before it invokes the query bridge", async () => {
   let calls = 0;
   const adapter = createAuditUiAdapter({
