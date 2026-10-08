@@ -214,10 +214,11 @@ stamp the selected AirKit mode on every Messages request:
 
 ```bash
 airpi --profile openai-compatible-example --mode auto
+airomp --profile openai-compatible-example --mode auto
 airoc --profile openai-compatible-example --mode auto
 ```
 
-`airpi` uses Pi's Anthropic provider with the local adapter. `airoc` uses the
+`airpi` and `airomp` use Pi/OMP's Anthropic provider with the local adapter. `airoc` uses the
 Anthropic provider and enables OpenCode's fullscreen TUI by default; pass an
 explicit `--tui-mode regular` if a split/non-fullscreen TUI is desired.
 
