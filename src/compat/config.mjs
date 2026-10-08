@@ -335,9 +335,25 @@ export function requestedMode(headers) {
 // `routes.sonnet ?? routes.default` preserves the old target. Exact-match launch
 // routing stays limited to those two validated launch-id families so arbitrary
 // provider models are never promoted into launcher ids.
-export function routeBareClaudeModel(body, routes, launchModel = null) {
+export function routeBareClaudeModel(body, routes, launchModel = null, modeRoutes = null) {
   if (!isRecord(body) || typeof body.model !== "string") return null;
   if (!isRecord(routes)) return null;
+  if (body.model.startsWith("airkit-provider-")) return null;
+
+  if (body.model.startsWith("airkit/")) {
+    const alias = body.model.slice("airkit/".length).toLowerCase();
+    const modeTable = isRecord(modeRoutes) ? modeRoutes[alias] : null;
+    const target = modeTable?.default
+      ?? (alias === "opus" ? (routes.opus ?? routes.default)
+        : alias === "sonnet" ? (routes.sonnet ?? routes.default)
+        : alias === "background" || alias === "deepseek" ? (routes.background ?? routes.default)
+        : alias === "auto" || alias === "default" ? routes.default
+        : null);
+    if (typeof target === "string" && target !== "" && target !== body.model) {
+      return { ...body, model: target };
+    }
+  }
+
   if (body.model.includes("/")) return null;
   const target = body.model === launchModel && isSupportedLaunchModelId(launchModel)
     ? routes.default

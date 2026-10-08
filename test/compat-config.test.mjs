@@ -533,6 +533,41 @@ test("bare Claude models route to background or default; qualified and foreign m
   assert.equal(original.model, "claude-sonnet-5", "input body is not mutated");
   assert.notEqual(rewritten, original);
 });
+test("airkit/* model aliases route to the matching mode default or family route", () => {
+  const routes = {
+    default: "oneportal/DeepSeek-V4-1-Flash",
+    background: "oneportal/DeepSeek-V4-1-Flash",
+    opus: "oneportal/Kimi-K3",
+    sonnet: "web-litellm/claude-sonnet-5",
+  };
+  const modeRoutes = {
+    glm: { default: "oneportal/GLM-5.3" },
+    grok: { default: "oneportal/grok-4.6" },
+    gpt: { default: "oneportal/gpt-5.6-terra" },
+  };
+
+  assert.equal(
+    routeBareClaudeModel({ model: "airkit/glm" }, routes, null, modeRoutes).model,
+    "oneportal/GLM-5.3",
+  );
+  assert.equal(
+    routeBareClaudeModel({ model: "airkit/grok" }, routes, null, modeRoutes).model,
+    "oneportal/grok-4.6",
+  );
+  assert.equal(
+    routeBareClaudeModel({ model: "airkit/opus" }, routes, null, modeRoutes).model,
+    "oneportal/Kimi-K3",
+  );
+  assert.equal(
+    routeBareClaudeModel({ model: "airkit/sonnet" }, routes, null, modeRoutes).model,
+    "web-litellm/claude-sonnet-5",
+  );
+  assert.equal(
+    routeBareClaudeModel({ model: "airkit/auto" }, routes, null, modeRoutes).model,
+    "oneportal/DeepSeek-V4-1-Flash",
+  );
+});
+
 
 test("a dedicated launch id separates the launcher's own traffic from a Sonnet pick", () => {
   const routes = {
