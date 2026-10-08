@@ -165,7 +165,7 @@ export function createMessagesHandler({ config, coreClient, policies, auditEmitt
       // is unaffected. Each launch mode wants a different target model, so the
       // caller's own mode label picks the table.
       const mode = requestedMode(request?.headers);
-      const routed = routeBareClaudeModel(body, resolveModeRoutes(config, mode), config.launchModel ?? null);
+      const routed = routeBareClaudeModel(body, resolveModeRoutes(config, mode), config.launchModel ?? null, config.modeRoutes ?? null);
       const routedBody = routed ?? body;
       // Before the compatibility decision, apply the configured Advisor policy.
       // Fallback mode strips an unresolved definition before it can divert an
