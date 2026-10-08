@@ -119,7 +119,7 @@ The current audit contract has these source/client lanes:
 | --- | --- | --- |
 | `airclaude` / CCR compatibility | request lifecycle, route/provider attempts, response/usage, failure and session metadata when an audit emitter is supplied | Provider/cache evidence is still reported as `metadata_only` when the upstream response does not expose it. |
 | Claude Code JSONL / hook | bounded session metadata, request start, allowlisted usage counters | It does not parse arbitrary transcript text or infer provider attempts that are absent from the JSONL. |
-| `airpi` / Pi | session lifecycle and allowlisted usage through the managed extension | The extension is installed when the AirKit audit runtime is explicitly passed to the launcher; it is not a promise that an unrelated Pi invocation is captured. |
+| `airpi` / `airomp` | session lifecycle and allowlisted usage through the managed extension | The extension is installed when the AirKit audit runtime is explicitly passed to the launcher; it is not a promise that an unrelated Pi or OMP invocation is captured. |
 | `airoc` / OpenCode | adapter routing plus OpenCode SQLite message/session counters | Unknown or changed OpenCode schemas produce a collector gap instead of guessed data. |
 | Codex / `codex-desktop` | bounded JSONL session/task/token metadata | The measured contract does not expose provider attempts; this lane is normally `metadata_only`. |
 | Headroom | bounded JSONL savings/cost counters and optional exact AirKit event links | Unlinked rows remain `bounded_time_candidate`; they are never silently attached to a request. |
