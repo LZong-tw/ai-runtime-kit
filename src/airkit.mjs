@@ -943,7 +943,7 @@ export async function exportOssRelease({ outDir }) {
   const binPath = join(outDir, "src", "airkit.mjs");
   await writeFile(binPath, await readFile(fileURLToPath(import.meta.url), "utf8"));
   await chmod(binPath, 0o755);
-  for (const entrypoint of ["airpi.mjs", "airoc.mjs"]) {
+  for (const entrypoint of ["airpi.mjs", "airomp.mjs", "airoc.mjs"]) {
     const target = join(outDir, "src", entrypoint);
     await copyFile(join(here, entrypoint), target);
     await chmod(target, 0o755);
@@ -1717,6 +1717,7 @@ export async function prepareExternalClient(catalog, profileName, options = {}) 
 
 const EXTERNAL_CLIENT_SPECS = Object.freeze({
   pi: Object.freeze({ binary: "pi" }),
+  omp: Object.freeze({ binary: "omp" }),
   opencode: Object.freeze({ binary: "opencode" }),
 });
 
@@ -1741,6 +1742,7 @@ export async function runExternalClientCli(client, argv = process.argv.slice(2),
   const childEnv = { ...(options.env ?? process.env) };
   delete childEnv.ANTHROPIC_AUTH_TOKEN;
   delete childEnv.ANTHROPIC_AUTH_TOKEN_JBRIDGE;
+  delete childEnv.ANTHROPIC_OAUTH_TOKEN;
   childEnv.AIRKIT_CLIENT_BASE_URL = endpoint;
   childEnv.AIRKIT_CLIENT_TOKEN = adapter.token;
   childEnv.ANTHROPIC_BASE_URL = endpoint;
@@ -1748,13 +1750,16 @@ export async function runExternalClientCli(client, argv = process.argv.slice(2),
 
   const clientArgs = [];
   let piAuditRuntime = null;
-  if (client === "pi") {
+  if (client === "pi" || client === "omp") {
     piAuditRuntime = await createManagedPiAuditRuntime(options);
     if (piAuditRuntime) {
       Object.assign(childEnv, piAuditRuntime.env);
     }
     if (!hasExternalOption(parsed.userArgs, "--provider")) clientArgs.push("--provider", "anthropic");
     if (!hasExternalOption(parsed.userArgs, "--model")) clientArgs.push("--model", "claude-sonnet-5");
+    if (client === "omp" && !hasExternalOption(parsed.userArgs, "--api-key")) {
+      clientArgs.push("--api-key", adapter.token);
+    }
     clientArgs.push(...parsed.userArgs);
     if (piAuditRuntime && !hasExternalOptionValue(parsed.userArgs, ["-e", "--extension"], piAuditRuntime.extensionPath)) {
       clientArgs.push("--extension", piAuditRuntime.extensionPath);
@@ -2173,6 +2178,7 @@ function publicPackage(version) {
       airkit: "src/airkit.mjs",
       airclaude: "src/airkit.mjs",
       airpi: "src/airpi.mjs",
+      airomp: "src/airomp.mjs",
       airoc: "src/airoc.mjs",
       "airkit-auditd": "src/auditd.mjs",
       "airkit-shieldd": "src/shieldd.mjs",
@@ -2858,8 +2864,8 @@ function renderAirkitHelp() {
   return `Usage: airkit <command> [options]
 
 Commands:
-  connect [--profile <name>] [--mode <mode>] [--port <port>]
-  audit <install|start|stop|status|doctor|update|verify|open|repo|account|requests|request|sessions|clients|accounts|repos|usage|cache|gaps|query> [options]
+  connect [--profile <name>] [--mode <mode>] [--port <port>] [--config-dir <dir>]
+  audit <install|start|stop|status|doctor|update|verify|open|repo|account|requests|request|sessions|clients|accounts|repos|usage|cache|gaps|query|prune|export> [options]
   shield <install|uninstall|start|stop|status|doctor|policy|privacy|launch> [options]
   runtime check
   runtime update [--write]

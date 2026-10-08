@@ -277,6 +277,7 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
     assert.equal(exportedPackage.bin["airkit-shieldd"], "src/shieldd.mjs");
     const exportedAirPi = await readFile(join(outDir, "src", "airpi.mjs"), "utf8");
     assert.equal(exportedAirPi.includes("runAirPiCli()") || exportedAirPi.includes("runExternalClientCli(\"pi\")"), true);
+    assert.equal((await readFile(join(outDir, "src", "airomp.mjs"), "utf8")).includes("runExternalClientCli(\"omp\")"), true);
     assert.equal((await readFile(join(outDir, "src", "airoc.mjs"), "utf8")).includes("runExternalClientCli(\"opencode\")"), true);
     assert.equal((await readFile(join(outDir, "src", "audit", "service.mjs"), "utf8")).includes("installAuditService"), true);
     assert.equal((await readFile(join(outDir, "src", "audit", "cli.mjs"), "utf8")).includes("runAuditCli"), true);
@@ -6798,6 +6799,32 @@ test("airpi launches Pi through the local adapter with Anthropic credentials and
   assert.equal(calls[1].spawnOptions.env.ANTHROPIC_API_KEY, "local-token");
   assert.equal(calls[1].spawnOptions.env.ANTHROPIC_AUTH_TOKEN, undefined);
 });
+test("airomp launches OMP through the local adapter with Anthropic credentials, api-key override, and the selected mode", async () => {
+  const calls = [];
+  const exitCode = await runExternalClientCli("omp", ["--profile", "launch-example", "--mode", "glm", "hello"], {
+    catalog: { profiles: [{ name: "launch-example" }] },
+    env: { ANTHROPIC_AUTH_TOKEN: "inherited-token", ANTHROPIC_OAUTH_TOKEN: "inherited-oauth", PATH: "/usr/bin" },
+    prepareExternalClient: async (_catalog, profileName, options) => {
+      calls.push({ profileName, options });
+      return { externalClient: { origin: "http://127.0.0.1:4312/v1", token: "local-token", close: async () => {} } };
+    },
+    spawnCommand: (command, args, options) => {
+      calls.push({ command, args, spawnOptions: options });
+      return { status: 0 };
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(calls[0].profileName, "launch-example");
+  assert.equal(calls[0].options.mode, "glm");
+  assert.equal(calls[1].command, "omp");
+  assert.deepEqual(calls[1].args, ["--provider", "anthropic", "--model", "claude-sonnet-5", "--api-key", "local-token", "hello"]);
+  assert.equal(calls[1].spawnOptions.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:4312/v1");
+  assert.equal(calls[1].spawnOptions.env.ANTHROPIC_API_KEY, "local-token");
+  assert.equal(calls[1].spawnOptions.env.ANTHROPIC_AUTH_TOKEN, undefined);
+  assert.equal(calls[1].spawnOptions.env.ANTHROPIC_OAUTH_TOKEN, undefined);
+});
+
 
 test("airoc launches OpenCode in fullscreen TUI mode without overriding explicit client flags", async () => {
   const calls = [];
