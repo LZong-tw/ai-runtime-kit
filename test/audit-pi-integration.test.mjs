@@ -82,6 +82,43 @@ test("airpi appends one managed extension and preserves user extension ordering"
     await rm(root, { force: true, recursive: true });
   }
 });
+test("airomp appends managed extension and sets api-key override", async () => {
+  const calls = [];
+  const root = await mkdtemp(join(tmpdir(), "airkit-airomp-test-"));
+
+  try {
+    const exitCode = await runExternalClientCli("omp", [
+      "--profile", "launch-example",
+      "-e", "/tmp/custom-hook.mjs",
+      "hello",
+    ], {
+      auditEmitter: { emit: async () => {} },
+      tempRoot: root,
+      catalog: { profiles: [{ name: "launch-example" }] },
+      prepareExternalClient: async () => ({
+        externalClient: { origin: "http://127.0.0.1:4312/v1", token: "local-token", close: async () => {} },
+      }),
+      spawnCommand: (command, args, options) => {
+        calls.push({ command, args, options });
+        return { status: 0 };
+      },
+    });
+
+    assert.equal(exitCode, 0);
+    assert.equal(calls[0].command, "omp");
+    const args = calls[0].args;
+    assert.equal(args.includes("--api-key"), true);
+    assert.equal(args[args.indexOf("--api-key") + 1], "local-token");
+    assert.equal(args.includes("-e"), true);
+    assert.equal(args[args.indexOf("-e") + 1], "/tmp/custom-hook.mjs");
+    assert.equal(args.includes("--extension"), true);
+    assert.match(args[args.indexOf("--extension") + 1], /airkit-pi-audit-extension\.mjs$/);
+    assert.equal(calls[0].options.env.AIRKIT_PI_AUDIT_EVENTS_PATH.endsWith("airkit-pi-audit-events.jsonl"), true);
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
 
 test("airpi fail-opens when managed Pi audit setup cannot write temp files", async () => {
   const calls = [];

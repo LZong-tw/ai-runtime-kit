@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { runAuditCli } from "../src/audit/cli.mjs";
 
-const CLIENTS = Object.freeze(["airclaude", "airpi", "airoc", "codex-desktop", "opencode", "headroom"]);
+const CLIENTS = Object.freeze(["airclaude", "airpi", "airomp", "airoc", "codex-desktop", "opencode", "headroom"]);
 
 export async function verifyAuditClients({ mode = "fixture", client } = {}) {
   if (mode === "live") {

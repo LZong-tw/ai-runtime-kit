@@ -15,6 +15,7 @@
     "airkit": "src/airkit.mjs",
     "airclaude": "src/airkit.mjs",
     "airpi": "src/airpi.mjs",
+    "airomp": "src/airomp.mjs",
     "airoc": "src/airoc.mjs",
     "airkit-auditd": "src/auditd.mjs",
     "airkit-shieldd": "src/shieldd.mjs"
