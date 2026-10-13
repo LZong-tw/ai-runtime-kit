@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { promisify } from "node:util";
+import { describePlistDrift } from "../launchd-plist.mjs";
 
 import { readShieldIdentity, readShieldPolicyState, shieldPaths, writeShieldConfig } from "./paths.mjs";
 import { classifyShieldRequest } from "./classify.mjs";
@@ -533,7 +534,7 @@ function assertCompleteDetectorVersions(value) {
 
 async function ensurePathDrift(plan, io) {
   const existing = await io.readFile(plan.plistPath, "utf8");
-  if (existing !== plan.plistXml) throw new Error(`shield launch plist path drift detected: ${plan.plistPath}`);
+  if (existing !== plan.plistXml) throw new Error(`shield launch plist path drift detected: ${plan.plistPath} (${describePlistDrift(existing, plan.plistXml)}); run the install command from the checkout that should own this job`);
 }
 
 // launchctl reports an already-bootstrapped service as "Bootstrap failed: 5:

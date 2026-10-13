@@ -3400,6 +3400,39 @@ test("subagent observability projects child transcript progress without raw tool
   }
 });
 
+test("context hook records subagent timelines without an AirClaude profile", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-noprofile-"));
+  const childTranscript = join(pluginData, "child.jsonl");
+  try {
+    await writeFile(childTranscript, `${JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "plain session child update" }] },
+    })}\n`);
+    const env = { CLAUDE_PLUGIN_DATA: pluginData };
+    assert.equal(await processContextHook({
+      hook_event_name: "PostToolUse",
+      session_id: "plain-parent",
+      agent_id: "plain-child",
+      transcript_path: childTranscript,
+    }, env), null);
+    const rows = await renderSubagentStatusLine({
+      parent_id: "plain-parent",
+      tasks: [{ id: "task-1", agent_id: "plain-child", name: "plain-child", elapsed_ms: 1000 }],
+    }, env);
+    assert.equal(rows.length, 1);
+    assert.match(rows[0], /plain session child update/);
+    assert.doesNotMatch(rows[0], /waiting for first event/);
+
+    assert.equal(await processContextHook({
+      hook_event_name: "UserPromptSubmit",
+      prompt: "ordinary prompt",
+      session_id: "plain-parent",
+    }, env), null);
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
 test("subagent statusline appends only a Shield lane protection suffix", async () => {
   const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-suffix-"));
   const env = { CLAUDE_PLUGIN_DATA: pluginData };

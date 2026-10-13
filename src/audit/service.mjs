@@ -2,6 +2,7 @@ import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promi
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { describePlistDrift } from "../launchd-plist.mjs";
 
 const execFileAsync = promisify(execFile);
 export const AUDIT_SERVICE_LABEL = "com.airkit.auditd";
@@ -103,7 +104,7 @@ export async function uninstallAuditService({ write = false, confirm = false, pa
 async function ensurePathDrift(plan, io) {
   try {
     const existing = await io.readFile(plan.plistPath, "utf8");
-    if (existing !== plan.plistXml) throw new Error(`auditd launch plist path drift detected: ${plan.plistPath}`);
+    if (existing !== plan.plistXml) throw new Error(`auditd launch plist path drift detected: ${plan.plistPath} (${describePlistDrift(existing, plan.plistXml)}); run the install command from the checkout that should own this job`);
   } catch (error) {
     if (error?.code === "ENOENT") return;
     throw error;
