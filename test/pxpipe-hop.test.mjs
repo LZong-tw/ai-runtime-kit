@@ -26,8 +26,8 @@ test("pxpipe hop forwards to the given loopback upstream and closes", async () =
   assert.equal(record.killed, true);
 });
 
-test("pxpipe hop refuses non-loopback upstreams", async () => {
-  await assert.rejects(startPxpipeHop({ upstream: "https://api.anthropic.com", spawnProcess: () => assert.fail("spawned") }), /loopback/);
+test("pxpipe hop refuses arbitrary remote upstreams", async () => {
+  await assert.rejects(startPxpipeHop({ upstream: "https://example.com", spawnProcess: () => assert.fail("spawned") }), /loopback http origin or the Anthropic API/);
 });
 
 test("pxpipe hop reports an early exit", async () => {

@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import { createServer, connect } from "node:net";
 
+export const ANTHROPIC_ORIGIN = "https://api.anthropic.com";
+
 async function freePort() {
   return new Promise((resolve, reject) => {
     const server = createServer();
@@ -26,8 +28,9 @@ function probe(port) {
 // only ever receives traffic Shield already redacted.
 export async function startPxpipeHop({ upstream, command = "pxpipe", env = process.env, spawnProcess = spawn, timeoutMs = 10_000 } = {}) {
   const target = new URL(upstream);
-  if (target.hostname !== "127.0.0.1" || target.protocol !== "http:") {
-    throw new Error("pxpipe hop upstream must be a loopback http origin");
+  const loopback = target.hostname === "127.0.0.1" && target.protocol === "http:";
+  if (!loopback && target.origin !== ANTHROPIC_ORIGIN) {
+    throw new Error("pxpipe hop upstream must be a loopback http origin or the Anthropic API");
   }
   const port = await freePort();
   const child = spawnProcess(command, [], {

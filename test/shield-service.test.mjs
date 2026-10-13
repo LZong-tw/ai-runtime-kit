@@ -879,7 +879,7 @@ test("shield status never displays capability or target metadata", async () => {
 test("shield launch CLI requires a lane and command boundary", async () => {
   await assert.rejects(
     runShieldCli(["launch", "--lane", "subscription", "echo", "unsafe"], { shield: {} }),
-    /usage: shield launch --lane subscription\|managed -- command/i,
+    /usage: shield launch --lane subscription\|managed .*-- command/i,
   );
 });
 
@@ -900,6 +900,41 @@ test("subscription shield CLI accepts only an explicit loopback dynamic target",
   for (const target of ["https://127.0.0.1:8804", "http://localhost:8804", "http://127.0.0.1", "http://example.com:80"]) {
     await assert.rejects(runShieldCli(["launch", "--lane", "subscription", "--target", target, "--", "echo", "no"], { shield: {} }), /usage: shield launch/i);
   }
+});
+
+test("subscription --pxpipe launch points Shield at a pxpipe hop and closes it with the lease", async () => {
+  const events = [];
+  await runShieldCli(["launch", "--lane", "subscription", "--pxpipe", "--", "echo", "ok"], {
+    stdout: capture().stdout,
+    ensureShieldReady: async () => ({ origin: "http://127.0.0.1:8811", capability: "a".repeat(32), lane: "subscription", targetClass: "subscription" }),
+    startPxpipeHop: async ({ upstream }) => {
+      events.push(`hop:${upstream}`);
+      return { origin: "http://127.0.0.1:8805", async close() { events.push("hop-close"); } };
+    },
+    createShieldDestinationLease: async ({ ready, targetOrigin }) => { events.push(`create:${targetOrigin}`); return ready; },
+    renewShieldDestinationLease: async () => true,
+    revokeShieldDestinationLease: async () => events.push("revoke"),
+    shieldLeaseSetInterval: () => ({ unref() {} }),
+    shieldLeaseClearInterval: () => {},
+    launchShieldChild: async () => { events.push("child-exit"); return { code: 0 }; },
+  });
+  assert.deepEqual(events, ["hop:https://api.anthropic.com", "create:http://127.0.0.1:8805", "child-exit", "revoke", "hop-close"]);
+});
+
+test("--pxpipe is subscription-only and excludes --target", async () => {
+  await assert.rejects(runShieldCli(["launch", "--lane", "managed", "--pxpipe", "--", "echo", "no"], { shield: {} }), /lease lifecycle/);
+  await assert.rejects(runShieldCli(["launch", "--lane", "subscription", "--pxpipe", "--target", "http://127.0.0.1:8804", "--", "echo", "no"], { shield: {} }), /not both/);
+});
+
+test("subscription --pxpipe closes the hop when the lease cannot be created", async () => {
+  let closed = false;
+  await assert.rejects(runShieldCli(["launch", "--lane", "subscription", "--pxpipe", "--", "echo", "no"], {
+    stdout: capture().stdout,
+    ensureShieldReady: async () => ({ origin: "http://127.0.0.1:8811", capability: "a".repeat(32), lane: "subscription", targetClass: "subscription" }),
+    startPxpipeHop: async () => ({ origin: "http://127.0.0.1:8805", async close() { closed = true; } }),
+    createShieldDestinationLease: async () => { throw new Error("lease refused"); },
+  }), /lease refused/);
+  assert.equal(closed, true);
 });
 
 test("subscription target launch renews its lease until its foreground child exits", async () => {
