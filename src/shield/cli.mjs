@@ -7,6 +7,7 @@ import { provisionShieldAssets } from "./provision.mjs";
 import { installShieldPolicyProvision, readShieldPolicyProvision } from "./policy-bundle.mjs";
 import { readShieldOperationalStatus } from "./operational-status.mjs";
 import { hasBackgroundClaudeHost, scheduleBackgroundHostRelease } from "./background-host.mjs";
+import { ANTHROPIC_ORIGIN, startPxpipeHop } from "./pxpipe-hop.mjs";
 import {
   ensureShieldReady,
   createShieldDestinationLease,
@@ -159,10 +160,17 @@ async function createDefaultShieldDependencies(dependencies) {
       const state = await readShieldPolicyState({ paths: shieldPaths({ env, lane }), io: dependencies.io });
       return state ? { state: "healthy", version: state.version, detectorVersions: state.detectorVersions } : { state: "stopped", installed: false };
     },
-    async launch({ lane, targetOrigin, command, args }) {
+    async launch({ lane, targetOrigin: fixedTarget, pxpipe = false, command, args }) {
       const lanePaths = shieldPaths({ env, lane });
       let ready = await ensureReady({ lane, env, paths: lanePaths, io: dependencies.io, inspectService: dependencies.inspectService, isProcessAlive: dependencies.isProcessAlive, probeShield: dependencies.probeShield });
-      if (targetOrigin) ready = await createLease({ ready, targetOrigin, paths: lanePaths, io: dependencies.io });
+      // pxpipe sits behind Shield, so it only sees redacted traffic. It lives
+      // exactly as long as the lease that points Shield at it.
+      const hop = pxpipe ? await (dependencies.startPxpipeHop ?? startPxpipeHop)({ upstream: ANTHROPIC_ORIGIN, env }) : null;
+      const targetOrigin = hop?.origin ?? fixedTarget;
+      if (targetOrigin) {
+        try { ready = await createLease({ ready, targetOrigin, paths: lanePaths, io: dependencies.io }); }
+        catch (error) { await hop?.close(); throw error; }
+      }
       let leaseTimer = null;
       const stopLeaseTimer = () => {
         if (leaseTimer !== null) {
@@ -185,6 +193,7 @@ async function createDefaultShieldDependencies(dependencies) {
         leaseReleased = true;
         stopLeaseTimer();
         await revokeLease({ ready, paths: lanePaths, io: dependencies.io }).catch(() => {});
+        await hop?.close();
       };
       try {
         outcome = await launchChild({ command, args, ready, env, spawnChild: dependencies.spawnChild });
@@ -223,12 +232,14 @@ function parseLaunch(argv) {
   const targetIndex = argv.indexOf("--target");
   const targetOrigin = targetIndex >= 0 ? argv[targetIndex + 1] : undefined;
   const beforeBoundary = argv.slice(0, boundary);
+  const pxpipe = beforeBoundary.includes("--pxpipe");
   const validTarget = targetIndex < 0 || (targetIndex + 1 < boundary && isLoopbackTarget(targetOrigin));
-  if (laneIndex < 0 || !lane || boundary < 0 || boundary === argv.length - 1 || (lane !== "subscription" && lane !== "managed") || !validTarget || beforeBoundary.some((value, index) => !["--lane", lane, "--target", targetOrigin].includes(value))) {
-    throw new Error("usage: shield launch --lane subscription|managed -- command [args...]");
+  if (laneIndex < 0 || !lane || boundary < 0 || boundary === argv.length - 1 || (lane !== "subscription" && lane !== "managed") || !validTarget || beforeBoundary.some((value) => !["--lane", lane, "--target", targetOrigin, "--pxpipe"].includes(value))) {
+    throw new Error("usage: shield launch --lane subscription|managed [--target http://127.0.0.1:port | --pxpipe] -- command [args...]");
   }
-  if (lane === "managed" && targetOrigin) throw new Error("managed Shield launch requires AirKit lease lifecycle");
-  return { lane, targetOrigin, command: argv[boundary + 1], args: argv.slice(boundary + 2) };
+  if (lane === "managed" && (targetOrigin || pxpipe)) throw new Error("managed Shield launch requires AirKit lease lifecycle");
+  if (pxpipe && targetOrigin) throw new Error("shield launch accepts --target or --pxpipe, not both");
+  return { lane, targetOrigin, pxpipe, command: argv[boundary + 1], args: argv.slice(boundary + 2) };
 }
 
 function isLoopbackTarget(value) { try { const url = new URL(value); return url.protocol === "http:" && url.hostname === "127.0.0.1" && Number.isInteger(Number(url.port)) && Number(url.port) > 0 && url.pathname === "/" && !url.search && !url.hash; } catch { return false; } }
