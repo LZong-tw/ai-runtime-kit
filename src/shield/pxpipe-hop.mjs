@@ -26,7 +26,7 @@ function probe(port) {
 // Starts a per-launch pxpipe between Shield and the gateway. Shield sees the
 // pxpipe origin as its fixed target; pxpipe forwards to `upstream`. pxpipe
 // only ever receives traffic Shield already redacted.
-export async function startPxpipeHop({ upstream, command = "pxpipe", env = process.env, spawnProcess = spawn, timeoutMs = 10_000 } = {}) {
+export async function startPxpipeHop({ upstream, command = "pxpipe", env = process.env, spawnProcess = spawn, timeoutMs = 10_000, owner = process } = {}) {
   const target = new URL(upstream);
   const loopback = target.hostname === "127.0.0.1" && target.protocol === "http:";
   if (!loopback && target.origin !== ANTHROPIC_ORIGIN) {
@@ -44,13 +44,29 @@ export async function startPxpipeHop({ upstream, command = "pxpipe", env = proce
     stdio: "ignore",
   });
   let exited = null;
-  child.once("exit", (code) => { exited = code ?? -1; });
-  child.once("error", () => { exited = -1; });
+  // A killed launcher never reaches its finally block, so the hop reaps
+  // pxpipe itself and then lets the signal take its normal course.
+  const reap = () => { if (exited === null) child.kill("SIGTERM"); };
+  const signals = ["SIGTERM", "SIGINT", "SIGHUP"];
+  const onSignal = (signal) => {
+    detach();
+    reap();
+    owner.kill(owner.pid, signal);
+  };
+  const detach = () => {
+    owner.off("exit", reap);
+    for (const signal of signals) owner.off(signal, onSignal);
+  };
+  owner.on("exit", reap);
+  for (const signal of signals) owner.on(signal, onSignal);
+  child.once("exit", (code) => { exited = code ?? -1; detach(); });
+  child.once("error", () => { exited = -1; detach(); });
   const deadline = Date.now() + timeoutMs;
   while (!(await probe(port))) {
     if (exited !== null) throw new Error(`pxpipe exited before listening (code ${exited})`);
     if (Date.now() > deadline) {
-      child.kill("SIGTERM");
+      detach();
+      reap();
       throw new Error("pxpipe did not start listening in time");
     }
     await new Promise((r) => setTimeout(r, 100));
@@ -58,7 +74,8 @@ export async function startPxpipeHop({ upstream, command = "pxpipe", env = proce
   return {
     origin: `http://127.0.0.1:${port}`,
     async close() {
-      if (exited === null) child.kill("SIGTERM");
+      detach();
+      reap();
     },
   };
 }

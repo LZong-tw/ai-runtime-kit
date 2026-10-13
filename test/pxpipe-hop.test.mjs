@@ -39,3 +39,26 @@ test("pxpipe hop reports an early exit", async () => {
   };
   await assert.rejects(startPxpipeHop({ upstream: "http://127.0.0.1:4000", spawnProcess }), /exited before listening \(code 2\)/);
 });
+
+test("pxpipe hop reaps pxpipe when the launcher is signalled, then re-raises", async () => {
+  const record = {};
+  const owner = new EventEmitter();
+  owner.pid = 4242;
+  const raised = [];
+  owner.kill = (pid, signal) => raised.push([pid, signal]);
+  await startPxpipeHop({ upstream: "http://127.0.0.1:4000", env: {}, spawnProcess: fakeSpawn(record), owner });
+  owner.emit("SIGTERM", "SIGTERM");
+  assert.equal(record.killed, true);
+  assert.deepEqual(raised, [[4242, "SIGTERM"]]);
+  assert.equal(owner.listenerCount("SIGTERM"), 0);
+  assert.equal(owner.listenerCount("exit"), 0);
+});
+
+test("pxpipe hop close drops its process listeners", async () => {
+  const owner = new EventEmitter();
+  owner.kill = () => assert.fail("re-raised");
+  const hop = await startPxpipeHop({ upstream: "http://127.0.0.1:4000", env: {}, spawnProcess: fakeSpawn({}), owner });
+  await hop.close();
+  assert.equal(owner.listenerCount("SIGINT"), 0);
+  assert.equal(owner.listenerCount("exit"), 0);
+});
