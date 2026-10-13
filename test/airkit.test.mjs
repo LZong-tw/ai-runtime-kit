@@ -5281,6 +5281,51 @@ test("profile-scoped Shield rollback removes only child Shield wiring", () => {
   assert.deepEqual(rollbackPlan.launch.clearEnv, protectedPlan.launch.clearEnv);
 });
 
+test("launch.pxpipe fronts the middleware without Shield and closes with it", async () => {
+  const catalog = compatibilityCatalog();
+  catalog.profiles[0].launch.pxpipe = true;
+  delete catalog.profiles[0].shield;
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-pxpipe-noshield-"));
+  const events = [];
+  let childEnv = null;
+  try {
+    await prepareLaunch(catalog, "launch-example", {
+      ccrClient: ccrTestClient([]), commandExists: async () => true, configDir,
+      env: { HOME: configDir, DEMO_API_KEY: "fixture-provider-key" }, interactive: false,
+      runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key" }),
+      runtimeVersions: passingRuntimeVersions(),
+      startCompatibilityMiddleware: async () => ({ origin: "http://127.0.0.1:4599", close: async () => events.push("middleware-close") }),
+      startPxpipeHop: async ({ upstream }) => {
+        events.push(`pxpipe-start:${upstream}`);
+        return { origin: "http://127.0.0.1:4700", close: async () => events.push("pxpipe-close") };
+      },
+      ensureShieldReady: async () => { throw new Error("Shield must not start"); },
+      spawnCommand: (command, args, options) => {
+        childEnv = options.env;
+        return { once(event, callback) { if (event === "exit") callback(0); } };
+      },
+      preserveMiddlewareForBackground: false,
+    });
+    assert.equal(childEnv.ANTHROPIC_BASE_URL, "http://127.0.0.1:4700");
+    assert.deepEqual(events, ["pxpipe-start:http://127.0.0.1:4599", "middleware-close", "pxpipe-close"]);
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("launch.pxpipe must be a boolean", async () => {
+  const catalog = compatibilityCatalog();
+  catalog.profiles[0].launch.pxpipe = "yes";
+  const dir = await mkdtemp(join(tmpdir(), "airkit-pxpipe-flag-"));
+  try {
+    const catalogPath = join(dir, "catalog.json");
+    await writeFile(catalogPath, JSON.stringify(catalog));
+    await assert.rejects(loadCatalog(catalogPath), /launch\.pxpipe must be a boolean/);
+  } finally {
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
 test("Shield launch derives a bounded git repository identity and reviewed profile trust", async () => {
   const catalog = compatibilityCatalog();
   catalog.profiles[0].shield = { enabled: true, lane: "managed", trustClass: "restricted" };

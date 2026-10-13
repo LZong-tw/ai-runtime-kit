@@ -33,6 +33,7 @@ import { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs
 import { runShieldCli } from "./shield/cli.mjs";
 import { DEFAULT_BACKGROUND_HOST_GRACE_MS, backgroundHostUsesAdapter, hasBackgroundClaudeHost, scheduleBackgroundHostRelease } from "./shield/background-host.mjs";
 import { resolveShieldLauncher, resolveShieldLauncherMarker } from "./shield/launchers.mjs";
+import { startPxpipeHop } from "./shield/pxpipe-hop.mjs";
 import { assertNoPersistedShieldEndpointOverride, buildShieldChildEnv, createShieldDestinationLease, ensureShieldReady, openShieldApprovalChannel, registerShieldApprovalChannel, renewShieldDestinationLease, revokeShieldDestinationLease, unregisterShieldApprovalChannel } from "./shield/service.mjs";
 
 export { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
@@ -1300,6 +1301,7 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
       // When the profile pins a gateway address the spawn keeps it; otherwise
       // the live CCR config supplies the base URLs at spawn time.
       gatewayPinned: Boolean(gatewayEndpoint),
+      pxpipe: profile.launch?.pxpipe === true,
       // Provider credential placeholders join the cleared list: the child gets
       // the gateway key instead, and its Bash tools must not inherit upstream
       // secrets. ANTHROPIC_AUTH_TOKEN may appear here AND be set at spawn —
@@ -1543,7 +1545,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
       options,
       plan,
     });
-    const middleware = options.plainClaude === true || !managed.compatibility
+    const compatibilityMiddleware = options.plainClaude === true || !managed.compatibility
       ? null
       : await (options.startCompatibilityMiddleware ?? startCompatibilityMiddleware)({
         compatibility: managed.compatibility,
@@ -1554,6 +1556,35 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
         launchInstanceId: options.launchInstanceId ?? null,
         sessionContext: options.sessionContext ?? null,
       });
+    // pxpipe runs whether or not Shield does. It sits in front of the
+    // middleware, so with Shield on it only ever sees redacted traffic. Its
+    // lifetime follows the middleware (including background preservation).
+    let pxpipeHop = null;
+    if (plan.launch.pxpipe === true) {
+      try {
+        pxpipeHop = await (options.startPxpipeHop ?? startPxpipeHop)({
+          upstream: compatibilityMiddleware?.origin ?? gatewayOrigin,
+          env: launchEnv,
+        });
+      } catch (error) {
+        await compatibilityMiddleware?.close();
+        throw error;
+      }
+    }
+    const middleware = compatibilityMiddleware && pxpipeHop
+      ? {
+        ...compatibilityMiddleware,
+        origin: pxpipeHop.origin,
+        close: async () => {
+          try { await compatibilityMiddleware.close(); } finally { await pxpipeHop.close(); }
+        },
+      }
+      : compatibilityMiddleware;
+    const closeHops = async () => {
+      if (middleware) await middleware.close();
+      else await pxpipeHop?.close();
+    };
+    const shieldTargetOrigin = middleware?.origin ?? pxpipeHop?.origin ?? gatewayOrigin;
     let shieldReady = null;
     try {
       if (profileShield?.enabled === true) {
@@ -1562,19 +1593,19 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
         }
         shieldReady = await (options.ensureShieldReady ?? ensureShieldReady)({
           env: launchEnv,
-          expectedTargetOrigin: middleware?.origin ?? gatewayOrigin,
+          expectedTargetOrigin: shieldTargetOrigin,
           lane: plan.shieldLauncher.clientLane,
         });
         if (shieldReady.lane === "managed") {
           shieldReady = await (options.createShieldDestinationLease ?? createShieldDestinationLease)({
             ready: shieldReady,
-            targetOrigin: middleware?.origin ?? gatewayOrigin,
+            targetOrigin: shieldTargetOrigin,
             launcherContext: shieldLaunchContext(plan.shieldLauncher.clientLane, profileShield, options),
           });
         }
       }
     } catch (error) {
-      await middleware?.close();
+      await closeHops();
       throw error;
     }
     const spawnCommand = options.spawnCommand ?? spawnCommandAsync;
@@ -1587,7 +1618,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     let shieldLeaseTarget = null;
     const stopShieldLeaseTimer = () => { if (shieldLeaseTimer !== null) { (options.shieldLeaseClearInterval ?? clearInterval)(shieldLeaseTimer); shieldLeaseTimer = null; } };
     if (shieldReady?.lane === "managed") {
-      shieldLeaseTarget = middleware?.origin ?? gatewayOrigin;
+      shieldLeaseTarget = shieldTargetOrigin;
       const schedule = options.shieldLeaseSetInterval ?? setInterval;
       shieldLeaseTimer = schedule(() => { void (options.renewShieldDestinationLease ?? renewShieldDestinationLease)({ ready: shieldReady, targetOrigin: shieldLeaseTarget }).catch(() => {}); }, 15_000);
       shieldLeaseTimer.unref?.();
@@ -1603,7 +1634,8 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
       if (shieldApprovalRegistered) await (options.unregisterShieldApprovalChannel ?? unregisterShieldApprovalChannel)({ ready: shieldReady }).catch(() => {});
       await shieldApprovalChannel?.close?.();
       await (options.revokeShieldDestinationLease ?? revokeShieldDestinationLease)({ ready: shieldReady }).catch(() => {});
-      if (closeMiddleware) await middleware?.close();
+      if (closeMiddleware) await closeHops();
+      else if (!middleware) await pxpipeHop?.close();
     };
     try {
       if (shieldReady) {
@@ -1620,8 +1652,8 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
         ...inherited,
         ...plan.launch.env,
         ...compatibilityLaunch.env,
-        ...(middleware
-          ? gatewayBaseUrlEnv(middleware.origin)
+        ...(middleware || pxpipeHop
+          ? gatewayBaseUrlEnv(middleware?.origin ?? pxpipeHop.origin)
           : plan.launch.gatewayPinned
             ? {}
             : gatewayBaseUrlEnv(gatewayOrigin)),
@@ -1893,6 +1925,10 @@ export function resolveProfileShield(profile, { enabled } = {}) {
 }
 
 function validateLaunch(profile) {
+  const pxpipe = profile.launch?.pxpipe;
+  if (pxpipe !== undefined && typeof pxpipe !== "boolean") {
+    throw new Error(`profile "${profile.name}" launch.pxpipe must be a boolean`);
+  }
   const context = profile.launch?.context;
   if (context !== undefined) {
     if (!isPlainObject(context)) {

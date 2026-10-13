@@ -1,0 +1,41 @@
+import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { createServer } from "node:net";
+import test from "node:test";
+
+import { startPxpipeHop } from "../src/shield/pxpipe-hop.mjs";
+
+function fakeSpawn(record) {
+  return (command, args, options) => {
+    const child = new EventEmitter();
+    const server = createServer().listen(Number(options.env.PORT), "127.0.0.1");
+    child.kill = () => { record.killed = true; server.close(); };
+    Object.assign(record, { command, args, env: options.env });
+    return child;
+  };
+}
+
+test("pxpipe hop forwards to the given loopback upstream and closes", async () => {
+  const record = {};
+  const hop = await startPxpipeHop({ upstream: "http://127.0.0.1:4000/x", env: {}, spawnProcess: fakeSpawn(record) });
+  assert.equal(record.env.PXPIPE_UPSTREAM, "http://127.0.0.1:4000");
+  assert.equal(record.env.ANTHROPIC_UPSTREAM, "http://127.0.0.1:4000");
+  assert.equal(record.env.HOST, "127.0.0.1");
+  assert.equal(hop.origin, `http://127.0.0.1:${record.env.PORT}`);
+  await hop.close();
+  assert.equal(record.killed, true);
+});
+
+test("pxpipe hop refuses non-loopback upstreams", async () => {
+  await assert.rejects(startPxpipeHop({ upstream: "https://api.anthropic.com", spawnProcess: () => assert.fail("spawned") }), /loopback/);
+});
+
+test("pxpipe hop reports an early exit", async () => {
+  const spawnProcess = () => {
+    const child = new EventEmitter();
+    child.kill = () => {};
+    setImmediate(() => child.emit("exit", 2));
+    return child;
+  };
+  await assert.rejects(startPxpipeHop({ upstream: "http://127.0.0.1:4000", spawnProcess }), /exited before listening \(code 2\)/);
+});
