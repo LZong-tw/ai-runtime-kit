@@ -76,6 +76,17 @@ export async function processContextHook(input, env = process.env) {
   // Audit-only covers claude-sub, which emits audit without AirClaude routing.
   // A session that has a profile still gets context, completion and subagent
   // handling: enabling audit must never silently retire them.
+  // Subagent observability feeds the plugin's subagentStatusLine, which Claude
+  // Code renders in every session that loads the plugin. It must not depend on
+  // an AirClaude profile, or plain sessions show "waiting for first event"
+  // forever because no hook ever writes the child timeline.
+  if (["SubagentStart", "PostToolUse", "SubagentStop"].includes(input?.hook_event_name)) {
+    try {
+      await processSubagentObservabilityHook(input, env);
+    } catch {
+      // Observability is additive; existing hook behavior must continue.
+    }
+  }
   const auditOnly = env.AIRKIT_AUDIT_ENABLED === "1" && env.__airkitAudit && !env.AIRCLAUDE_PROFILE;
   if (!env.AIRCLAUDE_PROFILE && !auditOnly) return null;
   if (env.__airkitAudit) {
@@ -86,13 +97,6 @@ export async function processContextHook(input, env = process.env) {
     }
   }
   if (auditOnly) return null;
-  if (["SubagentStart", "PostToolUse", "SubagentStop"].includes(input?.hook_event_name)) {
-    try {
-      await processSubagentObservabilityHook(input, env);
-    } catch {
-      // Observability is additive; existing hook behavior must continue.
-    }
-  }
   const completionGuardResponse = await processCompletionGuardHook(input, env);
   if (completionGuardResponse) return completionGuardResponse;
   const subagentOutputResponse = await processSubagentOutputHook(input, env);

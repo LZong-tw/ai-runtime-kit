@@ -954,6 +954,7 @@ export async function exportOssRelease({ outDir }) {
   await copyFile(join(here, "context-heartbeat.mjs"), join(outDir, "src", "context-heartbeat.mjs"));
   await copyFile(join(here, "context-observability.mjs"), join(outDir, "src", "context-observability.mjs"));
   await copyFile(join(here, "subagent-observability.mjs"), join(outDir, "src", "subagent-observability.mjs"));
+  await copyFile(join(here, "launchd-plist.mjs"), join(outDir, "src", "launchd-plist.mjs"));
   await copyDirectory(join(here, "audit"), join(outDir, "src", "audit"));
   await copyDirectory(join(here, "completion"), join(outDir, "src", "completion"));
   await copyFile(join(here, "auditd.mjs"), join(outDir, "src", "auditd.mjs"));
