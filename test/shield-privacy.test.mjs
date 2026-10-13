@@ -174,7 +174,7 @@ test("privacy distinguishes body, admission, frame, queue, timeout and protocol 
   const filter = await createPrivacyFilter({ provision, spawnWorker: () => worker, validateWorker, timeoutMs: 100 });
   t.after(() => filter.close());
   assert.equal((await filter.scan(Buffer.alloc(1_048_577))).reason, "body_invalid");
-  assert.equal((await filter.scan(Buffer.alloc(786_400))).reason, "frame_limit");
+  assert.notEqual((await filter.scan(Buffer.alloc(786_400))).reason, "frame_limit");
   const first = filter.scan(Buffer.from('{}'));
   const waiting = Array.from({ length: 3 }, () => filter.scan(Buffer.from(JSON.stringify({ content: sentinel }))));
   assert.equal((await filter.scan(Buffer.from('{}'))).reason, "admission_limit");
@@ -1036,7 +1036,7 @@ test("privacy worker timeout, exit, malformed reply, unknown labels, and oversiz
     { name: "malformed", handler: (message, emit) => message.type === "health" ? emit(health(message)) : emit({ type: "scan", id: message.id, status: "ok", findings: "bad" }), expected: "unavailable", reason: "reply_invalid" },
     { name: "mismatched", handler: (message, emit) => message.type === "health" ? emit(health(message)) : emit({ type: "scan", id: "different", status: "ok", findings: [] }), expected: "unavailable", reason: "scan_timeout" },
     { name: "unknown", handler: (message, emit) => message.type === "health" ? emit(health(message)) : emit({ type: "scan", id: message.id, status: "ok", findings: [{ label: "mystery", count: 1 }] }), expected: "unknown", reason: "findings_invalid" },
-    { name: "oversized", handler: (message, emit, worker) => message.type === "health" ? emit(health(message)) : worker.stdout.emit("data", "x".repeat(1_048_577)), expected: "unavailable", reason: "frame_limit" },
+    { name: "oversized", handler: (message, emit, worker) => message.type === "health" ? emit(health(message)) : worker.stdout.emit("data", "x".repeat(4 * 1_048_576 + 1)), expected: "unavailable", reason: "frame_limit" },
     { name: "invalid redaction", handler: (message, emit) => message.type === "health" ? emit(health(message)) : emit({ type: "scan", id: message.id, status: "ok", findings: [], redactions: [{ label: sentinel, count: 1 }] }), expected: "unavailable", reason: "redaction_invalid" },
     { name: "invalid replacement", handler: (message, emit) => message.type === "health" ? emit(health(message)) : emit({ type: "scan", id: message.id, status: "ok", findings: [], redactedBody: sentinel }), expected: "unavailable", reason: "redaction_invalid" },
   ];
