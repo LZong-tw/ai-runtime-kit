@@ -1757,6 +1757,11 @@ export async function runExternalClientCli(client, argv = process.argv.slice(2),
   const spec = EXTERNAL_CLIENT_SPECS[client];
   if (!spec) throw new Error(`unsupported external client: ${client}`);
 
+  if (isHelpRequest(argv)) {
+    (options.stdout ?? process.stdout).write(renderExternalClientHelp(client));
+    return 0;
+  }
+
   const parsed = parseExternalClientArgs(argv);
   const catalog = options.catalog ?? await loadCatalog(options.catalogPath ?? defaultCatalogPath);
   const profile = parsed.profile ?? defaultLaunchProfile(catalog);
@@ -2916,6 +2921,12 @@ Commands:
   airclaude [mode] [options] [-- <claude-args>]
   export-oss --out <dir>
 
+Launchers:
+  airclaude [mode] [options] [-- <claude-args>]   Claude Code
+  airpi [options] [-- <pi-args>]                  pi
+  airomp [options] [-- <omp-args>]                OMP
+  airoc [options] [-- <opencode-args>]            OpenCode
+
 Options:
   -h, --help    Show this help.
 
@@ -2924,6 +2935,27 @@ Examples:
   airkit init --profile openai-compatible-example
   airkit doctor --profile openai-compatible-example
   airkit airclaude pro --dry-run
+`;
+}
+
+const EXTERNAL_CLIENT_LAUNCHERS = Object.freeze({ pi: "airpi", omp: "airomp", opencode: "airoc" });
+
+function renderExternalClientHelp(client) {
+  const launcher = EXTERNAL_CLIENT_LAUNCHERS[client];
+  const binary = EXTERNAL_CLIENT_SPECS[client].binary;
+  return `Usage: ${launcher} [options] [-- <${binary}-args>]
+
+Launch ${binary} through the AirKit managed route.
+
+Options:
+  --profile <name>      Catalog profile (default: the catalog's launch profile).
+  --mode <mode>         Routing mode (default: auto).
+  --port <port>         Local adapter port (default: random).
+  --config-dir <dir>    AirKit config directory.
+  -h, --help            Show this help.
+
+Arguments AirKit does not consume are forwarded to ${binary}.
+Use \`${launcher} -- --help\` for ${binary}'s own help.
 `;
 }
 
