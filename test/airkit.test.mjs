@@ -6948,3 +6948,16 @@ async function writeLaunchCatalog(catalog = launchCatalog()) {
   await writeFile(path, `${JSON.stringify(catalog, null, 2)}\n`);
   return path;
 }
+
+test("external client launchers print their own help without preparing a route", async () => {
+  for (const [client, launcher] of [["pi", "airpi"], ["omp", "airomp"], ["opencode", "airoc"]]) {
+    let output = "";
+    const exitCode = await runExternalClientCli(client, ["--help"], {
+      stdout: { write: (chunk) => { output += chunk; } },
+      prepareExternalClient: () => assert.fail("prepared a route for --help"),
+    });
+    assert.equal(exitCode, 0);
+    assert.match(output, new RegExp(`^Usage: ${launcher} `));
+    assert.match(output, new RegExp(`${launcher} -- --help`));
+  }
+});
