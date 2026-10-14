@@ -9,11 +9,13 @@ import {
 import {
   DEFAULT_ADVISOR_UNSUPPORTED,
   VERIFIED_NATIVE_COMPATIBILITY,
+  appendModelPrompt,
   compatibilityFallbackSelector,
   requestedMode,
   resolveCompatibilityPolicies,
   resolveModeEffort,
   resolveModeRoutes,
+  resolveModelPrompt,
   resolveTransportFallbackPolicy,
   resolveToolSearchMaxTools,
   requiresClientToolFallback,
@@ -182,9 +184,13 @@ export function createMessagesHandler({ config, coreClient, policies, auditEmitt
         : null;
       const effortAdjustedBody = rewriteClaudeEffortForOpenAI(clientToolScopedBody, modeEffort);
       const outputBudgetAdjustedBody = ensureGptMinimumOutputTokens(effortAdjustedBody);
-      const outboundBody = applyToolSearchBudget(
+      const toolSearchBudgetedBody = applyToolSearchBudget(
         outputBudgetAdjustedBody,
         resolveToolSearchMaxTools(config, outputBudgetAdjustedBody?.model),
+      );
+      const outboundBody = appendModelPrompt(
+        toolSearchBudgetedBody,
+        resolveModelPrompt(config, toolSearchBudgetedBody?.model, toolSearchBudgetedBody),
       );
       const outboundRaw = outboundBody === parsedBody
         ? rawBody
