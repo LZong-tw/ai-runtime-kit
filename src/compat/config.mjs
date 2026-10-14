@@ -19,6 +19,7 @@ const CONFIG_KEYS = new Set([
   "launchModel",
   "modeEffort",
   "modeRoutes",
+  "modelPrompts",
   "routeLog",
   "routes",
   "transportFallbacks",
@@ -127,6 +128,8 @@ export function validateCompatibilityConfig(config) {
   }
 
   if (config.routes !== undefined) validateRouteTable(config.routes, "routes");
+
+  if (config.modelPrompts !== undefined) validateModelPrompts(config.modelPrompts);
 
   if (config.modeRoutes !== undefined) {
     assertRecord(config.modeRoutes, "modeRoutes");
@@ -474,4 +477,49 @@ function rejectRemovedAdvisorConfig(advisor) {
       throw new Error(`advisor.${field} was removed; configure fallback.model instead`);
     }
   }
+}
+
+const MODEL_PROMPT_KEYS = new Set(["match", "prompt"]);
+
+function validateModelPrompts(rules) {
+  if (!Array.isArray(rules)) throw new Error("modelPrompts must be an array");
+  rules.forEach((rule, index) => {
+    const label = `modelPrompts[${index}]`;
+    assertRecord(rule, label);
+    rejectUnknownKeys(rule, MODEL_PROMPT_KEYS, label);
+    if (typeof rule.match !== "string" || rule.match.length === 0) {
+      throw new Error(`${label}.match must be a non-empty string`);
+    }
+    try {
+      new RegExp(rule.match, "i");
+    } catch (error) {
+      throw new Error(`${label}.match is not a valid regex: ${error.message}`);
+    }
+    if (typeof rule.prompt !== "string" || rule.prompt.trim().length === 0) {
+      throw new Error(`${label}.prompt must be a non-empty string`);
+    }
+  });
+}
+
+// Matches against the provider-local model id (after "provider/" or "provider,"),
+// so one rule covers the same model on OnePortal and Web LiteLLM. First match
+// wins; Claude ids and permission-classifier calls are never touched.
+export function resolveModelPrompt(config, model, body = null) {
+  if (!Array.isArray(config?.modelPrompts) || typeof model !== "string") return null;
+  if (isAutoModeClassifierRequest(body)) return null;
+  const bareModel = model.slice(Math.max(model.lastIndexOf("/"), model.lastIndexOf(",")) + 1);
+  if (/^claude-/i.test(bareModel)) return null;
+  const rule = config.modelPrompts.find((entry) => new RegExp(entry.match, "i").test(bareModel));
+  return rule ? rule.prompt : null;
+}
+
+// Appends after every existing block so the cached system prefix is unchanged.
+export function appendModelPrompt(body, prompt) {
+  if (!prompt || body === null || typeof body !== "object" || Array.isArray(body)) return body;
+  const system = Array.isArray(body.system)
+    ? body.system
+    : typeof body.system === "string" && body.system.length > 0
+      ? [{ type: "text", text: body.system }]
+      : [];
+  return { ...body, system: [...system, { type: "text", text: prompt }] };
 }

@@ -687,3 +687,52 @@ test("sonnet is an accepted route key in both tables", () => {
     /routes\.sonnet must be a provider-qualified model selector/,
   );
 });
+
+test("modelPrompts resolve by routed model family, first match wins", async () => {
+  const { resolveModelPrompt, appendModelPrompt } = await import("../src/compat/config.mjs");
+  const config = {
+    modelPrompts: [
+      { match: "^gpt-(5\\.6|6)", prompt: "GPT rules" },
+      { match: "^deepseek-v4", prompt: "DeepSeek rules" },
+      { match: ".*", prompt: "catch-all" },
+    ],
+  };
+  assert.equal(resolveModelPrompt(config, "oneportal_responses/gpt-6.1-sol"), "GPT rules");
+  assert.equal(resolveModelPrompt(config, "oneportal,gpt-5.6-terra"), "GPT rules");
+  assert.equal(resolveModelPrompt(config, "oneportal/DeepSeek-V4-1-Flash"), "DeepSeek rules");
+  assert.equal(resolveModelPrompt(config, "web_litellm/deepseek-v4-flash"), "DeepSeek rules");
+  assert.equal(resolveModelPrompt(config, "oneportal/GLM-5.3"), "catch-all");
+  assert.equal(resolveModelPrompt(config, "oneportal-anthropic/claude-sonnet-5"), null, "Claude untouched");
+  assert.equal(resolveModelPrompt({}, "oneportal/GLM-5.3"), null);
+  const classifier = {
+    system: [{ type: "text", text: "You are a security monitor for autonomous AI coding agents." }],
+  };
+  if (isAutoModeClassifierRequest(classifier)) {
+    assert.equal(resolveModelPrompt(config, "oneportal/GLM-5.3", classifier), null, "classifier untouched");
+  }
+
+  const cached = { type: "text", text: "base", cache_control: { type: "ephemeral" } };
+  const body = { model: "x", system: [cached], messages: [] };
+  const out = appendModelPrompt(body, "rules");
+  assert.deepEqual(out.system, [cached, { type: "text", text: "rules" }]);
+  assert.equal(body.system.length, 1, "input not mutated");
+  assert.deepEqual(appendModelPrompt({ system: "s" }, "r").system, [
+    { type: "text", text: "s" },
+    { type: "text", text: "r" },
+  ]);
+  assert.deepEqual(appendModelPrompt({}, "r").system, [{ type: "text", text: "r" }]);
+  assert.equal(appendModelPrompt(body, null), body);
+});
+
+test("modelPrompts validation rejects malformed rules", async () => {
+  const { validateCompatibilityConfig } = await import("../src/compat/config.mjs");
+  const bad = [
+    [{}, /modelPrompts must be an array/],
+    [[{ match: "(", prompt: "x" }], /not a valid regex/],
+    [[{ match: "a", prompt: " " }], /prompt must be a non-empty string/],
+    [[{ match: "a", prompt: "x", extra: 1 }], /extra/],
+  ];
+  for (const [modelPrompts, pattern] of bad) {
+    assert.throws(() => validateCompatibilityConfig({ ...VALID_CONFIG, modelPrompts }), pattern);
+  }
+});
