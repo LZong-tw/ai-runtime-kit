@@ -3778,6 +3778,135 @@ test("subagent lifecycle accepts Claude Code agent transcript path fields", asyn
   }
 });
 
+function jsonLines(records) {
+  return records.map((record) => `${JSON.stringify(record)}\n`).join("");
+}
+
+function assistantRecord(text) {
+  return { type: "assistant", message: { content: [{ type: "text", text }] } };
+}
+
+// Claude Code 2.1.300 lays a session out as <project>/<session>.jsonl plus
+// <project>/<session>/subagents/[<subdir>/]agent-<agentId>.jsonl, and every hook
+// (SubagentStart, SubagentStop, PostToolUse inside a child) carries the
+// session transcript as transcript_path.
+async function subagentSessionFixture(root, sessionId, agentId, childRecords, subdirectory = "") {
+  const parentTranscript = join(root, `${sessionId}.jsonl`);
+  const childDirectory = join(root, sessionId, "subagents", subdirectory);
+  const childTranscript = join(childDirectory, `agent-${agentId}.jsonl`);
+  await mkdir(childDirectory, { recursive: true });
+  await writeFile(parentTranscript, "", { flag: "a" });
+  await writeFile(childTranscript, jsonLines(childRecords));
+  return { parentTranscript, childTranscript };
+}
+
+test("subagent lifecycle hooks project the child transcript, never the parent session transcript", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-subagent-parent-leak-"));
+  const env = { CLAUDE_PLUGIN_DATA: join(root, "plugin-data") };
+  const sessionId = "leak-session";
+  const agentId = "a90e522fc038e7111";
+
+  try {
+    const { parentTranscript, childTranscript } = await subagentSessionFixture(
+      root, sessionId, agentId, [assistantRecord("child is reading the plan")],
+    );
+    await writeFile(parentTranscript, jsonLines([assistantRecord("main session prose must stay out")]));
+    const base = { session_id: sessionId, transcript_path: parentTranscript, agent_id: agentId, agent_type: "general-purpose" };
+
+    await processSubagentObservabilityHook({ ...base, hook_event_name: "SubagentStart" }, env);
+    await writeFile(childTranscript, jsonLines([assistantRecord("child ran a tool")]), { flag: "a" });
+    await processSubagentObservabilityHook({ ...base, hook_event_name: "PostToolUse", tool_name: "Read" }, env);
+    await processSubagentObservabilityHook({
+      ...base,
+      hook_event_name: "SubagentStop",
+      agent_transcript_path: childTranscript,
+      last_assistant_message: "done",
+    }, env);
+
+    const [parentKey] = await readdir(join(env.CLAUDE_PLUGIN_DATA, "subagent-timelines"));
+    const [childKey] = await readdir(join(env.CLAUDE_PLUGIN_DATA, "subagent-timelines", parentKey));
+    const timeline = await readFile(join(env.CLAUDE_PLUGIN_DATA, "subagent-timelines", parentKey, childKey, "timeline.md"), "utf8");
+    assert.match(timeline, /child is reading the plan/);
+    assert.match(timeline, /child ran a tool/);
+    assert.doesNotMatch(timeline, /main session prose/);
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("subagent projection restarts when a stored state was built from another transcript", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-subagent-heal-"));
+  const env = { CLAUDE_PLUGIN_DATA: join(root, "plugin-data") };
+  const sessionId = "heal-session";
+  const agentId = "a0c0b8368675186f1";
+
+  try {
+    const { parentTranscript, childTranscript } = await subagentSessionFixture(
+      root, sessionId, agentId, [assistantRecord("genuine child progress")],
+    );
+    await writeFile(parentTranscript, jsonLines([assistantRecord("stale parent prose")]));
+    const base = { hook_event_name: "PostToolUse", session_id: sessionId, agent_id: agentId };
+    await processSubagentObservabilityHook({ ...base, agent_transcript_path: parentTranscript }, env);
+    await processSubagentObservabilityHook({ ...base, agent_transcript_path: childTranscript }, env);
+
+    const [row] = await renderSubagentStatusLine({
+      session_id: sessionId,
+      tasks: [{ id: agentId, type: "local_agent", status: "running" }],
+    }, env);
+    assert.match(row, /genuine child progress/);
+    assert.doesNotMatch(row, /stale parent prose/);
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("subagent status line follows a running local_agent task to its nested child transcript by id", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-subagent-running-"));
+  const env = { CLAUDE_PLUGIN_DATA: join(root, "plugin-data") };
+  const sessionId = "running-session";
+  const agentId = "a1a706373b4b6f699";
+
+  try {
+    const { parentTranscript, childTranscript } = await subagentSessionFixture(
+      root, sessionId, agentId, [], join("workflows", "wf_0f4fed9b-7af"),
+    );
+    await writeFile(parentTranscript, jsonLines([{ type: "user", message: { content: "kick off the review" } }]));
+    await processSubagentObservabilityHook({
+      hook_event_name: "SubagentStart",
+      session_id: sessionId,
+      transcript_path: parentTranscript,
+      agent_id: agentId,
+      agent_type: "workflow-subagent",
+    }, env);
+    await writeFile(childTranscript, jsonLines([{
+      type: "assistant",
+      message: { content: [{ type: "text", text: "reviewing correctness" }, { type: "tool_use", name: "Grep" }] },
+    }]));
+
+    const [row] = await renderSubagentStatusLine({
+      session_id: sessionId,
+      transcript_path: parentTranscript,
+      tasks: [{
+        id: agentId,
+        type: "local_agent",
+        agentType: "workflow-subagent",
+        status: "running",
+        description: "review:correctness",
+        label: "review:correctness",
+        startTime: 1,
+        tokenCount: 512,
+        tokenSamples: [512],
+      }],
+    }, env);
+    assert.match(row, /reviewing correctness/);
+    assert.match(row, /tool: Grep/);
+    assert.match(row, /512 tokens/);
+    assert.doesNotMatch(row, /waiting for first event/);
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
 test("subagent identity wins over colliding generic labels", async () => {
   const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-identity-label-"));
   const env = { CLAUDE_PLUGIN_DATA: pluginData };

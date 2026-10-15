@@ -16,15 +16,62 @@ const MAX_VISIBLE = 160;
 
 export async function processSubagentObservabilityHook(input, env = process.env) {
   if (!isSubagentLifecycleEvent(input) || !validPluginData(env)) return null;
-  const transcriptPath = transcriptPathValue(input);
+  const transcriptPath = await childTranscriptPath(input);
   if (transcriptPath) await observeChildTranscript({ ...input, transcript_path: transcriptPath }, env);
   else await persistPendingChildState(input, env);
   return null;
 }
 
+// Claude Code hooks always carry the session transcript as transcript_path, even
+// when they fire for a subagent; only SubagentStop adds agent_transcript_path.
+// The child transcript is otherwise found next to the session transcript.
+async function childTranscriptPath(input) {
+  const explicit = firstString([input.agent_transcript_path, input.agentTranscriptPath]);
+  if (explicit) return explicit;
+  const sessionTranscript = sessionTranscriptPathValue(input);
+  if (!sessionTranscript) return "";
+  if (isSafeAgentId(input.agent_id)) {
+    if (basename(sessionTranscript) === `agent-${input.agent_id}.jsonl`) return sessionTranscript;
+    const found = await findChildTranscript(subagentsDirectory(sessionTranscript), input.agent_id);
+    if (found) return found;
+  }
+  return isSessionTranscript(sessionTranscript, input.session_id) ? "" : sessionTranscript;
+}
+
+function isSessionTranscript(path, sessionId) {
+  return typeof sessionId === "string" && basename(path) === `${sessionId}.jsonl`;
+}
+
+function subagentsDirectory(sessionTranscript) {
+  return join(dirname(sessionTranscript), basename(sessionTranscript, ".jsonl"), "subagents");
+}
+
+function isSafeAgentId(value) {
+  return typeof value === "string" && /^[A-Za-z0-9._-]+$/.test(value) && !/^\.+$/.test(value);
+}
+
+// Workflow children live one or two directories down (workflows/wf_<id>/).
+async function findChildTranscript(directory, agentId, depth = 0) {
+  const name = `agent-${agentId}.jsonl`;
+  let entries;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch {
+    return "";
+  }
+  if (entries.some((entry) => entry.isFile() && entry.name === name)) return join(directory, name);
+  if (depth >= 2) return "";
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const found = await findChildTranscript(join(directory, entry.name), agentId, depth + 1);
+    if (found) return found;
+  }
+  return "";
+}
+
 export async function renderSubagentStatusLine(input, env = process.env) {
   await hydrateTaskStates(input, env);
-  const parentAgentStates = await readParentAgentStates(transcriptPathValue(input));
+  const parentAgentStates = await readParentAgentStates(sessionTranscriptPathValue(input));
   const rows = [];
   for (const task of Array.isArray(input?.tasks) ? input.tasks : []) {
     rows.push(await renderTaskRow(task, input, env, parentAgentStates));
@@ -35,9 +82,9 @@ export async function renderSubagentStatusLine(input, env = process.env) {
 async function hydrateTaskStates(input, env) {
   if (!validPluginData(env)) return;
   const parentValue = statuslineParentValue(input);
-  const transcriptPath = transcriptPathValue(input);
-  if (!parentValue || typeof transcriptPath !== "string" || transcriptPath.length === 0) return;
-  const sessionDirectory = join(dirname(transcriptPath), basename(transcriptPath, ".jsonl"), "subagents");
+  const transcriptPath = sessionTranscriptPathValue(input);
+  if (!parentValue || !transcriptPath) return;
+  const sessionDirectory = subagentsDirectory(transcriptPath);
   let children;
   try {
     children = await readdir(sessionDirectory, { withFileTypes: true });
@@ -46,6 +93,7 @@ async function hydrateTaskStates(input, env) {
   }
   const tasks = Array.isArray(input?.tasks) ? input.tasks : [];
   for (const task of tasks) {
+    if (await hydrateTaskById(task, parentValue, sessionDirectory, env)) continue;
     const labels = taskLabelCandidates(task);
     if (labels.length === 0) continue;
     const parent = identity(parentValue);
@@ -85,6 +133,26 @@ async function hydrateTaskStates(input, env) {
       // Statusline rendering must remain fail-open if hydration cannot persist.
     }
   }
+}
+
+// A local_agent task id is the hook agent_id, which names the child transcript
+// directly, including workflow children nested below subagents/.
+async function hydrateTaskById(task, parentValue, sessionDirectory, env) {
+  if (!isSafeAgentId(task?.id)) return false;
+  const childTranscript = await findChildTranscript(sessionDirectory, task.id);
+  if (!childTranscript) return false;
+  try {
+    await observeChildTranscript({
+      hook_event_name: "SubagentStart",
+      session_id: parentValue,
+      agent_id: task.id,
+      agent_type: firstString([task.agentType, task.type === "local_agent" ? "" : task.type]),
+      transcript_path: childTranscript,
+    }, env);
+  } catch {
+    // Statusline rendering must remain fail-open if hydration cannot persist.
+  }
+  return true;
 }
 
 async function childTranscriptLabels(path) {
@@ -169,6 +237,12 @@ async function observeChildTranscript(input, env) {
   const timelinePath = join(directory, "timeline.md");
   const statePath = join(directory, ".state.json");
   let previous = await loadState(statePath, parent, child);
+  const sourceHash = createHash("sha256").update(input.transcript_path).digest("hex");
+  // Older states have no sourceHash and may have been projected from the parent
+  // session transcript, so any state built from another file starts over.
+  if (previous.sourceHash !== sourceHash) {
+    previous = { ...emptyState(parent, child, previous.labels), sourceHash };
+  }
   const labels = taskLabelsFromHook(input);
   const labeled = mergeStateLabels(previous, labels);
   const labelsChanged = labeled.labels.length !== previous.labels.length
@@ -186,7 +260,10 @@ async function observeChildTranscript(input, env) {
   try {
     const { size } = await transcript.stat();
     if (previous.offset > size) {
-      previous = addDiagnostic(emptyState(parent, child, labels), "diagnostic: child transcript was truncated; projection restarted");
+      previous = addDiagnostic(
+        { ...emptyState(parent, child, labels), sourceHash },
+        "diagnostic: child transcript was truncated; projection restarted",
+      );
     }
     if (previous.offset === size) {
       if (labelsChanged || (previous.diagnostics.length > 0 && previous.offset === 0)) {
@@ -340,6 +417,7 @@ async function loadState(path, parent, child) {
     return boundState({
       parentHash: parent.hash,
       childHash: child.hash,
+      sourceHash: typeof state.sourceHash === "string" ? state.sourceHash : "",
       offset: Number.isInteger(state.offset) && state.offset >= 0 ? state.offset : 0,
       discardingOversizeLine: state.discardingOversizeLine === true,
       entries: sanitizeEntries(state.entries),
@@ -757,6 +835,7 @@ function emptyState(parent, child, labels = []) {
   return {
     parentHash: parent.hash,
     childHash: child.hash,
+    sourceHash: "",
     offset: 0,
     discardingOversizeLine: false,
     entries: [],
@@ -848,19 +927,14 @@ async function readFileTail(path, limit) {
 function statuslineParentValue(input) {
   const explicit = input?.parent_id ?? input?.session_id;
   if (typeof explicit === "string" && explicit.length > 0) return explicit;
-  const transcriptPath = transcriptPathValue(input);
+  const transcriptPath = sessionTranscriptPathValue(input);
   if (!transcriptPath) return "";
   const name = basename(transcriptPath, ".jsonl");
   return name.length > 0 ? name : "";
 }
 
-function transcriptPathValue(input) {
-  return firstString([
-    input?.transcript_path,
-    input?.transcriptPath,
-    input?.agent_transcript_path,
-    input?.agentTranscriptPath,
-  ]);
+function sessionTranscriptPathValue(input) {
+  return firstString([input?.transcript_path, input?.transcriptPath]);
 }
 
 async function readParentTranscript(path) {
