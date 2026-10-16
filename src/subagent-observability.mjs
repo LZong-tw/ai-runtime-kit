@@ -8,6 +8,7 @@ const MAX_STATE_BYTES = 1_000_000;
 const MAX_TRANSCRIPT_READ_BYTES = 256 * 1024;
 const MAX_PARENT_TRANSCRIPT_READ_BYTES = 2 * 1024 * 1024;
 const MAX_PARENT_TRANSCRIPT_HEAD_BYTES = 512 * 1024;
+const ANCHOR_BYTES = 4096;
 const MAX_ENTRIES = 200;
 const MAX_SEEN = 500;
 const MAX_DIAGNOSTICS = 20;
@@ -264,6 +265,13 @@ async function observeChildTranscript(input, env) {
         { ...emptyState(parent, child, labels), sourceHash },
         "diagnostic: child transcript was truncated; projection restarted",
       );
+    } else if (previous.anchorHash && previous.anchorHash !== await anchorHash(transcript, previous.offset)) {
+      // The path alone cannot tell a rewrite from an append, so the bytes just
+      // before the offset must still be the ones that were projected.
+      previous = addDiagnostic(
+        { ...emptyState(parent, child, previous.labels), sourceHash },
+        "diagnostic: child transcript was replaced; projection restarted",
+      );
     }
     if (previous.offset === size) {
       if (labelsChanged || (previous.diagnostics.length > 0 && previous.offset === 0)) {
@@ -277,10 +285,18 @@ async function observeChildTranscript(input, env) {
     const { bytesRead } = await transcript.read(buffer, 0, length, previous.offset);
     if (bytesRead === 0) return;
     const next = projectTranscriptChunk(previous, buffer.subarray(0, bytesRead));
+    if (next.offset !== previous.offset) next.anchorHash = await anchorHash(transcript, next.offset);
     await saveProjection(directory, timelinePath, statePath, next);
   } finally {
     await transcript.close();
   }
+}
+
+async function anchorHash(transcript, offset) {
+  const length = Math.min(ANCHOR_BYTES, offset);
+  const buffer = Buffer.alloc(length);
+  const { bytesRead } = await transcript.read(buffer, 0, length, offset - length);
+  return createHash("sha256").update(buffer.subarray(0, bytesRead)).digest("hex");
 }
 
 async function persistPendingChildState(input, env) {
@@ -418,6 +434,7 @@ async function loadState(path, parent, child) {
       parentHash: parent.hash,
       childHash: child.hash,
       sourceHash: typeof state.sourceHash === "string" ? state.sourceHash : "",
+      anchorHash: typeof state.anchorHash === "string" ? state.anchorHash : "",
       offset: Number.isInteger(state.offset) && state.offset >= 0 ? state.offset : 0,
       discardingOversizeLine: state.discardingOversizeLine === true,
       entries: sanitizeEntries(state.entries),
@@ -836,6 +853,7 @@ function emptyState(parent, child, labels = []) {
     parentHash: parent.hash,
     childHash: child.hash,
     sourceHash: "",
+    anchorHash: "",
     offset: 0,
     discardingOversizeLine: false,
     entries: [],
