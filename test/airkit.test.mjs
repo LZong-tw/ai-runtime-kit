@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
@@ -4108,6 +4108,147 @@ test("subagent status line hydrates a native child through its metadata sidecar"
     assert.doesNotMatch(row, /waiting for first event|ambiguous child transcript/);
   } finally {
     await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+async function childStateFiles(pluginData) {
+  const root = join(pluginData, "subagent-timelines");
+  const [parentKey] = await readdir(root);
+  const [childKey] = await readdir(join(root, parentKey));
+  const directory = join(root, parentKey, childKey);
+  return {
+    state: JSON.parse(await readFile(join(directory, ".state.json"), "utf8")),
+    timeline: await readFile(join(directory, "timeline.md"), "utf8"),
+  };
+}
+
+function assistantTexts(state) {
+  return state.entries.filter((entry) => entry.kind === "assistant").map((entry) => entry.text);
+}
+
+test("subagent statusline race between render hydration and lifecycle hooks keeps one consistent projection", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-subagent-race-"));
+  const env = { CLAUDE_PLUGIN_DATA: join(root, "plugin-data") };
+  const sessionId = "race-session";
+  const agentId = "a5e1f0c2d3b4a5968";
+
+  try {
+    const { parentTranscript, childTranscript } = await subagentSessionFixture(root, sessionId, agentId, []);
+    const base = { session_id: sessionId, transcript_path: parentTranscript, agent_id: agentId, agent_type: "general-purpose" };
+    const render = () => renderSubagentStatusLine({
+      session_id: sessionId,
+      transcript_path: parentTranscript,
+      tasks: [{ id: agentId, type: "local_agent", status: "running", description: "race", startTime: 1 }],
+    }, env);
+    await processSubagentObservabilityHook({ ...base, hook_event_name: "SubagentStart" }, env);
+
+    const expected = [];
+    for (let step = 0; step < 12; step += 1) {
+      expected.push(`race step #${String(step).padStart(2, "0")}#`);
+      await writeFile(childTranscript, jsonLines([assistantRecord(`race step #${String(step).padStart(2, "0")}#`)]), { flag: "a" });
+      await Promise.all([
+        render(),
+        processSubagentObservabilityHook({ ...base, hook_event_name: "PostToolUse", tool_name: "Read" }, env),
+        render(),
+        processSubagentObservabilityHook({ ...base, hook_event_name: "SubagentStop", agent_transcript_path: childTranscript }, env),
+      ]);
+    }
+    // A losing writer may leave an older offset behind; the next quiescent tick
+    // re-projects from there and the seen fingerprints keep it duplicate-free.
+    await processSubagentObservabilityHook({ ...base, hook_event_name: "PostToolUse", tool_name: "Read" }, env);
+
+    const { state, timeline } = await childStateFiles(env.CLAUDE_PLUGIN_DATA);
+    assert.equal(state.offset, (await stat(childTranscript)).size);
+    assert.deepEqual(assistantTexts(state), expected);
+    for (const text of expected) {
+      assert.equal(timeline.split(text).length - 1, 1, `${text} appears once in the timeline`);
+    }
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("subagent projection restarts when the child transcript is replaced at the same path", async () => {
+  for (const [variant, longer, viaRename] of [
+    ["same-length in place", false, false],
+    ["longer in place", true, false],
+    ["same-length rename", false, true],
+    ["longer rename", true, true],
+  ]) {
+    const root = await mkdtemp(join(tmpdir(), "airkit-subagent-replaced-"));
+    const env = { CLAUDE_PLUGIN_DATA: join(root, "plugin-data") };
+    const sessionId = "replaced-session";
+    const agentId = "a7c3e9d1b5f2a4086";
+
+    try {
+      const { parentTranscript, childTranscript } = await subagentSessionFixture(
+        root, sessionId, agentId, [assistantRecord("old alpha"), assistantRecord("old bravo")],
+      );
+      const base = { session_id: sessionId, transcript_path: parentTranscript, agent_id: agentId, agent_type: "general-purpose" };
+      await processSubagentObservabilityHook({ ...base, hook_event_name: "SubagentStart" }, env);
+      assert.deepEqual(assistantTexts((await childStateFiles(env.CLAUDE_PLUGIN_DATA)).state), ["old alpha", "old bravo"]);
+
+      const replacement = longer
+        ? [assistantRecord("new charlie, which is a longer first record"), assistantRecord("new delta")]
+        : [assistantRecord("new alpha"), assistantRecord("new bravo")];
+      const content = jsonLines(replacement);
+      if (viaRename) {
+        await writeFile(`${childTranscript}.tmp`, content);
+        await rename(`${childTranscript}.tmp`, childTranscript);
+      } else {
+        await writeFile(childTranscript, content);
+      }
+      await processSubagentObservabilityHook({ ...base, hook_event_name: "PostToolUse", tool_name: "Read" }, env);
+
+      const { state, timeline } = await childStateFiles(env.CLAUDE_PLUGIN_DATA);
+      assert.deepEqual(assistantTexts(state), replacement.map((record) => record.message.content[0].text), variant);
+      assert.equal(state.offset, Buffer.byteLength(content), variant);
+      assert.ok(!state.diagnostics.some((value) => /malformed/.test(value)), variant);
+      assert.doesNotMatch(timeline, /old alpha/, variant);
+      assert.deepEqual(state.labels, ["general-purpose"], variant);
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  }
+});
+
+test("subagent projection migrates a state created while the child transcript was missing or empty", async () => {
+  for (const variant of ["missing", "empty", "pending"]) {
+    const root = await mkdtemp(join(tmpdir(), "airkit-subagent-migrate-"));
+    const env = { CLAUDE_PLUGIN_DATA: join(root, "plugin-data") };
+    const sessionId = "migrate-session";
+    const agentId = "a2b4c6d8e0f1a3b5c";
+
+    try {
+      const { parentTranscript, childTranscript } = await subagentSessionFixture(root, sessionId, agentId, []);
+      const base = { session_id: sessionId, transcript_path: parentTranscript, agent_id: agentId, agent_type: "general-purpose" };
+      if (variant === "missing") {
+        await rm(childTranscript);
+        await processSubagentObservabilityHook({
+          ...base, hook_event_name: "SubagentStart", agent_transcript_path: childTranscript,
+        }, env);
+      } else if (variant === "empty") {
+        await processSubagentObservabilityHook({ ...base, hook_event_name: "SubagentStart" }, env);
+      } else {
+        await rm(join(root, sessionId), { force: true, recursive: true });
+        await processSubagentObservabilityHook({ ...base, hook_event_name: "SubagentStart" }, env);
+        await mkdir(dirname(childTranscript), { recursive: true });
+      }
+      const before = (await childStateFiles(env.CLAUDE_PLUGIN_DATA)).state;
+      assert.equal(before.offset, 0, variant);
+      assert.deepEqual(before.entries, [], variant);
+
+      const content = jsonLines([assistantRecord("first real event"), assistantRecord("second real event")]);
+      await writeFile(childTranscript, content);
+      await processSubagentObservabilityHook({ ...base, hook_event_name: "PostToolUse", tool_name: "Read" }, env);
+
+      const { state } = await childStateFiles(env.CLAUDE_PLUGIN_DATA);
+      assert.deepEqual(assistantTexts(state), ["first real event", "second real event"], variant);
+      assert.equal(state.offset, Buffer.byteLength(content), variant);
+      assert.deepEqual(state.labels, ["general-purpose"], variant);
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
   }
 });
 
