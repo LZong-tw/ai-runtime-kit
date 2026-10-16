@@ -23,15 +23,23 @@ async function fixture(t, options = {}) {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'completion-verifier-'));
   t.after(() => fs.rm(workspace, { recursive: true, force: true }));
   await fs.writeFile(path.join(workspace, 'source.mjs'), 'export const value = 1;\n');
+  // timeoutMs also caps each observation's budget, and an observation is a node
+  // spawn; 1s was not enough under full-suite load. Timeout tests set their own.
   const target = { id: 'test-1', executable: process.execPath, argv: ['-e', 'process.exit(0)'],
-    cwd: workspace, files: ['source.mjs'], timeoutMs: 1000, sideEffectFree: true };
+    cwd: workspace, files: ['source.mjs'], timeoutMs: 5000, sideEffectFree: true };
   const verifier = module.createOwnedVerifier({ authorize: async () => true, ...options });
   return { workspace, target, verifier, run: (overrides = {}) => verifier.run({ key, item, target, ...overrides }) };
 }
 
-async function ready(file) {
-  for (let attempt = 0; attempt < 200; attempt++) {
-    try { return await fs.readFile(file, 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+// writeFile truncates before it writes, so an existing file can still read as
+// empty; Number('') is 0, and process.kill(0, 0) probes the whole group.
+async function ready(file, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const text = await fs.readFile(file, 'utf8');
+      if (text) return text;
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
     await delay(5);
   }
   assert.fail('owned child did not become ready');
@@ -313,7 +321,7 @@ Date.now = () => Number(fs.readFileSync(${JSON.stringify(clockFile)}, 'utf8'));\
       await exercise({ workspace, children, execution, pid, deadlines, advance, pending });
     })();
     await Promise.race([exercising, new Promise((_, reject) => {
-      watchdog = wallSetTimeout(() => reject(new Error('real owned phases exceeded the wall-clock watchdog')), 3000);
+      watchdog = wallSetTimeout(() => reject(new Error('real owned phases exceeded the wall-clock watchdog')), 20_000);
     })]);
   } finally {
     wallClearTimeout(watchdog);
@@ -403,7 +411,8 @@ test('spawn failure cannot verify or disclose its executable', async (t) => {
 
 test('timeout awaits terminal death even when the owned child ignores SIGTERM', async (t) => {
   const { workspace, target, run } = await fixture(t);
-  target.timeoutMs = 150;
+  // Long enough for node to start and install its handler under full-suite load.
+  target.timeoutMs = 2000;
   target.argv = ['-e', 'process.on("SIGTERM", () => {}); require("node:fs").writeFileSync("ready", String(process.pid)); setInterval(() => {}, 1000)'];
   const pending = run();
   const pid = Number(await ready(path.join(workspace, 'ready')));
@@ -414,6 +423,7 @@ test('timeout awaits terminal death even when the owned child ignores SIGTERM', 
 test('cancellation awaits terminal death and cannot leave a verified receipt', async (t) => {
   const { workspace, target, run } = await fixture(t);
   const abort = new AbortController();
+  target.timeoutMs = 5000;
   target.argv = ['-e', 'process.on("SIGTERM", () => {}); require("node:fs").writeFileSync("ready", String(process.pid)); setInterval(() => {}, 1000)'];
   const pending = run({ signal: abort.signal });
   const pid = Number(await ready(path.join(workspace, 'ready')));
@@ -442,7 +452,7 @@ for (const stopKind of ['timeout', 'cancellation']) {
   test(`${stopKind} stops the whole owned process group, not only the direct child`, async (t) => {
     const { workspace, target, run } = await fixture(t);
     const abort = new AbortController();
-    target.timeoutMs = stopKind === 'timeout' ? 800 : 5000;
+    target.timeoutMs = stopKind === 'timeout' ? 2000 : 5000;
     target.argv = ['-e', forkingTarget];
     const pending = run({ signal: abort.signal });
     const grandchild = Number(await ready(path.join(workspace, 'grandchild')));
