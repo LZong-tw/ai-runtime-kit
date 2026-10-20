@@ -454,8 +454,10 @@ async function renderTaskRow(task, input, env, parentAgentStates = new Map()) {
   const parent = typeof parentValue === "string" && parentValue.length > 0 ? identity(parentValue) : null;
   const childValues = taskIdentityCandidates(task);
   const labels = taskLabelCandidates(task);
-  if (!validPluginData(env)) return waitingTaskRow(task, taskLabel(task), env);
   if (explicitTaskIdentities(task).length > 1) return ambiguousTaskRow(task);
+  const direct = await childTranscriptTailEntries(task, input);
+  if (direct.length > 0) return activeTaskRow(task, null, taskModel(task, input, env), direct);
+  if (!validPluginData(env)) return waitingTaskRow(task, taskLabel(task), env);
 
   const matches = parent
     ? await findParentChildStates(env.CLAUDE_PLUGIN_DATA, parent, childValues, labels)
@@ -479,11 +481,42 @@ async function renderTaskRow(task, input, env, parentAgentStates = new Map()) {
     const status = parentState?.status ?? task.status;
     return [taskDisplayLabel(task, child), ...(model ? [`model: ${model}`] : []), statusText, ...taskMetadata(task, status)].join(" | ");
   }
-  const latestText = [...state.entries].reverse().find((entry) => entry.kind === "assistant")?.text;
-  const latestTool = [...state.entries].reverse().find((entry) => entry.kind === "tool")?.name;
-  const parts = [taskDisplayLabel(task, child), ...(model ? [`model: ${model}`] : []), oneLine(redactSensitive(latestText || "waiting for first event"))];
+  return activeTaskRow(task, child, model, state.entries);
+}
+
+function activeTaskRow(task, child, model, entries) {
+  const latestText = [...entries].reverse().find((entry) => entry.kind === "assistant")?.text;
+  const latestTool = [...entries].reverse().find((entry) => entry.kind === "tool")?.name;
+  const parts = [taskDisplayLabel(task, child), ...(model ? [`model: ${model}`] : []), oneLine(redactSensitive(latestText || "working"))];
   if (latestTool) parts.push(`tool: ${latestTool}`);
   return [...parts, ...taskMetadata(task)].join(" | ");
+}
+
+// Claude Code spawns the subagentStatusLine command without CLAUDE_PLUGIN_DATA:
+// it sets that only for plugin hooks, MCP and LSP servers. The hook-written
+// timeline is therefore out of reach in a real session, so the row reads the
+// child transcript itself. A local_agent task id is the agent id, which names
+// that transcript below the session's subagents directory.
+async function childTranscriptTailEntries(task, input) {
+  const sessionTranscript = sessionTranscriptPathValue(input);
+  if (!sessionTranscript || !isSafeAgentId(task?.id)) return [];
+  const path = await findChildTranscript(subagentsDirectory(sessionTranscript), task.id);
+  if (!path) return [];
+  let tail;
+  try {
+    tail = await readFileTail(path, MAX_TRANSCRIPT_READ_BYTES);
+  } catch {
+    return [];
+  }
+  return tail.split(/\r?\n/).flatMap((line) => {
+    if (!line.trim()) return [];
+    try {
+      const record = JSON.parse(line);
+      return record && typeof record === "object" && !Array.isArray(record) ? projectRecord(record) : [];
+    } catch {
+      return [];
+    }
+  });
 }
 
 async function readParentAgentStates(transcriptPath) {
