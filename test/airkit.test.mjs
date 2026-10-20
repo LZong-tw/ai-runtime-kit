@@ -3890,6 +3890,31 @@ test("subagent statusline walks back past large records to the latest child text
     const [bounded] = await renderSubagentStatusLine(input, {});
     assert.match(bounded, /^Tail task \| working \| tool: Grep/);
     assert.doesNotMatch(bounded, /beyond the bound/);
+
+    await writeFile(childTranscript, jsonLines([
+      assistantRecord("older note"),
+      assistantRecord(`long report ${"y".repeat(600 * 1024)}`),
+      toolOnly,
+    ]));
+    const [oversized] = await renderSubagentStatusLine(input, {});
+    assert.match(oversized, /^Tail task \| long report y+/);
+    assert.doesNotMatch(oversized, /older note/);
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("subagent statusline reads the transcript named by an explicit agent id, not the task id", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-subagent-explicit-id-"));
+  const sessionId = "explicit-id-session";
+  const task = { id: "a0000000000000aaa", agentId: "a0000000000000bbb", type: "local_agent", status: "running", label: "Explicit" };
+
+  try {
+    const { parentTranscript } = await subagentSessionFixture(root, sessionId, task.id, [assistantRecord("task id text")]);
+    await subagentSessionFixture(root, sessionId, task.agentId, [assistantRecord("agent id text")], join("workflows", "wf_2"));
+    const [row] = await renderSubagentStatusLine({ session_id: sessionId, transcript_path: parentTranscript, tasks: [task] }, {});
+    assert.match(row, /^Explicit \| agent id text/);
+    assert.doesNotMatch(row, /task id text/);
   } finally {
     await rm(root, { force: true, recursive: true });
   }
