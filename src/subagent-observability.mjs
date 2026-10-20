@@ -6,6 +6,7 @@ const LIFECYCLE_EVENTS = new Set(["PostToolUse", "SubagentStart", "SubagentStop"
 const MAX_INPUT_BYTES = 1_000_000;
 const MAX_STATE_BYTES = 1_000_000;
 const MAX_TRANSCRIPT_READ_BYTES = 256 * 1024;
+const MAX_CHILD_TAIL_BYTES = 2 * 1024 * 1024;
 const MAX_PARENT_TRANSCRIPT_READ_BYTES = 2 * 1024 * 1024;
 const MAX_PARENT_TRANSCRIPT_HEAD_BYTES = 512 * 1024;
 const ANCHOR_BYTES = 4096;
@@ -502,13 +503,46 @@ async function childTranscriptTailEntries(task, input) {
   if (!sessionTranscript || !isSafeAgentId(task?.id)) return [];
   const path = await findChildTranscript(subagentsDirectory(sessionTranscript), task.id);
   if (!path) return [];
-  let tail;
   try {
-    tail = await readFileTail(path, MAX_TRANSCRIPT_READ_BYTES);
+    return await readTranscriptTailEntries(path);
   } catch {
     return [];
   }
-  return tail.split(/\r?\n/).flatMap((line) => {
+}
+
+// A child transcript interleaves the agent's messages with request snapshots,
+// skill listings and attachments that are often 60-100 KB each, so a fixed
+// tail can hold no assistant text at all. Walk back one chunk at a time until
+// the projection contains assistant text, bounded by MAX_CHILD_TAIL_BYTES.
+async function readTranscriptTailEntries(path) {
+  const file = await open(path, "r");
+  try {
+    const { size } = await file.stat();
+    const floor = Math.max(0, size - MAX_CHILD_TAIL_BYTES);
+    let end = size;
+    let partial = Buffer.alloc(0);
+    let entries = [];
+    while (end > floor) {
+      const start = Math.max(floor, end - MAX_TRANSCRIPT_READ_BYTES);
+      const chunk = Buffer.allocUnsafe(end - start);
+      const { bytesRead } = await file.read(chunk, 0, chunk.length, start);
+      const bytes = Buffer.concat([chunk.subarray(0, bytesRead), partial]);
+      end = start;
+      // Bytes before the first newline may belong to a record that starts
+      // further back; keep them for the next chunk instead of parsing them.
+      const cut = start > 0 ? bytes.indexOf(10) + 1 : 0;
+      partial = bytes.subarray(0, cut);
+      entries = [...projectTranscriptLines(bytes.subarray(cut)), ...entries];
+      if (entries.some((entry) => entry.kind === "assistant")) break;
+    }
+    return entries;
+  } finally {
+    await file.close();
+  }
+}
+
+function projectTranscriptLines(bytes) {
+  return bytes.toString("utf8").split(/\r?\n/).flatMap((line) => {
     if (!line.trim()) return [];
     try {
       const record = JSON.parse(line);

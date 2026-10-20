@@ -3861,6 +3861,40 @@ test("subagent statusline renders child progress without CLAUDE_PLUGIN_DATA", as
   }
 });
 
+// Real child transcripts carry request snapshots of 60-100 KB per record, so the
+// latest assistant text is regularly more than one 256 KB chunk from the end.
+test("subagent statusline walks back past large records to the latest child text", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-subagent-tail-"));
+  const sessionId = "tail-session";
+  const task = { id: "a1b2c3d4e5f60718a", type: "local_agent", status: "running", label: "Tail task" };
+  const snapshot = (bytes) => ({ type: "api-request-blob", body: "x".repeat(bytes) });
+  const toolOnly = { type: "assistant", message: { content: [{ type: "tool_use", name: "Grep", input: {} }] } };
+
+  try {
+    const { parentTranscript, childTranscript } = await subagentSessionFixture(root, sessionId, task.id, [
+      assistantRecord("older note"),
+      assistantRecord("comparing the two routers"),
+      snapshot(300 * 1024),
+      snapshot(90 * 1024),
+      toolOnly,
+    ]);
+    const input = { session_id: sessionId, transcript_path: parentTranscript, tasks: [task] };
+    const [row] = await renderSubagentStatusLine(input, {});
+    assert.match(row, /^Tail task \| comparing the two routers \| tool: Grep \| status: running/);
+
+    await writeFile(childTranscript, jsonLines([
+      assistantRecord("beyond the bound"),
+      snapshot(3 * 1024 * 1024),
+      toolOnly,
+    ]));
+    const [bounded] = await renderSubagentStatusLine(input, {});
+    assert.match(bounded, /^Tail task \| working \| tool: Grep/);
+    assert.doesNotMatch(bounded, /beyond the bound/);
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
 test("subagent lifecycle hooks project the child transcript, never the parent session transcript", async () => {
   const root = await mkdtemp(join(tmpdir(), "airkit-subagent-parent-leak-"));
   const env = { CLAUDE_PLUGIN_DATA: join(root, "plugin-data") };
