@@ -2805,6 +2805,13 @@ test("airclaude enables the Advisor tool only when the compatibility plugin brid
   assert.equal(plain.launch.env.CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL, undefined);
 });
 
+test("airclaude opts out of server-side auto-mode checks behind the local gateway", () => {
+  for (const catalog of [launchCatalog(), compatibilityCatalog()]) {
+    const plan = buildLaunchPlan(catalog, "launch-example", { configDir: "/tmp/airkit-auto-mode-server" });
+    assert.equal(plan.launch.env.CLAUDE_CODE_AUTO_MODE_SERVER, "0");
+  }
+});
+
 test("airclaude propagates arbitrary route context limits without a false 1M launch marker", () => {
   const catalog = launchCatalog();
   catalog.modelCatalog.providers[0].models.push({ id: "grok-4.6", contextWindow: 500_000 });
@@ -5532,6 +5539,7 @@ test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves
       AIRCLAUDE_STATUSLINE_LABEL: "airclaude pro demo/strong-coder",
       CLAUDE_STATUSLINE_CACHE_DIR: "/tmp/airkit-isolated-home/.claude/cache/airclaude/launch-example/pro",
       POWERLEVEL9K_INSTANT_PROMPT: "off",
+      CLAUDE_CODE_AUTO_MODE_SERVER: "0",
       CCR_PROFILE: "launch-example",
       ANTHROPIC_CUSTOM_HEADERS: "x-airkit-mode: pro",
       CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",

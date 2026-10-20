@@ -3305,6 +3305,10 @@ function airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, runtimeEnv = proc
     // "(eval): command not found: git/head/awk/dirname/basename". Quiet it for the launched
     // process only; the user's interactive P10k prompt and .zshrc are untouched.
     POWERLEVEL9K_INSTANT_PROMPT: "off",
+    // Server-side auto-mode checks need a direct Anthropic connection; every
+    // airclaude request goes through local CCR, so opt out and keep the
+    // classifier on its routed lane without the eligibility notice.
+    CLAUDE_CODE_AUTO_MODE_SERVER: "0",
   };
   const statuslinePriceMap = profileStatuslinePriceMap(profile);
   if (statuslinePriceMap) {
