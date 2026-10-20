@@ -692,13 +692,14 @@ function boundedTranscript(messages, cap = MAX_TRANSCRIPT_LENGTH) {
   let remaining = cap - TRANSCRIPT_MARKER_RESERVE;
   for (const index of pinned) {
     included[index] = keepTranscriptTail(rendered[index], share);
-    remaining -= included[index].text.length + TRANSCRIPT_SEPARATOR.length;
+    if (included[index] !== null) remaining -= included[index].text.length + TRANSCRIPT_SEPARATOR.length;
   }
   for (let index = rendered.length - 1; index >= 0 && remaining > 0; index -= 1) {
     if (included[index] !== null) continue;
     const room = remaining - TRANSCRIPT_SEPARATOR.length;
     if (room <= 0) break;
     included[index] = keepTranscriptTail(rendered[index], room);
+    if (included[index] === null) break;
     remaining -= included[index].text.length + TRANSCRIPT_SEPARATOR.length;
     if (included[index].elided) break;
   }
@@ -714,7 +715,7 @@ function boundedTranscript(messages, cap = MAX_TRANSCRIPT_LENGTH) {
     parts.push(entry.text);
   }
   if (omitted > 0) parts.push(omittedMessagesMarker(omitted));
-  return keepTranscriptTail(parts.join(TRANSCRIPT_SEPARATOR), cap).text;
+  return keepTranscriptTail(parts.join(TRANSCRIPT_SEPARATOR), cap)?.text ?? "";
 }
 
 // Claude Code attaches <system-reminder> text to tool-result messages, so a
@@ -750,6 +751,9 @@ function keepTranscriptTail(text, limit) {
   const newline = text.indexOf("\n");
   const header = newline >= 0 && newline < 64 ? text.slice(0, newline + 1) : "";
   const body = text.slice(header.length);
+  // Too little room for the header and marker: a mangled marker would read as
+  // content, so the caller drops the message and counts it as omitted.
+  if (limit < header.length + elisionMarker(body.length).length + 1) return null;
   let kept = Math.max(0, limit - header.length - elisionMarker(body.length).length - 1);
   let marker = elisionMarker(body.length - kept);
   kept = Math.max(0, limit - header.length - marker.length - 1);
