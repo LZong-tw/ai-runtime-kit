@@ -27,6 +27,7 @@ import {
 import {
   collapseSettingsArgs,
   estimateFixedContext,
+  laneWindow,
   resolveAutoCompactPolicy,
   thrashWarnings,
   userSetsAutoCompact,
@@ -1253,7 +1254,7 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
     : resolveAutoCompactPolicy({
       enabled: true,
       binaryEligible: shouldAppendReusableRuntimeLessons(launch.binary),
-      claudeCodeVersion: options.runtimeVersions?.claudeCode ?? null,
+      claudeCodeVersion: options.runtimeVersions?.claudeBinary ?? options.runtimeVersions?.claudeCode ?? null,
       router: ccrConfig.Router,
       launchModel: claudeModel,
       lookupEntry: (route) => {
@@ -1538,7 +1539,7 @@ async function prepareManagedGateway({ plan, managed, currentConfig, ccrClient, 
 export async function prepareLaunch(catalog, profileName, options = {}) {
   // The per-model autocompact gate needs the Claude Code version at plan time;
   // the runtime check below reuses the same reading.
-  if (!options.runtimeVersions && profileUsesPerModelAutoCompact(findProfile(catalog, profileName))) {
+  if (!options.runtimeVersions && launchModeUsesPerModelAutoCompact(findProfile(catalog, profileName), options.mode)) {
     options = { ...options, runtimeVersions: await inspectRuntimeVersions(options) };
   }
   const plan = buildLaunchPlan(catalog, profileName, options);
@@ -1977,7 +1978,11 @@ function validateCatalog(catalog) {
   }
   for (const providerEntry of Array.isArray(catalog.modelCatalog?.providers) ? catalog.modelCatalog.providers : []) {
     for (const modelEntry of providerEntry.models ?? []) {
-      validateAutoCompactEntry(`modelCatalog ${providerEntry.id}/${modelEntry.id}`, modelEntry.autoCompact);
+      const label = `modelCatalog ${providerEntry.id}/${modelEntry.id}`;
+      validateAutoCompactEntry(label, modelEntry.autoCompact);
+      // Resolve the lane window now so a ratio without contextWindow, or one
+      // below the floor, fails at load rather than only at a gated launch.
+      laneWindow(modelEntry, label);
     }
   }
 }
@@ -2051,13 +2056,9 @@ function validateLaunch(profile) {
     }
   }
 
-  const modeFields = new Set(["ccr", "effort", "appendSystemPrompt", "completionGuard", "perModelAutoCompact", "strictMcp"]);
+  // Mode definitions stay open: unknown fields (e.g. `description`) are ignored,
+  // only the fields AirKit reads are type-checked.
   for (const [mode, definition] of Object.entries(profile.launch?.modes ?? {})) {
-    for (const field of Object.keys(definition ?? {})) {
-      if (!modeFields.has(field)) {
-        throw new Error(`profile "${profile.name}" launch.modes.${mode} contains unsupported field: ${field}`);
-      }
-    }
     const strictMcp = definition?.strictMcp;
     if (strictMcp !== undefined) {
       if (typeof strictMcp !== "boolean") {
@@ -3335,8 +3336,10 @@ function modeAppendSystemPrompt(launch, mode) {
   return typeof prompt === "string" && prompt.trim() !== "" ? prompt : null;
 }
 
-function profileUsesPerModelAutoCompact(profile) {
-  return Object.values(profile?.launch?.modes ?? {}).some((definition) => definition?.perModelAutoCompact === true);
+function launchModeUsesPerModelAutoCompact(profile, requestedMode) {
+  if (!profile?.launch) return false;
+  const mode = resolveLaunchMode(profile, profile.launch, requestedMode);
+  return profile.launch.modes?.[mode]?.perModelAutoCompact === true;
 }
 
 function withHeartbeatPluginArg(args, binary, configDir) {
@@ -3801,6 +3804,9 @@ async function inspectRuntimeVersions(options = {}) {
     node: process.versions.node,
     claudeCode: dependencies["@anthropic-ai/claude-code"]?.version ?? extractVersion(claude.stdout),
     claudeCodeRouter: dependencies["@musistudio/claude-code-router"]?.version ?? null,
+    // What `claude` on PATH actually is; a native install can differ from the
+    // npm global package, and version gates on the spawned binary need this one.
+    claudeBinary: extractVersion(claude.stdout),
   };
 }
 
