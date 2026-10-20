@@ -225,6 +225,19 @@ function extractSettings(args, readFile) {
   return { rest, found };
 }
 
+// True when the args already choose an autocompact window, either with
+// --autocompact or through a --settings key the per-model policy would
+// overwrite. The policy then stands down rather than silently winning.
+export function userSetsAutoCompact(args, readFile = readFileSync) {
+  if (args.some((arg) => arg === "--autocompact" || String(arg).startsWith("--autocompact="))) return true;
+  return extractSettings(args, readFile).found.some((settings) =>
+    settings.autoCompactWindow !== undefined
+    || settings.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW !== undefined
+    || settings.env?.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE !== undefined
+    || Object.values(isPlainObject(settings.modelSettings) ? settings.modelSettings : {})
+      .some((entry) => entry?.autoCompactWindow !== undefined));
+}
+
 // Claude Code keeps only one --settings value, so every source collapses into
 // a single object: launcher args first, then user args, then AirKit's keys.
 export function collapseSettingsArgs(headArgs, tailArgs, airkitSettings, readFile = readFileSync) {
