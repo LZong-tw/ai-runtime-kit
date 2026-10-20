@@ -24,7 +24,13 @@ import {
   validateCompatibilityConfig,
   validateCompatibilityProviderBinding,
 } from "./compat/config.mjs";
-import { collapseSettingsArgs, resolveAutoCompactPolicy, validateAutoCompactEntry } from "./autocompact.mjs";
+import {
+  collapseSettingsArgs,
+  estimateFixedContext,
+  resolveAutoCompactPolicy,
+  thrashWarnings,
+  validateAutoCompactEntry,
+} from "./autocompact.mjs";
 import { startCompatibilityMiddleware } from "./compat/middleware.mjs";
 import { renderHeartbeatManagedFiles } from "./context-heartbeat.mjs";
 import { buildContextObservability } from "./context-observability.mjs";
@@ -1290,6 +1296,17 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
       launch.binary,
       configDir,
     );
+  if (autoCompact?.status === "active") {
+    const appendPrompt = claudeArgs
+      .filter((_, index) => claudeArgs[index - 1] === "--append-system-prompt")
+      .join("\n");
+    autoCompact.fixedContextTokens =
+      options.fixedContextTokens ?? estimateFixedContext({ appendPrompt, cwd: options.cwd });
+    autoCompact.warnings = [
+      ...(autoCompact.warnings ?? []),
+      ...thrashWarnings(autoCompact.byModel, autoCompact.fixedContextTokens, profile.launch?.context?.maxOutputTokens),
+    ];
+  }
   const collapsed = autoCompactSettingsArgs(claudeArgs, options.userArgs ?? [], autoCompact, options.readSettingsFile);
 
   return {
@@ -1700,6 +1717,9 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
             : gatewayBaseUrlEnv(gatewayOrigin)),
         ANTHROPIC_AUTH_TOKEN: gatewayToken,
       };
+      for (const warning of plan.launch.autoCompact?.warnings ?? []) {
+        (options.stderr ?? process.stderr).write(`airkit: per-model autocompact warning: ${warning}\n`);
+      }
       const spawnArgs = autoCompactSettingsArgs(
         [...plan.launch.args, ...compatibilityLaunch.args],
         plan.launch.userArgs,
@@ -3217,7 +3237,7 @@ function autoCompactLines(autoCompact) {
     .map(([id, { lane, window }]) => `${id}=${window} (${lane})`)
     .join(", ");
   const warnings = (autoCompact.warnings ?? []).map((warning) => `- per-model autocompact warning: ${warning}\n`).join("");
-  return `- per-model autocompact: active ${autoCompact.policyGeneration}; fallback ${autoCompact.fallbackWindow}; ${models}\n${warnings}`;
+  return `- per-model autocompact: active ${autoCompact.policyGeneration}; fallback ${autoCompact.fallbackWindow}; fixed context ~${autoCompact.fixedContextTokens}; ${models}\n${warnings}`;
 }
 
 function contextEnvLines(env = {}) {

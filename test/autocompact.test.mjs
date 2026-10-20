@@ -1,9 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  CLAUDE_CODE_FIXED_BASELINE,
   collapseSettingsArgs,
+  compactionThreshold,
+  estimateFixedContext,
   laneWindow,
   resolveAutoCompactPolicy,
+  thrashWarnings,
   validateAutoCompactEntry,
 } from "../src/autocompact.mjs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -231,6 +235,7 @@ test("an explicit --autocompact from the user is kept and reported", () => {
     mode: "auto",
     runtimeVersions: { claudeCode: "2.1.304" },
     userArgs: ["--autocompact", "200000"],
+    fixedContextTokens: 20_000,
   });
   assert.deepEqual(plan.launch.autoCompact.warnings, ["an explicit --autocompact value overrides the per-model table"]);
   assert.equal(plan.launch.userArgs.includes("200000"), true);
@@ -261,4 +266,49 @@ test("the catalog validator rejects bad per-model flags and autoCompact entries"
   const both = perModelCatalog();
   both.profiles[0].launch.context = { autoCompactWindow: 300_000 };
   await assert.rejects(validateCatalog(both), /choose one/);
+});
+
+test("the fixed-context estimate adds instruction files, project memory and the append prompt to the baseline", () => {
+  const files = {
+    "/home/u/.claude/CLAUDE.md": "x".repeat(700),
+    "/home/u/work/repo/CLAUDE.md": "y".repeat(350),
+    "/home/u/.claude/projects/-home-u-work-repo/memory/MEMORY.md": "z".repeat(35),
+  };
+  const readFile = (path) => {
+    if (!(path in files)) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    return files[path];
+  };
+  const tokens = estimateFixedContext({ appendPrompt: "p".repeat(70), cwd: "/home/u/work/repo", home: "/home/u", readFile });
+  assert.equal(tokens, CLAUDE_CODE_FIXED_BASELINE + 330);
+});
+
+test("a lane warns once when the fixed floor passes a quarter of its compaction threshold", () => {
+  assert.equal(compactionThreshold(180_000, 64_000), 147_000);
+  const byModel = {
+    "airkit-mode": { lane: "default", window: 180_000 },
+    "claude-sonnet-5": { lane: "default", window: 180_000 },
+    "claude-haiku-5-5": { lane: "background", window: 278_000 },
+  };
+  assert.deepEqual(thrashWarnings(byModel, 36_000, 64_000), []);
+  const warnings = thrashWarnings(byModel, 40_000, 64_000);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /^default lane \(airkit-mode\): fixed context ~40000 tokens is 27% of its 147000-token compaction threshold/);
+});
+
+test("the launch plan carries the fixed-context estimate and its thrash warning", () => {
+  const plan = buildLaunchPlan(perModelCatalog(), "pm", {
+    mode: "auto",
+    runtimeVersions: { claudeCode: "2.1.304" },
+    fixedContextTokens: 100_000,
+  });
+  assert.equal(plan.launch.autoCompact.fixedContextTokens, 100_000);
+  assert.deepEqual(
+    plan.launch.autoCompact.warnings.map((warning) => warning.split(":")[0]),
+    [
+      "default lane (airkit-mode)",
+      "opus lane (claude-opus-5-5)",
+      "sonnet lane (claude-sonnet-5-5)",
+      "background lane (claude-haiku-5-5)",
+    ],
+  );
 });
