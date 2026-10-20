@@ -3,6 +3,7 @@ import { appendFile, mkdir, open, readFile, rename, rm, stat, writeFile } from "
 import { basename, dirname, join } from "node:path";
 import { processSubagentObservabilityHook } from "./subagent-observability.mjs";
 import { processAuditHook } from "./audit/claude-hook.mjs";
+import { EDUCATION_DEFAULTS, EDUCATION_ENV, EDUCATION_EVENTS } from "./education.mjs";
 import { createClaudeAuditHookEmitter } from "./audit/claude-hook-runtime.mjs";
 
 export const HEARTBEAT_CONTEXT_LIMIT = 512;
@@ -390,7 +391,7 @@ async function createAuditHookEmitter(env) {
   }
 }
 
-export function renderHeartbeatManagedFiles(configDir, runtimeModuleUrl = import.meta.url, { completionMode = "off" } = {}) {
+export function renderHeartbeatManagedFiles(configDir, runtimeModuleUrl = import.meta.url, { completionMode = "off", education = null } = {}) {
   const root = join(configDir, "plugins", "airkit-context");
   const statuslinePath = join(root, "scripts", "subagent-statusline.mjs");
   const manifest = {
@@ -455,6 +456,13 @@ export function renderHeartbeatManagedFiles(configDir, runtimeModuleUrl = import
       type: "command",
     }] }];
   }
+  const educationEnv = education ? educationHookEnv(education) : null;
+  if (educationEnv) {
+    for (const event of EDUCATION_EVENTS) {
+      const entry = { hooks: [{ args: ["${CLAUDE_PLUGIN_ROOT}/scripts/education/hook.mjs"], command: "node", type: "command" }] };
+      hooks.hooks[event] = [...(hooks.hooks[event] ?? []), entry];
+    }
+  }
   const script = `import { runHeartbeatHook } from ${JSON.stringify(runtimeModuleUrl)};\nawait runHeartbeatHook(${completionShadow ? '{ env: { ...process.env, AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS: "0" } }' : ""});\n`;
   const statuslineScript = `import { runShieldStatusline } from ${JSON.stringify(new URL("./shield/statusline-state.mjs", runtimeModuleUrl).href)};\nawait runShieldStatusline();\n`;
   const settings = {
@@ -502,7 +510,20 @@ export function renderHeartbeatManagedFiles(configDir, runtimeModuleUrl = import
       path: join(root, "scripts", "completion", "hook.mjs"),
       relativePath: "plugins/airkit-context/scripts/completion/hook.mjs",
     }] : []),
+    ...(educationEnv ? [{
+      content: `import { runEducationHook } from ${JSON.stringify(new URL("./education.mjs", runtimeModuleUrl).href)};\nawait runEducationHook({ env: { ...process.env, ...${JSON.stringify(educationEnv)} } });\n`,
+      label: "AirClaude model education hook",
+      path: join(root, "scripts", "education", "hook.mjs"),
+      relativePath: "plugins/airkit-context/scripts/education/hook.mjs",
+    }] : []),
   ];
+}
+
+// Flags are baked into the generated script so a stray shell export cannot
+// flip a rule to enforce; P3 ships every rule in shadow (log-only).
+export function educationHookEnv(education = {}) {
+  const flags = { ...EDUCATION_DEFAULTS, ...(education === true ? {} : education) };
+  return Object.fromEntries(Object.entries(EDUCATION_ENV).map(([key, name]) => [name, String(flags[key])]));
 }
 
 function routeContext(env, extra = []) {
