@@ -727,6 +727,24 @@ test("Advisor transcript never cuts through a surrogate pair", async () => {
   }
 });
 
+test("Advisor transcript drops a message whose room cannot hold its elision marker", async () => {
+  // Sweeps the filler across the window where the older message gets only a
+  // few dozen characters of room, too few for its header and marker.
+  for (let filler = 64_950; filler <= 65_250; filler += 3) {
+    const transcript = await captureAdvisorTranscript([
+      { role: "user", content: "Describe repository Lantern-9." },
+      { role: "assistant", content: "o".repeat(5_000) },
+      { role: "assistant", content: "f".repeat(filler) },
+    ], [{ type: "text", text: "Executor-turn-marker: consulting now." }]);
+
+    assert.ok(transcript.length <= ADVISOR_TRANSCRIPT_CAP);
+    assert.match(transcript, /^(\[\.\.\. \d+ earlier messages? omitted \.\.\.\]|\[user\])\n/, `filler ${filler}`);
+    const markers = transcript.match(/characters omitted \.\.\.\]/g) ?? [];
+    const whole = transcript.match(/\[\.\.\. \d+ earlier characters omitted \.\.\.\]/g) ?? [];
+    assert.equal(whole.length, markers.length, `filler ${filler}`);
+  }
+});
+
 test("prior ToolSearch result blocks become bounded history and reactivate referenced tools", async () => {
   const fixture = createBridgeFixture([
     message({ content: [{ type: "text", text: "History understood." }] }),
