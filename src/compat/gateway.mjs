@@ -24,7 +24,13 @@ import { normalizeResponsesThinkingHistory } from "./reasoning-history.mjs";
 const TOOL_SEARCH_BRIDGE_NAME = "airkit_tool_search";
 const ADVISOR_BRIDGE_NAME = "airkit_advisor";
 const MAX_EXECUTOR_ITERATIONS = 8;
-const MAX_TRANSCRIPT_LENGTH = 32_768;
+// Advisor transcript budget in UTF-16 code units. Claude Code's first user
+// message alone often carries more than 32 KB of injected CLAUDE.md / memory
+// reminders, so 64 KB leaves room for the latest request, the executor turn,
+// and several recent tool exchanges. The cost is about 16K advisor input tokens.
+const MAX_TRANSCRIPT_LENGTH = 65_536;
+const TRANSCRIPT_SEPARATOR = "\n\n";
+const TRANSCRIPT_MARKER_RESERVE = 256;
 const MAX_HISTORY_TEXT_LENGTH = 4_096;
 const CORE_RESPONSE_METADATA = Symbol("airkitCoreResponseMetadata");
 
@@ -672,14 +678,138 @@ async function requestAdvisor({
   }
 }
 
-function boundedTranscript(messages) {
-  let serialized;
-  try {
-    serialized = JSON.stringify(messages);
-  } catch {
-    serialized = "[unavailable transcript]";
+// Keeps the newest context: the executor's turn and the latest real user
+// request are pinned (each bounded to a quarter of the cap, tail kept), then older messages fill the remaining budget newest
+// first. Every dropped span is marked so the advisor never reads a silent cut.
+function boundedTranscript(messages, cap = MAX_TRANSCRIPT_LENGTH) {
+  const rendered = messages.map(renderTranscriptMessage);
+  if (rendered.length === 0) return "";
+  const included = new Array(rendered.length).fill(null);
+  const share = Math.floor(cap / 4);
+  const pinned = [rendered.length - 1, latestUserRequestIndex(messages)].filter(
+    (index, position, all) => index >= 0 && all.indexOf(index) === position,
+  );
+  let remaining = cap - TRANSCRIPT_MARKER_RESERVE;
+  for (const index of pinned) {
+    included[index] = keepTranscriptTail(rendered[index], share);
+    remaining -= included[index].text.length + TRANSCRIPT_SEPARATOR.length;
   }
-  return serialized.slice(0, MAX_TRANSCRIPT_LENGTH);
+  for (let index = rendered.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    if (included[index] !== null) continue;
+    const room = remaining - TRANSCRIPT_SEPARATOR.length;
+    if (room <= 0) break;
+    included[index] = keepTranscriptTail(rendered[index], room);
+    remaining -= included[index].text.length + TRANSCRIPT_SEPARATOR.length;
+    if (included[index].elided) break;
+  }
+  const parts = [];
+  let omitted = 0;
+  for (const entry of included) {
+    if (entry === null) {
+      omitted += 1;
+      continue;
+    }
+    if (omitted > 0) parts.push(omittedMessagesMarker(omitted));
+    omitted = 0;
+    parts.push(entry.text);
+  }
+  if (omitted > 0) parts.push(omittedMessagesMarker(omitted));
+  return keepTranscriptTail(parts.join(TRANSCRIPT_SEPARATOR), cap).text;
+}
+
+function latestUserRequestIndex(messages) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== "user") continue;
+    if (typeof message.content === "string" && message.content.trim().length > 0) return index;
+    if (
+      Array.isArray(message.content) &&
+      message.content.some((block) => block?.type === "text" && String(block.text ?? "").trim().length > 0)
+    ) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function keepTranscriptTail(text, limit) {
+  if (text.length <= limit) return { text, elided: false };
+  const newline = text.indexOf("\n");
+  const header = newline >= 0 && newline < 64 ? text.slice(0, newline + 1) : "";
+  const body = text.slice(header.length);
+  let kept = Math.max(0, limit - header.length - elisionMarker(body.length).length - 1);
+  let marker = elisionMarker(body.length - kept);
+  kept = Math.max(0, limit - header.length - marker.length - 1);
+  marker = elisionMarker(body.length - kept);
+  const result = `${header}${marker}\n${kept > 0 ? body.slice(body.length - kept) : ""}`;
+  return { text: result.length <= limit ? result : result.slice(result.length - limit), elided: true };
+}
+
+function elisionMarker(count) {
+  return `[... ${count} earlier characters omitted ...]`;
+}
+
+function omittedMessagesMarker(count) {
+  return `[... ${count} earlier ${count === 1 ? "message" : "messages"} omitted ...]`;
+}
+
+function renderTranscriptMessage(message) {
+  const role = typeof message?.role === "string" ? message.role : "unknown";
+  const content = message?.content;
+  let body;
+  if (typeof content === "string") {
+    body = content;
+  } else if (Array.isArray(content)) {
+    body = content.map(renderTranscriptBlock).filter((text) => text !== null).join("\n");
+  } else {
+    body = "";
+  }
+  return `[${role}]\n${body}`;
+}
+
+function renderTranscriptBlock(block) {
+  switch (block?.type) {
+    case "text":
+      return String(block.text ?? "");
+    case "thinking":
+    case "redacted_thinking":
+      return null;
+    case "tool_use":
+    case "server_tool_use":
+      return `[${block.type} ${String(block.name ?? "")}] ${compactJson(block.input ?? {})}`;
+    case "tool_result":
+      return `[tool_result${block.is_error ? " error" : ""}] ${renderToolResultContent(block.content)}`;
+    case "advisor_tool_result":
+      return renderHistoryBlock(advisorHistoryText, block);
+    case "tool_search_tool_result":
+      return renderHistoryBlock(toolSearchHistoryText, block);
+    default:
+      return `[${String(block?.type ?? "unknown")}]`;
+  }
+}
+
+function renderToolResultContent(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((block) => (block?.type === "text" ? String(block.text ?? "") : `[${String(block?.type ?? "unknown")}]`))
+    .join("\n");
+}
+
+function renderHistoryBlock(render, block) {
+  try {
+    return render(block);
+  } catch {
+    return `[${block.type}]`;
+  }
+}
+
+function compactJson(value) {
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return "[unserializable input]";
+  }
 }
 
 function extractMessageText(message) {
