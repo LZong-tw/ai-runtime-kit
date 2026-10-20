@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, open, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
 const LIFECYCLE_EVENTS = new Set(["PostToolUse", "SubagentStart", "SubagentStop"]);
@@ -52,36 +52,67 @@ function isSafeAgentId(value) {
   return typeof value === "string" && /^[A-Za-z0-9._-]+$/.test(value) && !/^\.+$/.test(value);
 }
 
-// Workflow children live one or two directories down (workflows/wf_<id>/).
-async function findChildTranscript(directory, agentId, depth = 0) {
-  const name = `agent-${agentId}.jsonl`;
+async function findChildTranscript(directory, agentId) {
+  return childTranscriptResolver(directory)(agentId);
+}
+
+// Most children sit directly in subagents/; workflow children live one or two
+// directories down (workflows/wf_<id>/). The tree is walked at most once per
+// resolver, and only after a direct lookup misses, so a statusline tick with
+// many tasks and many workflow runs pays for one walk instead of one per task.
+function childTranscriptResolver(directory) {
+  let index;
+  return async (agentId) => {
+    if (!isSafeAgentId(agentId)) return "";
+    const name = `agent-${agentId}.jsonl`;
+    try {
+      if ((await lstat(join(directory, name))).isFile()) return join(directory, name);
+    } catch {
+      // Not a direct child; fall through to the nested index.
+    }
+    index ??= indexChildTranscripts(directory);
+    return (await index).get(name) ?? "";
+  };
+}
+
+async function indexChildTranscripts(directory, depth = 0, index = new Map()) {
   let entries;
   try {
     entries = await readdir(directory, { withFileTypes: true });
   } catch {
-    return "";
+    return index;
   }
-  if (entries.some((entry) => entry.isFile() && entry.name === name)) return join(directory, name);
-  if (depth >= 2) return "";
   for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const found = await findChildTranscript(join(directory, entry.name), agentId, depth + 1);
-    if (found) return found;
+    if (entry.isFile() && entry.name.startsWith("agent-") && entry.name.endsWith(".jsonl") && !index.has(entry.name)) {
+      index.set(entry.name, join(directory, entry.name));
+    }
   }
-  return "";
+  if (depth >= 2) return index;
+  for (const entry of entries) {
+    if (entry.isDirectory()) await indexChildTranscripts(join(directory, entry.name), depth + 1, index);
+  }
+  return index;
+}
+
+// The task row's own agent id: an explicit agent_id/agentId wins over the
+// task id, which for a local_agent task is the same value.
+function taskAgentId(task) {
+  return firstString([task?.agent_id, task?.agentId, task?.id]);
 }
 
 export async function renderSubagentStatusLine(input, env = process.env) {
-  await hydrateTaskStates(input, env);
-  const parentAgentStates = await readParentAgentStates(sessionTranscriptPathValue(input));
+  const sessionTranscript = sessionTranscriptPathValue(input);
+  const resolveChild = sessionTranscript ? childTranscriptResolver(subagentsDirectory(sessionTranscript)) : async () => "";
+  await hydrateTaskStates(input, env, resolveChild);
+  const parentAgentStates = await readParentAgentStates(sessionTranscript);
   const rows = [];
   for (const task of Array.isArray(input?.tasks) ? input.tasks : []) {
-    rows.push(await renderTaskRow(task, input, env, parentAgentStates));
+    rows.push(await renderTaskRow(task, input, env, parentAgentStates, resolveChild));
   }
   return rows;
 }
 
-async function hydrateTaskStates(input, env) {
+async function hydrateTaskStates(input, env, resolveChild) {
   if (!validPluginData(env)) return;
   const parentValue = statuslineParentValue(input);
   const transcriptPath = sessionTranscriptPathValue(input);
@@ -95,7 +126,7 @@ async function hydrateTaskStates(input, env) {
   }
   const tasks = Array.isArray(input?.tasks) ? input.tasks : [];
   for (const task of tasks) {
-    if (await hydrateTaskById(task, parentValue, sessionDirectory, env)) continue;
+    if (await hydrateTaskById(task, parentValue, resolveChild, env)) continue;
     const labels = taskLabelCandidates(task);
     if (labels.length === 0) continue;
     const parent = identity(parentValue);
@@ -139,15 +170,15 @@ async function hydrateTaskStates(input, env) {
 
 // A local_agent task id is the hook agent_id, which names the child transcript
 // directly, including workflow children nested below subagents/.
-async function hydrateTaskById(task, parentValue, sessionDirectory, env) {
-  if (!isSafeAgentId(task?.id)) return false;
-  const childTranscript = await findChildTranscript(sessionDirectory, task.id);
+async function hydrateTaskById(task, parentValue, resolveChild, env) {
+  const agentId = taskAgentId(task);
+  const childTranscript = await resolveChild(agentId);
   if (!childTranscript) return false;
   try {
     await observeChildTranscript({
       hook_event_name: "SubagentStart",
       session_id: parentValue,
-      agent_id: task.id,
+      agent_id: agentId,
       agent_type: firstString([task.agentType, task.type === "local_agent" ? "" : task.type]),
       transcript_path: childTranscript,
     }, env);
@@ -450,13 +481,13 @@ async function loadState(path, parent, child) {
   }
 }
 
-async function renderTaskRow(task, input, env, parentAgentStates = new Map()) {
+async function renderTaskRow(task, input, env, parentAgentStates, resolveChild) {
   const parentValue = statuslineParentValue(input);
   const parent = typeof parentValue === "string" && parentValue.length > 0 ? identity(parentValue) : null;
   const childValues = taskIdentityCandidates(task);
   const labels = taskLabelCandidates(task);
   if (explicitTaskIdentities(task).length > 1) return ambiguousTaskRow(task);
-  const direct = await childTranscriptTailEntries(task, input);
+  const direct = await childTranscriptTailEntries(task, resolveChild);
   if (direct.length > 0) return activeTaskRow(task, null, taskModel(task, input, env), direct);
   if (!validPluginData(env)) return waitingTaskRow(task, taskLabel(task), env);
 
@@ -498,10 +529,8 @@ function activeTaskRow(task, child, model, entries) {
 // timeline is therefore out of reach in a real session, so the row reads the
 // child transcript itself. A local_agent task id is the agent id, which names
 // that transcript below the session's subagents directory.
-async function childTranscriptTailEntries(task, input) {
-  const sessionTranscript = sessionTranscriptPathValue(input);
-  if (!sessionTranscript || !isSafeAgentId(task?.id)) return [];
-  const path = await findChildTranscript(subagentsDirectory(sessionTranscript), task.id);
+async function childTranscriptTailEntries(task, resolveChild) {
+  const path = await resolveChild(taskAgentId(task));
   if (!path) return [];
   try {
     return await readTranscriptTailEntries(path);
