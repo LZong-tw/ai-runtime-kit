@@ -679,8 +679,10 @@ async function requestAdvisor({
 }
 
 // Keeps the newest context: the executor's turn and the latest real user
-// request are pinned (each bounded to a quarter of the cap, tail kept), then older messages fill the remaining budget newest
-// first. Every dropped span is marked so the advisor never reads a silent cut.
+// request are pinned (each first bounded to a quarter of the cap, tail kept),
+// older messages fill the remaining budget newest first, and whatever budget
+// is still unused goes back to the pinned messages that were cut. Every
+// dropped span is marked so the advisor never reads a silent cut.
 function boundedTranscript(messages, cap = MAX_TRANSCRIPT_LENGTH) {
   const rendered = messages.map(renderTranscriptMessage);
   if (rendered.length === 0) return "";
@@ -702,6 +704,14 @@ function boundedTranscript(messages, cap = MAX_TRANSCRIPT_LENGTH) {
     if (included[index] === null) break;
     remaining -= included[index].text.length + TRANSCRIPT_SEPARATOR.length;
     if (included[index].elided) break;
+  }
+  for (const index of pinned) {
+    const entry = included[index];
+    if (!entry?.elided || remaining <= 0) continue;
+    const grown = keepTranscriptTail(rendered[index], entry.text.length + remaining);
+    if (grown === null || grown.text.length <= entry.text.length) continue;
+    remaining -= grown.text.length - entry.text.length;
+    included[index] = grown;
   }
   const parts = [];
   let omitted = 0;
@@ -736,6 +746,15 @@ function latestUserRequestIndex(messages) {
 }
 
 const SYSTEM_REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
+
+// Same ordering as reminder-only blocks: a tail cut then drops injected
+// reminders before the user's own words.
+function remindersFirst(text) {
+  const reminders = text.match(SYSTEM_REMINDER);
+  if (reminders === null) return text;
+  const own = text.replace(SYSTEM_REMINDER, "").trim();
+  return own.length > 0 ? `${reminders.join("\n")}\n${own}` : text;
+}
 
 function hasRequestText(text) {
   return typeof text === "string" && text.replace(SYSTEM_REMINDER, "").trim().length > 0;
@@ -798,7 +817,7 @@ function renderTranscriptMessage(message) {
   const content = message?.content;
   let body;
   if (typeof content === "string") {
-    body = content;
+    body = role === "user" ? remindersFirst(content) : content;
   } else if (Array.isArray(content)) {
     // Reminders go first so a tail cut drops them before the user's own words.
     const ordered = role === "user"

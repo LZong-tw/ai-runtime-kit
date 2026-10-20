@@ -714,7 +714,7 @@ test("Advisor transcript keeps a request that precedes a trailing reminder in th
 const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
 
 test("Advisor transcript never cuts through a surrogate pair", async () => {
-  for (const size of [9_000, 9_001, 20_000, 40_000]) {
+  for (const size of [20_000, 20_001, 25_003, 40_000]) {
     const transcript = await captureAdvisorTranscript([
       { role: "user", content: "Describe repository Lantern-9." },
       { role: "assistant", content: "\u{1F600}".repeat(size) },
@@ -743,6 +743,56 @@ test("Advisor transcript drops a message whose room cannot hold its elision mark
     const whole = transcript.match(/\[\.\.\. \d+ earlier characters omitted \.\.\.\]/g) ?? [];
     assert.equal(whole.length, markers.length, `filler ${filler}`);
   }
+});
+
+test("Advisor transcript gives unused budget back to a truncated pinned request", async () => {
+  const reminder = injectedReminder(40_000);
+  const transcript = await captureAdvisorTranscript([
+    { role: "user", content: `${reminder}\nDescribe repository Lantern-9.` },
+  ], [{ type: "text", text: "Executor-turn-marker: consulting now." }]);
+
+  assert.ok(transcript.length <= ADVISOR_TRANSCRIPT_CAP);
+  assert.ok(transcript.includes(reminder), `transcript length ${transcript.length}`);
+  assert.doesNotMatch(transcript, /characters omitted/);
+  assert.match(transcript, /Describe repository Lantern-9\./);
+  assert.match(transcript, /Executor-turn-marker/);
+});
+
+test("Advisor transcript fills the cap from a pinned request larger than its share", async () => {
+  const transcript = await captureAdvisorTranscript([
+    { role: "user", content: `${injectedReminder(120_000)}\nDescribe repository Lantern-9.` },
+  ], [{ type: "text", text: "Executor-turn-marker: consulting now." }]);
+
+  assert.ok(transcript.length <= ADVISOR_TRANSCRIPT_CAP);
+  assert.ok(transcript.length > ADVISOR_TRANSCRIPT_CAP - 1_024, `transcript length ${transcript.length}`);
+  assert.match(transcript, /Describe repository Lantern-9\./);
+  assert.match(transcript, /Executor-turn-marker/);
+});
+
+test("Advisor transcript keeps a string request that precedes a large reminder", async () => {
+  const transcript = await captureAdvisorTranscript([
+    { role: "user", content: `Describe repository Lantern-9.\n${injectedReminder(100_000)}` },
+  ], [{ type: "text", text: "Executor-turn-marker: consulting now." }]);
+
+  assert.ok(transcript.length <= ADVISOR_TRANSCRIPT_CAP);
+  assert.match(transcript, /Describe repository Lantern-9\./);
+  assert.match(transcript, /Executor-turn-marker/);
+});
+
+test("Advisor transcript keeps a block request that precedes a large reminder block", async () => {
+  const transcript = await captureAdvisorTranscript([
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "Describe repository Lantern-9." },
+        { type: "text", text: injectedReminder(20_000) },
+      ],
+    },
+  ], [{ type: "text", text: "Executor-turn-marker: consulting now." }]);
+
+  assert.ok(transcript.length <= ADVISOR_TRANSCRIPT_CAP);
+  assert.match(transcript, /Describe repository Lantern-9\./);
+  assert.doesNotMatch(transcript, /characters omitted/);
 });
 
 test("prior ToolSearch result blocks become bounded history and reactivate referenced tools", async () => {
