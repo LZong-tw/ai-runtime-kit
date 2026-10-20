@@ -3327,6 +3327,12 @@ function airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, runtimeEnv = proc
     // 500K/750K model is neither mistaken for 200K nor allowed to grow to 1M.
     env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(contextWindow);
   }
+  // The airkit-mode launch id has no advisor rank in Claude Code's catalog, so
+  // it hides the Advisor tool and the gateway bridge never sees a call.
+  const compatibility = configuredCompatibility(ccrConfig);
+  if (compatibility && resolveCompatibilityPolicies(compatibility, VERIFIED_NATIVE_COMPATIBILITY).policies.advisor === "bridge") {
+    env.CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL = "1";
+  }
   const maxStopBlocks = profile.launch?.modes?.[mode]?.completionGuard?.maxStopBlocks;
   if (maxStopBlocks !== undefined) {
     env.AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS = String(maxStopBlocks);
