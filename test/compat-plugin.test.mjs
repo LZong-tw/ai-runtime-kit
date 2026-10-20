@@ -533,6 +533,138 @@ test("Advisor bridge uses the configured Anthropic model and resumes the executo
   assert.match(result.content[2].content.text, /failure boundary/);
 });
 
+const ADVISOR_TRANSCRIPT_CAP = 65_536;
+
+async function captureAdvisorTranscript(messages, executorContent) {
+  const fixture = createBridgeFixture([
+    message({
+      content: [
+        ...executorContent,
+        { type: "tool_use", id: "toolu_advisor", name: "airkit_advisor", input: {} },
+      ],
+    }),
+    message({
+      model: "anthropic-messages/claude-sonnet",
+      content: [{ type: "text", text: "Advice." }],
+    }),
+    message({ content: [{ type: "text", text: "Done." }] }),
+  ], {
+    body: {
+      messages,
+      tools: [{ type: "advisor_20260301", name: "advisor", model: "claude-opus-5", max_uses: 2 }],
+    },
+    advisorMode: "bridge",
+  });
+  await handleCompatibilityMessage(fixture.input);
+  const prompt = fixture.calls[1].body.messages[0].content;
+  const match = prompt.match(/<transcript>\n([\s\S]*)\n<\/transcript>$/);
+  assert.ok(match, "advisor prompt keeps the <transcript> wrapper");
+  return match[1];
+}
+
+function injectedReminder(size) {
+  return `<system-reminder>\nAttribution for git commits ${"x".repeat(size)}\n</system-reminder>`;
+}
+
+test("Advisor transcript keeps the user request and executor turn behind oversized injected context", async () => {
+  const transcript = await captureAdvisorTranscript([
+    {
+      role: "user",
+      content: [
+        { type: "text", text: injectedReminder(80_000) },
+        { type: "text", text: "Describe repository Lantern-7 please." },
+      ],
+    },
+  ], [{ type: "text", text: "Executor-turn-marker: consulting now." }]);
+
+  assert.match(transcript, /Describe repository Lantern-7 please\./);
+  assert.match(transcript, /Executor-turn-marker: consulting now\./);
+  assert.match(transcript, /\[\.\.\. \d+ earlier characters omitted \.\.\.\]/);
+  assert.ok(transcript.length <= ADVISOR_TRANSCRIPT_CAP);
+});
+
+test("Advisor transcript pins the latest request when a newer tool result exhausts the budget", async () => {
+  const transcript = await captureAdvisorTranscript([
+    { role: "user", content: "Original-request-alpha: audit the build." },
+    {
+      role: "assistant",
+      content: [{ type: "tool_use", id: "toolu_read", name: "Read", input: { file_path: "/tmp/big.log" } }],
+    },
+    {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "toolu_read", content: `head ${"y".repeat(100_000)} tail-of-log` }],
+    },
+  ], [{ type: "text", text: "Executor-turn-marker." }]);
+
+  assert.match(transcript, /Original-request-alpha: audit the build\./);
+  assert.match(transcript, /Executor-turn-marker\./);
+  assert.match(transcript, /tail-of-log/);
+  assert.doesNotMatch(transcript, /head y/);
+  assert.match(transcript, /\[\.\.\. \d+ earlier characters omitted \.\.\.\]/);
+  assert.ok(transcript.length <= ADVISOR_TRANSCRIPT_CAP);
+});
+
+test("Advisor transcript keeps every message of a small conversation", async () => {
+  const transcript = await captureAdvisorTranscript([
+    { role: "user", content: "First-question: why does CI fail?" },
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "secret-reasoning", signature: "sig" },
+        { type: "text", text: "Checking-the-logs." },
+        { type: "tool_use", id: "toolu_grep", name: "Grep", input: { pattern: "ERROR" } },
+      ],
+    },
+    {
+      role: "user",
+      content: [
+        { type: "tool_result", tool_use_id: "toolu_grep", content: [{ type: "text", text: "ERROR: missing-fixture" }] },
+        { type: "text", text: "Follow-up: also check lint." },
+      ],
+    },
+  ], [{ type: "text", text: "Executor-final-thoughts." }]);
+
+  for (const expected of [
+    "First-question: why does CI fail?",
+    "Checking-the-logs.",
+    "[tool_use Grep] {\"pattern\":\"ERROR\"}",
+    "ERROR: missing-fixture",
+    "Follow-up: also check lint.",
+    "Executor-final-thoughts.",
+  ]) {
+    assert.ok(transcript.includes(expected), `transcript is missing ${expected}`);
+  }
+  assert.doesNotMatch(transcript, /secret-reasoning/);
+  assert.doesNotMatch(transcript, /omitted/);
+});
+
+test("Advisor transcript stays within the cap and marks omitted messages", async () => {
+  const messages = [{ role: "user", content: "Opening-request." }];
+  for (let index = 0; index < 40; index += 1) {
+    messages.push({
+      role: "assistant",
+      content: [{ type: "tool_use", id: `toolu_${index}`, name: "Bash", input: { command: `step ${index}` } }],
+    });
+    messages.push({
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: `toolu_${index}`, content: `output-${index} ${"z".repeat(4_000)}` }],
+    });
+  }
+  messages.push({ role: "user", content: "Latest-request: summarize." });
+
+  const transcript = await captureAdvisorTranscript(messages, [
+    { type: "text", text: `Executor ${"w".repeat(30_000)} end-of-executor` },
+  ]);
+
+  assert.ok(transcript.length <= ADVISOR_TRANSCRIPT_CAP, `transcript length ${transcript.length}`);
+  assert.match(transcript, /Latest-request: summarize\./);
+  assert.match(transcript, /end-of-executor/);
+  assert.match(transcript, /output-39/);
+  assert.doesNotMatch(transcript, /Opening-request\./);
+  assert.match(transcript, /\[\.\.\. \d+ earlier messages omitted \.\.\.\]/);
+  assert.match(transcript, /\[\.\.\. \d+ earlier characters omitted \.\.\.\]/);
+});
+
 test("prior ToolSearch result blocks become bounded history and reactivate referenced tools", async () => {
   const fixture = createBridgeFixture([
     message({ content: [{ type: "text", text: "History understood." }] }),
