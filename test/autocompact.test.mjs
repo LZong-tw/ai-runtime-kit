@@ -13,7 +13,7 @@ import {
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildLaunchPlan, loadCatalog } from "../src/airkit.mjs";
+import { buildLaunchPlan, loadCatalog, runAirclaudeCli } from "../src/airkit.mjs";
 
 const models = {
   "demo,grok": { contextWindow: 1_000_000, autoCompact: { window: 400_000 } },
@@ -359,4 +359,93 @@ test("the catalog validator rejects a non-boolean strictMcp and strictMcp on pla
   const plain = perModelCatalog();
   plain.profiles[0].launch.modes.plain = { strictMcp: true };
   await assert.rejects(validateCatalog(plain), /plain cannot set strictMcp/);
+});
+
+test("the catalog validator ignores unknown mode fields but still type-checks known ones", async () => {
+  const catalog = perModelCatalog();
+  catalog.profiles[0].launch.modes.auto.description = "documentation only";
+  catalog.profiles[0].launch.modes.legacy.description = "older launch";
+  const loaded = await validateCatalog(catalog);
+  assert.equal(loaded.profiles[0].launch.modes.auto.perModelAutoCompact, true);
+
+  catalog.profiles[0].launch.modes.auto.strictMcp = 1;
+  await assert.rejects(validateCatalog(catalog), /strictMcp must be a boolean/);
+});
+
+test("the catalog validator resolves ratio lanes at load, not only at a gated launch", async () => {
+  const noContext = perModelCatalog();
+  delete noContext.modelCatalog.providers[0].models[0].contextWindow;
+  noContext.modelCatalog.providers[0].models[0].autoCompact = { ratio: 0.5 };
+  await assert.rejects(validateCatalog(noContext), /demo\/grok\.autoCompact\.ratio needs a contextWindow/);
+
+  const belowFloor = perModelCatalog();
+  belowFloor.modelCatalog.providers[0].models[0] = { id: "grok", contextWindow: 200_000, autoCompact: { ratio: 0.01 } };
+  await assert.rejects(validateCatalog(belowFloor), /demo\/grok\.autoCompact resolves to \d+, below the 100000 floor/);
+});
+
+test("the catalog validator rejects perModelAutoCompact on plain", async () => {
+  const plain = perModelCatalog();
+  plain.profiles[0].launch.modes.plain = { perModelAutoCompact: true };
+  await assert.rejects(validateCatalog(plain), /plain cannot set perModelAutoCompact/);
+});
+
+test("the version gate reads the claude binary on PATH ahead of the npm global package", () => {
+  const plan = buildLaunchPlan(perModelCatalog(), "pm", {
+    mode: "auto",
+    runtimeVersions: { claudeCode: "2.1.208", claudeBinary: "2.1.304" },
+  });
+  assert.equal(plan.launch.autoCompact.status, "active");
+
+  const stale = buildLaunchPlan(perModelCatalog(), "pm", {
+    mode: "auto",
+    runtimeVersions: { claudeCode: "2.1.304", claudeBinary: "2.1.208" },
+  });
+  assert.equal(stale.launch.autoCompact.status, "inactive");
+});
+
+async function dryRun(mode, mutate = () => {}) {
+  const dir = await mkdtemp(join(tmpdir(), "airkit-autocompact-dry-"));
+  try {
+    const catalog = perModelCatalog();
+    mutate(catalog);
+    const catalogPath = join(dir, "catalog.json");
+    await writeFile(catalogPath, JSON.stringify(catalog));
+    const out = [];
+    const calls = [];
+    const code = await runAirclaudeCli([mode, "--dry-run", "--profile", "pm", "--config-dir", join(dir, "cfg")], {
+      catalogPath,
+      env: { HOME: dir },
+      stdout: { write: (chunk) => out.push(chunk) },
+      stderr: { write: (chunk) => out.push(chunk) },
+      commandExists: async () => true,
+      runCommand: async (command, args) => {
+        calls.push([command, ...args].join(" "));
+        return { ok: true, status: 0, stdout: command === "claude" ? "2.1.304 (Claude Code)" : "{}" };
+      },
+      spawnCommand: () => {
+        throw new Error("dry-run must not spawn");
+      },
+    });
+    return { code, output: out.join(""), calls };
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+test("dry-run reports the per-model autocompact and strict MCP lines for an opted-in mode", async () => {
+  const { code, output, calls } = await dryRun("auto", (catalog) => {
+    catalog.profiles[0].launch.modes.auto.strictMcp = true;
+  });
+  assert.equal(code, 0);
+  assert.match(output, /- per-model autocompact: active [0-9a-f]{12}; fallback 278000; .*airkit-mode=400000 \(default\)/);
+  assert.match(output, /- MCP: strict \(/);
+  assert.equal(calls.filter((call) => call === "claude --version").length, 1, "the plan-time probe is reused by the runtime check");
+});
+
+test("dry-run of a mode without the flag prints neither line", async () => {
+  const { code, output, calls } = await dryRun("legacy");
+  assert.equal(code, 0);
+  assert.doesNotMatch(output, /per-model autocompact/);
+  assert.doesNotMatch(output, /MCP: strict/);
+  assert.equal(calls.filter((call) => call === "claude --version").length, 1);
 });
