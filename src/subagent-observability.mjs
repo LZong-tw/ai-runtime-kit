@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, open, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
 const LIFECYCLE_EVENTS = new Set(["PostToolUse", "SubagentStart", "SubagentStop"]);
 const MAX_INPUT_BYTES = 1_000_000;
 const MAX_STATE_BYTES = 1_000_000;
 const MAX_TRANSCRIPT_READ_BYTES = 256 * 1024;
+const MAX_CHILD_TAIL_BYTES = 2 * 1024 * 1024;
 const MAX_PARENT_TRANSCRIPT_READ_BYTES = 2 * 1024 * 1024;
 const MAX_PARENT_TRANSCRIPT_HEAD_BYTES = 512 * 1024;
 const ANCHOR_BYTES = 4096;
@@ -51,109 +52,115 @@ function isSafeAgentId(value) {
   return typeof value === "string" && /^[A-Za-z0-9._-]+$/.test(value) && !/^\.+$/.test(value);
 }
 
-// Workflow children live one or two directories down (workflows/wf_<id>/).
-async function findChildTranscript(directory, agentId, depth = 0) {
-  const name = `agent-${agentId}.jsonl`;
+async function findChildTranscript(directory, agentId) {
+  return childTranscriptResolver(directory)(agentId);
+}
+
+// Most children sit directly in subagents/; workflow children live one or two
+// directories down (workflows/wf_<id>/). The tree is walked at most once per
+// resolver, and only after a direct lookup misses, so a statusline tick with
+// many tasks and many workflow runs pays for one walk instead of one per task.
+function childTranscriptResolver(directory) {
+  let index;
+  return async (agentId) => {
+    if (!isSafeAgentId(agentId)) return "";
+    const name = `agent-${agentId}.jsonl`;
+    try {
+      if ((await lstat(join(directory, name))).isFile()) return join(directory, name);
+    } catch {
+      // Not a direct child; fall through to the nested index.
+    }
+    index ??= indexChildTranscripts(directory);
+    return (await index).get(name) ?? "";
+  };
+}
+
+async function indexChildTranscripts(directory, depth = 0, index = new Map()) {
   let entries;
   try {
     entries = await readdir(directory, { withFileTypes: true });
   } catch {
-    return "";
+    return index;
   }
-  if (entries.some((entry) => entry.isFile() && entry.name === name)) return join(directory, name);
-  if (depth >= 2) return "";
   for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const found = await findChildTranscript(join(directory, entry.name), agentId, depth + 1);
-    if (found) return found;
+    if (entry.isFile() && entry.name.startsWith("agent-") && entry.name.endsWith(".jsonl") && !index.has(entry.name)) {
+      index.set(entry.name, join(directory, entry.name));
+    }
   }
-  return "";
+  if (depth >= 2) return index;
+  for (const entry of entries) {
+    if (entry.isDirectory()) await indexChildTranscripts(join(directory, entry.name), depth + 1, index);
+  }
+  return index;
 }
 
+// The task row's own agent id: an explicit agent_id/agentId wins over the
+// task id, which for a local_agent task is the same value.
+function taskAgentId(task) {
+  return firstString([task?.agent_id, task?.agentId, task?.id]);
+}
+
+// The statusline only reads. Claude Code may hand it a CLAUDE_PLUGIN_DATA that
+// leaked in from the launcher and belongs to another plugin, so rendering never
+// creates or updates timeline state; lifecycle hooks, which do run with
+// AirKit's own data dir, are the only writers.
 export async function renderSubagentStatusLine(input, env = process.env) {
-  await hydrateTaskStates(input, env);
-  const parentAgentStates = await readParentAgentStates(sessionTranscriptPathValue(input));
+  const sessionTranscript = sessionTranscriptPathValue(input);
+  const resolveChild = sessionTranscript ? childTranscriptResolver(subagentsDirectory(sessionTranscript)) : async () => "";
+  const resolveTranscript = taskTranscriptResolver(input, env, resolveChild);
+  const parentAgentStates = await readParentAgentStates(sessionTranscript);
   const rows = [];
   for (const task of Array.isArray(input?.tasks) ? input.tasks : []) {
-    rows.push(await renderTaskRow(task, input, env, parentAgentStates));
+    const safeTask = task && typeof task === "object" && !Array.isArray(task) ? task : {};
+    rows.push(await renderTaskRow(safeTask, input, env, parentAgentStates, resolveTranscript));
   }
   return rows;
 }
 
-async function hydrateTaskStates(input, env) {
-  if (!validPluginData(env)) return;
+// A local_agent task id is the hook agent_id, which names the child transcript
+// directly, including workflow children nested below subagents/. Other tasks
+// are matched to a child transcript by label, or through the identity a hook
+// stored for them, and only when exactly one child fits.
+function taskTranscriptResolver(input, env, resolveChild) {
   const parentValue = statuslineParentValue(input);
   const transcriptPath = sessionTranscriptPathValue(input);
-  if (!parentValue || !transcriptPath) return;
-  const sessionDirectory = subagentsDirectory(transcriptPath);
+  const sessionDirectory = transcriptPath ? subagentsDirectory(transcriptPath) : "";
   let children;
-  try {
-    children = await readdir(sessionDirectory, { withFileTypes: true });
-  } catch {
-    return;
-  }
-  const tasks = Array.isArray(input?.tasks) ? input.tasks : [];
-  for (const task of tasks) {
-    if (await hydrateTaskById(task, parentValue, sessionDirectory, env)) continue;
+  const childEntries = async () => {
+    children ??= readdir(sessionDirectory, { withFileTypes: true })
+      .then((entries) => entries.filter((entry) => entry.isFile()
+        && entry.name.startsWith("agent-") && entry.name.endsWith(".jsonl")))
+      .catch(() => []);
+    return children;
+  };
+  return async (task) => {
+    const byId = await resolveChild(taskAgentId(task));
+    if (byId || !sessionDirectory || !parentValue) return byId;
     const labels = taskLabelCandidates(task);
-    if (labels.length === 0) continue;
-    const parent = identity(parentValue);
-    const childEntries = children.filter((entry) => entry.isFile()
-      && entry.name.startsWith("agent-") && entry.name.endsWith(".jsonl"));
-    const existing = parent
-      ? await findParentChildStates(env.CLAUDE_PLUGIN_DATA, parent, taskIdentityCandidates(task), labels)
-      : [];
+    if (labels.length === 0) return "";
+    const entries = await childEntries();
     const candidates = [];
-    for (const entry of childEntries) {
+    for (const entry of entries) {
       const childLabels = await childTranscriptLabels(join(sessionDirectory, entry.name));
-      if (labels.some((label) => childLabels.includes(label))) candidates.push({ entry, childLabels });
+      if (labels.some((label) => childLabels.includes(label))) candidates.push(entry);
     }
-    if (candidates.length !== 1 && existing.length === 1) {
-      const stored = existing[0].child;
-      const byIdentity = childEntries.filter((entry) => {
-        const childId = entry.name.slice("agent-".length, -".jsonl".length);
-        return childId === stored.label || childId.startsWith(`${stored.label}--`);
-      });
-      if (byIdentity.length === 1) candidates.splice(0, candidates.length, { entry: byIdentity[0], childLabels: [] });
-      else if (candidates.length === 0 && childEntries.length === 1) {
-        candidates.push({ entry: childEntries[0], childLabels: [] });
+    if (candidates.length !== 1 && validPluginData(env)) {
+      const parent = identity(parentValue);
+      const existing = parent
+        ? await findParentChildStates(env.CLAUDE_PLUGIN_DATA, parent, taskIdentityCandidates(task), labels)
+        : [];
+      if (existing.length === 1) {
+        const stored = existing[0].child;
+        const byIdentity = entries.filter((entry) => {
+          const childId = entry.name.slice("agent-".length, -".jsonl".length);
+          return childId === stored.label || childId.startsWith(`${stored.label}--`);
+        });
+        if (byIdentity.length === 1) candidates.splice(0, candidates.length, byIdentity[0]);
+        else if (candidates.length === 0 && entries.length === 1) candidates.push(entries[0]);
       }
     }
-    if (candidates.length !== 1) continue;
-    const childId = candidates[0].entry.name.slice("agent-".length, -".jsonl".length);
-    if (!/^[A-Za-z0-9._-]+$/.test(childId)) continue;
-    try {
-      await observeChildTranscript({
-        hook_event_name: "SubagentStart",
-        session_id: parentValue,
-        agent_id: childId,
-        agent_type: labels[0],
-        transcript_path: join(sessionDirectory, candidates[0].entry.name),
-      }, env);
-    } catch {
-      // Statusline rendering must remain fail-open if hydration cannot persist.
-    }
-  }
-}
-
-// A local_agent task id is the hook agent_id, which names the child transcript
-// directly, including workflow children nested below subagents/.
-async function hydrateTaskById(task, parentValue, sessionDirectory, env) {
-  if (!isSafeAgentId(task?.id)) return false;
-  const childTranscript = await findChildTranscript(sessionDirectory, task.id);
-  if (!childTranscript) return false;
-  try {
-    await observeChildTranscript({
-      hook_event_name: "SubagentStart",
-      session_id: parentValue,
-      agent_id: task.id,
-      agent_type: firstString([task.agentType, task.type === "local_agent" ? "" : task.type]),
-      transcript_path: childTranscript,
-    }, env);
-  } catch {
-    // Statusline rendering must remain fail-open if hydration cannot persist.
-  }
-  return true;
+    return candidates.length === 1 ? join(sessionDirectory, candidates[0].name) : "";
+  };
 }
 
 async function childTranscriptLabels(path) {
@@ -449,13 +456,16 @@ async function loadState(path, parent, child) {
   }
 }
 
-async function renderTaskRow(task, input, env, parentAgentStates = new Map()) {
+async function renderTaskRow(task, input, env, parentAgentStates, resolveTranscript) {
   const parentValue = statuslineParentValue(input);
   const parent = typeof parentValue === "string" && parentValue.length > 0 ? identity(parentValue) : null;
   const childValues = taskIdentityCandidates(task);
   const labels = taskLabelCandidates(task);
-  if (!validPluginData(env)) return waitingTaskRow(task, taskLabel(task), env);
   if (explicitTaskIdentities(task).length > 1) return ambiguousTaskRow(task);
+  const direct = await childTranscriptTailEntries(task, resolveTranscript);
+  if (direct.length > 0) return activeTaskRow(task, null, taskModel(task, input, env), direct);
+  const parentState = parentAgentStateForTask(task, parentAgentStates);
+  if (!validPluginData(env)) return noOutputTaskRow(task, null, taskModel(task, input, env), parentState);
 
   const matches = parent
     ? await findParentChildStates(env.CLAUDE_PLUGIN_DATA, parent, childValues, labels)
@@ -473,17 +483,117 @@ async function renderTaskRow(task, input, env, parentAgentStates = new Map()) {
   }
 
   const model = taskModel(task, input, env);
-  const parentState = matches.length === 0 ? parentAgentStateForTask(task, parentAgentStates) : null;
-  if (state.entries.length === 0) {
-    const statusText = parentState?.text ?? "waiting for first event";
-    const status = parentState?.status ?? task.status;
-    return [taskDisplayLabel(task, child), ...(model ? [`model: ${model}`] : []), statusText, ...taskMetadata(task, status)].join(" | ");
-  }
-  const latestText = [...state.entries].reverse().find((entry) => entry.kind === "assistant")?.text;
-  const latestTool = [...state.entries].reverse().find((entry) => entry.kind === "tool")?.name;
-  const parts = [taskDisplayLabel(task, child), ...(model ? [`model: ${model}`] : []), oneLine(redactSensitive(latestText || "waiting for first event"))];
+  if (state.entries.length === 0) return noOutputTaskRow(task, child, model, matches.length === 0 ? parentState : null);
+  return activeTaskRow(task, child, model, state.entries);
+}
+
+// A task with no child output yet. The parent transcript can still say why
+// (launch denied or failed, awaiting authorization); otherwise the row says the
+// agent is starting and how long ago Claude Code started it, and leaves out the
+// token count Claude Code fills with 0 before any progress arrives.
+function noOutputTaskRow(task, child, model, parentState) {
+  const label = taskDisplayLabel(task, child);
+  const summary = taskSummary(task, label);
+  const settled = parentState && parentState.status !== "running";
+  const elapsed = taskElapsed(task.startTime);
+  const statusText = settled
+    ? parentState.text
+    : `starting, no output yet${elapsed ? ` (${elapsed})` : ""}`;
+  const status = settled ? parentState.status : task.status;
+  const metadata = taskMetadata(task, status).filter((part) => part !== "0 tokens");
+  return [label, ...(model ? [`model: ${model}`] : []), statusText, ...(summary ? [summary] : []), ...metadata].join(" | ");
+}
+
+// Claude Code's task label is its live summary of the agent, or the
+// description when it has none; only a summary adds anything to the row.
+function taskSummary(task, displayLabel) {
+  if (typeof task.label !== "string") return "";
+  const summary = boundedMetadata(task.label, 80);
+  if (!summary || summary === displayLabel) return "";
+  if (typeof task.description === "string" && summary === boundedMetadata(task.description, 80)) return "";
+  return summary;
+}
+
+const MAX_ELAPSED_MS = 30 * 24 * 60 * 60 * 1000;
+
+function taskElapsed(startTime, now = Date.now()) {
+  const started = typeof startTime === "number" ? startTime : typeof startTime === "string" ? Date.parse(startTime) : Number.NaN;
+  if (!Number.isFinite(started)) return "";
+  const elapsed = now - started;
+  if (elapsed < 0 || elapsed > MAX_ELAPSED_MS) return "";
+  const seconds = Math.floor(elapsed / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${String(minutes % 60).padStart(2, "0")}m`;
+  return `${Math.floor(hours / 24)}d ${String(hours % 24).padStart(2, "0")}h`;
+}
+
+function activeTaskRow(task, child, model, entries) {
+  const latestText = [...entries].reverse().find((entry) => entry.kind === "assistant")?.text;
+  const latestTool = [...entries].reverse().find((entry) => entry.kind === "tool")?.name;
+  const parts = [taskDisplayLabel(task, child), ...(model ? [`model: ${model}`] : []), oneLine(redactSensitive(latestText || "working"))];
   if (latestTool) parts.push(`tool: ${latestTool}`);
   return [...parts, ...taskMetadata(task)].join(" | ");
+}
+
+// Claude Code spawns the subagentStatusLine command without CLAUDE_PLUGIN_DATA:
+// it sets that only for plugin hooks, MCP and LSP servers. The hook-written
+// timeline is therefore out of reach in a real session, so the row reads the
+// child transcript itself. A local_agent task id is the agent id, which names
+// that transcript below the session's subagents directory.
+async function childTranscriptTailEntries(task, resolveTranscript) {
+  const path = await resolveTranscript(task);
+  if (!path) return [];
+  try {
+    return await readTranscriptTailEntries(path);
+  } catch {
+    return [];
+  }
+}
+
+// A child transcript interleaves the agent's messages with request snapshots,
+// skill listings and attachments that are often 60-100 KB each, so a fixed
+// tail can hold no assistant text at all. Walk back one chunk at a time until
+// the projection contains assistant text, bounded by MAX_CHILD_TAIL_BYTES.
+async function readTranscriptTailEntries(path) {
+  const file = await open(path, "r");
+  try {
+    const { size } = await file.stat();
+    const floor = Math.max(0, size - MAX_CHILD_TAIL_BYTES);
+    let end = size;
+    let partial = Buffer.alloc(0);
+    let entries = [];
+    while (end > floor) {
+      const start = Math.max(floor, end - MAX_TRANSCRIPT_READ_BYTES);
+      const chunk = Buffer.allocUnsafe(end - start);
+      const { bytesRead } = await file.read(chunk, 0, chunk.length, start);
+      const bytes = Buffer.concat([chunk.subarray(0, bytesRead), partial]);
+      end = start;
+      // Bytes before the first newline may belong to a record that starts
+      // further back; keep them for the next chunk instead of parsing them.
+      const cut = start > 0 ? bytes.indexOf(10) + 1 : 0;
+      partial = bytes.subarray(0, cut);
+      entries = [...projectTranscriptLines(bytes.subarray(cut)), ...entries];
+      if (entries.some((entry) => entry.kind === "assistant")) break;
+    }
+    return entries;
+  } finally {
+    await file.close();
+  }
+}
+
+function projectTranscriptLines(bytes) {
+  return bytes.toString("utf8").split(/\r?\n/).flatMap((line) => {
+    if (!line.trim()) return [];
+    try {
+      const record = JSON.parse(line);
+      return record && typeof record === "object" && !Array.isArray(record) ? projectRecord(record) : [];
+    } catch {
+      return [];
+    }
+  });
 }
 
 async function readParentAgentStates(transcriptPath) {
@@ -528,7 +638,6 @@ async function readParentAgentStates(transcriptPath) {
         state.text = "launch failed: Agent tool error";
       } else if (/async agent launched successfully/i.test(text)) {
         state.status = "running";
-        state.text = "running: waiting for child event";
       }
       for (const key of state.keys) states.set(key, state);
     }
@@ -708,11 +817,6 @@ function storedIdentity(key, hash) {
   return { hash, key, label };
 }
 
-function waitingTaskRow(task, label, env) {
-  const model = taskModel(task, {}, env);
-  return [label || taskLabel(task), ...(model ? [`model: ${model}`] : []), "waiting for first event", ...taskMetadata(task)].join(" | ");
-}
-
 function ambiguousTaskRow(task) {
   return [taskLabel(task), "ambiguous child transcript", ...taskMetadata(task)].join(" | ");
 }
@@ -811,8 +915,11 @@ function taskLabel(task) {
   );
 }
 
+// The row names the agent by what it was asked to do; Claude Code's live
+// summary in `label` is shown separately by the rows that have room for it.
 function taskDisplayLabel(task, child) {
-  return taskLabelCandidates(task)[0] ?? child?.label ?? "task";
+  const stable = [task?.name, task?.description].find((value) => typeof value === "string" && value.trim());
+  return boundedMetadata(stable ?? taskLabelCandidates(task)[0] ?? child?.label ?? "task", 80);
 }
 
 function oneLine(value, limit = MAX_VISIBLE) {
@@ -907,6 +1014,7 @@ function redactSensitive(value) {
     .replaceAll(/\bAuthorization\s*[:=]\s*[^\s;,]+(?:\s+[^\s;,]+)?/gi, "Authorization: [redacted]")
     .replaceAll(/\bBearer\s+[^\s;,]+/gi, "Bearer [redacted]")
     .replaceAll(/\b(?:sk-|ghp_|xox[baprs]-)[A-Za-z0-9_-]{8,}/gi, "[redacted]")
+    .replaceAll(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, "[redacted]")
     .replaceAll(/https?:\/\/[^\s;,]+/gi, "[redacted-url]")
     .replaceAll(/\s+/g, " ")
     .trim();
