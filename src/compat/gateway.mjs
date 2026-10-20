@@ -717,19 +717,32 @@ function boundedTranscript(messages, cap = MAX_TRANSCRIPT_LENGTH) {
   return keepTranscriptTail(parts.join(TRANSCRIPT_SEPARATOR), cap).text;
 }
 
+// Claude Code attaches <system-reminder> text to tool-result messages, so a
+// user message only counts as a request when text survives stripping them.
 function latestUserRequestIndex(messages) {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (message?.role !== "user") continue;
-    if (typeof message.content === "string" && message.content.trim().length > 0) return index;
+    if (typeof message.content === "string" && hasRequestText(message.content)) return index;
     if (
       Array.isArray(message.content) &&
-      message.content.some((block) => block?.type === "text" && String(block.text ?? "").trim().length > 0)
+      message.content.some((block) => block?.type === "text" && hasRequestText(block.text))
     ) {
       return index;
     }
   }
   return -1;
+}
+
+const SYSTEM_REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
+
+function hasRequestText(text) {
+  return typeof text === "string" && text.replace(SYSTEM_REMINDER, "").trim().length > 0;
+}
+
+function isReminderOnlyBlock(block) {
+  return block?.type === "text" && typeof block.text === "string" && block.text.trim().length > 0 &&
+    !hasRequestText(block.text);
 }
 
 function keepTranscriptTail(text, limit) {
@@ -760,7 +773,11 @@ function renderTranscriptMessage(message) {
   if (typeof content === "string") {
     body = content;
   } else if (Array.isArray(content)) {
-    body = content.map(renderTranscriptBlock).filter((text) => text !== null).join("\n");
+    // Reminders go first so a tail cut drops them before the user's own words.
+    const ordered = role === "user"
+      ? [...content.filter(isReminderOnlyBlock), ...content.filter((block) => !isReminderOnlyBlock(block))]
+      : content;
+    body = ordered.map(renderTranscriptBlock).filter((text) => text !== null).join("\n");
   } else {
     body = "";
   }

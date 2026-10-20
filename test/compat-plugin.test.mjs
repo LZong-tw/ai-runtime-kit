@@ -665,6 +665,52 @@ test("Advisor transcript stays within the cap and marks omitted messages", async
   assert.match(transcript, /\[\.\.\. \d+ earlier characters omitted \.\.\.\]/);
 });
 
+test("Advisor transcript pins the real request, not a reminder riding on a tool result", async () => {
+  const messages = [{
+    role: "user",
+    content: [
+      { type: "text", text: injectedReminder(40_000) },
+      { type: "text", text: "Describe repository Lantern-9." },
+    ],
+  }];
+  for (let index = 0; index < 10; index += 1) {
+    messages.push({
+      role: "assistant",
+      content: [{ type: "tool_use", id: `toolu_${index}`, name: "Read", input: { file_path: `/f${index}` } }],
+    });
+    messages.push({
+      role: "user",
+      content: [
+        { type: "tool_result", tool_use_id: `toolu_${index}`, content: `read-${index} ${"q".repeat(8_000)}` },
+        { type: "text", text: "<system-reminder>\nThe todo list is empty.\n</system-reminder>" },
+      ],
+    });
+  }
+
+  const transcript = await captureAdvisorTranscript(messages, [
+    { type: "text", text: "Executor-turn-marker: consulting now." },
+  ]);
+
+  assert.ok(transcript.length <= ADVISOR_TRANSCRIPT_CAP, `transcript length ${transcript.length}`);
+  assert.match(transcript, /Describe repository Lantern-9\./);
+  assert.match(transcript, /Executor-turn-marker/);
+  assert.match(transcript, /read-9 /);
+  assert.ok(transcript.indexOf("Lantern-9") < transcript.indexOf("read-9 "));
+});
+
+test("Advisor transcript keeps a request that precedes a trailing reminder in the same message", async () => {
+  const transcript = await captureAdvisorTranscript([{
+    role: "user",
+    content: [
+      { type: "text", text: "Describe repository Lantern-9." },
+      { type: "text", text: injectedReminder(20_000) },
+    ],
+  }], [{ type: "text", text: "Executor-turn-marker: consulting now." }]);
+
+  assert.match(transcript, /Describe repository Lantern-9\./);
+  assert.match(transcript, /Executor-turn-marker/);
+});
+
 test("prior ToolSearch result blocks become bounded history and reactivate referenced tools", async () => {
   const fixture = createBridgeFixture([
     message({ content: [{ type: "text", text: "History understood." }] }),
