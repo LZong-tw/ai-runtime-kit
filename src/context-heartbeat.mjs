@@ -78,7 +78,7 @@ export async function processContextHook(input, env = process.env) {
   // handling: enabling audit must never silently retire them.
   // Subagent observability feeds the plugin's subagentStatusLine, which Claude
   // Code renders in every session that loads the plugin. It must not depend on
-  // an AirClaude profile, or plain sessions show "waiting for first event"
+  // an AirClaude profile, or plain sessions show a task as "starting, no output yet"
   // forever because no hook ever writes the child timeline.
   if (["SubagentStart", "PostToolUse", "SubagentStop"].includes(input?.hook_event_name)) {
     try {
