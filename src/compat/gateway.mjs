@@ -825,7 +825,7 @@ function renderTranscriptMessage(message) {
       : content;
     body = ordered.map(renderTranscriptBlock).filter((text) => text !== null).join("\n");
   } else {
-    body = "";
+    body = content == null ? "" : "[unsupported content]";
   }
   return `[${role}]\n${body}`;
 }
@@ -833,7 +833,7 @@ function renderTranscriptMessage(message) {
 function renderTranscriptBlock(block) {
   switch (block?.type) {
     case "text":
-      return String(block.text ?? "");
+      return transcriptText(block.text);
     case "thinking":
     case "redacted_thinking":
       return null;
@@ -847,16 +847,46 @@ function renderTranscriptBlock(block) {
     case "tool_search_tool_result":
       return renderHistoryBlock(toolSearchHistoryText, block);
     default:
-      return `[${String(block?.type ?? "unknown")}]`;
+      if (typeof block?.type === "string" && block.type.endsWith("_tool_result")) {
+        return `[${block.type}] ${safeHead(renderToolResultContent(block.content), MAX_HISTORY_TEXT_LENGTH)}`;
+      }
+      return `[${typeof block?.type === "string" ? block.type : "unknown"}]`;
   }
 }
 
+function transcriptText(value) {
+  if (typeof value === "string") return value;
+  if (value == null) return "";
+  return safeHead(compactJson(value), MAX_HISTORY_TEXT_LENGTH);
+}
+
+// Server tool results (web search, web fetch, code execution, MCP) become a
+// short summary: titles and urls, exit code and output tails, or the error
+// code. Encrypted payloads and fetched documents are never copied.
 function renderToolResultContent(content) {
   if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((block) => (block?.type === "text" ? String(block.text ?? "") : `[${String(block?.type ?? "unknown")}]`))
-    .join("\n");
+  if (content == null) return "";
+  const items = Array.isArray(content) ? content : [content];
+  return items.map(renderResultItem).join("\n");
+}
+
+function renderResultItem(item) {
+  if (typeof item === "string") return item;
+  if (item === null || typeof item !== "object") return "[unsupported result]";
+  if (item.type === "text") return transcriptText(item.text);
+  if (typeof item.error_code === "string") return `[${item.type ?? "error"}] ${item.error_code}`;
+  if (typeof item.url === "string") {
+    return typeof item.title === "string" ? `${item.title} <${item.url}>` : `<${item.url}>`;
+  }
+  if ("stdout" in item || "stderr" in item || "return_code" in item) {
+    const lines = [`exit ${Number.isInteger(item.return_code) ? item.return_code : "?"}`];
+    for (const stream of ["stdout", "stderr"]) {
+      const text = typeof item[stream] === "string" ? item[stream].trim() : "";
+      if (text) lines.push(`${stream}: ${safeTail(text, MAX_HISTORY_TEXT_LENGTH / 4)}`);
+    }
+    return lines.join("\n");
+  }
+  return `[${typeof item.type === "string" ? item.type : "unsupported result"}]`;
 }
 
 function renderHistoryBlock(render, block) {
