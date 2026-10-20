@@ -2792,6 +2792,19 @@ test("airclaude exposes the selected route context window to statusline", () => 
   assert.equal(plan.launch.env.AIRCLAUDE_STATUSLINE_CONTEXT_WINDOW, "256000");
 });
 
+test("airclaude enables the Advisor tool only when the compatibility plugin bridges it", () => {
+  const bridged = compatibilityCatalog();
+  bridged.profiles[0].ccr.plugins[0].config.advisor = { mode: "bridge" };
+  const bridgedPlan = buildLaunchPlan(bridged, "launch-example", { configDir: "/tmp/airkit-advisor-bridge" });
+  assert.equal(bridgedPlan.launch.env.CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL, "1");
+
+  const fallback = buildLaunchPlan(compatibilityCatalog(), "launch-example", { configDir: "/tmp/airkit-advisor-fallback" });
+  assert.equal(fallback.launch.env.CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL, undefined);
+
+  const plain = buildLaunchPlan(launchCatalog(), "launch-example", { configDir: "/tmp/airkit-advisor-none" });
+  assert.equal(plain.launch.env.CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL, undefined);
+});
+
 test("airclaude propagates arbitrary route context limits without a false 1M launch marker", () => {
   const catalog = launchCatalog();
   catalog.modelCatalog.providers[0].models.push({ id: "grok-4.6", contextWindow: 500_000 });
