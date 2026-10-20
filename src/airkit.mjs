@@ -43,7 +43,7 @@ import { runShieldCli } from "./shield/cli.mjs";
 import { DEFAULT_BACKGROUND_HOST_GRACE_MS, backgroundHostUsesAdapter, hasBackgroundClaudeHost, scheduleBackgroundHostRelease } from "./shield/background-host.mjs";
 import { resolveShieldLauncher, resolveShieldLauncherMarker } from "./shield/launchers.mjs";
 import { startPxpipeHop } from "./shield/pxpipe-hop.mjs";
-import { assertNoPersistedShieldEndpointOverride, buildShieldChildEnv, createShieldDestinationLease, ensureShieldReady, openShieldApprovalChannel, registerShieldApprovalChannel, renewShieldDestinationLease, revokeShieldDestinationLease, unregisterShieldApprovalChannel } from "./shield/service.mjs";
+import { assertNoPersistedShieldEndpointOverride, buildShieldChildEnv, createShieldDestinationLease, createShieldLaunchId, ensureShieldReady, openShieldApprovalChannel, registerShieldApprovalChannel, renewShieldDestinationLease, revokeShieldDestinationLease, unregisterShieldApprovalChannel } from "./shield/service.mjs";
 
 export { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
 export { tailHeadroomSavings } from "./audit/reconcile/headroom.mjs";
@@ -1700,12 +1700,13 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     const compatibilityLaunch = middleware
       ? buildCompatibilityLaunch(managed.compatibility, shieldReady?.origin ?? middleware.origin, gatewayToken)
       : { args: [], env: {} };
+    const shieldLaunchId = shieldReady ? (options.createShieldLaunchId ?? createShieldLaunchId)() : undefined;
     let shieldCleanedUp = false;
     const cleanupShieldLaunch = async ({ closeMiddleware = false } = {}) => {
       if (shieldCleanedUp) return;
       shieldCleanedUp = true;
       stopShieldLeaseTimer();
-      if (shieldApprovalRegistered) await (options.unregisterShieldApprovalChannel ?? unregisterShieldApprovalChannel)({ ready: shieldReady }).catch(() => {});
+      if (shieldApprovalRegistered) await (options.unregisterShieldApprovalChannel ?? unregisterShieldApprovalChannel)({ ready: shieldReady, launchId: shieldLaunchId }).catch(() => {});
       await shieldApprovalChannel?.close?.();
       await (options.revokeShieldDestinationLease ?? revokeShieldDestinationLease)({ ready: shieldReady }).catch(() => {});
       if (closeMiddleware) await closeHops();
@@ -1718,7 +1719,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
           createApprovalChannel: options.createShieldApprovalChannel,
         });
         if (shieldApprovalChannel !== null) {
-          await (options.registerShieldApprovalChannel ?? registerShieldApprovalChannel)({ ready: shieldReady, channel: shieldApprovalChannel });
+          await (options.registerShieldApprovalChannel ?? registerShieldApprovalChannel)({ ready: shieldReady, channel: shieldApprovalChannel, launchId: shieldLaunchId });
           shieldApprovalRegistered = true;
         }
       }
@@ -1744,7 +1745,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
       );
       child = spawnCommand(plan.launch.command, [...spawnArgs.head, ...spawnArgs.tail], {
         env: shieldReady
-          ? buildShieldChildEnv({ ...shieldReady, lane: plan.shieldLauncher.clientLane }, childEnv)
+          ? buildShieldChildEnv({ ...shieldReady, lane: plan.shieldLauncher.clientLane }, childEnv, shieldLaunchId)
           : childEnv,
         stdio: "inherit",
       });
