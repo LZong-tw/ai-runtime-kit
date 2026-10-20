@@ -5746,10 +5746,12 @@ test("enabled Shield replaces only the spawned AirClaude endpoint and capability
         events.push("approval-open");
         return approvalChannel;
       },
-      registerShieldApprovalChannel: async ({ ready, channel }) => {
+      createShieldLaunchId: () => "9".repeat(32),
+      registerShieldApprovalChannel: async ({ ready, channel, launchId }) => {
         events.push("approval-register");
         assert.equal(ready.capability, "lease-capability-012345678901234567890");
         assert.equal(channel, approvalChannel);
+        assert.equal(launchId, "9".repeat(32));
       },
       shieldLeaseSetInterval: (callback, delay) => {
         assert.equal(delay, 15_000);
@@ -5808,7 +5810,7 @@ test("enabled Shield replaces only the spawned AirClaude endpoint and capability
     assert.doesNotMatch(JSON.stringify({ args: spawnCalls[0].args, env: spawnCalls[0].env }), /127\.0\.0\.1:4599/);
     assert.equal(
       spawnCalls[0].env.ANTHROPIC_CUSTOM_HEADERS,
-      "x-airkit-mode: auto\nx-airkit-shield: lease-capability-012345678901234567890",
+      `x-airkit-mode: auto\nx-airkit-shield: lease-capability-012345678901234567890\nx-airkit-shield-launch: ${"9".repeat(32)}`,
     );
     assert.equal(spawnCalls[0].env.AIRKIT_SHIELD_CAPABILITY, undefined);
     assert.equal(spawnCalls[0].env.AIRKIT_SHIELD_CONTROL_CAPABILITY, undefined);
