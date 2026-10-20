@@ -1271,9 +1271,10 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
       throw new Error(`launch.env must not set ${key}; the launched Claude inherits the caller's home`);
     }
   }
+  const strictMcp = !plainClaude && profile.launch?.modes?.[mode]?.strictMcp === true;
   const claudeArgs = plainClaude
     ? []
-    : withHeartbeatPluginArg(
+    : withStrictMcpArgs(strictMcp, withHeartbeatPluginArg(
       appendLaunchRuntimePrompts(
         autoCompact?.status === "active"
           ? withAirclaudeModelArg(renderedLaunchArgs, launch.binary, claudeModel)
@@ -1295,7 +1296,7 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
       ),
       launch.binary,
       configDir,
-    );
+    ));
   if (autoCompact?.status === "active") {
     const appendPrompt = claudeArgs
       .filter((_, index) => claudeArgs[index - 1] === "--append-system-prompt")
@@ -1358,8 +1359,19 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
       managedProfileId,
       userArgs: collapsed.tail,
       ...(autoCompact ? { autoCompact } : {}),
+      ...(strictMcp ? { strictMcp } : {}),
     },
   };
+}
+
+// A strict-MCP mode starts from an empty server set: the user's, project and
+// plugin MCP configs are ignored, while any --mcp-config added later (the
+// compatibility bridge, or the user's own argv) still loads.
+function withStrictMcpArgs(strict, args) {
+  if (!strict || args.includes("--strict-mcp-config")) return args;
+  // The `=` form matters: --mcp-config is variadic, and a separate value would
+  // let it swallow a positional prompt that follows in the user's argv.
+  return [...args, "--strict-mcp-config", `--mcp-config=${JSON.stringify({ mcpServers: {} })}`];
 }
 
 // An active per-model policy owns the one --settings Claude Code keeps; every
@@ -2036,11 +2048,20 @@ function validateLaunch(profile) {
     }
   }
 
-  const modeFields = new Set(["ccr", "effort", "appendSystemPrompt", "completionGuard", "perModelAutoCompact"]);
+  const modeFields = new Set(["ccr", "effort", "appendSystemPrompt", "completionGuard", "perModelAutoCompact", "strictMcp"]);
   for (const [mode, definition] of Object.entries(profile.launch?.modes ?? {})) {
     for (const field of Object.keys(definition ?? {})) {
       if (!modeFields.has(field)) {
         throw new Error(`profile "${profile.name}" launch.modes.${mode} contains unsupported field: ${field}`);
+      }
+    }
+    const strictMcp = definition?.strictMcp;
+    if (strictMcp !== undefined) {
+      if (typeof strictMcp !== "boolean") {
+        throw new Error(`profile "${profile.name}" launch.modes.${mode}.strictMcp must be a boolean`);
+      }
+      if (mode === "plain") {
+        throw new Error(`profile "${profile.name}" launch.modes.plain cannot set strictMcp; plain claude keeps the user's MCP servers`);
       }
     }
     const perModel = definition?.perModelAutoCompact;
@@ -3224,7 +3245,7 @@ Environment:
 - mode header: ${result.launch.env.ANTHROPIC_CUSTOM_HEADERS ?? "unset"}
 - gateway key: resolved at launch from ${result.launch.gatewayTokenCommand}
 - inherited Claude home: CLAUDE_CONFIG_DIR is left untouched
-${contextEnvLines(result.launch.env)}${autoCompactLines(result.launch.autoCompact)}- cleared: ${(result.launch.clearEnv ?? []).join(", ") || "none"}
+${contextEnvLines(result.launch.env)}${autoCompactLines(result.launch.autoCompact)}${result.launch.strictMcp ? "- MCP: strict (user, project and plugin MCP servers are not loaded; only --mcp-config servers)\n" : ""}- cleared: ${(result.launch.clearEnv ?? []).join(", ") || "none"}
 `;
 }
 
