@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 
 import { claudeFamilyLane } from "./compat/config.mjs";
 
@@ -123,6 +125,55 @@ export function resolveAutoCompactPolicy({ enabled, binaryEligible, claudeCodeVe
     .digest("hex")
     .slice(0, 12);
   return { status: "active", policyGeneration, lanes, byModel, fallbackWindow, settings };
+}
+
+// The part of every request a session can never compact away, measured with
+// o200k on Claude Code 2.1.304: system prompt, built-in tool schemas, sandbox
+// and environment notes, the deferred-tool, agent, MCP and skills listings,
+// and the git/memory/attribution reminders. Instruction files and the AirKit
+// append are estimated per launch below because they vary by workspace.
+export const CLAUDE_CODE_FIXED_BASELINE = 20_000;
+// Warn once the fixed floor takes more than this share of a lane's compaction
+// threshold: past it, a compacted session starts with too little room left.
+export const THRASH_SHARE = 0.25;
+const CHARS_PER_TOKEN = 3.5;
+
+function instructionFiles(cwd, home) {
+  const files = [join(home, ".claude", "CLAUDE.md")];
+  for (let dir = resolve(cwd); ; dir = dirname(dir)) {
+    files.push(join(dir, "CLAUDE.md"), join(dir, ".claude", "CLAUDE.md"), join(dir, "CLAUDE.local.md"));
+    if (dir === home || dir === dirname(dir)) break;
+  }
+  const slug = resolve(cwd).replace(/[^a-zA-Z0-9]/g, "-");
+  files.push(join(home, ".claude", "projects", slug, "memory", "MEMORY.md"));
+  return files;
+}
+
+export function estimateFixedContext({ appendPrompt = "", cwd = process.cwd(), home = homedir(), readFile = readFileSync } = {}) {
+  let chars = appendPrompt.length;
+  for (const file of new Set(instructionFiles(cwd, home))) {
+    try {
+      chars += readFile(file, "utf8").length;
+    } catch {
+      // absent files cost nothing
+    }
+  }
+  return CLAUDE_CODE_FIXED_BASELINE + Math.ceil(chars / CHARS_PER_TOKEN);
+}
+
+export function compactionThreshold(window, maxOutput = DEFAULT_MAX_OUTPUT) {
+  return window - Math.min(maxOutput, SUMMARY_RESERVE_CAP) - TRIGGER_BUFFER;
+}
+
+export function thrashWarnings(byModel, fixedTokens, maxOutput) {
+  const warned = new Map();
+  for (const [id, { lane, window }] of Object.entries(byModel)) {
+    const threshold = compactionThreshold(window, maxOutput);
+    if (fixedTokens <= threshold * THRASH_SHARE || warned.has(lane)) continue;
+    const share = Math.round((fixedTokens / threshold) * 100);
+    warned.set(lane, `${lane} lane (${id}): fixed context ~${fixedTokens} tokens is ${share}% of its ${threshold}-token compaction threshold; sessions will compact repeatedly`);
+  }
+  return [...warned.values()];
 }
 
 function isPlainObject(value) {
