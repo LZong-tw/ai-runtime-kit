@@ -533,6 +533,310 @@ test("Advisor bridge uses the configured Anthropic model and resumes the executo
   assert.match(result.content[2].content.text, /failure boundary/);
 });
 
+const ADVISOR_TRANSCRIPT_CAP = 65_536;
+
+async function captureAdvisorTranscript(messages, executorContent, { model, tools = [] } = {}) {
+  const fixture = createBridgeFixture([
+    message({
+      content: [
+        ...executorContent,
+        { type: "tool_use", id: "toolu_advisor", name: "airkit_advisor", input: {} },
+      ],
+    }),
+    message({
+      model: "anthropic-messages/claude-sonnet",
+      content: [{ type: "text", text: "Advice." }],
+    }),
+    message({ content: [{ type: "text", text: "Done." }] }),
+  ], {
+    body: {
+      ...(model === undefined ? {} : { model }),
+      messages,
+      tools: [...tools, { type: "advisor_20260301", name: "advisor", model: "claude-opus-5", max_uses: 2 }],
+    },
+    advisorMode: "bridge",
+  });
+  await handleCompatibilityMessage(fixture.input);
+  const prompt = fixture.calls[1].body.messages[0].content;
+  const match = prompt.match(/<transcript>\n([\s\S]*)\n<\/transcript>$/);
+  assert.ok(match, "advisor prompt keeps the <transcript> wrapper");
+  return match[1];
+}
+
+function injectedReminder(size) {
+  return `<system-reminder>\nAttribution for git commits ${"x".repeat(size)}\n</system-reminder>`;
+}
+
+test("Advisor transcript keeps the user request and executor turn behind oversized injected context", async () => {
+  const transcript = await captureAdvisorTranscript([
+    {
+      role: "user",
+      content: [
+        { type: "text", text: injectedReminder(80_000) },
+        { type: "text", text: "Describe repository Lantern-7 please." },
+      ],
+    },
+  ], [{ type: "text", text: "Executor-turn-marker: consulting now." }]);
+
+  assert.match(transcript, /Describe repository Lantern-7 please\./);
+  assert.match(transcript, /Executor-turn-marker: consulting now\./);
+  assert.match(transcript, /\[\.\.\. \d+ earlier characters omitted \.\.\.\]/);
+  assert.ok(transcript.length <= ADVISOR_TRANSCRIPT_CAP);
+});
+
+test("Advisor transcript pins the latest request when a newer tool result exhausts the budget", async () => {
+  const transcript = await captureAdvisorTranscript([
+    { role: "user", content: "Original-request-alpha: audit the build." },
+    {
+      role: "assistant",
+      content: [{ type: "tool_use", id: "toolu_read", name: "Read", input: { file_path: "/tmp/big.log" } }],
+    },
+    {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "toolu_read", content: `head ${"y".repeat(100_000)} tail-of-log` }],
+    },
+  ], [{ type: "text", text: "Executor-turn-marker." }]);
+
+  assert.match(transcript, /Original-request-alpha: audit the build\./);
+  assert.match(transcript, /Executor-turn-marker\./);
+  assert.match(transcript, /tail-of-log/);
+  assert.doesNotMatch(transcript, /head y/);
+  assert.match(transcript, /\[\.\.\. \d+ earlier characters omitted \.\.\.\]/);
+  assert.ok(transcript.length <= ADVISOR_TRANSCRIPT_CAP);
+});
+
+test("Advisor transcript keeps every message of a small conversation", async () => {
+  const transcript = await captureAdvisorTranscript([
+    { role: "user", content: "First-question: why does CI fail?" },
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "secret-reasoning", signature: "sig" },
+        { type: "text", text: "Checking-the-logs." },
+        { type: "tool_use", id: "toolu_grep", name: "Grep", input: { pattern: "ERROR" } },
+      ],
+    },
+    {
+      role: "user",
+      content: [
+        { type: "tool_result", tool_use_id: "toolu_grep", content: [{ type: "text", text: "ERROR: missing-fixture" }] },
+        { type: "text", text: "Follow-up: also check lint." },
+      ],
+    },
+  ], [{ type: "text", text: "Executor-final-thoughts." }]);
+
+  for (const expected of [
+    "First-question: why does CI fail?",
+    "Checking-the-logs.",
+    "[tool_use Grep] {\"pattern\":\"ERROR\"}",
+    "ERROR: missing-fixture",
+    "Follow-up: also check lint.",
+    "Executor-final-thoughts.",
+  ]) {
+    assert.ok(transcript.includes(expected), `transcript is missing ${expected}`);
+  }
+  assert.doesNotMatch(transcript, /secret-reasoning/);
+  assert.doesNotMatch(transcript, /omitted/);
+});
+
+test("Advisor transcript stays within the cap and marks omitted messages", async () => {
+  const messages = [{ role: "user", content: "Opening-request." }];
+  for (let index = 0; index < 40; index += 1) {
+    messages.push({
+      role: "assistant",
+      content: [{ type: "tool_use", id: `toolu_${index}`, name: "Bash", input: { command: `step ${index}` } }],
+    });
+    messages.push({
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: `toolu_${index}`, content: `output-${index} ${"z".repeat(4_000)}` }],
+    });
+  }
+  messages.push({ role: "user", content: "Latest-request: summarize." });
+
+  const transcript = await captureAdvisorTranscript(messages, [
+    { type: "text", text: `Executor ${"w".repeat(30_000)} end-of-executor` },
+  ]);
+
+  assert.ok(transcript.length <= ADVISOR_TRANSCRIPT_CAP, `transcript length ${transcript.length}`);
+  assert.match(transcript, /Latest-request: summarize\./);
+  assert.match(transcript, /end-of-executor/);
+  assert.match(transcript, /output-39/);
+  assert.doesNotMatch(transcript, /Opening-request\./);
+  assert.match(transcript, /\[\.\.\. \d+ earlier messages omitted \.\.\.\]/);
+  assert.match(transcript, /\[\.\.\. \d+ earlier characters omitted \.\.\.\]/);
+});
+
+test("Advisor transcript pins the real request, not a reminder riding on a tool result", async () => {
+  const messages = [{
+    role: "user",
+    content: [
+      { type: "text", text: injectedReminder(40_000) },
+      { type: "text", text: "Describe repository Lantern-9." },
+    ],
+  }];
+  for (let index = 0; index < 10; index += 1) {
+    messages.push({
+      role: "assistant",
+      content: [{ type: "tool_use", id: `toolu_${index}`, name: "Read", input: { file_path: `/f${index}` } }],
+    });
+    messages.push({
+      role: "user",
+      content: [
+        { type: "tool_result", tool_use_id: `toolu_${index}`, content: `read-${index} ${"q".repeat(8_000)}` },
+        { type: "text", text: "<system-reminder>\nThe todo list is empty.\n</system-reminder>" },
+      ],
+    });
+  }
+
+  const transcript = await captureAdvisorTranscript(messages, [
+    { type: "text", text: "Executor-turn-marker: consulting now." },
+  ]);
+
+  assert.ok(transcript.length <= ADVISOR_TRANSCRIPT_CAP, `transcript length ${transcript.length}`);
+  assert.match(transcript, /Describe repository Lantern-9\./);
+  assert.match(transcript, /Executor-turn-marker/);
+  assert.match(transcript, /read-9 /);
+  assert.ok(transcript.indexOf("Lantern-9") < transcript.indexOf("read-9 "));
+});
+
+test("Advisor transcript keeps a request that precedes a trailing reminder in the same message", async () => {
+  const transcript = await captureAdvisorTranscript([{
+    role: "user",
+    content: [
+      { type: "text", text: "Describe repository Lantern-9." },
+      { type: "text", text: injectedReminder(20_000) },
+    ],
+  }], [{ type: "text", text: "Executor-turn-marker: consulting now." }]);
+
+  assert.match(transcript, /Describe repository Lantern-9\./);
+  assert.match(transcript, /Executor-turn-marker/);
+});
+
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+
+test("Advisor transcript never cuts through a surrogate pair", async () => {
+  for (const size of [20_000, 20_001, 25_003, 40_000]) {
+    const transcript = await captureAdvisorTranscript([
+      { role: "user", content: "Describe repository Lantern-9." },
+      { role: "assistant", content: "\u{1F600}".repeat(size) },
+      { role: "user", content: "x" + "\u{1F600}".repeat(size) },
+    ], [{ type: "text", text: "Executor-turn-marker: consulting now." }]);
+
+    assert.ok(transcript.length <= ADVISOR_TRANSCRIPT_CAP);
+    assert.match(transcript, /earlier characters omitted/);
+    assert.doesNotMatch(transcript, LONE_SURROGATE, `size ${size}`);
+  }
+});
+
+test("Advisor transcript drops a message whose room cannot hold its elision marker", async () => {
+  // Sweeps the filler across the window where the older message gets only a
+  // few dozen characters of room, too few for its header and marker.
+  for (let filler = 64_950; filler <= 65_250; filler += 3) {
+    const transcript = await captureAdvisorTranscript([
+      { role: "user", content: "Describe repository Lantern-9." },
+      { role: "assistant", content: "o".repeat(5_000) },
+      { role: "assistant", content: "f".repeat(filler) },
+    ], [{ type: "text", text: "Executor-turn-marker: consulting now." }]);
+
+    assert.ok(transcript.length <= ADVISOR_TRANSCRIPT_CAP);
+    assert.match(transcript, /^(\[\.\.\. \d+ earlier messages? omitted \.\.\.\]|\[user\])\n/, `filler ${filler}`);
+    const markers = transcript.match(/characters omitted \.\.\.\]/g) ?? [];
+    const whole = transcript.match(/\[\.\.\. \d+ earlier characters omitted \.\.\.\]/g) ?? [];
+    assert.equal(whole.length, markers.length, `filler ${filler}`);
+  }
+});
+
+test("Advisor transcript gives unused budget back to a truncated pinned request", async () => {
+  const reminder = injectedReminder(40_000);
+  const transcript = await captureAdvisorTranscript([
+    { role: "user", content: `${reminder}\nDescribe repository Lantern-9.` },
+  ], [{ type: "text", text: "Executor-turn-marker: consulting now." }]);
+
+  assert.ok(transcript.length <= ADVISOR_TRANSCRIPT_CAP);
+  assert.ok(transcript.includes(reminder), `transcript length ${transcript.length}`);
+  assert.doesNotMatch(transcript, /characters omitted/);
+  assert.match(transcript, /Describe repository Lantern-9\./);
+  assert.match(transcript, /Executor-turn-marker/);
+});
+
+test("Advisor transcript fills the cap from a pinned request larger than its share", async () => {
+  const transcript = await captureAdvisorTranscript([
+    { role: "user", content: `${injectedReminder(120_000)}\nDescribe repository Lantern-9.` },
+  ], [{ type: "text", text: "Executor-turn-marker: consulting now." }]);
+
+  assert.ok(transcript.length <= ADVISOR_TRANSCRIPT_CAP);
+  assert.ok(transcript.length > ADVISOR_TRANSCRIPT_CAP - 1_024, `transcript length ${transcript.length}`);
+  assert.match(transcript, /Describe repository Lantern-9\./);
+  assert.match(transcript, /Executor-turn-marker/);
+});
+
+test("Advisor transcript keeps a string request that precedes a large reminder", async () => {
+  const transcript = await captureAdvisorTranscript([
+    { role: "user", content: `Describe repository Lantern-9.\n${injectedReminder(100_000)}` },
+  ], [{ type: "text", text: "Executor-turn-marker: consulting now." }]);
+
+  assert.ok(transcript.length <= ADVISOR_TRANSCRIPT_CAP);
+  assert.match(transcript, /Describe repository Lantern-9\./);
+  assert.match(transcript, /Executor-turn-marker/);
+});
+
+test("Advisor transcript keeps a block request that precedes a large reminder block", async () => {
+  const transcript = await captureAdvisorTranscript([
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "Describe repository Lantern-9." },
+        { type: "text", text: injectedReminder(20_000) },
+      ],
+    },
+  ], [{ type: "text", text: "Executor-turn-marker: consulting now." }]);
+
+  assert.ok(transcript.length <= ADVISOR_TRANSCRIPT_CAP);
+  assert.match(transcript, /Describe repository Lantern-9\./);
+  assert.doesNotMatch(transcript, /characters omitted/);
+});
+
+test("Advisor transcript summarizes server tool results without copying payloads", async () => {
+  const transcript = await captureAdvisorTranscript([
+    { role: "user", content: "Check the release notes." },
+    {
+      role: "assistant",
+      content: [
+        { type: "server_tool_use", id: "srvtoolu_s", name: "web_search", input: { query: "lantern release" } },
+        {
+          type: "web_search_tool_result",
+          tool_use_id: "srvtoolu_s",
+          content: [{
+            type: "web_search_result",
+            title: "Lantern 9 notes",
+            url: "https://example.test/lantern-9",
+            encrypted_content: "ENCRYPTED-SEARCH-PAYLOAD",
+          }],
+        },
+        { type: "server_tool_use", id: "srvtoolu_e", name: "web_search", input: { query: "again" } },
+        { type: "web_search_tool_result", tool_use_id: "srvtoolu_e", content: { type: "web_search_tool_result_error", error_code: "max_uses_exceeded" } },
+        { type: "text", text: { nested: "value" } },
+      ],
+    },
+    { role: "user", content: { unexpected: "shape" } },
+  ], [{ type: "text", text: "Executor-turn-marker: consulting now." }], {
+    // Only verified-native server history stays on the executor route, and only
+    // for cache-sensitive models that still declare the tool; everything else
+    // (web fetch, code execution) takes the whole-request fallback instead.
+    model: "oneportal,deepseek-v4-flash",
+    tools: [
+      { type: "web_search_20250305", name: "web_search" },
+    ],
+  });
+
+  assert.match(transcript, /Lantern 9 notes <https:\/\/example\.test\/lantern-9>/);
+  assert.match(transcript, /max_uses_exceeded/);
+  assert.match(transcript, /\{"nested":"value"\}/);
+  assert.match(transcript, /\[user\]\n\[unsupported content\]/);
+  assert.doesNotMatch(transcript, /\[object Object\]/);
+  assert.doesNotMatch(transcript, /ENCRYPTED-SEARCH-PAYLOAD/);
+});
+
 test("prior ToolSearch result blocks become bounded history and reactivate referenced tools", async () => {
   const fixture = createBridgeFixture([
     message({ content: [{ type: "text", text: "History understood." }] }),

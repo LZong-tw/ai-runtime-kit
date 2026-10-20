@@ -24,7 +24,13 @@ import { normalizeResponsesThinkingHistory } from "./reasoning-history.mjs";
 const TOOL_SEARCH_BRIDGE_NAME = "airkit_tool_search";
 const ADVISOR_BRIDGE_NAME = "airkit_advisor";
 const MAX_EXECUTOR_ITERATIONS = 8;
-const MAX_TRANSCRIPT_LENGTH = 32_768;
+// Advisor transcript budget in UTF-16 code units. Claude Code's first user
+// message alone often carries more than 32 KB of injected CLAUDE.md / memory
+// reminders, so 64 KB leaves room for the latest request, the executor turn,
+// and several recent tool exchanges. The cost is about 16K advisor input tokens.
+const MAX_TRANSCRIPT_LENGTH = 65_536;
+const TRANSCRIPT_SEPARATOR = "\n\n";
+const TRANSCRIPT_MARKER_RESERVE = 256;
 const MAX_HISTORY_TEXT_LENGTH = 4_096;
 const CORE_RESPONSE_METADATA = Symbol("airkitCoreResponseMetadata");
 
@@ -623,7 +629,7 @@ function advisorHistoryText(block) {
 }
 
 function boundedHistoryText(value) {
-  return String(value).slice(0, MAX_HISTORY_TEXT_LENGTH);
+  return safeHead(String(value), MAX_HISTORY_TEXT_LENGTH);
 }
 
 function unsupportedHistory() {
@@ -672,14 +678,231 @@ async function requestAdvisor({
   }
 }
 
-function boundedTranscript(messages) {
-  let serialized;
-  try {
-    serialized = JSON.stringify(messages);
-  } catch {
-    serialized = "[unavailable transcript]";
+// Keeps the newest context: the executor's turn and the latest real user
+// request are pinned (each first bounded to a quarter of the cap, tail kept),
+// older messages fill the remaining budget newest first, and whatever budget
+// is still unused goes back to the pinned messages that were cut. Every
+// dropped span is marked so the advisor never reads a silent cut.
+function boundedTranscript(messages, cap = MAX_TRANSCRIPT_LENGTH) {
+  const rendered = messages.map(renderTranscriptMessage);
+  if (rendered.length === 0) return "";
+  const included = new Array(rendered.length).fill(null);
+  const share = Math.floor(cap / 4);
+  const pinned = [rendered.length - 1, latestUserRequestIndex(messages)].filter(
+    (index, position, all) => index >= 0 && all.indexOf(index) === position,
+  );
+  let remaining = cap - TRANSCRIPT_MARKER_RESERVE;
+  for (const index of pinned) {
+    included[index] = keepTranscriptTail(rendered[index], share);
+    if (included[index] !== null) remaining -= included[index].text.length + TRANSCRIPT_SEPARATOR.length;
   }
-  return serialized.slice(0, MAX_TRANSCRIPT_LENGTH);
+  for (let index = rendered.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    if (included[index] !== null) continue;
+    const room = remaining - TRANSCRIPT_SEPARATOR.length;
+    if (room <= 0) break;
+    included[index] = keepTranscriptTail(rendered[index], room);
+    if (included[index] === null) break;
+    remaining -= included[index].text.length + TRANSCRIPT_SEPARATOR.length;
+    if (included[index].elided) break;
+  }
+  for (const index of pinned) {
+    const entry = included[index];
+    if (!entry?.elided || remaining <= 0) continue;
+    const grown = keepTranscriptTail(rendered[index], entry.text.length + remaining);
+    if (grown === null || grown.text.length <= entry.text.length) continue;
+    remaining -= grown.text.length - entry.text.length;
+    included[index] = grown;
+  }
+  const parts = [];
+  let omitted = 0;
+  for (const entry of included) {
+    if (entry === null) {
+      omitted += 1;
+      continue;
+    }
+    if (omitted > 0) parts.push(omittedMessagesMarker(omitted));
+    omitted = 0;
+    parts.push(entry.text);
+  }
+  if (omitted > 0) parts.push(omittedMessagesMarker(omitted));
+  return keepTranscriptTail(parts.join(TRANSCRIPT_SEPARATOR), cap)?.text ?? "";
+}
+
+// Claude Code attaches <system-reminder> text to tool-result messages, so a
+// user message only counts as a request when text survives stripping them.
+function latestUserRequestIndex(messages) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== "user") continue;
+    if (typeof message.content === "string" && hasRequestText(message.content)) return index;
+    if (
+      Array.isArray(message.content) &&
+      message.content.some((block) => block?.type === "text" && hasRequestText(block.text))
+    ) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+const SYSTEM_REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
+
+// Same ordering as reminder-only blocks: a tail cut then drops injected
+// reminders before the user's own words.
+function remindersFirst(text) {
+  const reminders = text.match(SYSTEM_REMINDER);
+  if (reminders === null) return text;
+  const own = text.replace(SYSTEM_REMINDER, "").trim();
+  return own.length > 0 ? `${reminders.join("\n")}\n${own}` : text;
+}
+
+function hasRequestText(text) {
+  return typeof text === "string" && text.replace(SYSTEM_REMINDER, "").trim().length > 0;
+}
+
+function isReminderOnlyBlock(block) {
+  return block?.type === "text" && typeof block.text === "string" && block.text.trim().length > 0 &&
+    !hasRequestText(block.text);
+}
+
+function keepTranscriptTail(text, limit) {
+  if (text.length <= limit) return { text, elided: false };
+  const newline = text.indexOf("\n");
+  const header = newline >= 0 && newline < 64 ? text.slice(0, newline + 1) : "";
+  const body = text.slice(header.length);
+  // Too little room for the header and marker: a mangled marker would read as
+  // content, so the caller drops the message and counts it as omitted.
+  if (limit < header.length + elisionMarker(body.length).length + 1) return null;
+  let kept = Math.max(0, limit - header.length - elisionMarker(body.length).length - 1);
+  let marker = elisionMarker(body.length - kept);
+  kept = Math.max(0, limit - header.length - marker.length - 1);
+  const tail = safeTail(body, kept);
+  marker = elisionMarker(body.length - tail.length);
+  const result = `${header}${marker}\n${tail}`;
+  return { text: result.length <= limit ? result : safeTail(result, limit), elided: true };
+}
+
+// A cut through a surrogate pair would hand the advisor a lone surrogate.
+function safeTail(text, count) {
+  if (count <= 0) return "";
+  if (count >= text.length) return text;
+  const start = text.length - count;
+  return text.slice(isLowSurrogate(text.charCodeAt(start)) ? start + 1 : start);
+}
+
+function safeHead(text, count) {
+  if (count <= 0) return "";
+  if (count >= text.length) return text;
+  return text.slice(0, isHighSurrogate(text.charCodeAt(count - 1)) ? count - 1 : count);
+}
+
+function isHighSurrogate(code) {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+function isLowSurrogate(code) {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
+function elisionMarker(count) {
+  return `[... ${count} earlier characters omitted ...]`;
+}
+
+function omittedMessagesMarker(count) {
+  return `[... ${count} earlier ${count === 1 ? "message" : "messages"} omitted ...]`;
+}
+
+function renderTranscriptMessage(message) {
+  const role = typeof message?.role === "string" ? message.role : "unknown";
+  const content = message?.content;
+  let body;
+  if (typeof content === "string") {
+    body = role === "user" ? remindersFirst(content) : content;
+  } else if (Array.isArray(content)) {
+    // Reminders go first so a tail cut drops them before the user's own words.
+    const ordered = role === "user"
+      ? [...content.filter(isReminderOnlyBlock), ...content.filter((block) => !isReminderOnlyBlock(block))]
+      : content;
+    body = ordered.map(renderTranscriptBlock).filter((text) => text !== null).join("\n");
+  } else {
+    body = content == null ? "" : "[unsupported content]";
+  }
+  return `[${role}]\n${body}`;
+}
+
+function renderTranscriptBlock(block) {
+  switch (block?.type) {
+    case "text":
+      return transcriptText(block.text);
+    case "thinking":
+    case "redacted_thinking":
+      return null;
+    case "tool_use":
+    case "server_tool_use":
+      return `[${block.type} ${String(block.name ?? "")}] ${compactJson(block.input ?? {})}`;
+    case "tool_result":
+      return `[tool_result${block.is_error ? " error" : ""}] ${renderToolResultContent(block.content)}`;
+    case "advisor_tool_result":
+      return renderHistoryBlock(advisorHistoryText, block);
+    case "tool_search_tool_result":
+      return renderHistoryBlock(toolSearchHistoryText, block);
+    default:
+      if (typeof block?.type === "string" && block.type.endsWith("_tool_result")) {
+        return `[${block.type}] ${safeHead(renderToolResultContent(block.content), MAX_HISTORY_TEXT_LENGTH)}`;
+      }
+      return `[${typeof block?.type === "string" ? block.type : "unknown"}]`;
+  }
+}
+
+function transcriptText(value) {
+  if (typeof value === "string") return value;
+  if (value == null) return "";
+  return safeHead(compactJson(value), MAX_HISTORY_TEXT_LENGTH);
+}
+
+// Server tool results (web search, web fetch, code execution, MCP) become a
+// short summary: titles and urls, exit code and output tails, or the error
+// code. Encrypted payloads and fetched documents are never copied.
+function renderToolResultContent(content) {
+  if (typeof content === "string") return content;
+  if (content == null) return "";
+  const items = Array.isArray(content) ? content : [content];
+  return items.map(renderResultItem).join("\n");
+}
+
+function renderResultItem(item) {
+  if (typeof item === "string") return item;
+  if (item === null || typeof item !== "object") return "[unsupported result]";
+  if (item.type === "text") return transcriptText(item.text);
+  if (typeof item.error_code === "string") return `[${item.type ?? "error"}] ${item.error_code}`;
+  if (typeof item.url === "string") {
+    return typeof item.title === "string" ? `${item.title} <${item.url}>` : `<${item.url}>`;
+  }
+  if ("stdout" in item || "stderr" in item || "return_code" in item) {
+    const lines = [`exit ${Number.isInteger(item.return_code) ? item.return_code : "?"}`];
+    for (const stream of ["stdout", "stderr"]) {
+      const text = typeof item[stream] === "string" ? item[stream].trim() : "";
+      if (text) lines.push(`${stream}: ${safeTail(text, MAX_HISTORY_TEXT_LENGTH / 4)}`);
+    }
+    return lines.join("\n");
+  }
+  return `[${typeof item.type === "string" ? item.type : "unsupported result"}]`;
+}
+
+function renderHistoryBlock(render, block) {
+  try {
+    return render(block);
+  } catch {
+    return `[${block.type}]`;
+  }
+}
+
+function compactJson(value) {
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return "[unserializable input]";
+  }
 }
 
 function extractMessageText(message) {
