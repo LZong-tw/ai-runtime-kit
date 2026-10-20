@@ -535,7 +535,7 @@ test("Advisor bridge uses the configured Anthropic model and resumes the executo
 
 const ADVISOR_TRANSCRIPT_CAP = 65_536;
 
-async function captureAdvisorTranscript(messages, executorContent) {
+async function captureAdvisorTranscript(messages, executorContent, { model, tools = [] } = {}) {
   const fixture = createBridgeFixture([
     message({
       content: [
@@ -550,8 +550,9 @@ async function captureAdvisorTranscript(messages, executorContent) {
     message({ content: [{ type: "text", text: "Done." }] }),
   ], {
     body: {
+      ...(model === undefined ? {} : { model }),
       messages,
-      tools: [{ type: "advisor_20260301", name: "advisor", model: "claude-opus-5", max_uses: 2 }],
+      tools: [...tools, { type: "advisor_20260301", name: "advisor", model: "claude-opus-5", max_uses: 2 }],
     },
     advisorMode: "bridge",
   });
@@ -793,6 +794,47 @@ test("Advisor transcript keeps a block request that precedes a large reminder bl
   assert.ok(transcript.length <= ADVISOR_TRANSCRIPT_CAP);
   assert.match(transcript, /Describe repository Lantern-9\./);
   assert.doesNotMatch(transcript, /characters omitted/);
+});
+
+test("Advisor transcript summarizes server tool results without copying payloads", async () => {
+  const transcript = await captureAdvisorTranscript([
+    { role: "user", content: "Check the release notes." },
+    {
+      role: "assistant",
+      content: [
+        { type: "server_tool_use", id: "srvtoolu_s", name: "web_search", input: { query: "lantern release" } },
+        {
+          type: "web_search_tool_result",
+          tool_use_id: "srvtoolu_s",
+          content: [{
+            type: "web_search_result",
+            title: "Lantern 9 notes",
+            url: "https://example.test/lantern-9",
+            encrypted_content: "ENCRYPTED-SEARCH-PAYLOAD",
+          }],
+        },
+        { type: "server_tool_use", id: "srvtoolu_e", name: "web_search", input: { query: "again" } },
+        { type: "web_search_tool_result", tool_use_id: "srvtoolu_e", content: { type: "web_search_tool_result_error", error_code: "max_uses_exceeded" } },
+        { type: "text", text: { nested: "value" } },
+      ],
+    },
+    { role: "user", content: { unexpected: "shape" } },
+  ], [{ type: "text", text: "Executor-turn-marker: consulting now." }], {
+    // Only verified-native server history stays on the executor route, and only
+    // for cache-sensitive models that still declare the tool; everything else
+    // (web fetch, code execution) takes the whole-request fallback instead.
+    model: "oneportal,deepseek-v4-flash",
+    tools: [
+      { type: "web_search_20250305", name: "web_search" },
+    ],
+  });
+
+  assert.match(transcript, /Lantern 9 notes <https:\/\/example\.test\/lantern-9>/);
+  assert.match(transcript, /max_uses_exceeded/);
+  assert.match(transcript, /\{"nested":"value"\}/);
+  assert.match(transcript, /\[user\]\n\[unsupported content\]/);
+  assert.doesNotMatch(transcript, /\[object Object\]/);
+  assert.doesNotMatch(transcript, /ENCRYPTED-SEARCH-PAYLOAD/);
 });
 
 test("prior ToolSearch result blocks become bounded history and reactivate referenced tools", async () => {
