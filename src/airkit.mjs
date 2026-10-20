@@ -29,6 +29,7 @@ import {
   estimateFixedContext,
   resolveAutoCompactPolicy,
   thrashWarnings,
+  userSetsAutoCompact,
   validateAutoCompactEntry,
 } from "./autocompact.mjs";
 import { startCompatibilityMiddleware } from "./compat/middleware.mjs";
@@ -1247,7 +1248,7 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
   const renderedLaunchEnv = renderTemplateValue(launch.env ?? {}, launchVars);
   // Only modes that opt in get a policy; everything else keeps the user's
   // global autocompact settings and renders exactly as before.
-  const autoCompact = plainClaude || profile.launch?.modes?.[mode]?.perModelAutoCompact !== true
+  let autoCompact = plainClaude || profile.launch?.modes?.[mode]?.perModelAutoCompact !== true
     ? null
     : resolveAutoCompactPolicy({
       enabled: true,
@@ -1261,8 +1262,10 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
       },
       label: `profile "${profile.name}" mode "${mode}"`,
     });
-  if (autoCompact?.status === "active" && combinedLaunchArgs.some((arg) => arg === "--autocompact" || String(arg).startsWith("--autocompact="))) {
-    autoCompact.warnings = ["an explicit --autocompact value overrides the per-model table"];
+  // Checked only once the policy is active, so an inactive launch never parses
+  // --settings it did not parse before.
+  if (autoCompact?.status === "active" && userSetsAutoCompact(combinedLaunchArgs, options.readSettingsFile)) {
+    autoCompact = { status: "inactive", reason: "explicit user autocompact setting" };
   }
   for (const key of ["CLAUDE_CONFIG_DIR", "HOME"]) {
     if (Object.hasOwn(renderedLaunchEnv, key)) {

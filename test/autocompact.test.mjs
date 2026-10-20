@@ -230,15 +230,39 @@ test("an old Claude Code or a mode without the flag keeps the native --autocompa
   assert.equal(legacy.launch.args.includes("--autocompact"), true);
 });
 
-test("an explicit --autocompact from the user is kept and reported", () => {
-  const plan = buildLaunchPlan(perModelCatalog(), "pm", {
+test("an explicit user autocompact choice turns the per-model policy off", () => {
+  const readFile = (path) => {
+    if (path === "/u/compact.json") return JSON.stringify({ modelSettings: { "claude-opus-5-5": { autoCompactWindow: 500_000 } } });
+    throw new Error(`unexpected read ${path}`);
+  };
+  for (const userArgs of [
+    ["--autocompact", "200000"],
+    ["--autocompact=200000"],
+    ["--settings", '{"autoCompactWindow":200000}'],
+    ["--settings={\"env\":{\"CLAUDE_CODE_AUTO_COMPACT_WINDOW\":\"200000\"}}"],
+    ["--settings", '{"env":{"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE":"80"}}'],
+    ["--settings", "/u/compact.json"],
+  ]) {
+    const plan = buildLaunchPlan(perModelCatalog(), "pm", {
+      mode: "auto",
+      runtimeVersions: { claudeCode: "2.1.304" },
+      userArgs,
+      fixedContextTokens: 20_000,
+      readSettingsFile: readFile,
+    });
+    const label = JSON.stringify(userArgs);
+    assert.deepEqual(plan.launch.autoCompact, { status: "inactive", reason: "explicit user autocompact setting" }, label);
+    assert.deepEqual(plan.launch.userArgs, userArgs, `${label} reaches Claude untouched`);
+    assert.equal(settingsOf(plan.launch.args).length, 0, `${label} gets no AirKit --settings`);
+  }
+
+  const unrelated = buildLaunchPlan(perModelCatalog(), "pm", {
     mode: "auto",
     runtimeVersions: { claudeCode: "2.1.304" },
-    userArgs: ["--autocompact", "200000"],
+    userArgs: ["--settings", '{"env":{"FOO":"1"},"modelSettings":{"x":{}}}'],
     fixedContextTokens: 20_000,
   });
-  assert.deepEqual(plan.launch.autoCompact.warnings, ["an explicit --autocompact value overrides the per-model table"]);
-  assert.equal(plan.launch.userArgs.includes("200000"), true);
+  assert.equal(unrelated.launch.autoCompact.status, "active", "other settings keep the policy");
 });
 
 async function validateCatalog(catalog) {
