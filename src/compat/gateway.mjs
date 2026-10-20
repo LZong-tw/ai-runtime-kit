@@ -629,7 +629,7 @@ function advisorHistoryText(block) {
 }
 
 function boundedHistoryText(value) {
-  return String(value).slice(0, MAX_HISTORY_TEXT_LENGTH);
+  return safeHead(String(value), MAX_HISTORY_TEXT_LENGTH);
 }
 
 function unsupportedHistory() {
@@ -753,9 +753,32 @@ function keepTranscriptTail(text, limit) {
   let kept = Math.max(0, limit - header.length - elisionMarker(body.length).length - 1);
   let marker = elisionMarker(body.length - kept);
   kept = Math.max(0, limit - header.length - marker.length - 1);
-  marker = elisionMarker(body.length - kept);
-  const result = `${header}${marker}\n${kept > 0 ? body.slice(body.length - kept) : ""}`;
-  return { text: result.length <= limit ? result : result.slice(result.length - limit), elided: true };
+  const tail = safeTail(body, kept);
+  marker = elisionMarker(body.length - tail.length);
+  const result = `${header}${marker}\n${tail}`;
+  return { text: result.length <= limit ? result : safeTail(result, limit), elided: true };
+}
+
+// A cut through a surrogate pair would hand the advisor a lone surrogate.
+function safeTail(text, count) {
+  if (count <= 0) return "";
+  if (count >= text.length) return text;
+  const start = text.length - count;
+  return text.slice(isLowSurrogate(text.charCodeAt(start)) ? start + 1 : start);
+}
+
+function safeHead(text, count) {
+  if (count <= 0) return "";
+  if (count >= text.length) return text;
+  return text.slice(0, isHighSurrogate(text.charCodeAt(count - 1)) ? count - 1 : count);
+}
+
+function isHighSurrogate(code) {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+function isLowSurrogate(code) {
+  return code >= 0xdc00 && code <= 0xdfff;
 }
 
 function elisionMarker(count) {

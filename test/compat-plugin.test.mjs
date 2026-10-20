@@ -711,6 +711,22 @@ test("Advisor transcript keeps a request that precedes a trailing reminder in th
   assert.match(transcript, /Executor-turn-marker/);
 });
 
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+
+test("Advisor transcript never cuts through a surrogate pair", async () => {
+  for (const size of [9_000, 9_001, 20_000, 40_000]) {
+    const transcript = await captureAdvisorTranscript([
+      { role: "user", content: "Describe repository Lantern-9." },
+      { role: "assistant", content: "\u{1F600}".repeat(size) },
+      { role: "user", content: "x" + "\u{1F600}".repeat(size) },
+    ], [{ type: "text", text: "Executor-turn-marker: consulting now." }]);
+
+    assert.ok(transcript.length <= ADVISOR_TRANSCRIPT_CAP);
+    assert.match(transcript, /earlier characters omitted/);
+    assert.doesNotMatch(transcript, LONE_SURROGATE, `size ${size}`);
+  }
+});
+
 test("prior ToolSearch result blocks become bounded history and reactivate referenced tools", async () => {
   const fixture = createBridgeFixture([
     message({ content: [{ type: "text", text: "History understood." }] }),
