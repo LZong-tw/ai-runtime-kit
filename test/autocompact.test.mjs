@@ -312,3 +312,27 @@ test("the launch plan carries the fixed-context estimate and its thrash warning"
     ],
   );
 });
+
+test("a strictMcp mode launches with an empty strict MCP config and other modes do not", () => {
+  const catalog = perModelCatalog();
+  catalog.profiles[0].launch.modes.auto.strictMcp = true;
+  const strict = buildLaunchPlan(catalog, "pm", { mode: "auto", runtimeVersions: { claudeCode: "2.1.304" } });
+  assert.equal(strict.launch.strictMcp, true);
+  const index = strict.launch.args.indexOf("--strict-mcp-config");
+  assert.notEqual(index, -1);
+  assert.equal(strict.launch.args[index + 1], '--mcp-config={"mcpServers":{}}');
+
+  const other = buildLaunchPlan(catalog, "pm", { mode: "legacy", runtimeVersions: { claudeCode: "2.1.304" } });
+  assert.equal(other.launch.strictMcp, undefined);
+  assert.equal(other.launch.args.includes("--strict-mcp-config"), false);
+});
+
+test("the catalog validator rejects a non-boolean strictMcp and strictMcp on plain", async () => {
+  const bad = perModelCatalog();
+  bad.profiles[0].launch.modes.auto.strictMcp = "yes";
+  await assert.rejects(validateCatalog(bad), /strictMcp must be a boolean/);
+
+  const plain = perModelCatalog();
+  plain.profiles[0].launch.modes.plain = { strictMcp: true };
+  await assert.rejects(validateCatalog(plain), /plain cannot set strictMcp/);
+});
