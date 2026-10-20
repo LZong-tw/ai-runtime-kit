@@ -24,6 +24,7 @@ import {
   validateCompatibilityConfig,
   validateCompatibilityProviderBinding,
 } from "./compat/config.mjs";
+import { collapseSettingsArgs, resolveAutoCompactPolicy, validateAutoCompactEntry } from "./autocompact.mjs";
 import { startCompatibilityMiddleware } from "./compat/middleware.mjs";
 import { renderHeartbeatManagedFiles } from "./context-heartbeat.mjs";
 import { buildContextObservability } from "./context-observability.mjs";
@@ -949,6 +950,7 @@ export async function exportOssRelease({ outDir }) {
     await copyFile(join(here, entrypoint), target);
     await chmod(target, 0o755);
   }
+  await copyFile(join(here, "autocompact.mjs"), join(outDir, "src", "autocompact.mjs"));
   await copyFile(join(here, "codex-takeover-guard.mjs"), join(outDir, "src", "codex-takeover-guard.mjs"));
   await copyFile(join(here, "codex-transcript-guard.mjs"), join(outDir, "src", "codex-transcript-guard.mjs"));
   await copyFile(join(here, "context-heartbeat.mjs"), join(outDir, "src", "context-heartbeat.mjs"));
@@ -1237,6 +1239,25 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
   assertNoManagedApiKeyHelperOverride(combinedLaunchArgs);
   assertNoDefaultSystemPromptOverride(combinedLaunchArgs);
   const renderedLaunchEnv = renderTemplateValue(launch.env ?? {}, launchVars);
+  // Only modes that opt in get a policy; everything else keeps the user's
+  // global autocompact settings and renders exactly as before.
+  const autoCompact = plainClaude || profile.launch?.modes?.[mode]?.perModelAutoCompact !== true
+    ? null
+    : resolveAutoCompactPolicy({
+      enabled: true,
+      binaryEligible: shouldAppendReusableRuntimeLessons(launch.binary),
+      claudeCodeVersion: options.runtimeVersions?.claudeCode ?? null,
+      router: ccrConfig.Router,
+      launchModel: claudeModel,
+      lookupEntry: (route) => {
+        const { provider, model } = splitRoute(route);
+        return catalogModelEntry(catalog, provider, model);
+      },
+      label: `profile "${profile.name}" mode "${mode}"`,
+    });
+  if (autoCompact?.status === "active" && combinedLaunchArgs.some((arg) => arg === "--autocompact" || String(arg).startsWith("--autocompact="))) {
+    autoCompact.warnings = ["an explicit --autocompact value overrides the per-model table"];
+  }
   for (const key of ["CLAUDE_CONFIG_DIR", "HOME"]) {
     if (Object.hasOwn(renderedLaunchEnv, key)) {
       // Direct launch exists so every launcher shares one Claude home; a
@@ -1248,16 +1269,18 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
     ? []
     : withHeartbeatPluginArg(
       appendLaunchRuntimePrompts(
-        withAutoCompactArg(
-          withAirclaudeModelArg(
-            renderedLaunchArgs,
+        autoCompact?.status === "active"
+          ? withAirclaudeModelArg(renderedLaunchArgs, launch.binary, claudeModel)
+          : withAutoCompactArg(
+            withAirclaudeModelArg(
+              renderedLaunchArgs,
+              launch.binary,
+              claudeModel,
+            ),
             launch.binary,
-            claudeModel,
+            profile,
+            combinedLaunchArgs,
           ),
-          launch.binary,
-          profile,
-          combinedLaunchArgs,
-        ),
         launch.binary,
         mode,
         ccrConfig,
@@ -1267,6 +1290,7 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
       launch.binary,
       configDir,
     );
+  const collapsed = autoCompactSettingsArgs(claudeArgs, options.userArgs ?? [], autoCompact, options.readSettingsFile);
 
   return {
     profile: basePlan.profile,
@@ -1287,7 +1311,7 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
       // statusline, and hooks across four homes; CCR stays the gateway daemon
       // and the shared ~/.claude is inherited untouched.
       command: launch.binary,
-      args: claudeArgs,
+      args: collapsed.head,
       env: {
         ...airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, options.env),
         ...renderedLaunchEnv,
@@ -1315,9 +1339,20 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
       // the accepted tradeoff for a key that only opens the local gateway.
       gatewayTokenCommand: join(ccrRuntimePaths(options.env).configDir, "bin", `ccr-claude-code-api-key-${managedProfileId}`),
       managedProfileId,
-      userArgs: options.userArgs ?? [],
+      userArgs: collapsed.tail,
+      ...(autoCompact ? { autoCompact } : {}),
     },
   };
+}
+
+// An active per-model policy owns the one --settings Claude Code keeps; every
+// other --settings source (profile, user, compatibility) folds into it.
+function autoCompactSettingsArgs(headArgs, tailArgs, autoCompact, readSettingsFile) {
+  if (autoCompact?.status !== "active") return { head: headArgs, tail: tailArgs };
+  const collapsed = collapseSettingsArgs(headArgs, tailArgs, autoCompact.settings, readSettingsFile);
+  // File-based settings were skipped by the earlier scan; now they are inline.
+  assertNoManagedApiKeyHelperOverride([...collapsed.head, ...collapsed.tail]);
+  return collapsed;
 }
 
 export function assertNoManagedApiKeyHelperOverride(args) {
@@ -1469,6 +1504,11 @@ async function prepareManagedGateway({ plan, managed, currentConfig, ccrClient, 
 }
 
 export async function prepareLaunch(catalog, profileName, options = {}) {
+  // The per-model autocompact gate needs the Claude Code version at plan time;
+  // the runtime check below reuses the same reading.
+  if (!options.runtimeVersions && profileUsesPerModelAutoCompact(findProfile(catalog, profileName))) {
+    options = { ...options, runtimeVersions: await inspectRuntimeVersions(options) };
+  }
   const plan = buildLaunchPlan(catalog, profileName, options);
   const profileShield = plan.shield;
   const rendered = renderProfile(catalog, profileName, {
@@ -1660,11 +1700,13 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
             : gatewayBaseUrlEnv(gatewayOrigin)),
         ANTHROPIC_AUTH_TOKEN: gatewayToken,
       };
-      child = spawnCommand(plan.launch.command, [
-        ...plan.launch.args,
-        ...compatibilityLaunch.args,
-        ...plan.launch.userArgs,
-      ], {
+      const spawnArgs = autoCompactSettingsArgs(
+        [...plan.launch.args, ...compatibilityLaunch.args],
+        plan.launch.userArgs,
+        plan.launch.autoCompact,
+        options.readSettingsFile,
+      );
+      child = spawnCommand(plan.launch.command, [...spawnArgs.head, ...spawnArgs.tail], {
         env: shieldReady
           ? buildShieldChildEnv({ ...shieldReady, lane: plan.shieldLauncher.clientLane }, childEnv)
           : childEnv,
@@ -1898,6 +1940,11 @@ function validateCatalog(catalog) {
     validateShell(profile);
     validateManagedFiles(profile);
   }
+  for (const providerEntry of Array.isArray(catalog.modelCatalog?.providers) ? catalog.modelCatalog.providers : []) {
+    for (const modelEntry of providerEntry.models ?? []) {
+      validateAutoCompactEntry(`modelCatalog ${providerEntry.id}/${modelEntry.id}`, modelEntry.autoCompact);
+    }
+  }
 }
 
 function validateShield(profile) {
@@ -1969,7 +2016,25 @@ function validateLaunch(profile) {
     }
   }
 
+  const modeFields = new Set(["ccr", "effort", "appendSystemPrompt", "completionGuard", "perModelAutoCompact"]);
   for (const [mode, definition] of Object.entries(profile.launch?.modes ?? {})) {
+    for (const field of Object.keys(definition ?? {})) {
+      if (!modeFields.has(field)) {
+        throw new Error(`profile "${profile.name}" launch.modes.${mode} contains unsupported field: ${field}`);
+      }
+    }
+    const perModel = definition?.perModelAutoCompact;
+    if (perModel !== undefined) {
+      if (typeof perModel !== "boolean") {
+        throw new Error(`profile "${profile.name}" launch.modes.${mode}.perModelAutoCompact must be a boolean`);
+      }
+      if (mode === "plain") {
+        throw new Error(`profile "${profile.name}" launch.modes.plain cannot set perModelAutoCompact; plain claude keeps the user's settings`);
+      }
+      if (perModel && (context?.autoCompactWindow ?? context?.autoCompactPercentage) !== undefined) {
+        throw new Error(`profile "${profile.name}" sets launch.context.autoCompactWindow/autoCompactPercentage and launch.modes.${mode}.perModelAutoCompact; choose one`);
+      }
+    }
     const effort = definition?.effort;
     if (effort !== undefined && (typeof effort !== "string"
       || !["low", "medium", "high", "xhigh", "max"].includes(effort.trim().toLowerCase()))) {
@@ -3139,12 +3204,22 @@ Environment:
 - mode header: ${result.launch.env.ANTHROPIC_CUSTOM_HEADERS ?? "unset"}
 - gateway key: resolved at launch from ${result.launch.gatewayTokenCommand}
 - inherited Claude home: CLAUDE_CONFIG_DIR is left untouched
-${contextEnvLines(result.launch.env)}- cleared: ${(result.launch.clearEnv ?? []).join(", ") || "none"}
+${contextEnvLines(result.launch.env)}${autoCompactLines(result.launch.autoCompact)}- cleared: ${(result.launch.clearEnv ?? []).join(", ") || "none"}
 `;
 }
 
 // `launch.context` overrides are invisible in the launch argv but change how the
 // child behaves, so a dry run that omits them under-reports the plan.
+function autoCompactLines(autoCompact) {
+  if (!autoCompact) return "";
+  if (autoCompact.status !== "active") return `- per-model autocompact: inactive (${autoCompact.reason})\n`;
+  const models = Object.entries(autoCompact.byModel)
+    .map(([id, { lane, window }]) => `${id}=${window} (${lane})`)
+    .join(", ");
+  const warnings = (autoCompact.warnings ?? []).map((warning) => `- per-model autocompact warning: ${warning}\n`).join("");
+  return `- per-model autocompact: active ${autoCompact.policyGeneration}; fallback ${autoCompact.fallbackWindow}; ${models}\n${warnings}`;
+}
+
 function contextEnvLines(env = {}) {
   return [
     "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
@@ -3214,6 +3289,10 @@ function appendLaunchRuntimePrompts(args, binary, mode, ccrConfig, claudeModel, 
 function modeAppendSystemPrompt(launch, mode) {
   const prompt = launch.modes?.[mode]?.appendSystemPrompt;
   return typeof prompt === "string" && prompt.trim() !== "" ? prompt : null;
+}
+
+function profileUsesPerModelAutoCompact(profile) {
+  return Object.values(profile?.launch?.modes ?? {}).some((definition) => definition?.perModelAutoCompact === true);
 }
 
 function withHeartbeatPluginArg(args, binary, configDir) {
@@ -3436,15 +3515,19 @@ function catalogInputPrice(catalog, provider, model) {
 }
 
 function catalogContextWindow(catalog, provider, model) {
+  const modelEntry = catalogModelEntry(catalog, provider, model);
+  return Number.isInteger(modelEntry?.contextWindow) && modelEntry.contextWindow > 0
+    ? modelEntry.contextWindow
+    : null;
+}
+
+function catalogModelEntry(catalog, provider, model) {
   const providers = catalog.modelCatalog?.providers;
   if (!Array.isArray(providers)) return null;
 
   for (const providerEntry of providers) {
     for (const modelEntry of providerEntry.models ?? []) {
-      if (!modelMatches(provider, model, providerEntry, modelEntry)) continue;
-      return Number.isInteger(modelEntry.contextWindow) && modelEntry.contextWindow > 0
-        ? modelEntry.contextWindow
-        : null;
+      if (modelMatches(provider, model, providerEntry, modelEntry)) return modelEntry;
     }
   }
 

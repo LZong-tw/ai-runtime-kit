@@ -358,19 +358,28 @@ export function routeBareClaudeModel(body, routes, launchModel = null, modeRoute
   }
 
   if (body.model.includes("/")) return null;
+  const lane = claudeFamilyLane(body.model);
   const target = body.model === launchModel && isSupportedLaunchModelId(launchModel)
     ? routes.default
-    : !body.model.startsWith("claude-")
+    : lane === null
       ? null
-    : body.model.startsWith("claude-opus-")
-      ? routes.opus ?? routes.default
-      : body.model.startsWith("claude-haiku-")
-        ? routes.background ?? routes.default
-        : body.model.startsWith("claude-sonnet-")
-          ? routes.sonnet ?? routes.default
-          : null;
+      : routes[lane] ?? routes.default;
   if (typeof target !== "string" || target === "" || target === body.model) return null;
   return { ...body, model: target };
+}
+
+// Which Router lane serves a bare Claude family id. The launcher's per-model
+// autocompact table reads the same mapping, so a family's compact threshold
+// always follows the route that actually answers it.
+export const CLAUDE_FAMILY_LANES = Object.freeze([
+  Object.freeze({ prefix: "claude-opus-", lane: "opus" }),
+  Object.freeze({ prefix: "claude-sonnet-", lane: "sonnet" }),
+  Object.freeze({ prefix: "claude-haiku-", lane: "background" }),
+]);
+
+export function claudeFamilyLane(model) {
+  if (typeof model !== "string") return null;
+  return CLAUDE_FAMILY_LANES.find(({ prefix }) => model.startsWith(prefix))?.lane ?? null;
 }
 
 export function resolveCompatibilityPolicies(config, nativeCapabilities = {}) {
