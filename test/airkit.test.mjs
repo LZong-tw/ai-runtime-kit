@@ -3820,6 +3820,47 @@ async function subagentSessionFixture(root, sessionId, agentId, childRecords, su
   return { parentTranscript, childTranscript };
 }
 
+// Claude Code 2.1.304 spawns subagentStatusLine with extendEnv:false and no
+// CLAUDE_PLUGIN_DATA, and sends only local_agent tasks whose id is the agent id.
+test("subagent statusline renders child progress without CLAUDE_PLUGIN_DATA", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-subagent-no-plugin-data-"));
+  const sessionId = "no-plugin-data-session";
+  const agentId = "a5f3c1e9d2b7a4c60";
+  const task = {
+    id: agentId,
+    type: "local_agent",
+    agentType: "general-purpose",
+    status: "running",
+    description: "Audit the router",
+    label: "Audit the router",
+    model: "claude-airkit-mode[1m]",
+    tokenCount: 1200,
+  };
+
+  try {
+    const { parentTranscript, childTranscript } = await subagentSessionFixture(
+      root, sessionId, agentId, [assistantRecord("first step")], join("workflows", "wf_1"),
+    );
+    await writeFile(childTranscript, jsonLines([
+      { type: "assistant", message: { content: [{ type: "text", text: "reading the router" }, { type: "tool_use", name: "Read", input: {} }] } },
+    ]), { flag: "a" });
+    await writeFile(childTranscript, '{"type":"assistant","message":{"content":[{"type":"text","text":"half wri', { flag: "a" });
+
+    const [row] = await renderSubagentStatusLine({ session_id: sessionId, transcript_path: parentTranscript, tasks: [task] }, {});
+    assert.match(row, /^Audit the router \| .*reading the router \| tool: Read \| status: running/);
+    assert.doesNotMatch(row, /waiting for first event|half wri/);
+
+    const [unknown] = await renderSubagentStatusLine({
+      session_id: sessionId,
+      transcript_path: parentTranscript,
+      tasks: [{ ...task, id: "a000000000000000f" }],
+    }, {});
+    assert.match(unknown, /waiting for first event/);
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
 test("subagent lifecycle hooks project the child transcript, never the parent session transcript", async () => {
   const root = await mkdtemp(join(tmpdir(), "airkit-subagent-parent-leak-"));
   const env = { CLAUDE_PLUGIN_DATA: join(root, "plugin-data") };
