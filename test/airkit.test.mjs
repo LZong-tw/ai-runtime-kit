@@ -3402,7 +3402,7 @@ test("subagent observability projects child transcript progress without raw tool
       tasks: [{ id: "task-2", agent_id: "child-1", child_id: "other-child" }],
     }, env);
     assert.equal(ambiguous.length, 1);
-    assert.match(ambiguous[0], /waiting for first event|ambiguous child transcript/);
+    assert.match(ambiguous[0], /ambiguous child transcript/);
     assert.doesNotMatch(ambiguous[0], /second child update/);
 
     let output = "";
@@ -3441,7 +3441,7 @@ test("context hook records subagent timelines without an AirClaude profile", asy
     }, env);
     assert.equal(rows.length, 1);
     assert.match(rows[0], /plain session child update/);
-    assert.doesNotMatch(rows[0], /waiting for first event/);
+    assert.doesNotMatch(rows[0], /no output yet/);
 
     assert.equal(await processContextHook({
       hook_event_name: "UserPromptSubmit",
@@ -3676,13 +3676,13 @@ test("subagent status line accepts Claude Code native task ids and token counts"
     assert.match(row, /native child progress/);
     assert.match(row, /Read/);
     assert.match(row, /321 tokens/);
-    assert.doesNotMatch(row, /ambiguous child transcript/);
+    assert.doesNotMatch(row, /no output yet|ambiguous child transcript/);
 
     const [waiting] = await renderSubagentStatusLine({
       session_id: "native-parent",
       tasks: [{ id: "native-not-started", name: "not started", tokenCount: 99 }],
     }, env);
-    assert.match(waiting, /waiting for first event/);
+    assert.match(waiting, /starting, no output yet/);
     assert.match(waiting, /99 tokens/);
   } finally {
     await rm(pluginData, { force: true, recursive: true });
@@ -3756,7 +3756,7 @@ test("subagent status line distinguishes parent Agent launch states before child
     assert.match(denied, /status: launch-denied/);
     assert.match(initializing, /initializing: waiting for Agent launch authorization/);
     assert.match(initializing, /status: initializing/);
-    assert.match(running, /running: waiting for child event/);
+    assert.equal(running, "Explore M3 topology | starting, no output yet | status: running");
     assert.match(running, /status: running/);
   } finally {
     await rm(pluginData, { force: true, recursive: true });
@@ -3792,7 +3792,7 @@ test("subagent lifecycle accepts Claude Code agent transcript path fields", asyn
       tasks: [{ id: "schema-child", name: "schema-child-task", status: "completed" }],
     }, env);
     assert.match(row, /schema child progress/);
-    assert.doesNotMatch(row, /waiting for first event/);
+    assert.doesNotMatch(row, /no output yet/);
   } finally {
     await rm(pluginData, { force: true, recursive: true });
   }
@@ -3848,14 +3848,128 @@ test("subagent statusline renders child progress without CLAUDE_PLUGIN_DATA", as
 
     const [row] = await renderSubagentStatusLine({ session_id: sessionId, transcript_path: parentTranscript, tasks: [task] }, {});
     assert.match(row, /^Audit the router \| .*reading the router \| tool: Read \| status: running/);
-    assert.doesNotMatch(row, /waiting for first event|half wri/);
+    assert.doesNotMatch(row, /no output yet|half wri/);
 
     const [unknown] = await renderSubagentStatusLine({
       session_id: sessionId,
       transcript_path: parentTranscript,
       tasks: [{ ...task, id: "a000000000000000f" }],
     }, {});
-    assert.match(unknown, /waiting for first event/);
+    assert.match(unknown, /starting, no output yet/);
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("subagent statusline shows a task without output as starting, with its elapsed time", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-subagent-starting-"));
+  const sessionId = "starting-session";
+  const agentId = "a1b2c3d4e5f6a7b80";
+  const now = Date.now();
+  const base = { type: "local_agent", status: "running", description: "Audit the router", tokenCount: 0 };
+  try {
+    const { parentTranscript } = await subagentSessionFixture(root, sessionId, agentId, []);
+    const render = async (tasks) => renderSubagentStatusLine({ session_id: sessionId, transcript_path: parentTranscript, tasks }, {});
+    const [resolved, unresolved, missing, invalid, future, ancient, summarized, counted] = await render([
+      { ...base, id: agentId, label: "Audit the router", startTime: now - 75_000 },
+      { ...base, id: "a00000000000000ab", startTime: now - 3_000 },
+      { ...base, id: "a00000000000000ac" },
+      { ...base, id: "a00000000000000ad", startTime: "not a time" },
+      { ...base, id: "a00000000000000ae", startTime: now + 60_000 },
+      { ...base, id: "a00000000000000af", startTime: now - 400 * 24 * 60 * 60 * 1000 },
+      { ...base, id: "a00000000000000b0", label: "Reading src/router.mjs", startTime: now - 1_000 },
+      { ...base, id: "a00000000000000b1", startTime: now - 2 * 60 * 60 * 1000, tokenCount: 512 },
+    ]);
+
+    assert.match(resolved, /^Audit the router \| starting, no output yet \(1m 1[5-9]s\) \| status: running$/);
+    assert.match(unresolved, /^Audit the router \| starting, no output yet \([3-9]s\) \| status: running$/);
+    for (const row of [missing, invalid, future, ancient]) {
+      assert.equal(row, "Audit the router | starting, no output yet | status: running");
+    }
+    assert.match(summarized, /^Audit the router \| starting, no output yet \(\d+s\) \| Reading src\/router\.mjs \| status: running$/);
+    assert.match(counted, /^Audit the router \| starting, no output yet \(2h 00m\) \| status: running \| 512 tokens$/);
+    for (const row of [resolved, unresolved, missing, invalid, future, ancient, summarized, counted]) {
+      assert.doesNotMatch(row, /waiting for first event|\b0 tokens/);
+    }
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+// The launcher can leak another plugin's CLAUDE_PLUGIN_DATA (Codex here) into
+// the statusline; rendering must leave that directory exactly as it found it.
+test("subagent statusline never writes into a foreign CLAUDE_PLUGIN_DATA", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-subagent-foreign-data-"));
+  const foreign = join(root, "codex-openai-codex");
+  const sessionId = "foreign-data-session";
+  const agentId = "a9e8d7c6b5a4f3e20";
+  try {
+    await mkdir(foreign);
+    const { parentTranscript } = await subagentSessionFixture(root, sessionId, agentId, [
+      { type: "assistant", message: { content: [{ type: "text", text: "reading the router" }, { type: "tool_use", name: "Read", input: {} }] } },
+    ]);
+    const input = {
+      session_id: sessionId,
+      transcript_path: parentTranscript,
+      tasks: [
+        { id: agentId, type: "local_agent", status: "running", description: "Audit the router", tokenCount: 10 },
+        { id: "lessons-extractor", type: "local_agent", status: "running", description: "Lessons extractor", tokenCount: 0 },
+      ],
+    };
+    const env = { CLAUDE_PLUGIN_DATA: foreign };
+    const first = await renderSubagentStatusLine(input, env);
+    const second = await renderSubagentStatusLine(input, env);
+
+    assert.deepEqual(await readdir(foreign), []);
+    assert.deepEqual(second, first);
+    assert.equal(first[0], "Audit the router | reading the router | tool: Read | status: running | 10 tokens");
+    assert.equal(first[1], "Lessons extractor | starting, no output yet | status: running");
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("subagent statusline fails open on an empty transcript_path", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-empty-transcript-"));
+  const input = {
+    session_id: "empty-transcript-session",
+    transcript_path: "",
+    tasks: [{ id: "a1111111111111111", type: "local_agent", status: "running", description: "Audit the router", tokenCount: 0 }],
+  };
+  try {
+    for (const env of [{}, { CLAUDE_PLUGIN_DATA: pluginData }]) {
+      assert.deepEqual(await renderSubagentStatusLine(input, env), ["Audit the router | starting, no output yet | status: running"]);
+    }
+    let output = "";
+    await runSubagentStatusLine({
+      env: {},
+      input: (async function* () { yield JSON.stringify(input); })(),
+      output: { write: (chunk) => { output += chunk; } },
+    });
+    assert.deepEqual(output.trim().split("\n").map((line) => JSON.parse(line)), [
+      { id: "a1111111111111111", content: "Audit the router | starting, no output yet | status: running" },
+    ]);
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+test("subagent statusline skips malformed tasks and redacts AWS access key ids", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-subagent-malformed-"));
+  const sessionId = "malformed-session";
+  const agentId = "a2222222222222222";
+  try {
+    const { parentTranscript } = await subagentSessionFixture(root, sessionId, agentId, [
+      assistantRecord("found AKIAIOSFODNN7EXAMPLE and ASIAY34FZKBOKMUTVV7A in the env"),
+    ]);
+    const rows = await renderSubagentStatusLine({
+      session_id: sessionId,
+      transcript_path: parentTranscript,
+      tasks: [null, "task", 7, [], { id: agentId, type: "local_agent", status: "running", description: "Scan for leaks AKIAIOSFODNN7EXAMPLE" }],
+    }, {});
+    assert.equal(rows.length, 5);
+    assert.equal(rows[4], "Scan for leaks [redacted] | found [redacted] and [redacted] in the env | status: running");
+    for (const row of rows) assert.doesNotMatch(row, /AKIAIOSFODNN7EXAMPLE|ASIAY34FZKBOKMUTVV7A/);
   } finally {
     await rm(root, { force: true, recursive: true });
   }
@@ -4021,7 +4135,7 @@ test("subagent status line follows a running local_agent task to its nested chil
     assert.match(row, /reviewing correctness/);
     assert.match(row, /tool: Grep/);
     assert.match(row, /512 tokens/);
-    assert.doesNotMatch(row, /waiting for first event/);
+    assert.doesNotMatch(row, /no output yet/);
   } finally {
     await rm(root, { force: true, recursive: true });
   }
@@ -4052,7 +4166,7 @@ test("subagent identity wins over colliding generic labels", async () => {
       tasks: [{ id: "child-b", agent_id: "logical-task-id", name: "Explore", status: "running" }],
     }, env);
     assert.match(row, /child-b progress/);
-    assert.doesNotMatch(row, /ambiguous child transcript/);
+    assert.doesNotMatch(row, /no output yet|ambiguous child transcript/);
     assert.doesNotMatch(row, /child-a progress|child-c progress/);
   } finally {
     await rm(pluginData, { force: true, recursive: true });
@@ -4069,7 +4183,7 @@ test("parent Agent launch state survives a transcript larger than the tail windo
   };
   const launchResult = {
     type: "user",
-    message: { content: [{ type: "tool_result", tool_use_id: "call-large", content: "Async agent launched successfully." }] },
+    message: { content: [{ type: "tool_result", tool_use_id: "call-large", is_error: true, content: "Agent failed to start." }] },
   };
   const filler = { type: "assistant", message: { content: [{ type: "text", text: "x".repeat(2_000) }] } };
 
@@ -4080,8 +4194,8 @@ test("parent Agent launch state survives a transcript larger than the tail windo
       transcript_path: parentTranscript,
       tasks: [{ id: "large-task", name: "large parent task", status: "running", tokenCount: 1 }],
     }, env);
-    assert.match(row, /running: waiting for child event/);
-    assert.doesNotMatch(row, /waiting for first event/);
+    assert.match(row, /launch failed: Agent tool error \| status: launch-failed/);
+    assert.doesNotMatch(row, /no output yet/);
   } finally {
     await rm(pluginData, { force: true, recursive: true });
   }
@@ -4120,7 +4234,7 @@ test("subagent status line joins Claude task names to hook agent types and keeps
     assert.match(row, /Read/);
     assert.match(row, /643 tokens/);
     assert.match(row, /status: running/);
-    assert.doesNotMatch(row, /ambiguous child transcript/);
+    assert.doesNotMatch(row, /no output yet|ambiguous child transcript/);
   } finally {
     await rm(pluginData, { force: true, recursive: true });
   }
@@ -4151,7 +4265,7 @@ test("subagent status line hydrates an existing session from child transcripts",
     assert.match(row, /existing child progress/);
     assert.match(row, /Read/);
     assert.match(row, /42 tokens/);
-    assert.doesNotMatch(row, /waiting for first event|ambiguous child transcript/);
+    assert.doesNotMatch(row, /no output yet|ambiguous child transcript/);
   } finally {
     await rm(pluginData, { force: true, recursive: true });
   }
@@ -4182,7 +4296,7 @@ test("subagent status line refreshes an existing empty state as the child transc
       tasks: [{ id: "task-refresh", name: "refresh-child-task", status: "running", tokenCount: 42 }],
     };
     const [waiting] = await renderSubagentStatusLine(statuslineInput, env);
-    assert.match(waiting, /waiting for first event/);
+    assert.match(waiting, /starting, no output yet/);
 
     await writeFile(childTranscript, `${JSON.stringify({
       type: "assistant",
@@ -4190,7 +4304,7 @@ test("subagent status line refreshes an existing empty state as the child transc
     })}\n`);
     const [refreshed] = await renderSubagentStatusLine(statuslineInput, env);
     assert.match(refreshed, /child event arrived/);
-    assert.doesNotMatch(refreshed, /waiting for first event/);
+    assert.doesNotMatch(refreshed, /no output yet/);
   } finally {
     await rm(pluginData, { force: true, recursive: true });
   }
@@ -4225,7 +4339,7 @@ test("subagent status line hydrates a native child through its metadata sidecar"
     assert.match(row, /sidecar child progress/);
     assert.match(row, /Read/);
     assert.match(row, /42 tokens/);
-    assert.doesNotMatch(row, /waiting for first event|ambiguous child transcript/);
+    assert.doesNotMatch(row, /no output yet|ambiguous child transcript/);
   } finally {
     await rm(pluginData, { force: true, recursive: true });
   }
@@ -4399,7 +4513,7 @@ test("subagent status line resolves row context without a parent id and displays
     }, env);
     assert.match(row, /GPT child progress/);
     assert.match(row, /model: gpt-5\.6-luna/);
-    assert.doesNotMatch(row, /ambiguous child transcript/);
+    assert.doesNotMatch(row, /no output yet|ambiguous child transcript/);
   } finally {
     await rm(pluginData, { force: true, recursive: true });
   }
