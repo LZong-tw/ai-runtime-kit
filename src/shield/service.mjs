@@ -9,13 +9,14 @@ import { createInterface } from "node:readline/promises";
 import { promisify } from "node:util";
 import { describePlistDrift } from "../launchd-plist.mjs";
 
-import { readShieldIdentity, readShieldPolicyState, shieldPaths, writeShieldConfig } from "./paths.mjs";
+import { ccshieldPaths, readShieldIdentity, readShieldPolicyState, shieldPaths, writeShieldConfig } from "./paths.mjs";
 import { classifyShieldRequest } from "./classify.mjs";
 import { createApprovalBroker } from "./approval.mjs";
 import { approvalChannelRegistration, createApprovalChannel } from "./approval-channel.mjs";
 
 const execFileAsync = promisify(execFile);
 export const SHIELD_SERVICE_LABEL = "com.airkit.shield";
+const CCSHIELD_SERVICE_LABEL = "com.ccshield";
 const SUBSCRIPTION_TARGET_ORIGIN = "https://api.anthropic.com";
 const UNKNOWN_REMOTE_HASH = "0".repeat(64);
 
@@ -202,7 +203,7 @@ export async function transitionShieldPolicy({ paths, installPolicy, io = defaul
 }
 
 export async function inspectShieldService({ paths, io = defaultIo, runLaunchctl = defaultLaunchctl } = {}) {
-  assertShieldPaths(paths);
+  assertShieldPaths(paths, { readOnly: true });
   const installed = await io.readFile(paths.launchAgentPath, "utf8").then(() => true, () => false);
   const printed = await launch(runLaunchctl, ["print", paths.launchdTarget], true);
   const state = /^\s*state = (\S+)\s*$/m.exec(printed.stdout ?? "")?.[1] ?? null;
@@ -213,7 +214,7 @@ export async function inspectShieldService({ paths, io = defaultIo, runLaunchctl
 }
 
 export async function readShieldConfig({ paths, io = defaultIo } = {}) {
-  assertShieldPaths(paths);
+  assertShieldPaths(paths, { readOnly: true });
   let config;
   try {
     config = JSON.parse(await io.readFile(paths.configPath, "utf8"));
@@ -251,8 +252,46 @@ export async function readShieldConfig({ paths, io = defaultIo } = {}) {
   return result;
 }
 
-export async function ensureShieldReady({ lane, expectedTargetOrigin, env = process.env, paths = shieldPaths({ env, lane }), io = defaultIo, inspectService = inspectShieldService, isProcessAlive = defaultIsProcessAlive, probeShield = defaultProbeShield } = {}) {
+// ccshield wins when its lane identity is valid v1 and its daemon answers;
+// otherwise the legacy AirKit Shield root is used and readiness fails closed
+// there exactly as before. `skipped` says why ccshield was not chosen.
+export async function resolveShieldRoot({ lane, env = process.env, io = defaultIo, isProcessAlive = defaultIsProcessAlive, probeShield = defaultProbeShield } = {}) {
   assertLane(lane);
+  let reason;
+  let candidate = null;
+  try {
+    candidate = ccshieldPaths({ env, lane });
+    reason = await ccshieldRejection(candidate, lane, { io, isProcessAlive, probeShield });
+  } catch (error) {
+    reason = `ccshield paths are invalid: ${error.message}`;
+  }
+  if (reason === null) return { implementation: "ccshield", rootDir: candidate.rootDir, paths: candidate, skipped: [] };
+  const paths = shieldPaths({ env, lane });
+  return {
+    implementation: "airkit",
+    rootDir: paths.rootDir,
+    paths,
+    skipped: [{ implementation: "ccshield", rootDir: candidate?.rootDir ?? null, reason }],
+  };
+}
+
+async function ccshieldRejection(paths, lane, { io, isProcessAlive, probeShield }) {
+  let identity;
+  try {
+    identity = await readShieldIdentity({ paths, io });
+  } catch (error) {
+    return `identity is not valid v1: ${error.message}`;
+  }
+  if (!identity) return "identity.json is absent";
+  if (identity.lane !== lane) return `identity lane is ${identity.lane}, not ${lane}`;
+  if (!(await isProcessAlive(identity.pid))) return `identity pid ${identity.pid} is not running`;
+  if (!(await probeShield(identity.origin, identity.capability))) return "listener at the identity origin did not answer the readiness probe";
+  return null;
+}
+
+export async function ensureShieldReady({ lane, expectedTargetOrigin, env = process.env, paths, io = defaultIo, inspectService = inspectShieldService, isProcessAlive = defaultIsProcessAlive, probeShield = defaultProbeShield } = {}) {
+  assertLane(lane);
+  paths ??= (await resolveShieldRoot({ lane, env, io, isProcessAlive, probeShield })).paths;
   const identity = await readShieldIdentity({ paths, io });
   if (!identity || !(await isProcessAlive(identity.pid))) {
     throw new Error("shield identity is stale; start the shield service and try again");
@@ -288,6 +327,7 @@ export async function ensureShieldReady({ lane, expectedTargetOrigin, env = proc
     targetClass: identity.targetClass,
     policyVersion: identity.policyVersion,
     detectorVersions: identity.detectorVersions,
+    paths,
   };
 }
 
@@ -335,7 +375,7 @@ export async function registerShieldApprovalChannel({ ready, channel, launchId, 
   if (!ready?.origin || !ready?.capability || channel === null || channel === undefined) throw new Error("shield approval registration requires a fresh ready identity");
   assertShieldLaunchId(launchId);
   const registration = { ...approvalChannelRegistration(channel), launchId };
-  const config = await readShieldConfig({ paths: paths ?? shieldPaths({ lane: ready.lane }), io });
+  const config = await readShieldConfig({ paths: paths ?? ready.paths ?? shieldPaths({ lane: ready.lane }), io });
   let response;
   try {
     response = await fetchImpl(`${ready.origin}/_airkit/shield/approval-channel`, {
@@ -352,7 +392,7 @@ export async function registerShieldApprovalChannel({ ready, channel, launchId, 
 export async function unregisterShieldApprovalChannel({ ready, launchId, paths, io, fetchImpl = fetch } = {}) {
   if (!ready?.origin) return;
   assertShieldLaunchId(launchId);
-  const config = await readShieldConfig({ paths: paths ?? shieldPaths({ lane: ready.lane }), io });
+  const config = await readShieldConfig({ paths: paths ?? ready.paths ?? shieldPaths({ lane: ready.lane }), io });
   const response = await fetchImpl(`${ready.origin}/_airkit/shield/approval-channel`, {
     method: "DELETE",
     headers: { "x-airkit-shield-control": config.controlCapability, "content-type": "application/json" },
@@ -364,7 +404,7 @@ export async function unregisterShieldApprovalChannel({ ready, launchId, paths, 
 export async function createShieldDestinationLease({ ready, targetOrigin, launcherContext, paths, io, fetchImpl = fetch } = {}) {
   if ((ready?.lane !== "managed" && ready?.lane !== "subscription") || !ready.origin || !targetOrigin) throw new Error("shield destination lease requires a fresh lane identity");
   if (launcherContext !== undefined) classifyShieldRequest({ body: Buffer.alloc(0), launcherContext });
-  const config = await readShieldConfig({ paths: paths ?? shieldPaths({ lane: ready.lane }), io });
+  const config = await readShieldConfig({ paths: paths ?? ready.paths ?? shieldPaths({ lane: ready.lane }), io });
   const capability = randomUUID().replaceAll("-", "");
   const response = await fetchImpl(`${ready.origin}/_airkit/shield/destination-lease`, {
     method: "POST",
@@ -377,7 +417,7 @@ export async function createShieldDestinationLease({ ready, targetOrigin, launch
 
 export async function revokeShieldDestinationLease({ ready, paths, io, fetchImpl = fetch } = {}) {
   if ((ready?.lane !== "managed" && ready?.lane !== "subscription") || !ready.origin || !ready.capability) return;
-  const config = await readShieldConfig({ paths: paths ?? shieldPaths({ lane: ready.lane }), io });
+  const config = await readShieldConfig({ paths: paths ?? ready.paths ?? shieldPaths({ lane: ready.lane }), io });
   const response = await fetchImpl(`${ready.origin}/_airkit/shield/destination-lease`, {
     method: "DELETE",
     headers: { "x-airkit-shield-control": config.controlCapability, "content-type": "application/json" },
@@ -388,7 +428,7 @@ export async function revokeShieldDestinationLease({ ready, paths, io, fetchImpl
 
 export async function renewShieldDestinationLease({ ready, targetOrigin, paths, io, fetchImpl = fetch } = {}) {
   if ((ready?.lane !== "managed" && ready?.lane !== "subscription") || !ready.origin || !ready.capability || !targetOrigin) return false;
-  const config = await readShieldConfig({ paths: paths ?? shieldPaths({ lane: ready.lane }), io });
+  const config = await readShieldConfig({ paths: paths ?? ready.paths ?? shieldPaths({ lane: ready.lane }), io });
   const response = await fetchImpl(`${ready.origin}/_airkit/shield/destination-lease`, {
     method: "POST",
     headers: { "x-airkit-shield-control": config.controlCapability, "content-type": "application/json" },
@@ -520,7 +560,9 @@ function normalizeShieldTargetOrigin(value, label) {
   return target.origin;
 }
 
-function assertShieldPaths(paths) {
+// AirKit only reads a ccshield root; installing, starting or stopping a service
+// stays on its own label.
+function assertShieldPaths(paths, { readOnly = false } = {}) {
   if (!paths?.rootDir || !paths.lane || !paths.serviceLabel || !paths.configPath || !paths.identityPath || !paths.policyStatePath || !paths.launchAgentPath || !paths.launchdDomain || !paths.launchdTarget) {
     throw new TypeError("shield service paths are required");
   }
@@ -530,9 +572,14 @@ function assertShieldPaths(paths) {
   if (!isAbsolute(paths.launchAgentPath) || basename(paths.launchAgentPath) !== `${paths.serviceLabel}.plist`) {
     throw new Error("paths.launchAgentPath must be the absolute lane-specific shield plist path");
   }
-  if ((paths.lane !== "subscription" && paths.lane !== "managed") || paths.serviceLabel !== `${SHIELD_SERVICE_LABEL}.${paths.lane}` || !isAbsolute(paths.rootDir) || paths.configPath !== resolve(paths.rootDir, "config.json") || paths.identityPath !== resolve(paths.rootDir, "identity.json") || paths.policyStatePath !== resolve(paths.rootDir, "policy-state.json")) {
+  if ((paths.lane !== "subscription" && paths.lane !== "managed") || !serviceLabels(paths.lane, readOnly).includes(paths.serviceLabel) || !isAbsolute(paths.rootDir) || paths.configPath !== resolve(paths.rootDir, "config.json") || paths.identityPath !== resolve(paths.rootDir, "identity.json") || paths.policyStatePath !== resolve(paths.rootDir, "policy-state.json")) {
     throw new Error("shield service paths must use the canonical shield state layout");
   }
+}
+
+function serviceLabels(lane, readOnly) {
+  const own = `${SHIELD_SERVICE_LABEL}.${lane}`;
+  return readOnly ? [own, `${CCSHIELD_SERVICE_LABEL}.${lane}`] : [own];
 }
 
 function sameDetectorVersions(actual, expected) {

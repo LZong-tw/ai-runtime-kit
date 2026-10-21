@@ -20,6 +20,7 @@ import {
   transitionShieldPolicy,
   renewShieldDestinationLease,
   revokeShieldDestinationLease,
+  resolveShieldRoot,
 } from "./service.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -77,6 +78,9 @@ async function createDefaultShieldDependencies(dependencies) {
   const renewLease = dependencies.renewShieldDestinationLease ?? renewShieldDestinationLease;
   const revokeLease = dependencies.revokeShieldDestinationLease ?? revokeShieldDestinationLease;
   const launchChild = dependencies.launchShieldChild ?? launchShieldChild;
+  const resolveRoot = ({ lane }) => (dependencies.resolveShieldRoot ?? resolveShieldRoot)({
+    lane, env, io: dependencies.io, isProcessAlive: dependencies.isProcessAlive, probeShield: dependencies.probeShield,
+  });
   const createDecisionRecorder = dependencies.createDecisionRecorder ?? (async () => {
     const { createDefaultDecisionRecorder } = await import("../shieldd.mjs");
     return createDefaultDecisionRecorder({ env });
@@ -119,13 +123,15 @@ async function createDefaultShieldDependencies(dependencies) {
       return { state: "stopped", stopped: true };
     },
     async status({ lane }) {
-      return await shieldStatus({ paths: shieldPaths({ env, lane }), io: dependencies.io, runLaunchctl: dependencies.runLaunchctl });
+      const root = await resolveRoot({ lane });
+      return { ...await shieldStatus({ paths: root.paths, io: dependencies.io, runLaunchctl: dependencies.runLaunchctl }), root: describeRoot(root) };
     },
     async doctor({ lane }) {
-      const status = await readStatus({ paths: shieldPaths({ env, lane }), io: dependencies.io, runLaunchctl: dependencies.runLaunchctl });
+      const root = await resolveRoot({ lane });
+      const status = await readStatus({ paths: root.paths, io: dependencies.io, runLaunchctl: dependencies.runLaunchctl });
       const operational = await readOperational({ env, audit: await readAuditHealth() });
       const selected = operational.lanes?.find((entry) => entry.lane === lane);
-      return { ...status, state: status.state === "healthy" && selected?.state !== "protected" ? "degraded" : status.state, operational, checked: true };
+      return { ...status, root: describeRoot(root), state: status.state === "healthy" && selected?.state !== "protected" ? "degraded" : status.state, operational, checked: true };
     },
     async privacyProvision({ bundlePath, gitleaksPath, gitleaksRulesPath, policyBundlePath, lane = "subscription", write }) {
       const lanePaths = shieldPaths({ env, lane });
@@ -157,16 +163,20 @@ async function createDefaultShieldDependencies(dependencies) {
       return { state: "degraded", version: result.version, detectorVersions: result.detectorVersions, write: true };
     },
     async policyStatus({ lane }) {
-      const state = await readShieldPolicyState({ paths: shieldPaths({ env, lane }), io: dependencies.io });
-      return state ? { state: "healthy", version: state.version, detectorVersions: state.detectorVersions } : { state: "stopped", installed: false };
+      const root = await resolveRoot({ lane });
+      const state = await readShieldPolicyState({ paths: root.paths, io: dependencies.io });
+      return state
+        ? { state: "healthy", version: state.version, detectorVersions: state.detectorVersions, root: describeRoot(root) }
+        : { state: "stopped", installed: false, root: describeRoot(root) };
     },
     async launch({ lane, targetOrigin: fixedTarget, pxpipe = false, command, args }) {
-      const lanePaths = shieldPaths({ env, lane });
-      let ready = await ensureReady({ lane, env, paths: lanePaths, io: dependencies.io, inspectService: dependencies.inspectService, isProcessAlive: dependencies.isProcessAlive, probeShield: dependencies.probeShield });
+      let ready = await ensureReady({ lane, env, io: dependencies.io, inspectService: dependencies.inspectService, isProcessAlive: dependencies.isProcessAlive, probeShield: dependencies.probeShield });
       // pxpipe sits behind Shield, so it only sees redacted traffic. It lives
       // exactly as long as the lease that points Shield at it.
       const hop = pxpipe ? await (dependencies.startPxpipeHop ?? startPxpipeHop)({ upstream: ANTHROPIC_ORIGIN, env }) : null;
       const targetOrigin = hop?.origin ?? fixedTarget;
+      // Leases go to whichever root answered, ccshield or the legacy one.
+      const lanePaths = ready.paths ?? shieldPaths({ env, lane });
       if (targetOrigin) {
         try { ready = await createLease({ ready, targetOrigin, paths: lanePaths, io: dependencies.io }); }
         catch (error) { await hop?.close(); throw error; }
@@ -223,6 +233,10 @@ async function shieldStatus({ paths, io, runLaunchctl }) {
   } catch {
     return { state: "blocked", service, identity: { present: false, valid: false } };
   }
+}
+
+function describeRoot({ implementation, rootDir, skipped }) {
+  return { implementation, rootDir, skipped: skipped.map(({ implementation: name, reason }) => ({ implementation: name, reason })) };
 }
 
 function parseLaunch(argv) {

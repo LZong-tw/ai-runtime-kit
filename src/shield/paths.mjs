@@ -4,17 +4,35 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 const SHIELD_LABEL = "com.airkit.shield";
+const CCSHIELD_LABEL = "com.ccshield";
 const defaultIo = { chmod, constants, lstat, mkdir, open, readFile, rename, unlink };
 const canonicalShieldPaths = new WeakSet();
 
+export const SHIELD_IMPLEMENTATIONS = Object.freeze({
+  airkit: Object.freeze({ label: SHIELD_LABEL, stateDir: [".local", "state", "airkit-shield"], name: "AirKit Shield" }),
+  ccshield: Object.freeze({ label: CCSHIELD_LABEL, stateDir: [".local", "share", "ccshield"], name: "ccshield" }),
+});
+
 export function shieldPaths({ env = process.env, homeDir = homeFromEnv(env), uid = env.AIRKIT_GUI_UID ?? env.UID ?? process.getuid?.(), lane = "subscription", rootDir, configPath, identityPath, socketPath, launchAgentPath } = {}) {
+  return buildShieldPaths({ implementation: "airkit", homeDir, uid, lane, rootDir: rootDir ?? env.AIRKIT_SHIELD_ROOT_DIR, configPath, identityPath, socketPath, launchAgentPath });
+}
+
+// The read-only view of a ccshield lane. AirKit never writes here; it only
+// discovers a running ccshield daemon and talks to it over the shared v1 protocol.
+export function ccshieldPaths({ env = process.env, homeDir = homeFromEnv(env), uid = env.AIRKIT_GUI_UID ?? env.UID ?? process.getuid?.(), lane = "subscription" } = {}) {
+  return buildShieldPaths({ implementation: "ccshield", homeDir, uid, lane });
+}
+
+function buildShieldPaths({ implementation, homeDir, uid, lane, rootDir, configPath, identityPath, socketPath, launchAgentPath }) {
   assertLane(lane);
+  const { label, stateDir, name } = SHIELD_IMPLEMENTATIONS[implementation];
   const home = absolutePath(homeDir, "homeDir");
-  const canonicalRoot = join(home, ".local", "state", "airkit-shield", lane);
-  const root = absolutePath(rootDir ?? env.AIRKIT_SHIELD_ROOT_DIR ?? canonicalRoot, "rootDir");
-  if (resolve(root) !== resolve(canonicalRoot)) throw new Error("rootDir must be the canonical AirKit Shield state directory");
-  const serviceLabel = `${SHIELD_LABEL}.${lane}`;
+  const canonicalRoot = join(home, ...stateDir, lane);
+  const root = absolutePath(rootDir ?? canonicalRoot, "rootDir");
+  if (resolve(root) !== resolve(canonicalRoot)) throw new Error(`rootDir must be the canonical ${name} state directory`);
+  const serviceLabel = `${label}.${lane}`;
   const paths = {
+    implementation,
     lane,
     serviceLabel,
     rootDir: root,
