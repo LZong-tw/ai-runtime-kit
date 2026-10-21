@@ -1,4 +1,4 @@
-import { dirname, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { GITLEAKS_COMMAND_PROFILE } from "./gitleaks.mjs";
@@ -8,6 +8,7 @@ import { installShieldPolicyProvision, readShieldPolicyProvision } from "./polic
 import { readShieldOperationalStatus } from "./operational-status.mjs";
 import { hasBackgroundClaudeHost, scheduleBackgroundHostRelease } from "./background-host.mjs";
 import { ANTHROPIC_ORIGIN, startPxpipeHop } from "./pxpipe-hop.mjs";
+import { globalModelWarning, inspectGlobalModel, neutralizeGlobalModel } from "../global-model-guard.mjs";
 import {
   ensureShieldReady,
   createShieldDestinationLease,
@@ -133,7 +134,15 @@ async function createDefaultShieldDependencies(dependencies) {
       const status = await readStatus({ paths: root.paths, io: dependencies.io, runLaunchctl: dependencies.runLaunchctl });
       const operational = await readOperational({ env, audit: await readAuditHealth(), inspectService });
       const selected = operational.lanes?.find((entry) => entry.lane === lane);
-      return { ...status, root: describeRoot(root), state: status.state === "healthy" && selected?.state !== "protected" ? "degraded" : status.state, operational, checked: true };
+      const globalModel = lane === "subscription" ? await inspectGlobalModel({ env, readText: dependencies.readGlobalSettings }) : null;
+      return {
+        ...status,
+        root: describeRoot(root),
+        state: status.state === "healthy" && selected?.state !== "protected" ? "degraded" : status.state,
+        operational,
+        ...(globalModel ? { globalModel: { ...globalModel, warning: globalModelWarning(globalModel, false).replace(/^airkit: /, "").trim() } } : {}),
+        checked: true,
+      };
     },
     async privacyProvision({ bundlePath, gitleaksPath, gitleaksRulesPath, policyBundlePath, lane = "subscription", write }) {
       const lanePaths = shieldPaths({ env, lane });
@@ -183,6 +192,11 @@ async function createDefaultShieldDependencies(dependencies) {
         : { state: "stopped", installed: false, root: describeRoot(root) };
     },
     async launch({ lane, targetOrigin: fixedTarget, pxpipe = false, command, args }) {
+      // The subscription lane talks to Anthropic directly, so a CCR route id
+      // saved as the shared default by an airclaude `/model` pick cannot work.
+      if (lane === "subscription" && /^claude/i.test(basename(String(command)))) {
+        ({ args } = await neutralizeGlobalModel({ args, env, readText: dependencies.readGlobalSettings, stderr: dependencies.stderr ?? process.stderr }));
+      }
       let ready = await ensureReady({ lane, env, io: dependencies.io, inspectService: dependencies.inspectService, isProcessAlive: dependencies.isProcessAlive, probeShield: dependencies.probeShield });
       // pxpipe sits behind Shield, so it only sees redacted traffic. It lives
       // exactly as long as the lease that points Shield at it.

@@ -6865,6 +6865,81 @@ test("runAirclaudeCli dry run supports positional pro mode and avoids launching"
   }
 });
 
+async function withLeakedGlobalModel(model, run) {
+  const home = await mkdtemp(join(tmpdir(), "airkit-global-model-"));
+  await mkdir(join(home, ".claude"), { recursive: true });
+  await writeFile(join(home, ".claude", "settings.json"), JSON.stringify({ model }));
+  try {
+    return await run({ home, env: { DEMO_API_KEY: "runtime-secret", HOME: home }, configDir: join(home, "airkit") });
+  } finally {
+    await rm(home, { force: true, recursive: true });
+  }
+}
+
+test("plain airclaude overrides a CCR route id that /model saved into the shared settings", async () => {
+  const catalog = launchCatalog();
+  catalog.profiles[0].launch.modes.plain = {};
+  await withLeakedGlobalModel("anthropic/claude-ccr-h6169726b", async ({ home, env, configDir }) => {
+    const result = await prepareLaunch(catalog, "launch-example", {
+      configDir, env, dryRun: true, mode: "plain", plainClaude: true, userArgs: ["--resume"],
+      commandExists: async () => true,
+      runCommand: async () => ({ ok: true, status: 0, stdout: "" }),
+      runtimeVersions: passingRuntimeVersions(),
+    });
+    assert.deepEqual(result.launch.args, ["--model", "default"]);
+    assert.deepEqual(result.launch.userArgs, ["--resume"]);
+    assert.equal(result.globalModel.path, join(home, ".claude", "settings.json"));
+    assert.equal(result.globalModel.model, "anthropic/claude-ccr-h6169726b");
+  });
+});
+
+test("plain airclaude keeps a user --model and a real saved model untouched", async () => {
+  const catalog = launchCatalog();
+  catalog.profiles[0].launch.modes.plain = {};
+  const plan = (env, configDir, userArgs) => prepareLaunch(catalog, "launch-example", {
+    configDir, env, dryRun: true, mode: "plain", plainClaude: true, userArgs,
+    commandExists: async () => true,
+    runCommand: async () => ({ ok: true, status: 0, stdout: "" }),
+    runtimeVersions: passingRuntimeVersions(),
+  });
+  await withLeakedGlobalModel("claude-airkit-mode[1m]", async ({ env, configDir }) => {
+    const result = await plan(env, configDir, ["--model", "opus"]);
+    assert.deepEqual(result.launch.args, []);
+    assert.deepEqual(result.launch.userArgs, ["--model", "opus"]);
+  });
+  await withLeakedGlobalModel("opus[1m]", async ({ env, configDir }) => {
+    const result = await plan(env, configDir, []);
+    assert.deepEqual(result.launch.args, []);
+    assert.equal(result.globalModel, undefined);
+  });
+});
+
+test("airclaude --doctor warns about a CCR-only model saved in the shared settings", async () => {
+  const catalogPath = await writeLaunchCatalog();
+  try {
+    await withLeakedGlobalModel("anthropic/claude-ccr-h6169726b", async ({ home, env, configDir }) => {
+      const output = [];
+      const exitCode = await runAirclaudeCli(["--doctor", "--profile", "launch-example", "--config-dir", configDir], {
+        catalogPath,
+        env,
+        stdout: { write: (chunk) => output.push(chunk) },
+        ccrClient: ccrTestClient([]),
+        commandExists: async () => true,
+        runCommand: async () => ({ ok: true, status: 0, stdout: "" }),
+        runtimeVersions: passingRuntimeVersions(),
+        spawnCommand: () => { throw new Error("doctor must not launch"); },
+      });
+      const text = output.join("");
+      assert.equal(exitCode, 0);
+      assert.ok(text.includes(`- warning: ${join(home, ".claude", "settings.json")} sets "model": "anthropic/claude-ccr-h6169726b"`), text);
+      assert.match(text, /remove the "model" key/);
+      assert.match(text, /\n\nEnvironment:/);
+    });
+  } finally {
+    await rm(resolve(catalogPath, ".."), { force: true, recursive: true });
+  }
+});
+
 // A profile with launch.pxpipe spawns the binary on every launch, so a missing
 // or broken pxpipe has to show up in doctor rather than as a failed launch.
 async function airclaudeDoctorPxpipe({ pxpipe, script }) {
