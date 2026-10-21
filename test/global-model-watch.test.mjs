@@ -84,6 +84,25 @@ test("the file watcher restores the key while the session is still running", asy
   });
 });
 
+test("the stat poll restores the key when the file watch delivers no events", async () => {
+  await withHome(async ({ env, path }) => {
+    await writeFile(path, JSON.stringify({ model: "opus" }));
+    const deafFs = { ...fs, watch: () => ({ on() {}, close() {} }) };
+    const watch = startGlobalModelWatch({ env, fs: deafFs, debounceMs: 10, pollMs: 50 });
+    try {
+      await writeFile(`${path}.tmp`, JSON.stringify({ model: ROUTE_ID }));
+      await fs.promises.rename(`${path}.tmp`, path);
+      const deadline = Date.now() + 5_000;
+      while (JSON.parse(await readFile(path, "utf8")).model !== "opus" && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      assert.equal(JSON.parse(await readFile(path, "utf8")).model, "opus");
+    } finally {
+      watch.stop();
+    }
+  });
+});
+
 test("a launch that started from a CCR-only value has nothing to restore to and writes nothing", async () => {
   await withHome(async ({ env, path }) => {
     await writeFile(path, JSON.stringify({ model: ROUTE_ID }));
