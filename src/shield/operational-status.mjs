@@ -28,7 +28,7 @@ export async function readShieldOperationalStatus({
       if (resolvePaths) {
         paths = resolvePaths({ env, lane });
       } else {
-        root = await resolveRoot({ lane, env });
+        root = await resolveRoot({ lane, env, inspectService });
         paths = root.paths;
       }
     } catch {

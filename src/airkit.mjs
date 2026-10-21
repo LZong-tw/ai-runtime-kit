@@ -1563,7 +1563,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
         ? await inspectLiveCcrState(catalog, { ...options, configDir: plan.configDir })
         : {}),
       ...(options.doctor && profileShield?.enabled === true
-        ? { shieldRoot: await (options.resolveShieldRoot ?? resolveShieldRoot)({ lane: plan.shieldLauncher.clientLane, env: options.env ?? process.env }) }
+        ? { shieldRoot: await (options.resolveShieldRoot ?? resolveShieldRoot)({ lane: plan.shieldLauncher.clientLane, env: options.env ?? process.env, ...(options.inspectShieldService ? { inspectService: options.inspectShieldService } : {}) }) }
         : {}),
       runtime: await checkLaunchRuntime(plan, options),
     };

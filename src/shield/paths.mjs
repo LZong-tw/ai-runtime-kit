@@ -68,6 +68,8 @@ export async function readShieldIdentity({ paths, io = defaultIo } = {}) {
   if (!paths?.identityPath) throw new TypeError("shield identity paths are required");
   let contents;
   try {
+    // ccshield files are only trusted when private to this user; the legacy root keeps its old behaviour.
+    if (paths.implementation === "ccshield") await assertPrivateRegularFile(paths.identityPath, io, "shield identity");
     contents = await io.readFile(paths.identityPath, "utf8");
   } catch (error) {
     if (error?.code === "ENOENT") return null;
@@ -354,13 +356,13 @@ function safePath(value) { return typeof value === "string" && isAbsolute(value)
 function isPlainObject(value) { return value !== null && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype; }
 function exactKeys(value, expected) { const keys = Object.keys(value).sort(); return keys.length === expected.length && keys.every((key, index) => key === expected[index]); }
 
-async function assertPrivateRegularFile(path, io) {
+export async function assertPrivateRegularFile(path, io = defaultIo, label = "shield policy state") {
   const entry = await io.lstat(path);
-  if (entry.isSymbolicLink()) throw new Error("shield policy state must not be a symlink");
-  if (!entry.isFile()) throw new Error("shield policy state must be a regular file");
-  if ((entry.mode & 0o077) !== 0) throw new Error("shield policy state must be private");
+  if (entry.isSymbolicLink()) throw new Error(`${label} must not be a symlink`);
+  if (!entry.isFile()) throw new Error(`${label} must be a regular file`);
+  if ((entry.mode & 0o077) !== 0) throw new Error(`${label} must be private`);
   const ownerUid = process.getuid?.();
-  if (Number.isInteger(ownerUid) && entry.uid !== ownerUid) throw new Error("shield policy state has unexpected owner");
+  if (Number.isInteger(ownerUid) && entry.uid !== ownerUid) throw new Error(`${label} has unexpected owner`);
 }
 
 async function ensureDirectory(path, io, ownerUid, privateMode) {

@@ -5787,6 +5787,7 @@ test("airclaude --doctor names the ccshield root it would use, or the legacy roo
         runCommand: async () => ({ ok: true, status: 0, stdout: "" }),
         runtimeVersions: passingRuntimeVersions(),
         spawnCommand: () => { throw new Error("doctor must not launch"); },
+        inspectShieldService: fixture.inspectService,
       });
       return { exitCode, text: output.join("") };
     };
