@@ -9,7 +9,7 @@ import { createInterface } from "node:readline/promises";
 import { promisify } from "node:util";
 import { describePlistDrift } from "../launchd-plist.mjs";
 
-import { ccshieldPaths, readShieldIdentity, readShieldPolicyState, shieldPaths, writeShieldConfig } from "./paths.mjs";
+import { assertPrivateRegularFile, ccshieldPaths, readShieldIdentity, readShieldPolicyState, shieldPaths, writeShieldConfig } from "./paths.mjs";
 import { classifyShieldRequest } from "./classify.mjs";
 import { createApprovalBroker } from "./approval.mjs";
 import { approvalChannelRegistration, createApprovalChannel } from "./approval-channel.mjs";
@@ -215,6 +215,7 @@ export async function inspectShieldService({ paths, io = defaultIo, runLaunchctl
 
 export async function readShieldConfig({ paths, io = defaultIo } = {}) {
   assertShieldPaths(paths, { readOnly: true });
+  if (paths.implementation === "ccshield") await assertPrivateRegularFile(paths.configPath, io, "shield configuration");
   let config;
   try {
     config = JSON.parse(await io.readFile(paths.configPath, "utf8"));
@@ -255,13 +256,13 @@ export async function readShieldConfig({ paths, io = defaultIo } = {}) {
 // ccshield wins when its lane identity is valid v1 and its daemon answers;
 // otherwise the legacy AirKit Shield root is used and readiness fails closed
 // there exactly as before. `skipped` says why ccshield was not chosen.
-export async function resolveShieldRoot({ lane, env = process.env, io = defaultIo, isProcessAlive = defaultIsProcessAlive, probeShield = defaultProbeShield } = {}) {
+export async function resolveShieldRoot({ lane, env = process.env, io = defaultIo, inspectService = inspectShieldService, isProcessAlive = defaultIsProcessAlive, probeShield = defaultProbeShield } = {}) {
   assertLane(lane);
   let reason;
   let candidate = null;
   try {
     candidate = ccshieldPaths({ env, lane });
-    reason = await ccshieldRejection(candidate, lane, { io, isProcessAlive, probeShield });
+    reason = await ccshieldRejection(candidate, lane, { io, inspectService, isProcessAlive, probeShield });
   } catch (error) {
     reason = `ccshield paths are invalid: ${error.message}`;
   }
@@ -275,7 +276,22 @@ export async function resolveShieldRoot({ lane, env = process.env, io = defaultI
   };
 }
 
-async function ccshieldRejection(paths, lane, { io, isProcessAlive, probeShield }) {
+// Nothing is sent to identity.origin until launchd confirms the ccshield service
+// owns identity.pid: a stale identity whose pid was reused, with some other
+// process on the freed port, must never receive the capability.
+async function ccshieldRejection(paths, lane, { io, inspectService, isProcessAlive, probeShield }) {
+  for (const [path, label] of [[paths.identityPath, "identity.json"], [paths.configPath, "config.json"]]) {
+    try {
+      await assertPrivateRegularFile(path, io, label);
+    } catch (error) {
+      // A missing config is left for readiness to reject, so it fails closed on this root.
+      if (error?.code === "ENOENT") {
+        if (label === "identity.json") return "identity.json is absent";
+        continue;
+      }
+      return error.message;
+    }
+  }
   let identity;
   try {
     identity = await readShieldIdentity({ paths, io });
@@ -284,6 +300,14 @@ async function ccshieldRejection(paths, lane, { io, isProcessAlive, probeShield 
   }
   if (!identity) return "identity.json is absent";
   if (identity.lane !== lane) return `identity lane is ${identity.lane}, not ${lane}`;
+  let service;
+  try {
+    service = await inspectService({ paths, io });
+  } catch (error) {
+    return `service ${paths.serviceLabel} could not be inspected: ${error.message}`;
+  }
+  if (!service?.loaded || !service.active) return `service ${paths.serviceLabel} is not actively running`;
+  if (service.pid !== identity.pid) return `service ${paths.serviceLabel} pid does not match identity pid ${identity.pid}`;
   if (!(await isProcessAlive(identity.pid))) return `identity pid ${identity.pid} is not running`;
   if (!(await probeShield(identity.origin, identity.capability))) return "listener at the identity origin did not answer the readiness probe";
   return null;
@@ -291,7 +315,18 @@ async function ccshieldRejection(paths, lane, { io, isProcessAlive, probeShield 
 
 export async function ensureShieldReady({ lane, expectedTargetOrigin, env = process.env, paths, io = defaultIo, inspectService = inspectShieldService, isProcessAlive = defaultIsProcessAlive, probeShield = defaultProbeShield } = {}) {
   assertLane(lane);
-  paths ??= (await resolveShieldRoot({ lane, env, io, isProcessAlive, probeShield })).paths;
+  paths ??= (await resolveShieldRoot({ lane, env, io, inspectService, isProcessAlive, probeShield })).paths;
+  try {
+    return await checkShieldReady({ lane, paths, io, inspectService, isProcessAlive, probeShield });
+  } catch (error) {
+    if (paths.implementation !== "ccshield") throw error;
+    // A ccshield that answered discovery owns the lane; a failed deep check
+    // blocks the launch rather than quietly switching Shield implementations.
+    throw new Error(`${error.message} (ccshield at ${paths.rootDir} is the chosen Shield; AirKit does not fall back to the legacy Shield)`, { cause: error });
+  }
+}
+
+async function checkShieldReady({ lane, paths, io, inspectService, isProcessAlive, probeShield }) {
   const identity = await readShieldIdentity({ paths, io });
   if (!identity || !(await isProcessAlive(identity.pid))) {
     throw new Error("shield identity is stale; start the shield service and try again");

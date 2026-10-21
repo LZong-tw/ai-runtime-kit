@@ -12,6 +12,13 @@ export const CCSHIELD_POLICY = Object.freeze({
   detectorVersions: Object.freeze({ gitleaks: "8.30.1", privacy: "opf-1-client-exempt" }),
 });
 
+// launchd's view of a ccshield service that owns `pid`; every other label is not loaded.
+export function ccshieldService(pid, lane = "subscription") {
+  return async ({ paths }) => paths.serviceLabel === `com.ccshield.${lane}`
+    ? { label: paths.serviceLabel, installed: true, loaded: true, active: true, pid, state: "running", stale: false }
+    : { label: paths.serviceLabel, installed: false, loaded: false, active: false, pid: null, state: null, stale: false };
+}
+
 export async function startCcshieldFixture({ lane = "subscription", identity: override = {}, listen = true, home } = {}) {
   home ??= await mkdtemp(join(tmpdir(), "airkit-ccshield-"));
   const root = join(home, ".local", "share", "ccshield", lane);
@@ -72,6 +79,7 @@ export async function startCcshieldFixture({ lane = "subscription", identity: ov
     requests,
     env: { HOME: home, AIRKIT_GUI_UID: String(process.getuid()) },
     legacyRoot: join(home, ".local", "state", "airkit-shield", lane),
+    inspectService: ccshieldService(identity.pid, lane),
     async close() {
       if (server) await new Promise((resolve) => server.close(resolve));
       await rm(home, { recursive: true, force: true });
