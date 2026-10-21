@@ -11,6 +11,17 @@ import { ccrOnlyModelReason, globalSettingsPath } from "./global-model-guard.mjs
 
 const ABSENT = Symbol("absent");
 const DEFAULT_DEBOUNCE_MS = 200;
+const DEFAULT_POLL_MS = 2_000;
+
+// stat follows the link, so a rename onto the target changes ino/mtime/size.
+function statKey(fs, path) {
+  try {
+    const s = fs.statSync(path);
+    return `${s.ino}:${s.mtimeMs}:${s.size}`;
+  } catch {
+    return "missing";
+  }
+}
 
 export function startGlobalModelWatch({
   env = process.env,
@@ -18,6 +29,7 @@ export function startGlobalModelWatch({
   fs = nodeFs,
   debounceMs = DEFAULT_DEBOUNCE_MS,
   watch = true,
+  pollMs = DEFAULT_POLL_MS,
 } = {}) {
   const path = globalSettingsPath(env);
   if (!path) return null;
@@ -32,6 +44,7 @@ export function startGlobalModelWatch({
   const restored = [];
   const watchers = [];
   let timer = null;
+  let poller = null;
   let stopped = false;
 
   const check = () => {
@@ -63,12 +76,27 @@ export function startGlobalModelWatch({
         watchers.push(watcher);
       } catch {}
     }
+    // FSEvents can drop or badly delay events right after a watch starts or
+    // under load, so a cheap stat poll backs the watch up.
+    if (pollMs > 0) {
+      let last = statKey(fs, path);
+      poller = setInterval(() => {
+        const next = statKey(fs, path);
+        if (next !== last) {
+          last = next;
+          schedule();
+        }
+      }, pollMs);
+      poller.unref?.();
+    }
   }
 
   const stop = () => {
     if (!stopped) {
       if (timer !== null) clearTimeout(timer);
       timer = null;
+      if (poller !== null) clearInterval(poller);
+      poller = null;
       for (const watcher of watchers) {
         try { watcher.close(); } catch {}
       }
