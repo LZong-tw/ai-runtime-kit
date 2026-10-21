@@ -67,7 +67,7 @@ test("inspectGlobalModel ignores missing files, invalid JSON and real Anthropic 
 test("a leaked global model is overridden for this launch only, with one warning naming the fix", async () => {
   const reader = settingsReader({ model: ROUTE_ID, permissions: {} });
   const stderr = sink();
-  const result = await neutralizeGlobalModel({ args: ["--resume", "--", "x"], env: { HOME: "/h" }, readText: reader.readText, stderr });
+  const result = await neutralizeGlobalModel({ args: ["--resume", "--", "x"], env: { HOME: "/h" }, cwd: null, readText: reader.readText, stderr });
 
   assert.deepEqual(result.args, ["--model", "default", "--resume", "--", "x"]);
   assert.equal(result.leak.model, ROUTE_ID);
@@ -79,11 +79,10 @@ test("a leaked global model is overridden for this launch only, with one warning
   assert.match(warning, /overrides it with --model/);
 });
 
-test("an explicit --model or ANTHROPIC_MODEL wins without reading the settings file", async () => {
+test("an explicit --model wins without reading the settings file", async () => {
   for (const [args, env] of [
     [["--model", "opus"], { HOME: "/h" }],
     [["--model=opus"], { HOME: "/h" }],
-    [["-p", "hi"], { HOME: "/h", ANTHROPIC_MODEL: "claude-sonnet-5" }],
   ]) {
     const reader = settingsReader({ model: ROUTE_ID });
     const stderr = sink();
@@ -93,4 +92,43 @@ test("an explicit --model or ANTHROPIC_MODEL wins without reading the settings f
     assert.deepEqual(reader.reads, []);
     assert.equal(stderr.value(), "");
   }
+});
+
+function filesReader(files) {
+  return async (path) => {
+    if (!(path in files)) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    return JSON.stringify(files[path]);
+  };
+}
+
+test("a real model from ANTHROPIC_MODEL or project/local settings is not overridden", async () => {
+  const global = { "/h/.claude/settings.json": { model: ROUTE_ID } };
+  for (const [env, files] of [
+    [{ HOME: "/h", ANTHROPIC_MODEL: "claude-sonnet-5" }, global],
+    [{ HOME: "/h" }, { ...global, "/proj/.claude/settings.local.json": { model: "opus" } }],
+    [{ HOME: "/h" }, { ...global, "/proj/.claude/settings.json": { model: "sonnet[1m]" } }],
+  ]) {
+    const stderr = sink();
+    const result = await neutralizeGlobalModel({ args: ["-p", "hi"], env, cwd: "/proj", readText: filesReader(files), stderr });
+    assert.deepEqual(result.args, ["-p", "hi"]);
+    assert.equal(result.leak, null);
+    assert.equal(stderr.value(), "");
+  }
+});
+
+test("a CCR-only value in a higher layer is not a choice to protect", async () => {
+  const global = { "/h/.claude/settings.json": { model: ROUTE_ID } };
+  for (const [env, files] of [
+    [{ HOME: "/h", ANTHROPIC_MODEL: "claude-airkit-mode[1m]" }, global],
+    [{ HOME: "/h" }, { ...global, "/proj/.claude/settings.local.json": { model: ROUTE_ID } }],
+  ]) {
+    const result = await neutralizeGlobalModel({ args: ["-p", "hi"], env, cwd: "/proj", readText: filesReader(files), stderr: sink() });
+    assert.deepEqual(result.args, ["--model", "default", "-p", "hi"]);
+  }
+});
+
+test("project settings in the home directory are the user layer, not a higher one", async () => {
+  const files = { "/h/.claude/settings.json": { model: ROUTE_ID } };
+  const result = await neutralizeGlobalModel({ args: [], env: { HOME: "/h" }, cwd: "/h", readText: filesReader(files), stderr: sink() });
+  assert.deepEqual(result.args, ["--model", "default"]);
 });
