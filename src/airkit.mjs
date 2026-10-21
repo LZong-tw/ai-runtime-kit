@@ -3215,6 +3215,7 @@ function renderLaunchResult(result, options = {}) {
     ? [
         `- ${result.runtime.ccr.ok ? "ok" : "fail"} CCR: ${result.runtime.ccr.command}`,
         `- ${result.runtime.launch.ok ? "ok" : "fail"} launch command: ${result.runtime.launch.command}`,
+        ...(result.runtime.pxpipe ? [pxpipeRuntimeLine(result.runtime.pxpipe)] : []),
       ]
     : [];
 
@@ -3957,7 +3958,35 @@ async function checkLaunchRuntime(plan, options = {}) {
   if (failedVersion) {
     runtime.ccr = { ok: false, command: "ccr", reason: `${failedVersion.label} ${failedVersion.version ?? "missing"} does not satisfy ${failedVersion.requirement}; run airkit runtime update --write` };
   }
+  // Only doctor probes pxpipe: a launch finds out by spawning it, and a dry
+  // run stays free of side effects beyond the existing command checks.
+  if (options.doctor) runtime.pxpipe = inspectPxpipe(plan, options.env ?? process.env);
   return runtime;
+}
+
+const PXPIPE_INSTALL = "npm i -g pxpipe-proxy";
+
+// A launch.pxpipe profile spawns pxpipe on every launch, so a missing or broken
+// binary otherwise surfaces as a confusing launch failure. The lookup goes
+// through /bin/sh so it honours the launch environment's PATH.
+function inspectPxpipe(plan, env) {
+  if (plan.launch.pxpipe !== true) return { ok: true, required: false };
+  const found = runCommandSync("/bin/sh", ["-c", "command -v pxpipe"], { env, timeoutMs: 5000 });
+  if (!found.ok || !found.stdout) {
+    return { ok: false, required: true, reason: `missing command: pxpipe; run ${PXPIPE_INSTALL}` };
+  }
+  const path = found.stdout;
+  const version = runCommandSync(path, ["--version"], { env, timeoutMs: 5000 });
+  if (!version.ok) {
+    const detail = version.stderr || `exit ${version.status}`;
+    return { ok: false, required: true, path, reason: `${path}: pxpipe --version failed (${detail}); reinstall with ${PXPIPE_INSTALL}` };
+  }
+  return { ok: true, required: true, path, version: version.stdout.split("\n")[0] };
+}
+
+function pxpipeRuntimeLine(pxpipe) {
+  if (!pxpipe.required) return "- info pxpipe: not required by this profile";
+  return pxpipe.ok ? `- ok pxpipe: ${pxpipe.path} (${pxpipe.version})` : `- fail pxpipe: ${pxpipe.reason}`;
 }
 
 async function readCcrVersionSafely(ccrClient) {
