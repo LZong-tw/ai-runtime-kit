@@ -3874,7 +3874,7 @@ async function probeCcr3Runtime(options = {}) {
   const runCommand = options.runCommand ?? runCommandSync;
   await mkdir(env.HOME, { recursive: true });
   try {
-    const client = createCcr3Client({ ...options, env, runCommand });
+    const client = createCcr3Client({ ...options, env, runCommand, isolated: true });
     const version = await client.getVersion();
     const config = await client.getConfig();
     await client.saveConfig({
@@ -4098,7 +4098,10 @@ export function createCcr3Client(options = {}) {
   async function startService() {
     if (options.autoStart === false) throw serviceUnavailable();
     const timeoutMs = options.commandTimeoutMs ?? 30000;
-    const supervisor = await ccrSupervisorTarget(runCommand, options.env);
+    // An isolated client runs against a private CCR home. The launchd job
+    // serves the user's real home, so kickstarting it here starts nothing this
+    // client can reach — the isolated service has to be its own.
+    const supervisor = options.isolated ? null : await ccrSupervisorTarget(runCommand, options.env);
     if (supervisor) {
       // `kickstart` without -k starts a job that is down and does nothing to one
       // that is already up, so it cannot add a second service the way a bare

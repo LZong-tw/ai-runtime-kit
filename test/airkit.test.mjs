@@ -1938,6 +1938,51 @@ test("runtime update --write requires the isolated CCR 3 profile probe", async (
   }
 });
 
+test("runtime update probe starts its own isolated CCR instead of kickstarting the user's supervised daemon", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-runtime-probe-isolation-"));
+  const realHome = join(root, "real-home");
+  const calls = [];
+  try {
+    const exitCode = await runCli(["runtime", "update", "--write"], {
+      backupDir: join(root, "backup"),
+      env: { HOME: realHome },
+      fetch: async (_url, request) => {
+        const { method } = JSON.parse(request.body);
+        const value = method === "getAppInfo" ? { version: "3.0.18" } : method === "getConfig" ? {} : null;
+        return { ok: true, status: 200, json: async () => ({ value }) };
+      },
+      runCommand: async (command, args, options = {}) => {
+        calls.push({ command, args, env: options.env });
+        if (command === "launchctl" && args[0] === "print") return { ok: true, status: 0, stdout: "state = running" };
+        if (command === "ccr" && args[0] === "start") {
+          const stateDir = join(options.env.CCR_INTERNAL_HOME_DIR, ".claude-code-router");
+          await mkdir(stateDir, { recursive: true });
+          await writeFile(join(stateDir, "service.json"), JSON.stringify({
+            url: "http://127.0.0.1:9/?ccr_web_token=probe-token",
+          }));
+        }
+        return { ok: true, status: 0, stdout: "" };
+      },
+      runtimeVersions: passingRuntimeVersions(),
+      serviceReadyTimeoutMs: 50,
+      stdout: { write: () => {} },
+    });
+
+    assert.equal(exitCode, 0);
+    assert.equal(calls.some(({ command, args }) => command === "launchctl" && args[0] === "kickstart"), false);
+    const start = calls.find(({ command, args }) => command === "ccr" && args[0] === "start");
+    assert.deepEqual(start?.args, ["start", "--no-gateway"]);
+    assert.notEqual(start.env.HOME, realHome);
+    assert.match(start.env.CCR_INTERNAL_HOME_DIR, /airkit-runtime-probe-/);
+    assert.equal(start.env.CCR_INTERNAL_HOME_DIR, start.env.HOME);
+    const stop = calls.find(({ command, args }) => command === "ccr" && args[0] === "stop");
+    assert.equal(stop?.env.CCR_INTERNAL_HOME_DIR, start.env.CCR_INTERNAL_HOME_DIR);
+    assert.ok(calls.indexOf(stop) > calls.indexOf(start));
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
 test("airclaude launch injects reusable runtime lessons", async () => {
   const catalog = await loadCatalog();
   const plan = buildLaunchPlan(catalog, profile, { configDir: "/tmp/airkit-test" });
