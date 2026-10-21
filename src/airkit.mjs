@@ -43,7 +43,7 @@ import { runShieldCli } from "./shield/cli.mjs";
 import { DEFAULT_BACKGROUND_HOST_GRACE_MS, backgroundHostUsesAdapter, hasBackgroundClaudeHost, scheduleBackgroundHostRelease } from "./shield/background-host.mjs";
 import { resolveShieldLauncher, resolveShieldLauncherMarker } from "./shield/launchers.mjs";
 import { startPxpipeHop } from "./shield/pxpipe-hop.mjs";
-import { assertNoPersistedShieldEndpointOverride, buildShieldChildEnv, createShieldDestinationLease, createShieldLaunchId, ensureShieldReady, openShieldApprovalChannel, registerShieldApprovalChannel, renewShieldDestinationLease, revokeShieldDestinationLease, unregisterShieldApprovalChannel } from "./shield/service.mjs";
+import { assertNoPersistedShieldEndpointOverride, buildShieldChildEnv, createShieldDestinationLease, createShieldLaunchId, ensureShieldReady, openShieldApprovalChannel, registerShieldApprovalChannel, renewShieldDestinationLease, resolveShieldRoot, revokeShieldDestinationLease, unregisterShieldApprovalChannel } from "./shield/service.mjs";
 
 export { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
 export { tailHeadroomSavings } from "./audit/reconcile/headroom.mjs";
@@ -1561,6 +1561,9 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
       // offline; --doctor is the diagnostic mode, so it reads live state.
       ...(options.doctor
         ? await inspectLiveCcrState(catalog, { ...options, configDir: plan.configDir })
+        : {}),
+      ...(options.doctor && profileShield?.enabled === true
+        ? { shieldRoot: await (options.resolveShieldRoot ?? resolveShieldRoot)({ lane: plan.shieldLauncher.clientLane, env: options.env ?? process.env, ...(options.inspectShieldService ? { inspectService: options.inspectShieldService } : {}) }) }
         : {}),
       runtime: await checkLaunchRuntime(plan, options),
     };
@@ -3240,7 +3243,7 @@ ${[
 ]
   .map((line) => (line.startsWith("  ") ? line : `- ${line}`))
   .join("\n")}
-Runtime:
+${result.shieldRoot ? renderShieldRootLines(result.shieldRoot) : ""}Runtime:
 ${runtimeLines.join("\n") || "- skipped"}
 Launch:
 - ${result.launch.command} ${[...result.launch.args, ...result.launch.userArgs].map(quoteShell).join(" ")}
@@ -3252,6 +3255,14 @@ Environment:
 - inherited Claude home: CLAUDE_CONFIG_DIR is left untouched
 ${contextEnvLines(result.launch.env)}${autoCompactLines(result.launch.autoCompact)}${result.launch.strictMcp ? "- MCP: strict (user, project and plugin MCP servers are not loaded; only --mcp-config servers)\n" : ""}- cleared: ${(result.launch.clearEnv ?? []).join(", ") || "none"}
 `;
+}
+
+// Says which Shield the launch would use, so a stale ccshield identity reads as
+// a skipped candidate with its reason instead of a bare "service down".
+function renderShieldRootLines({ implementation, rootDir, skipped = [] }) {
+  return `Shield:
+- ${implementation === "ccshield" ? "ccshield" : "legacy AirKit Shield"}: ${rootDir}
+${skipped.map((entry) => `- skipped ${entry.implementation} at ${entry.rootDir ?? "unresolved root"}: ${entry.reason}\n`).join("")}`;
 }
 
 // `launch.context` overrides are invisible in the launch argv but change how the

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +15,7 @@ import {
   launchShieldChild,
   planShieldService,
   readShieldConfig,
+  resolveShieldRoot,
   startShieldService,
   stopShieldService,
   uninstallShieldService,
@@ -22,7 +23,10 @@ import {
 } from "../src/shield/service.mjs";
 import { invalidateShieldPolicyBinding, shieldPaths, writeShieldConfig, writeShieldIdentity, writeShieldPolicyState } from "../src/shield/paths.mjs";
 import { startShieldProxy } from "../src/shield/proxy.mjs";
+import { readShieldIdentity } from "../src/shield/paths.mjs";
+import { readShieldOperationalStatus } from "../src/shield/operational-status.mjs";
 import { installShieldPolicyProvision } from "../src/shield/policy-bundle.mjs";
+import { CCSHIELD_CAPABILITY, CCSHIELD_CONTROL_CAPABILITY, ccshieldService, startCcshieldFixture } from "./fixtures/ccshield-daemon.mjs";
 
 const capability = "c".repeat(32);
 const generation = "generation-1";
@@ -364,6 +368,7 @@ test("readiness returns only after the active identity answers the capability pr
     targetClass: "subscription",
     policyVersion: policyState.version,
     detectorVersions: policyState.detectorVersions,
+    paths,
   });
 });
 
@@ -1268,3 +1273,411 @@ async function startServer(handler) {
   const address = server.address();
   return { origin: `http://127.0.0.1:${address.port}`, close: () => new Promise((resolvePromise) => server.close(resolvePromise)) };
 }
+
+// ccshield listens on 127.0.0.1:<random> and publishes it as identity.origin;
+// it never creates shield.sock, so discovery must not depend on one.
+async function ccshieldHome(identity) {
+  const home = await mkdtemp(join(tmpdir(), "airkit-ccshield-"));
+  const root = join(home, ".local", "share", "ccshield", "subscription");
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  if (identity) await writeFile(join(root, "identity.json"), JSON.stringify(identity), { mode: 0o600 });
+  return { home, root, env: { HOME: home, AIRKIT_GUI_UID: "501" } };
+}
+
+const ccshieldIdentity = {
+  origin: "http://127.0.0.1:53817",
+  capability: "d".repeat(32),
+  version: 1,
+  pid: 4242,
+  lane: "subscription",
+  generation: "ccshield-generation-1",
+  targetClass: "subscription",
+  policyVersion: "airkit-subscription-opf-2026.09.30-secret-redact",
+  detectorVersions: { gitleaks: "8.30.1", privacy: "opf-1-client-exempt" },
+  media: { documents: "blocked", images: "unscanned" },
+};
+
+test("discovery picks a live ccshield by identity origin without any shield.sock", async () => {
+  const { home, root, env } = await ccshieldHome(ccshieldIdentity);
+  try {
+    const probes = [];
+    const resolved = await resolveShieldRoot({
+      lane: "subscription",
+      env,
+      inspectService: ccshieldService(4242),
+      isProcessAlive: async (pid) => pid === 4242,
+      probeShield: async (origin, cap) => { probes.push([origin, cap]); return true; },
+    });
+    await assert.rejects(stat(join(root, "shield.sock")), { code: "ENOENT" });
+    assert.equal(resolved.implementation, "ccshield");
+    assert.equal(resolved.rootDir, root);
+    assert.deepEqual(resolved.skipped, []);
+    assert.deepEqual(probes, [["http://127.0.0.1:53817", "d".repeat(32)]]);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("discovery falls back to the AirKit root when ccshield does not answer its origin", async () => {
+  const { home, env } = await ccshieldHome(ccshieldIdentity);
+  try {
+    const resolved = await resolveShieldRoot({ lane: "subscription", env, inspectService: ccshieldService(4242), isProcessAlive: async () => true, probeShield: async () => false });
+    assert.equal(resolved.implementation, "airkit");
+    assert.equal(resolved.rootDir, join(home, ".local", "state", "airkit-shield", "subscription"));
+    assert.equal(resolved.skipped[0].reason, "listener at the identity origin did not answer the readiness probe");
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("discovery falls back when the ccshield pid is dead or identity is absent", async () => {
+  const dead = await ccshieldHome(ccshieldIdentity);
+  const empty = await ccshieldHome(null);
+  try {
+    const probeShield = async () => { throw new Error("must not probe"); };
+    const stale = await resolveShieldRoot({ lane: "subscription", env: dead.env, inspectService: ccshieldService(4242), isProcessAlive: async () => false, probeShield });
+    assert.equal(stale.implementation, "airkit");
+    assert.match(stale.skipped[0].reason, /pid 4242 is not running/);
+    const absent = await resolveShieldRoot({ lane: "subscription", env: empty.env, isProcessAlive: async () => true, probeShield });
+    assert.equal(absent.implementation, "airkit");
+    assert.equal(absent.skipped[0].reason, "identity.json is absent");
+  } finally {
+    await rm(dead.home, { recursive: true, force: true });
+    await rm(empty.home, { recursive: true, force: true });
+  }
+});
+
+const notRunning = async () => ({ ok: true, stdout: "state = not running\n" });
+const running = async () => ({ ok: true, stdout: `state = running\npid = ${process.pid}\n` });
+const quietDoctor = { readAuditHealth: async () => "healthy", readShieldOperationalStatus: async () => ({ lanes: [] }) };
+
+test("an invalid or lane-mismatched ccshield identity falls back to the legacy root with its reason", async () => {
+  const mismatched = await startCcshieldFixture({ identity: { lane: "managed", targetClass: "managed" } });
+  const nonLoopback = await startCcshieldFixture({ identity: { origin: "http://10.0.0.1:8811" } });
+  try {
+    const lane = await resolveShieldRoot({ lane: "subscription", env: mismatched.env });
+    assert.equal(lane.implementation, "airkit");
+    assert.equal(lane.rootDir, mismatched.legacyRoot);
+    assert.deepEqual(lane.skipped.map(({ implementation, rootDir, reason }) => ({ implementation, rootDir, reason })), [
+      { implementation: "ccshield", rootDir: mismatched.root, reason: "identity lane is managed, not subscription" },
+    ]);
+    const schema = await resolveShieldRoot({ lane: "subscription", env: nonLoopback.env });
+    assert.equal(schema.implementation, "airkit");
+    assert.match(schema.skipped[0].reason, /^identity is not valid v1: shield identity origin must be a loopback HTTP endpoint/);
+    assert.deepEqual(nonLoopback.requests, [], "an invalid identity is never probed");
+  } finally {
+    await mismatched.close();
+    await nonLoopback.close();
+  }
+});
+
+test("shield status and doctor name the legacy root and why ccshield was skipped", async () => {
+  const fixture = await startCcshieldFixture({ identity: { lane: "managed", targetClass: "managed" } });
+  try {
+    for (const command of ["status", "doctor"]) {
+      const output = capture();
+      await runShieldCli([command, "--lane", "subscription"], { stdout: output.stdout, env: fixture.env, runLaunchctl: notRunning, ...quietDoctor });
+      const text = output.value();
+      assert.match(text, /^root\.implementation: airkit$/m, command);
+      assert.ok(text.includes(`root.rootDir: ${fixture.legacyRoot}\n`), command);
+      assert.match(text, /^root\.skipped\.0\.implementation: ccshield$/m, command);
+      assert.match(text, /^root\.skipped\.0\.reason: identity lane is managed, not subscription$/m, command);
+      assert.match(text, /^state: stopped$/m, command);
+    }
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("shield status and doctor name a live ccshield root without leaking its origin", async () => {
+  const fixture = await startCcshieldFixture();
+  try {
+    for (const command of ["status", "doctor"]) {
+      const output = capture();
+      await runShieldCli([command, "--lane", "subscription"], { stdout: output.stdout, env: fixture.env, runLaunchctl: running, ...quietDoctor });
+      const text = output.value();
+      assert.match(text, /^root\.implementation: ccshield$/m, command);
+      assert.ok(text.includes(`root.rootDir: ${fixture.root}\n`), command);
+      assert.doesNotMatch(text, /root\.skipped\./, command);
+      assert.equal(text.includes("127.0.0.1"), false, command);
+      assert.equal(text.includes(CCSHIELD_CAPABILITY), false, command);
+    }
+    const output = capture();
+    await runShieldCli(["status", "--lane", "subscription"], { stdout: output.stdout, env: fixture.env, runLaunchctl: running });
+    assert.match(output.value(), /^state: healthy$/m);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("with neither ccshield nor legacy Shield alive, readiness and launch fail closed as before", async () => {
+  const silent = await startCcshieldFixture({ listen: false });
+  const dead = await startCcshieldFixture({ identity: { pid: 2 ** 22 + 7 } });
+  try {
+    for (const fixture of [silent, dead]) {
+      await assert.rejects(
+        ensureShieldReady({ lane: "subscription", env: fixture.env, inspectService: async () => { throw new Error("must not inspect"); } }),
+        /^Error: shield identity is stale; start the shield service and try again$/,
+      );
+      let launched = false;
+      await assert.rejects(
+        runShieldCli(["launch", "--lane", "subscription", "--target", "http://127.0.0.1:8804", "--", "echo", "no"], {
+          stdout: capture().stdout,
+          env: fixture.env,
+          launchShieldChild: async () => { launched = true; return { code: 0 }; },
+        }),
+        /shield identity is stale/,
+      );
+      assert.equal(launched, false);
+      assert.deepEqual(fixture.requests.filter(({ path }) => path !== "/_airkit/shield/ready"), []);
+    }
+  } finally {
+    await silent.close();
+    await dead.close();
+  }
+});
+
+test("a launch on a chosen ccshield leases through its origin and reads its config", async () => {
+  const fixture = await startCcshieldFixture();
+  const launched = [];
+  try {
+    const code = await runShieldCli(["launch", "--lane", "subscription", "--target", "http://127.0.0.1:8804", "--", "echo", "ok"], {
+      stdout: capture().stdout,
+      env: fixture.env,
+      inspectService: async () => ({ loaded: true, active: true, pid: process.pid }),
+      shieldLeaseSetInterval: () => ({ unref() {} }),
+      shieldLeaseClearInterval: () => {},
+      backgroundHostDetector: async () => false,
+      launchShieldChild: async ({ ready }) => { launched.push(ready); return { code: 0 }; },
+    });
+    assert.equal(code, 0);
+    assert.equal(launched.length, 1);
+    assert.equal(launched[0].origin, fixture.origin);
+    assert.equal(launched[0].paths.implementation, "ccshield");
+    assert.equal(launched[0].paths.rootDir, fixture.root);
+    const leases = fixture.requests.filter(({ path }) => path === "/_airkit/shield/destination-lease");
+    assert.deepEqual(leases.map(({ method, control }) => [method, control]), [
+      ["POST", CCSHIELD_CONTROL_CAPABILITY],
+      ["DELETE", CCSHIELD_CONTROL_CAPABILITY],
+    ]);
+    assert.equal(leases[0].body.targetOrigin, "http://127.0.0.1:8804");
+    assert.equal(leases[1].body.capability, leases[0].body.capability);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("approval channel registration goes to the chosen ccshield origin", async () => {
+  const fixture = await startCcshieldFixture();
+  try {
+    const ready = await ensureShieldReady({ lane: "subscription", env: fixture.env, inspectService: async () => ({ loaded: true, active: true, pid: process.pid }) });
+    assert.equal(ready.paths.rootDir, fixture.root);
+    const result = await launchShieldChild({
+      command: "echo",
+      args: ["ok"],
+      ready,
+      env: { HOME: fixture.home },
+      approvalBroker: {},
+      createApprovalChannel: async () => ({ socketPath: "/tmp/airkit-ccshield-approval.sock", capability: "f".repeat(32), async close() {} }),
+      spawnChild: () => {
+        const child = new EventEmitter();
+        setImmediate(() => child.emit("close", 0, null));
+        return child;
+      },
+    });
+    assert.equal(result.code, 0);
+    const approvals = fixture.requests.filter(({ path }) => path === "/_airkit/shield/approval-channel");
+    assert.deepEqual(approvals.map(({ method, control }) => [method, control]), [
+      ["POST", CCSHIELD_CONTROL_CAPABILITY],
+      ["DELETE", CCSHIELD_CONTROL_CAPABILITY],
+    ]);
+    assert.equal(approvals[0].body.socketPath, "/tmp/airkit-ccshield-approval.sock");
+    assert.equal(approvals[1].body.launchId, approvals[0].body.launchId);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("shield policy status reads the policy of the chosen ccshield root", async () => {
+  const fixture = await startCcshieldFixture();
+  try {
+    const output = capture();
+    const code = await runShieldCli(["policy", "status", "--lane", "subscription"], { stdout: output.stdout, env: fixture.env, runLaunchctl: running });
+    assert.equal(code, 0);
+    assert.match(output.value(), /^version: airkit-subscription-opf-2026\.09\.30-secret-redact$/m);
+    assert.match(output.value(), /^detectorVersions\.gitleaks: 8\.30\.1$/m);
+    assert.match(output.value(), /^root\.implementation: ccshield$/m);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("a stale ccshield pid with a foreign listener on its port never receives the capability", async () => {
+  // pid 1 is alive (EPERM) but is not ccshield; the fixture listener stands in for whatever now owns the port.
+  const fixture = await startCcshieldFixture({ identity: { pid: 1 } });
+  try {
+    const unloaded = await resolveShieldRoot({ lane: "subscription", env: fixture.env, inspectService: ccshieldService(null, "managed") });
+    assert.equal(unloaded.implementation, "airkit");
+    assert.equal(unloaded.skipped[0].reason, "service com.ccshield.subscription is not actively running");
+    const otherPid = await resolveShieldRoot({ lane: "subscription", env: fixture.env, inspectService: ccshieldService(process.pid) });
+    assert.equal(otherPid.implementation, "airkit");
+    assert.equal(otherPid.skipped[0].reason, "service com.ccshield.subscription pid does not match identity pid 1");
+    for (const argv of [["status"], ["doctor"], ["policy", "status"]]) {
+      await runShieldCli([...argv, "--lane", "subscription"], { stdout: capture().stdout, env: fixture.env, runLaunchctl: running, readAuditHealth: async () => "healthy" });
+    }
+    await assert.rejects(ensureShieldReady({ lane: "subscription", env: fixture.env, inspectService: ccshieldService(process.pid) }), /shield identity is stale/);
+    assert.deepEqual(fixture.requests, []);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("ccshield identity and config files must be private regular files of this user", async () => {
+  const cases = [
+    ["identity.json", 0o644, "identity.json must be private"],
+    ["config.json", 0o640, "config.json must be private"],
+  ];
+  for (const [file, mode, reason] of cases) {
+    const fixture = await startCcshieldFixture();
+    try {
+      await chmod(join(fixture.root, file), mode);
+      const resolved = await resolveShieldRoot({ lane: "subscription", env: fixture.env, inspectService: fixture.inspectService });
+      assert.equal(resolved.implementation, "airkit", file);
+      assert.equal(resolved.skipped[0].reason, reason);
+      assert.deepEqual(fixture.requests, [], file);
+    } finally {
+      await fixture.close();
+    }
+  }
+  const linked = await startCcshieldFixture();
+  try {
+    const real = join(linked.home, "identity-elsewhere.json");
+    await rename(join(linked.root, "identity.json"), real);
+    await symlink(real, join(linked.root, "identity.json"));
+    const resolved = await resolveShieldRoot({ lane: "subscription", env: linked.env, inspectService: linked.inspectService });
+    assert.equal(resolved.skipped[0].reason, "identity.json must not be a symlink");
+    assert.deepEqual(linked.requests, []);
+  } finally {
+    await linked.close();
+  }
+});
+
+test("the legacy root still reads a group-readable identity as before", async () => {
+  const fixture = await startCcshieldFixture({ listen: false });
+  try {
+    const paths = shieldPaths({ env: fixture.env, lane: "subscription" });
+    await mkdir(paths.rootDir, { recursive: true, mode: 0o700 });
+    await writeFile(paths.identityPath, JSON.stringify(fixture.identity), { mode: 0o644 });
+    await chmod(paths.identityPath, 0o644);
+    const identity = await readShieldIdentity({ paths });
+    assert.equal(identity.pid, process.pid);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("with both ccshield and the legacy Shield alive, ccshield wins and the legacy one is never contacted", async () => {
+  const fixture = await startCcshieldFixture();
+  const legacy = await startCcshieldFixture();
+  try {
+    await mkdir(fixture.legacyRoot, { recursive: true, mode: 0o700 });
+    await writeFile(join(fixture.legacyRoot, "identity.json"), JSON.stringify(legacy.identity), { mode: 0o600 });
+    const bothAlive = async ({ paths }) => ({ loaded: true, active: true, pid: process.pid, label: paths.serviceLabel });
+    const ready = await ensureShieldReady({ lane: "subscription", env: fixture.env, inspectService: bothAlive });
+    assert.equal(ready.origin, fixture.origin);
+    assert.equal(ready.paths.implementation, "ccshield");
+    assert.deepEqual(legacy.requests, []);
+  } finally {
+    await fixture.close();
+    await legacy.close();
+  }
+});
+
+test("a ccshield that answers discovery but fails a deep check blocks the launch without falling back", async () => {
+  const mutations = [
+    ["config.json", (value) => ({ ...value, generation: "ccshield-generation-2" }), /^shield configuration generation mismatch; restart the shield service \(ccshield at .+ is the chosen Shield; AirKit does not fall back to the legacy Shield\)$/],
+    ["policy-state.json", (value) => ({ ...value, version: "airkit-subscription-opf-2026.10.01" }), /^shield policy version mismatch; restart the shield service \(ccshield at .+ is the chosen Shield; AirKit does not fall back to the legacy Shield\)$/],
+  ];
+  for (const [file, mutate, message] of mutations) {
+    const fixture = await startCcshieldFixture();
+    const legacy = await startCcshieldFixture();
+    try {
+      const path = join(fixture.root, file);
+      await writeFile(path, JSON.stringify(mutate(JSON.parse(await readFile(path, "utf8")))), { mode: 0o600 });
+      await mkdir(fixture.legacyRoot, { recursive: true, mode: 0o700 });
+      await writeFile(join(fixture.legacyRoot, "identity.json"), JSON.stringify(legacy.identity), { mode: 0o600 });
+      const bothAlive = async ({ paths }) => ({ loaded: true, active: true, pid: process.pid, label: paths.serviceLabel });
+      await assert.rejects(ensureShieldReady({ lane: "subscription", env: fixture.env, inspectService: bothAlive }), (error) => message.test(error.message));
+      let launched = false;
+      await assert.rejects(runShieldCli(["launch", "--lane", "subscription", "--", "echo", "no"], {
+        stdout: capture().stdout,
+        env: fixture.env,
+        inspectService: bothAlive,
+        launchShieldChild: async () => { launched = true; return { code: 0 }; },
+      }), (error) => message.test(error.message));
+      assert.equal(launched, false, file);
+      assert.deepEqual(legacy.requests, [], file);
+      assert.deepEqual(fixture.requests.filter(({ path: requestPath }) => requestPath !== "/_airkit/shield/ready"), [], file);
+    } finally {
+      await fixture.close();
+      await legacy.close();
+    }
+  }
+});
+
+test("operational status and shield doctor name the ccshield root without its origin or capabilities", async () => {
+  const fixture = await startCcshieldFixture();
+  try {
+    const operational = await readShieldOperationalStatus({ env: fixture.env, audit: "healthy", inspectService: fixture.inspectService });
+    const subscription = operational.lanes.find(({ lane }) => lane === "subscription");
+    assert.equal(subscription.implementation, "ccshield");
+    assert.equal(subscription.root_dir, fixture.root);
+    const serialized = JSON.stringify(operational);
+    for (const secret of [fixture.origin, "127.0.0.1", CCSHIELD_CAPABILITY, CCSHIELD_CONTROL_CAPABILITY]) {
+      assert.equal(serialized.includes(secret), false, secret);
+    }
+    const output = capture();
+    await runShieldCli(["doctor", "--lane", "subscription"], { stdout: output.stdout, env: fixture.env, runLaunchctl: running, readAuditHealth: async () => "healthy" });
+    const text = output.value();
+    assert.ok(text.includes(`root_dir: ${fixture.root}\n`), text);
+    for (const secret of [fixture.origin, "127.0.0.1", CCSHIELD_CAPABILITY, CCSHIELD_CONTROL_CAPABILITY]) {
+      assert.equal(text.includes(secret), false, secret);
+    }
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("shield policy install refuses while ccshield serves the lane", async () => {
+  const fixture = await startCcshieldFixture();
+  try {
+    const output = capture();
+    const code = await runShieldCli(["policy", "install", "--bundle", "/tmp/policy-bundle", "--public-key", "/tmp/policy-public.pem", "--write"], {
+      stdout: output.stdout,
+      env: fixture.env,
+      runLaunchctl: running,
+      installShieldPolicyProvision: async () => { throw new Error("must not install into the legacy root"); },
+    });
+    assert.equal(code, 3);
+    assert.match(output.value(), /^state: blocked$/m);
+    assert.match(output.value(), /^refused: ccshield serves the subscription lane; install its policy with ccshield's own tooling\. This command installs into the legacy AirKit Shield only\.$/m);
+    assert.match(output.value(), /^root\.implementation: ccshield$/m);
+    await assert.rejects(stat(fixture.legacyRoot), { code: "ENOENT" });
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("legacy service commands say they manage the legacy AirKit Shield only", async () => {
+  const fixture = await startCcshieldFixture();
+  try {
+    const output = capture();
+    await runShieldCli(["uninstall", "--lane", "subscription"], { stdout: output.stdout, env: fixture.env, runLaunchctl: notRunning });
+    assert.match(output.value(), /^manages: legacy AirKit Shield only$/m);
+    const help = capture();
+    await runShieldCli(["help"], { stdout: help.stdout });
+    assert.match(help.value(), /legacy AirKit Shield only/);
+  } finally {
+    await fixture.close();
+  }
+});

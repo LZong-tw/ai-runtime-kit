@@ -8,6 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import * as airkitRuntime from "../src/airkit.mjs";
+import { startCcshieldFixture } from "./fixtures/ccshield-daemon.mjs";
 import * as ccrVerifier from "../scripts/verify-ccr3-e2e.mjs";
 import {
   buildHeartbeatResponse,
@@ -5763,6 +5764,47 @@ test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves
     });
   } finally {
     await rm(configDir, { force: true, recursive: true });
+  }
+});
+
+test("airclaude --doctor names the ccshield root it would use, or the legacy root and why", async () => {
+  const catalog = launchCatalog();
+  catalog.profiles[0].shield = { enabled: true, lane: "managed" };
+  const catalogPath = await writeLaunchCatalog(catalog);
+  const live = await startCcshieldFixture({ lane: "managed" });
+  const stale = await startCcshieldFixture({ lane: "managed", identity: { lane: "subscription", targetClass: "subscription" } });
+
+  try {
+    const doctor = async (fixture) => {
+      const output = [];
+      const configDir = join(fixture.home, "airkit");
+      const exitCode = await runAirclaudeCli(["--doctor", "--profile", "launch-example", "--config-dir", configDir], {
+        catalogPath,
+        env: { ...fixture.env, DEMO_API_KEY: "runtime-secret" },
+        stdout: { write: (chunk) => output.push(chunk) },
+        ccrClient: ccrTestClient([]),
+        commandExists: async () => true,
+        runCommand: async () => ({ ok: true, status: 0, stdout: "" }),
+        runtimeVersions: passingRuntimeVersions(),
+        spawnCommand: () => { throw new Error("doctor must not launch"); },
+        inspectShieldService: fixture.inspectService,
+      });
+      return { exitCode, text: output.join("") };
+    };
+
+    const chosen = await doctor(live);
+    assert.equal(chosen.exitCode, 0);
+    assert.ok(chosen.text.includes(`Shield:\n- ccshield: ${live.root}\nRuntime:`), chosen.text);
+    assert.equal(chosen.text.includes(live.origin), false);
+
+    const fallback = await doctor(stale);
+    assert.ok(fallback.text.includes(
+      `Shield:\n- legacy AirKit Shield: ${stale.legacyRoot}\n- skipped ccshield at ${stale.root}: identity lane is subscription, not managed\nRuntime:`,
+    ), fallback.text);
+  } finally {
+    await live.close();
+    await stale.close();
+    await rm(resolve(catalogPath, ".."), { force: true, recursive: true });
   }
 });
 
