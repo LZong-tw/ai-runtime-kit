@@ -4,17 +4,35 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 const SHIELD_LABEL = "com.airkit.shield";
+const CCSHIELD_LABEL = "com.ccshield";
 const defaultIo = { chmod, constants, lstat, mkdir, open, readFile, rename, unlink };
 const canonicalShieldPaths = new WeakSet();
 
+export const SHIELD_IMPLEMENTATIONS = Object.freeze({
+  airkit: Object.freeze({ label: SHIELD_LABEL, stateDir: [".local", "state", "airkit-shield"], name: "AirKit Shield" }),
+  ccshield: Object.freeze({ label: CCSHIELD_LABEL, stateDir: [".local", "share", "ccshield"], name: "ccshield" }),
+});
+
 export function shieldPaths({ env = process.env, homeDir = homeFromEnv(env), uid = env.AIRKIT_GUI_UID ?? env.UID ?? process.getuid?.(), lane = "subscription", rootDir, configPath, identityPath, socketPath, launchAgentPath } = {}) {
+  return buildShieldPaths({ implementation: "airkit", homeDir, uid, lane, rootDir: rootDir ?? env.AIRKIT_SHIELD_ROOT_DIR, configPath, identityPath, socketPath, launchAgentPath });
+}
+
+// The read-only view of a ccshield lane. AirKit never writes here; it only
+// discovers a running ccshield daemon and talks to it over the shared v1 protocol.
+export function ccshieldPaths({ env = process.env, homeDir = homeFromEnv(env), uid = env.AIRKIT_GUI_UID ?? env.UID ?? process.getuid?.(), lane = "subscription" } = {}) {
+  return buildShieldPaths({ implementation: "ccshield", homeDir, uid, lane });
+}
+
+function buildShieldPaths({ implementation, homeDir, uid, lane, rootDir, configPath, identityPath, socketPath, launchAgentPath }) {
   assertLane(lane);
+  const { label, stateDir, name } = SHIELD_IMPLEMENTATIONS[implementation];
   const home = absolutePath(homeDir, "homeDir");
-  const canonicalRoot = join(home, ".local", "state", "airkit-shield", lane);
-  const root = absolutePath(rootDir ?? env.AIRKIT_SHIELD_ROOT_DIR ?? canonicalRoot, "rootDir");
-  if (resolve(root) !== resolve(canonicalRoot)) throw new Error("rootDir must be the canonical AirKit Shield state directory");
-  const serviceLabel = `${SHIELD_LABEL}.${lane}`;
+  const canonicalRoot = join(home, ...stateDir, lane);
+  const root = absolutePath(rootDir ?? canonicalRoot, "rootDir");
+  if (resolve(root) !== resolve(canonicalRoot)) throw new Error(`rootDir must be the canonical ${name} state directory`);
+  const serviceLabel = `${label}.${lane}`;
   const paths = {
+    implementation,
     lane,
     serviceLabel,
     rootDir: root,
@@ -50,6 +68,8 @@ export async function readShieldIdentity({ paths, io = defaultIo } = {}) {
   if (!paths?.identityPath) throw new TypeError("shield identity paths are required");
   let contents;
   try {
+    // ccshield files are only trusted when private to this user; the legacy root keeps its old behaviour.
+    if (paths.implementation === "ccshield") await assertPrivateRegularFile(paths.identityPath, io, "shield identity");
     contents = await io.readFile(paths.identityPath, "utf8");
   } catch (error) {
     if (error?.code === "ENOENT") return null;
@@ -336,13 +356,13 @@ function safePath(value) { return typeof value === "string" && isAbsolute(value)
 function isPlainObject(value) { return value !== null && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype; }
 function exactKeys(value, expected) { const keys = Object.keys(value).sort(); return keys.length === expected.length && keys.every((key, index) => key === expected[index]); }
 
-async function assertPrivateRegularFile(path, io) {
+export async function assertPrivateRegularFile(path, io = defaultIo, label = "shield policy state") {
   const entry = await io.lstat(path);
-  if (entry.isSymbolicLink()) throw new Error("shield policy state must not be a symlink");
-  if (!entry.isFile()) throw new Error("shield policy state must be a regular file");
-  if ((entry.mode & 0o077) !== 0) throw new Error("shield policy state must be private");
+  if (entry.isSymbolicLink()) throw new Error(`${label} must not be a symlink`);
+  if (!entry.isFile()) throw new Error(`${label} must be a regular file`);
+  if ((entry.mode & 0o077) !== 0) throw new Error(`${label} must be private`);
   const ownerUid = process.getuid?.();
-  if (Number.isInteger(ownerUid) && entry.uid !== ownerUid) throw new Error("shield policy state has unexpected owner");
+  if (Number.isInteger(ownerUid) && entry.uid !== ownerUid) throw new Error(`${label} has unexpected owner`);
 }
 
 async function ensureDirectory(path, io, ownerUid, privateMode) {

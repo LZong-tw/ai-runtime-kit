@@ -1,5 +1,5 @@
-import { readShieldAssetsProvision, readShieldIdentity, readShieldPolicyState, shieldPaths } from "./paths.mjs";
-import { ensureShieldReady, inspectShieldService } from "./service.mjs";
+import { readShieldAssetsProvision, readShieldIdentity, readShieldPolicyState } from "./paths.mjs";
+import { ensureShieldReady, inspectShieldService, resolveShieldRoot } from "./service.mjs";
 import { shieldLauncherDescriptors } from "./launchers.mjs";
 
 const LANES = Object.freeze(["subscription", "managed"]);
@@ -11,7 +11,8 @@ const CONTENT_COVERAGE = Object.freeze({ text: "scanned", images: "unscanned", d
 export async function readShieldOperationalStatus({
   env = process.env,
   audit = "unavailable",
-  shieldPaths: resolvePaths = shieldPaths,
+  shieldPaths: resolvePaths,
+  resolveRoot = resolveShieldRoot,
   inspectService = inspectShieldService,
   readIdentity = readShieldIdentity,
   readPolicy = readShieldPolicyState,
@@ -22,12 +23,20 @@ export async function readShieldOperationalStatus({
   const auditState = HEALTH.has(audit) ? audit : "unavailable";
   const lanes = await Promise.all(LANES.map(async (lane) => {
     let paths;
+    let root = null;
     try {
-      paths = resolvePaths({ env, lane });
+      if (resolvePaths) {
+        paths = resolvePaths({ env, lane });
+      } else {
+        root = await resolveRoot({ lane, env, inspectService });
+        paths = root.paths;
+      }
     } catch {
       return unavailableLane(lane, auditState);
     }
-    return readLaneStatus({ lane, audit: auditState, paths, inspectService, readIdentity, readPolicy, readAssets, ensureReady });
+    const status = await readLaneStatus({ lane, audit: auditState, paths, inspectService, readIdentity, readPolicy, readAssets, ensureReady });
+    // Name the root that was read, so a skipped ccshield identity is not mistaken for a stopped service.
+    return root ? { ...status, implementation: root.implementation, root_dir: root.rootDir } : status;
   }));
   const descriptors = safeLauncherDescriptors(launcherDescriptors({
     subscriptionShield: env?.AIRKIT_SHIELD_SUBSCRIPTION === "1",
