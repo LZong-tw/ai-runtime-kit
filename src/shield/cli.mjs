@@ -8,7 +8,7 @@ import { installShieldPolicyProvision, readShieldPolicyProvision } from "./polic
 import { readShieldOperationalStatus } from "./operational-status.mjs";
 import { hasBackgroundClaudeHost, scheduleBackgroundHostRelease } from "./background-host.mjs";
 import { ANTHROPIC_ORIGIN, startPxpipeHop } from "./pxpipe-hop.mjs";
-import { globalModelWarning, inspectGlobalModel, neutralizeGlobalModel } from "../global-model-guard.mjs";
+import { catalogCcrOnlyModelIds, globalModelWarning, inspectGlobalModel, neutralizeGlobalModel } from "../global-model-guard.mjs";
 import {
   ensureShieldReady,
   createShieldDestinationLease,
@@ -61,6 +61,18 @@ const SHIELD_COMMANDS = Object.freeze({
     return shield.launch(launch);
   },
 });
+
+// Bare catalog model ids (e.g. GLM-5.3) are CCR-only too; without the catalog
+// only prefixed route ids would be recognized. A catalog that cannot load must
+// not stop a launch, so it degrades to the prefix rules.
+async function loadCcrOnlyIds(dependencies) {
+  if (Array.isArray(dependencies.ccrOnlyIds)) return dependencies.ccrOnlyIds;
+  try {
+    return catalogCcrOnlyModelIds(await dependencies.loadCatalog?.());
+  } catch {
+    return [];
+  }
+}
 
 async function createDefaultShieldDependencies(dependencies) {
   const env = dependencies.env ?? process.env;
@@ -134,7 +146,9 @@ async function createDefaultShieldDependencies(dependencies) {
       const status = await readStatus({ paths: root.paths, io: dependencies.io, runLaunchctl: dependencies.runLaunchctl });
       const operational = await readOperational({ env, audit: await readAuditHealth(), inspectService });
       const selected = operational.lanes?.find((entry) => entry.lane === lane);
-      const globalModel = lane === "subscription" ? await inspectGlobalModel({ env, readText: dependencies.readGlobalSettings }) : null;
+      const globalModel = lane === "subscription"
+        ? await inspectGlobalModel({ env, readText: dependencies.readGlobalSettings, ccrOnlyIds: await loadCcrOnlyIds(dependencies) })
+        : null;
       return {
         ...status,
         root: describeRoot(root),
@@ -195,7 +209,14 @@ async function createDefaultShieldDependencies(dependencies) {
       // The subscription lane talks to Anthropic directly, so a CCR route id
       // saved as the shared default by an airclaude `/model` pick cannot work.
       if (lane === "subscription" && /^claude/i.test(basename(String(command)))) {
-        ({ args } = await neutralizeGlobalModel({ args, env, readText: dependencies.readGlobalSettings, stderr: dependencies.stderr ?? process.stderr }));
+        ({ args } = await neutralizeGlobalModel({
+          args,
+          env,
+          cwd: dependencies.cwd ?? process.cwd(),
+          readText: dependencies.readGlobalSettings,
+          ccrOnlyIds: await loadCcrOnlyIds(dependencies),
+          stderr: dependencies.stderr ?? process.stderr,
+        }));
       }
       let ready = await ensureReady({ lane, env, io: dependencies.io, inspectService: dependencies.inspectService, isProcessAlive: dependencies.isProcessAlive, probeShield: dependencies.probeShield });
       // pxpipe sits behind Shield, so it only sees redacted traffic. It lives

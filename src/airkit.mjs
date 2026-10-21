@@ -43,9 +43,11 @@ import { runShieldCli } from "./shield/cli.mjs";
 import {
   catalogCcrOnlyModelIds,
   globalModelWarning,
+  higherModelSource,
   hasModelArg,
   inspectGlobalModel,
 } from "./global-model-guard.mjs";
+import { globalModelRestoreNotice, startGlobalModelWatch, withSignalRestore } from "./global-model-watch.mjs";
 import { DEFAULT_BACKGROUND_HOST_GRACE_MS, backgroundHostUsesAdapter, hasBackgroundClaudeHost, scheduleBackgroundHostRelease } from "./shield/background-host.mjs";
 import { resolveShieldLauncher, resolveShieldLauncherMarker } from "./shield/launchers.mjs";
 import { freePort, startPxpipeHop } from "./shield/pxpipe-hop.mjs";
@@ -972,6 +974,7 @@ export async function exportOssRelease({ outDir }) {
   await copyFile(join(here, "subagent-observability.mjs"), join(outDir, "src", "subagent-observability.mjs"));
   await copyFile(join(here, "launchd-plist.mjs"), join(outDir, "src", "launchd-plist.mjs"));
   await copyFile(join(here, "global-model-guard.mjs"), join(outDir, "src", "global-model-guard.mjs"));
+  await copyFile(join(here, "global-model-watch.mjs"), join(outDir, "src", "global-model-watch.mjs"));
   await copyDirectory(join(here, "audit"), join(outDir, "src", "audit"));
   await copyDirectory(join(here, "completion"), join(outDir, "src", "completion"));
   await copyFile(join(here, "auditd.mjs"), join(outDir, "src", "auditd.mjs"));
@@ -1545,8 +1548,10 @@ async function prepareManagedGateway({ plan, managed, currentConfig, ccrClient, 
 
 // Plain mode passes no --model of its own, so a CCR-only id in the shared
 // settings.json would become its model; other modes already pin --model.
-function withGlobalModelGuard(plan, leak) {
-  if (!leak) return plan;
+// A model from a layer above the user settings already wins, so the leaked
+// value is inert for this launch and needs no override.
+function withGlobalModelGuard(plan, leak, higherSource) {
+  if (!leak || higherSource) return plan;
   const args = plan.launch.args;
   if (hasModelArg([...args, ...plan.launch.userArgs])) {
     return { ...plan, globalModel: { ...leak, neutralized: true } };
@@ -1558,20 +1563,31 @@ function withGlobalModelGuard(plan, leak) {
   };
 }
 
+// The model-bearing env the Claude child will actually see.
+function claudeModelEnv(plan, env) {
+  const inherited = { ...env };
+  for (const key of plan.launch.clearEnv ?? []) delete inherited[key];
+  return { ...inherited, ...plan.launch.env };
+}
+
 export async function prepareLaunch(catalog, profileName, options = {}) {
   // The per-model autocompact gate needs the Claude Code version at plan time;
   // the runtime check below reuses the same reading.
   if (!options.runtimeVersions && launchModeUsesPerModelAutoCompact(findProfile(catalog, profileName), options.mode)) {
     options = { ...options, runtimeVersions: await inspectRuntimeVersions(options) };
   }
-  const plan = withGlobalModelGuard(
-    buildLaunchPlan(catalog, profileName, options),
-    await inspectGlobalModel({
-      env: options.env ?? process.env,
-      readText: options.readGlobalSettings,
-      ccrOnlyIds: catalogCcrOnlyModelIds(catalog),
-    }),
-  );
+  const builtPlan = buildLaunchPlan(catalog, profileName, options);
+  const ccrOnlyIds = catalogCcrOnlyModelIds(catalog);
+  const plan = withGlobalModelGuard(builtPlan, await inspectGlobalModel({
+    env: options.env ?? process.env,
+    readText: options.readGlobalSettings,
+    ccrOnlyIds,
+  }), await higherModelSource({
+    env: claudeModelEnv(builtPlan, options.env ?? process.env),
+    cwd: options.cwd ?? process.cwd(),
+    ...(options.readGlobalSettings ? { readText: options.readGlobalSettings } : {}),
+    ccrOnlyIds,
+  }));
   const profileShield = plan.shield;
   const rendered = renderProfile(catalog, profileName, {
     configDir: plan.configDir,
@@ -1734,6 +1750,15 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
       ? buildCompatibilityLaunch(managed.compatibility, shieldReady?.origin ?? middleware.origin, gatewayToken)
       : { args: [], env: {} };
     const shieldLaunchId = shieldReady ? (options.createShieldLaunchId ?? createShieldLaunchId)() : undefined;
+    let modelWatch = null;
+    let detachModelWatchSignals = () => {};
+    // After the child exits, so the notice never lands inside the TUI.
+    const stopModelWatch = () => {
+      detachModelWatchSignals();
+      if (!modelWatch) return;
+      (options.stderr ?? process.stderr).write(globalModelRestoreNotice(modelWatch.stop()));
+      modelWatch = null;
+    };
     let shieldCleanedUp = false;
     const cleanupShieldLaunch = async ({ closeMiddleware = false } = {}) => {
       if (shieldCleanedUp) return;
@@ -1776,6 +1801,8 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
         plan.launch.autoCompact,
         options.readSettingsFile,
       );
+      modelWatch = options.watchGlobalModel === false ? null : startGlobalModelWatch({ env: launchEnv, ccrOnlyIds });
+      detachModelWatchSignals = withSignalRestore(modelWatch);
       child = spawnCommand(plan.launch.command, [...spawnArgs.head, ...spawnArgs.tail], {
         env: shieldReady
           ? buildShieldChildEnv({ ...shieldReady, lane: plan.shieldLauncher.clientLane }, childEnv, shieldLaunchId)
@@ -1783,6 +1810,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
         stdio: "inherit",
       });
     } catch (error) {
+      stopModelWatch();
       await cleanupShieldLaunch({ closeMiddleware: true });
       throw error;
     }
@@ -1800,6 +1828,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
         onDeferredClose: async () => await cleanupShieldLaunch(),
       });
     } finally {
+      stopModelWatch();
       if (!shieldLeaseRetained) await cleanupShieldLaunch();
     }
   }
@@ -2422,7 +2451,11 @@ export async function runCli(argv = process.argv.slice(2), options = {}) {
   }
 
   if (command === "shield") {
-    return runShieldCli([subcommand, ...rest].filter((arg) => arg !== undefined), { ...options, stdout });
+    return runShieldCli([subcommand, ...rest].filter((arg) => arg !== undefined), {
+      ...options,
+      stdout,
+      loadCatalog: options.loadCatalog ?? (() => options.catalog ?? loadCatalog(options.catalogPath ?? defaultCatalogPath)),
+    });
   }
 
   if (command === "runtime" && subcommand === "check") {

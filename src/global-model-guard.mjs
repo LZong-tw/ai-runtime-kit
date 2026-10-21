@@ -53,6 +53,26 @@ export function catalogCcrOnlyModelIds(catalog) {
   return [...ids].filter((id) => !/^claude-/i.test(id));
 }
 
+// Claude Code takes the model from --model, then ANTHROPIC_MODEL, then the
+// local, project and user settings in that order. Anything above the user
+// layer already outranks the shared settings.json, so overriding it with
+// `--model default` would discard a legitimate choice. A CCR-only value up
+// there is no choice to protect, so it does not count.
+export async function higherModelSource({ env = process.env, cwd = process.cwd(), readText = (path) => readFile(path, "utf8"), ccrOnlyIds = [] } = {}) {
+  if (env.ANTHROPIC_MODEL && !ccrOnlyModelReason(env.ANTHROPIC_MODEL, ccrOnlyIds)) return "ANTHROPIC_MODEL";
+  if (!cwd) return null;
+  for (const name of ["settings.local.json", "settings.json"]) {
+    const path = join(cwd, ".claude", name);
+    if (path === globalSettingsPath(env)) continue;
+    try {
+      const settings = JSON.parse(await readText(path));
+      const model = settings?.model;
+      if (typeof model === "string" && model.trim() !== "" && !ccrOnlyModelReason(model, ccrOnlyIds)) return path;
+    } catch {}
+  }
+  return null;
+}
+
 export function hasModelArg(args = []) {
   return args.some((arg) => arg === "--model" || String(arg).startsWith("--model="));
 }
@@ -75,10 +95,10 @@ export function globalModelWarning(leak, neutralized) {
 // `default` resolves to Claude Code's own default model, so prepending it
 // overrides the stored id for this launch only without touching the file.
 // Prepended so it stays a root option ahead of any subcommand or `--`.
-export async function neutralizeGlobalModel({ args = [], env = process.env, readText, ccrOnlyIds = [], stderr } = {}) {
-  if (hasModelArg(args) || env.ANTHROPIC_MODEL) return { args, leak: null };
+export async function neutralizeGlobalModel({ args = [], env = process.env, cwd, readText, ccrOnlyIds = [], stderr } = {}) {
+  if (hasModelArg(args)) return { args, leak: null };
   const leak = await inspectGlobalModel({ env, readText, ccrOnlyIds });
-  if (!leak) return { args, leak: null };
+  if (!leak || await higherModelSource({ env, cwd, readText, ccrOnlyIds })) return { args, leak: null };
   stderr?.write(globalModelWarning(leak, true));
   return { args: ["--model", "default", ...args], leak };
 }

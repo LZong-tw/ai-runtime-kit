@@ -927,7 +927,7 @@ test("subscription --pxpipe launch points Shield at a pxpipe hop and closes it w
   assert.deepEqual(events, ["hop:https://api.anthropic.com", "create:http://127.0.0.1:8805", "child-exit", "revoke", "hop-close"]);
 });
 
-async function launchWithGlobalSettings({ lane = "subscription", command = "claude", args = ["-p", "hi"], settings, env = { HOME: "/airkit-test-home" } }) {
+async function launchWithGlobalSettings({ lane = "subscription", command = "claude", args = ["-p", "hi"], settings, env = { HOME: "/airkit-test-home" }, loadCatalog }) {
   const launched = [];
   const reads = [];
   const stderr = capture();
@@ -935,7 +935,13 @@ async function launchWithGlobalSettings({ lane = "subscription", command = "clau
     env,
     stdout: capture().stdout,
     stderr: stderr.stdout,
-    readGlobalSettings: async (path) => { reads.push(path); return JSON.stringify(settings); },
+    cwd: "/airkit-test-project",
+    loadCatalog,
+    readGlobalSettings: async (path) => {
+      reads.push(path);
+      if (path.startsWith("/airkit-test-project/")) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      return JSON.stringify(settings);
+    },
     ensureShieldReady: async () => ({ origin: "http://127.0.0.1:8811", capability: "a".repeat(32), lane, targetClass: lane }),
     revokeShieldDestinationLease: async () => {},
     launchShieldChild: async (options) => { launched.push(options); return { code: 0 }; },
@@ -946,9 +952,19 @@ async function launchWithGlobalSettings({ lane = "subscription", command = "clau
 test("subscription launch overrides a CCR route id saved as the shared default /model", async () => {
   const result = await launchWithGlobalSettings({ settings: { model: "anthropic/claude-ccr-h6169726b" } });
   assert.deepEqual(result.args, ["--model", "default", "-p", "hi"]);
-  assert.deepEqual(result.reads, ["/airkit-test-home/.claude/settings.json"]);
+  assert.equal(result.reads[0], "/airkit-test-home/.claude/settings.json");
   assert.match(result.warning, /\/airkit-test-home\/\.claude\/settings\.json sets "model": "anthropic\/claude-ccr-h6169726b"/);
   assert.match(result.warning, /remove the "model" key/);
+});
+
+test("subscription launch recognizes a bare catalog model id as CCR-only", async () => {
+  const loadCatalog = async () => ({ profiles: [{ ccr: { Providers: [{ models: ["GLM-5.3", "claude-sonnet-5"] }] } }] });
+  const bare = await launchWithGlobalSettings({ settings: { model: "GLM-5.3" }, loadCatalog });
+  assert.deepEqual(bare.args, ["--model", "default", "-p", "hi"]);
+  assert.match(bare.warning, /"model": "GLM-5\.3", a CCR provider model/);
+
+  const broken = await launchWithGlobalSettings({ settings: { model: "GLM-5.3" }, loadCatalog: async () => { throw new Error("no catalog"); } });
+  assert.deepEqual(broken.args, ["-p", "hi"]);
 });
 
 test("subscription launch leaves real models, explicit --model and non-Claude commands alone", async () => {
