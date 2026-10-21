@@ -3,7 +3,7 @@ import { createServer, connect } from "node:net";
 
 export const ANTHROPIC_ORIGIN = "https://api.anthropic.com";
 
-async function freePort() {
+export async function freePort() {
   return new Promise((resolve, reject) => {
     const server = createServer();
     server.unref();

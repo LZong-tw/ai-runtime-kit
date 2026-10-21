@@ -42,7 +42,7 @@ import { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs
 import { runShieldCli } from "./shield/cli.mjs";
 import { DEFAULT_BACKGROUND_HOST_GRACE_MS, backgroundHostUsesAdapter, hasBackgroundClaudeHost, scheduleBackgroundHostRelease } from "./shield/background-host.mjs";
 import { resolveShieldLauncher, resolveShieldLauncherMarker } from "./shield/launchers.mjs";
-import { startPxpipeHop } from "./shield/pxpipe-hop.mjs";
+import { freePort, startPxpipeHop } from "./shield/pxpipe-hop.mjs";
 import { assertNoPersistedShieldEndpointOverride, buildShieldChildEnv, createShieldDestinationLease, createShieldLaunchId, ensureShieldReady, openShieldApprovalChannel, registerShieldApprovalChannel, renewShieldDestinationLease, resolveShieldRoot, revokeShieldDestinationLease, unregisterShieldApprovalChannel } from "./shield/service.mjs";
 
 export { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
@@ -3877,8 +3877,20 @@ async function probeCcr3Runtime(options = {}) {
     const client = createCcr3Client({ ...options, env, runCommand, isolated: true });
     const version = await client.getVersion();
     const config = await client.getConfig();
+    // `ccr <profile> cli` only resolves a claude-code profile against a live
+    // gateway, and a fresh CCR config defaults to 3456/3457 - the user's own
+    // gateway. Give the isolated instance OS-assigned ports so the probe starts
+    // and talks to its own gateway.
+    const gateway = {
+      ...config.gateway,
+      coreHost: "127.0.0.1",
+      corePort: await freePort(),
+      host: "127.0.0.1",
+      port: await freePort(),
+    };
     await client.saveConfig({
       ...config,
+      gateway,
       Providers: [...(config.Providers ?? []), {
         api_base_url: "http://127.0.0.1:9/v1/chat/completions",
         api_key: "airkit-runtime-probe",
@@ -3900,6 +3912,10 @@ async function probeCcr3Runtime(options = {}) {
         }],
       },
     });
+    const origin = await client.ensureGateway();
+    if (origin !== `http://127.0.0.1:${gateway.port}`) {
+      throw new Error(`isolated CCR gateway came up at ${origin}, not the probe port ${gateway.port}`);
+    }
     const resolved = await runCommand("ccr", ["airkit-runtime-probe", "cli", "--", "--version"], {
       env: { ...env, CCR_CLI_PREPARE_PROFILE_ONLY: "1" },
       timeoutMs: options.commandTimeoutMs ?? 30000,

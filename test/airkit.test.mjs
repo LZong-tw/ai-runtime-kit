@@ -1938,35 +1938,75 @@ test("runtime update --write requires the isolated CCR 3 profile probe", async (
   }
 });
 
+function isolatedProbeFetch(saved = []) {
+  return async (url, request) => {
+    if (new URL(url).pathname === "/health") return { ok: true, status: 200, json: async () => ({ status: "ok" }) };
+    const { method, args } = JSON.parse(request.body);
+    if (method === "saveConfig") saved.push(args[0]);
+    const value = method === "getAppInfo" ? { version: "3.0.18" }
+      : method === "getConfig" ? saved.at(-1) ?? { gateway: { coreHost: "127.0.0.1", corePort: 3457, enabled: true, host: "127.0.0.1", port: 3456 } }
+        : null;
+    return { ok: true, status: 200, json: async () => ({ value }) };
+  };
+}
+
+async function runIsolatedProbe(root, fetch) {
+  const calls = [];
+  const exitCode = await runCli(["runtime", "update", "--write"], {
+    backupDir: join(root, "backup"),
+    env: { HOME: join(root, "real-home") },
+    fetch,
+    runCommand: async (command, args, options = {}) => {
+      calls.push({ command, args, env: options.env });
+      if (command === "launchctl" && args[0] === "print") return { ok: true, status: 0, stdout: "state = running" };
+      if (command === "ccr" && args[0] === "start") {
+        const stateDir = join(options.env.CCR_INTERNAL_HOME_DIR, ".claude-code-router");
+        await mkdir(stateDir, { recursive: true });
+        await writeFile(join(stateDir, "service.json"), JSON.stringify({ url: "http://127.0.0.1:9/?ccr_web_token=probe-token" }));
+      }
+      return { ok: true, status: 0, stdout: "" };
+    },
+    runtimeVersions: passingRuntimeVersions(),
+    serviceReadyTimeoutMs: 50,
+    stdout: { write: () => {} },
+  });
+  return { calls, exitCode };
+}
+
+test("runtime update probe gives its isolated CCR a gateway off the user's live ports", async () => {
+  const root = await mkdtemp(join(tmpdir(), "airkit-runtime-probe-port-"));
+  const saved = [];
+  const healthChecks = [];
+  const fetch = isolatedProbeFetch(saved);
+  try {
+    const { calls, exitCode } = await runIsolatedProbe(root, async (url, request) => {
+      if (new URL(url).pathname === "/health") healthChecks.push(new URL(url).port);
+      return fetch(url, request);
+    });
+
+    assert.equal(exitCode, 0);
+    assert.equal(saved.length, 1);
+    const { gateway } = saved[0];
+    for (const port of [gateway.port, gateway.corePort]) {
+      assert.ok(Number.isInteger(port) && port > 0, `port ${port}`);
+      assert.ok(![3456, 3457, 3458].includes(port), `probe gateway port ${port} collides with the live CCR`);
+    }
+    assert.equal(gateway.host, "127.0.0.1");
+    assert.equal(gateway.coreHost, "127.0.0.1");
+    assert.ok(healthChecks.includes(String(gateway.port)));
+    const resolve = calls.findIndex(({ args }) => args[0] === "airkit-runtime-probe");
+    const stop = calls.findIndex(({ args }) => args[0] === "stop");
+    assert.ok(resolve > 0 && stop > resolve);
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
 test("runtime update probe starts its own isolated CCR instead of kickstarting the user's supervised daemon", async () => {
   const root = await mkdtemp(join(tmpdir(), "airkit-runtime-probe-isolation-"));
   const realHome = join(root, "real-home");
-  const calls = [];
   try {
-    const exitCode = await runCli(["runtime", "update", "--write"], {
-      backupDir: join(root, "backup"),
-      env: { HOME: realHome },
-      fetch: async (_url, request) => {
-        const { method } = JSON.parse(request.body);
-        const value = method === "getAppInfo" ? { version: "3.0.18" } : method === "getConfig" ? {} : null;
-        return { ok: true, status: 200, json: async () => ({ value }) };
-      },
-      runCommand: async (command, args, options = {}) => {
-        calls.push({ command, args, env: options.env });
-        if (command === "launchctl" && args[0] === "print") return { ok: true, status: 0, stdout: "state = running" };
-        if (command === "ccr" && args[0] === "start") {
-          const stateDir = join(options.env.CCR_INTERNAL_HOME_DIR, ".claude-code-router");
-          await mkdir(stateDir, { recursive: true });
-          await writeFile(join(stateDir, "service.json"), JSON.stringify({
-            url: "http://127.0.0.1:9/?ccr_web_token=probe-token",
-          }));
-        }
-        return { ok: true, status: 0, stdout: "" };
-      },
-      runtimeVersions: passingRuntimeVersions(),
-      serviceReadyTimeoutMs: 50,
-      stdout: { write: () => {} },
-    });
+    const { calls, exitCode } = await runIsolatedProbe(root, isolatedProbeFetch());
 
     assert.equal(exitCode, 0);
     assert.equal(calls.some(({ command, args }) => command === "launchctl" && args[0] === "kickstart"), false);
