@@ -40,6 +40,12 @@ import { createPiAuditRuntime } from "./audit/adapters/pi-extension.mjs";
 import { runAuditCli } from "./audit/cli.mjs";
 import { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
 import { runShieldCli } from "./shield/cli.mjs";
+import {
+  catalogCcrOnlyModelIds,
+  globalModelWarning,
+  hasModelArg,
+  inspectGlobalModel,
+} from "./global-model-guard.mjs";
 import { DEFAULT_BACKGROUND_HOST_GRACE_MS, backgroundHostUsesAdapter, hasBackgroundClaudeHost, scheduleBackgroundHostRelease } from "./shield/background-host.mjs";
 import { resolveShieldLauncher, resolveShieldLauncherMarker } from "./shield/launchers.mjs";
 import { freePort, startPxpipeHop } from "./shield/pxpipe-hop.mjs";
@@ -965,6 +971,7 @@ export async function exportOssRelease({ outDir }) {
   await copyFile(join(here, "context-observability.mjs"), join(outDir, "src", "context-observability.mjs"));
   await copyFile(join(here, "subagent-observability.mjs"), join(outDir, "src", "subagent-observability.mjs"));
   await copyFile(join(here, "launchd-plist.mjs"), join(outDir, "src", "launchd-plist.mjs"));
+  await copyFile(join(here, "global-model-guard.mjs"), join(outDir, "src", "global-model-guard.mjs"));
   await copyDirectory(join(here, "audit"), join(outDir, "src", "audit"));
   await copyDirectory(join(here, "completion"), join(outDir, "src", "completion"));
   await copyFile(join(here, "auditd.mjs"), join(outDir, "src", "auditd.mjs"));
@@ -1536,13 +1543,35 @@ async function prepareManagedGateway({ plan, managed, currentConfig, ccrClient, 
   return { gatewayOrigin, gatewayToken };
 }
 
+// Plain mode passes no --model of its own, so a CCR-only id in the shared
+// settings.json would become its model; other modes already pin --model.
+function withGlobalModelGuard(plan, leak) {
+  if (!leak) return plan;
+  const args = plan.launch.args;
+  if (hasModelArg([...args, ...plan.launch.userArgs])) {
+    return { ...plan, globalModel: { ...leak, neutralized: true } };
+  }
+  return {
+    ...plan,
+    globalModel: { ...leak, neutralized: true },
+    launch: { ...plan.launch, args: ["--model", "default", ...args] },
+  };
+}
+
 export async function prepareLaunch(catalog, profileName, options = {}) {
   // The per-model autocompact gate needs the Claude Code version at plan time;
   // the runtime check below reuses the same reading.
   if (!options.runtimeVersions && launchModeUsesPerModelAutoCompact(findProfile(catalog, profileName), options.mode)) {
     options = { ...options, runtimeVersions: await inspectRuntimeVersions(options) };
   }
-  const plan = buildLaunchPlan(catalog, profileName, options);
+  const plan = withGlobalModelGuard(
+    buildLaunchPlan(catalog, profileName, options),
+    await inspectGlobalModel({
+      env: options.env ?? process.env,
+      readText: options.readGlobalSettings,
+      ccrOnlyIds: catalogCcrOnlyModelIds(catalog),
+    }),
+  );
   const profileShield = plan.shield;
   const rendered = renderProfile(catalog, profileName, {
     configDir: plan.configDir,
@@ -1569,6 +1598,7 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     };
   }
 
+  if (plan.globalModel) (options.stderr ?? process.stderr).write(globalModelWarning(plan.globalModel, plan.globalModel.neutralized));
   const launchEnv = options.env ?? process.env;
   const createCcrClient = options.createCcrClient ?? createCcr3Client;
   const ccrClient = options.ccrClient ?? createCcrClient({ ...options, autoStart: true });
@@ -3248,7 +3278,7 @@ ${result.shieldRoot ? renderShieldRootLines(result.shieldRoot) : ""}Runtime:
 ${runtimeLines.join("\n") || "- skipped"}
 Launch:
 - ${result.launch.command} ${[...result.launch.args, ...result.launch.userArgs].map(quoteShell).join(" ")}
-
+${result.globalModel ? `- warning: ${globalModelWarning(result.globalModel, result.globalModel.neutralized).replace(/^airkit: /, "")}` : ""}
 Environment:
 - gateway: ${result.launch.env.ANTHROPIC_BASE_URL ?? "resolved from live CCR config at launch"}
 - mode header: ${result.launch.env.ANTHROPIC_CUSTOM_HEADERS ?? "unset"}

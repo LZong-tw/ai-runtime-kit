@@ -927,6 +927,58 @@ test("subscription --pxpipe launch points Shield at a pxpipe hop and closes it w
   assert.deepEqual(events, ["hop:https://api.anthropic.com", "create:http://127.0.0.1:8805", "child-exit", "revoke", "hop-close"]);
 });
 
+async function launchWithGlobalSettings({ lane = "subscription", command = "claude", args = ["-p", "hi"], settings, env = { HOME: "/airkit-test-home" } }) {
+  const launched = [];
+  const reads = [];
+  const stderr = capture();
+  await runShieldCli(["launch", "--lane", lane, "--", command, ...args], {
+    env,
+    stdout: capture().stdout,
+    stderr: stderr.stdout,
+    readGlobalSettings: async (path) => { reads.push(path); return JSON.stringify(settings); },
+    ensureShieldReady: async () => ({ origin: "http://127.0.0.1:8811", capability: "a".repeat(32), lane, targetClass: lane }),
+    revokeShieldDestinationLease: async () => {},
+    launchShieldChild: async (options) => { launched.push(options); return { code: 0 }; },
+  });
+  return { args: launched[0].args, reads, warning: stderr.value() };
+}
+
+test("subscription launch overrides a CCR route id saved as the shared default /model", async () => {
+  const result = await launchWithGlobalSettings({ settings: { model: "anthropic/claude-ccr-h6169726b" } });
+  assert.deepEqual(result.args, ["--model", "default", "-p", "hi"]);
+  assert.deepEqual(result.reads, ["/airkit-test-home/.claude/settings.json"]);
+  assert.match(result.warning, /\/airkit-test-home\/\.claude\/settings\.json sets "model": "anthropic\/claude-ccr-h6169726b"/);
+  assert.match(result.warning, /remove the "model" key/);
+});
+
+test("subscription launch leaves real models, explicit --model and non-Claude commands alone", async () => {
+  const real = await launchWithGlobalSettings({ settings: { model: "opus[1m]" } });
+  assert.deepEqual(real.args, ["-p", "hi"]);
+  assert.equal(real.warning, "");
+
+  const explicit = await launchWithGlobalSettings({ args: ["--model", "sonnet"], settings: { model: "claude-airkit-mode[1m]" } });
+  assert.deepEqual(explicit.args, ["--model", "sonnet"]);
+  assert.deepEqual(explicit.reads, []);
+
+  const other = await launchWithGlobalSettings({ command: "echo", args: ["ok"], settings: { model: "claude-airkit-mode[1m]" } });
+  assert.deepEqual(other.args, ["ok"]);
+  assert.deepEqual(other.reads, []);
+});
+
+test("shield doctor warns when the shared Claude settings pin a CCR-only model", async () => {
+  const output = capture();
+  await runShieldCli(["doctor", "--lane", "subscription"], {
+    env: { HOME: "/airkit-test-home" },
+    stdout: output.stdout,
+    readGlobalSettings: async () => JSON.stringify({ model: "anthropic/claude-ccr-h6169726b" }),
+    shieldStatus: async () => ({ state: "healthy", service: { active: true }, identity: { present: true } }),
+    readShieldOperationalStatus: async () => ({ state: "protected", lanes: [{ lane: "subscription", state: "protected" }] }),
+    readAuditHealth: async () => "healthy",
+  });
+  assert.match(output.value(), /globalModel\.warning: \/airkit-test-home\/\.claude\/settings\.json sets "model": "anthropic\/claude-ccr-h6169726b"/);
+  assert.match(output.value(), /any launch without --model would request it/);
+});
+
 test("--pxpipe is subscription-only and excludes --target", async () => {
   await assert.rejects(runShieldCli(["launch", "--lane", "managed", "--pxpipe", "--", "echo", "no"], { shield: {} }), /lease lifecycle/);
   await assert.rejects(runShieldCli(["launch", "--lane", "subscription", "--pxpipe", "--target", "http://127.0.0.1:8804", "--", "echo", "no"], { shield: {} }), /not both/);
