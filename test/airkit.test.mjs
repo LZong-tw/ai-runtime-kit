@@ -6738,6 +6738,62 @@ test("runAirclaudeCli dry run supports positional pro mode and avoids launching"
   }
 });
 
+// A profile with launch.pxpipe spawns the binary on every launch, so a missing
+// or broken pxpipe has to show up in doctor rather than as a failed launch.
+async function airclaudeDoctorPxpipe({ pxpipe, script }) {
+  const catalog = launchCatalog();
+  if (pxpipe !== undefined) catalog.profiles[0].launch.pxpipe = pxpipe;
+  const catalogPath = await writeLaunchCatalog(catalog);
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-doctor-pxpipe-"));
+  const fakeBin = await mkdtemp(join(tmpdir(), "airkit-doctor-pxpipe-bin-"));
+  const output = [];
+  try {
+    if (script !== undefined) {
+      await writeFile(join(fakeBin, "pxpipe"), `#!/bin/sh\n${script}\n`);
+      await chmod(join(fakeBin, "pxpipe"), 0o755);
+    }
+    const exitCode = await runAirclaudeCli(["--doctor", "--profile", "launch-example", "--config-dir", configDir], {
+      catalogPath,
+      env: { PATH: fakeBin },
+      stdout: { write: (chunk) => output.push(chunk) },
+      ccrClient: { getConfig: async () => { throw new Error("CCR 3 management service is not running"); } },
+      commandExists: async () => true,
+      runCommand: async () => ({ ok: true, status: 0, stdout: "" }),
+      runtimeVersions: passingRuntimeVersions(),
+      spawnCommand: () => {
+        throw new Error("doctor should not launch");
+      },
+    });
+    return { exitCode, output: output.join(""), fakeBin };
+  } finally {
+    await rm(configDir, { force: true, recursive: true });
+    await rm(resolve(catalogPath, ".."), { force: true, recursive: true });
+    await rm(fakeBin, { force: true, recursive: true });
+  }
+}
+
+test("airclaude --doctor reports the pxpipe path and version when the profile uses it", async () => {
+  const { exitCode, output, fakeBin } = await airclaudeDoctorPxpipe({ pxpipe: true, script: 'echo "9.9.9"' });
+  assert.equal(exitCode, 0);
+  assert.ok(output.includes(`- ok pxpipe: ${join(fakeBin, "pxpipe")} (9.9.9)`), output);
+});
+
+test("airclaude --doctor fails pxpipe with the install fix when the binary is missing", async () => {
+  const { output } = await airclaudeDoctorPxpipe({ pxpipe: true });
+  assert.match(output, /- fail pxpipe: missing command: pxpipe; run npm i -g pxpipe-proxy/);
+});
+
+test("airclaude --doctor fails pxpipe when the binary cannot report its version", async () => {
+  const { output } = await airclaudeDoctorPxpipe({ pxpipe: true, script: "echo boom >&2; exit 3" });
+  assert.match(output, /- fail pxpipe: .*pxpipe --version failed \(boom\); reinstall with npm i -g pxpipe-proxy/);
+});
+
+test("airclaude --doctor reports pxpipe as not required when the profile does not use it", async () => {
+  const { output } = await airclaudeDoctorPxpipe({ script: "exit 1" });
+  assert.match(output, /- info pxpipe: not required by this profile/);
+  assert.doesNotMatch(output, /fail pxpipe/);
+});
+
 test("runAirclaudeCli rejects an unpaired Headroom launcher marker before planning a route", async () => {
   const catalogPath = await writeLaunchCatalog();
   const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-cli-"));
