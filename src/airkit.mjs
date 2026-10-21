@@ -3881,12 +3881,16 @@ async function probeCcr3Runtime(options = {}) {
     // gateway, and a fresh CCR config defaults to 3456/3457 - the user's own
     // gateway. Give the isolated instance OS-assigned ports so the probe starts
     // and talks to its own gateway.
+    const port = await freePort();
+    let corePort = await freePort();
+    for (let attempt = 0; corePort === port && attempt < 5; attempt += 1) corePort = await freePort();
+    if (corePort === port) throw new Error("could not reserve two distinct ports for the isolated CCR gateway");
     const gateway = {
       ...config.gateway,
       coreHost: "127.0.0.1",
-      corePort: await freePort(),
+      corePort,
       host: "127.0.0.1",
-      port: await freePort(),
+      port,
     };
     await client.saveConfig({
       ...config,
