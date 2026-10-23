@@ -566,6 +566,7 @@ function normalizeCompatibilityHistory(source) {
 }
 
 export function normalizeMessageSystemRoles(body) {
+  body = normalizeInlineToolReferences(body);
   if (!isRecord(body) || !Array.isArray(body.messages)) return body;
   const movedSystem = [];
   const messages = [];
@@ -588,6 +589,41 @@ export function normalizeMessageSystemRoles(body) {
       ? [{ type: "text", text: body.system }]
       : [];
   return { ...body, system: [...existingSystem, ...movedSystem], messages };
+}
+
+
+function normalizeInlineToolReferences(body) {
+  if (!isRecord(body) || !Array.isArray(body.tools)) return body;
+  const names = new Set(body.tools.map((tool) => tool?.name).filter((name) => typeof name === "string"));
+  const activated = new Set();
+  const filterContent = (content) => {
+    if (!Array.isArray(content)) return content;
+    const kept = content.filter((block) => {
+      if (block?.type !== "tool_addition" || block.tool?.type !== "tool_reference" ||
+          !names.has(block.tool.name)) return true;
+      activated.add(block.tool.name);
+      return false;
+    });
+    return kept.length === content.length ? content : kept;
+  };
+  const system = filterContent(body.system);
+  const messages = Array.isArray(body.messages) ? body.messages.flatMap((message) => {
+    const content = filterContent(message?.content);
+    if (content === message?.content) return [message];
+    return content.length === 0 ? [] : [{ ...message, content }];
+  }) : body.messages;
+  if (activated.size === 0) return body;
+  const result = {
+    ...body,
+    tools: body.tools.map((tool) => activated.has(tool?.name) && tool.defer_loading === true
+      ? { ...tool, defer_loading: false } : tool),
+    ...(messages === undefined ? {} : { messages }),
+  };
+  if (system !== body.system) {
+    if (system.length === 0) delete result.system;
+    else result.system = system;
+  }
+  return result;
 }
 
 function isCompatibilityServerUse(block) {
