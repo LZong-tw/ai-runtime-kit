@@ -2,7 +2,6 @@ const UI_SCHEMA_VERSION = 1;
 const MAX_ARGUMENTS = 2;
 const MAX_ARGUMENT_LENGTH = 256;
 const ALLOWED_STATES = new Set(["healthy", "degraded", "stopped", "blocked"]);
-const SHIELD_STATES = new Set(["protected", "approval", "blocked", "unavailable"]);
 
 // The UI contract is deliberately narrower than the audit-store schema. A CCR
 // UI must be able to render useful metadata without becoming a payload reveal
@@ -33,23 +32,6 @@ const QUERY_FIELDS = Object.freeze({
     "cache_reuse_ratio", "normalization_state",
   ],
   gaps: ["gap_kind", "source", "reason", "recorded_at", "affected_client", "affected_session", "resolution"],
-  shield_decisions: [
-    "logical_request_id", "session_id", "lane", "destination_class", "policy_version",
-    "gitleaks_version", "privacy_version", "action", "reasons", "transform_count", "decision_source", "override",
-    "elapsed_ms", "observed_at", "image_version", "image_count", "image_transform_count", "document_count",
-    "media_outcome",
-  ],
-  shield_decision: [
-    "logical_request_id", "session_id", "lane", "destination_class", "policy_version",
-    "gitleaks_version", "privacy_version", "action", "reasons", "transform_count", "decision_source", "override",
-    "elapsed_ms", "observed_at", "image_version", "image_count", "image_transform_count", "document_count",
-    "media_outcome",
-  ],
-  shield_policy_transitions: [
-    "logical_request_id", "session_id", "lane", "destination_class", "policy_version",
-    "gitleaks_version", "privacy_version", "action", "reasons", "transform_count", "decision_source", "override",
-    "elapsed_ms", "observed_at",
-  ],
 });
 
 const QUERY_NAMES = new Set(Object.keys(QUERY_FIELDS));
@@ -101,7 +83,6 @@ export async function statusAuditUi({ status } = {}) {
       database: projectStatusSection(result?.database, ["present", "ok"]),
       service: projectStatusSection(result?.service, ["installed", "loaded", "stale"]),
       keychain: projectStatusSection(result?.keychain, ["present"]),
-      shield: projectShieldStatus(result?.shield),
       metadata_only: true,
       payload_included: false,
       projection: "audit-ui-status-v1",
@@ -110,64 +91,6 @@ export async function statusAuditUi({ status } = {}) {
   } catch {
     return degradedStatus("audit_status_unavailable");
   }
-}
-
-export function projectShieldStatus(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  const state = SHIELD_STATES.has(value.state) ? value.state : "unavailable";
-  const result = { state };
-  const lanes = projectShieldLanes(value.lanes);
-  const coverage = projectDeclaredCoverage(value.declared_coverage);
-  const bypasses = projectDeclaredBypasses(value.declared_bypasses);
-  if (lanes.length > 0) result.lanes = lanes;
-  if (coverage.length > 0) result.declared_coverage = coverage;
-  if (bypasses.length > 0) result.declared_bypasses = bypasses;
-  return result;
-}
-
-function projectShieldLanes(value) {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((lane) => {
-    if (!lane || typeof lane !== "object" || Array.isArray(lane)
-      || !["subscription", "managed"].includes(lane.lane)
-      || !["protected", "unavailable"].includes(lane.state)
-      || !["healthy", "degraded", "stopped", "unavailable"].includes(lane.service)
-      || !["healthy", "degraded", "missing", "unavailable"].includes(lane.policy)
-      || !["healthy", "degraded", "missing", "unavailable"].includes(lane.privacy)
-      || !["healthy", "unavailable"].includes(lane.audit)) return [];
-    const projected = {
-      lane: lane.lane,
-      state: lane.state,
-      service: lane.service,
-      policy: lane.policy,
-      privacy: lane.privacy,
-      audit: lane.audit,
-    };
-    for (const field of ["policy_version", "gitleaks_version", "privacy_version"]) {
-      if (Object.hasOwn(lane, field) && safeShieldScalar(lane[field]) !== null) projected[field] = lane[field];
-    }
-    return [projected];
-  });
-}
-
-function projectDeclaredCoverage(value) {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((entry) => {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)
-      || safeShieldScalar(entry.launcher) === null
-      || !Array.isArray(entry.lanes) || !entry.lanes.every((lane) => lane === "subscription" || lane === "managed")
-      || !Array.isArray(entry.hop_chain) || !entry.hop_chain.every((hop) => safeShieldScalar(hop) !== null)) return [];
-    return [{ launcher: entry.launcher, lanes: [...entry.lanes], hop_chain: [...entry.hop_chain] }];
-  });
-}
-
-function projectDeclaredBypasses(value) {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((entry) => {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)
-      || safeShieldScalar(entry.launcher) === null || safeShieldScalar(entry.reason) === null) return [];
-    return [{ launcher: entry.launcher, reason: entry.reason }];
-  });
 }
 
 function validateQuery(name, args) {
@@ -179,9 +102,6 @@ function validateQuery(name, args) {
       return { ok: false, reason: "invalid_query_arguments" };
     }
     normalized.push(arg);
-  }
-  if (name === "shield_decision" && !isShieldOpaqueId(normalized[0])) {
-    return { ok: false, reason: "invalid_query_arguments" };
   }
   return { ok: true, args: normalized };
 }
@@ -206,12 +126,6 @@ function safeScalar(value) {
   if (value === null || typeof value === "boolean" || typeof value === "number") return value;
   if (typeof value !== "string") return null;
   return scrubText(value).slice(0, 512);
-}
-
-function safeShieldScalar(value) {
-  if (typeof value === "boolean" || typeof value === "number") return value;
-  if (typeof value === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(value)) return value;
-  return null;
 }
 
 function scrubText(value) {
@@ -256,7 +170,6 @@ function degradedStatus(code) {
     database: {},
     service: {},
     keychain: {},
-    shield: { state: "unavailable" },
     metadata_only: true,
     payload_included: false,
     projection: "audit-ui-status-v1",
@@ -267,4 +180,3 @@ function degradedStatus(code) {
 function normalizeState(value) {
   return ALLOWED_STATES.has(value) ? value : "degraded";
 }
-import { isShieldOpaqueId } from "./event.mjs";

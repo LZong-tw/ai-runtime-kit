@@ -38,7 +38,7 @@ test("CCR audit wrapper registers a browser backend and one-time bootstrap app",
         return {
           async query(operation) {
             operations.push(operation);
-            return { rows: operation === "shield_decisions" ? [{ logical_request_id: "shield-request-1", raw_prompt: "must-not-render" }] : [] };
+            return { rows: operation === "requests" ? [{ logical_request_id: "request-1", raw_prompt: "must-not-render" }] : [] };
           },
         };
       },
@@ -70,26 +70,26 @@ test("CCR audit wrapper registers a browser backend and one-time bootstrap app",
     assert.equal(pageResponse.statusCode, 200);
     assert.match(pageResponse.headers["set-cookie"], /HttpOnly/i);
     assert.match(pageResponse.body(), /metadata-only local audit view/i);
-    assert.match(pageResponse.body(), /shield_decisions/);
-    assert.match(pageResponse.body(), /shield_policy_transitions/);
+    assert.match(pageResponse.body(), /requests/);
+    assert.doesNotMatch(pageResponse.body(), /shield/i);
     assert.doesNotMatch(pageResponse.body(), /api[_-]?key|authorization|bearer|secret|\/Users\//i);
     const sessionCookie = pageResponse.headers["set-cookie"].split(";", 1)[0];
-    const shieldQuery = responseRecorder();
+    const requestsQuery = responseRecorder();
+    await backends[0].handler(
+      { method: "GET", url: "/api/query?name=requests", headers: { cookie: sessionCookie } },
+      requestsQuery,
+    );
+    assert.equal(requestsQuery.statusCode, 200);
+    assert.deepEqual(operations, ["requests"]);
+    assert.doesNotMatch(requestsQuery.body(), /must-not-render/);
+    const retiredQuery = responseRecorder();
     await backends[0].handler(
       { method: "GET", url: "/api/query?name=shield_decisions", headers: { cookie: sessionCookie } },
-      shieldQuery,
+      retiredQuery,
     );
-    assert.equal(shieldQuery.statusCode, 200);
-    assert.deepEqual(operations, ["shield_decisions"]);
-    assert.doesNotMatch(shieldQuery.body(), /must-not-render/);
-    const rawDetail = responseRecorder();
-    await backends[0].handler(
-      { method: "GET", url: "/api/query?name=shield_decision&id=https%3A%2F%2Fprivate.invalid%2Frequest", headers: { cookie: sessionCookie } },
-      rawDetail,
-    );
-    assert.equal(rawDetail.statusCode, 200);
-    assert.match(rawDetail.body(), /invalid_query_arguments/);
-    assert.deepEqual(operations, ["shield_decisions"]);
+    assert.equal(retiredQuery.statusCode, 200);
+    assert.match(retiredQuery.body(), /unknown_query/);
+    assert.deepEqual(operations, ["requests"]);
     await assert.rejects(readFile(bootstrapPath, "utf8"), { code: "ENOENT" });
 
     const replayResponse = responseRecorder();
@@ -164,44 +164,6 @@ test("CCR plugin stop removes its unpublished browser entry and control token", 
     await plugin.stop();
     await assert.rejects(readFile(join(root, "ccr-ui-bootstrap-url"), "utf8"), { code: "ENOENT" });
     await assert.rejects(readFile(join(root, "ccr-ui-control.json"), "utf8"), { code: "ENOENT" });
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("CCR audit UI uses supplied Shield operational state instead of hardcoded coverage", async () => {
-  const root = await mkdtemp("/tmp/airkit-ccr-plugin-shield-state-");
-  const apps = [];
-  const backends = [];
-  try {
-    await writeFile(join(root, "capability"), "c".repeat(32), { mode: 0o600 });
-    await plugin.setup({
-      pluginConfig: { auditRootDir: root, auditQuerySocketPath: join(root, "auditd-query.sock") },
-      registerApp(app) { apps.push(app); },
-      createAuditQueryClient() { return { async query() { return { rows: [] }; } }; },
-      async shieldStatus({ audit }) {
-        assert.equal(audit, "healthy");
-        return {
-          state: "protected",
-          lanes: [{ lane: "managed", state: "protected", service: "healthy", policy: "healthy", privacy: "healthy", audit: "healthy", policy_version: "policy-7", gitleaks_version: "8.24.3", privacy_version: "privacy-1" }],
-          declared_coverage: [{ launcher: "airclaude", lanes: ["managed"], hop_chain: ["airclaude", "shield", "managed"] }],
-          declared_bypasses: [{ launcher: "claude", reason: "direct_client" }],
-        };
-      },
-      async registerHttpBackend(backend) { backends.push(backend); return { url: "http://127.0.0.1:4567" }; },
-    });
-    const bootstrap = new URL(apps[0].url).searchParams.get("bootstrap");
-    const page = responseRecorder();
-    await backends[0].handler({ method: "GET", url: `/?bootstrap=${encodeURIComponent(bootstrap)}`, headers: {} }, page);
-    const status = responseRecorder();
-    await backends[0].handler({ method: "GET", url: "/api/status", headers: { cookie: page.headers["set-cookie"].split(";", 1)[0] } }, status);
-    assert.equal(status.statusCode, 200);
-    assert.deepEqual(JSON.parse(status.body()).shield, {
-      state: "protected",
-      lanes: [{ lane: "managed", state: "protected", service: "healthy", policy: "healthy", privacy: "healthy", audit: "healthy", policy_version: "policy-7", gitleaks_version: "8.24.3", privacy_version: "privacy-1" }],
-      declared_coverage: [{ launcher: "airclaude", lanes: ["managed"], hop_chain: ["airclaude", "shield", "managed"] }],
-      declared_bypasses: [{ launcher: "claude", reason: "direct_client" }],
-    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

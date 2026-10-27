@@ -4,7 +4,6 @@ import { dirname } from "node:path";
 import { createConnection, createServer } from "node:net";
 
 import { createAuditFrameDecoder, encodeAuditFrame } from "./transport.mjs";
-import { isShieldOpaqueId } from "./event.mjs";
 
 const MAX_QUERY_LIMIT = 200;
 const DEFAULT_QUERY_LIMIT = 100;
@@ -44,17 +43,6 @@ const AUDIT_QUERY_SQL = Object.freeze({
     affected_session, resolution FROM evidence_gaps
     UNION ALL SELECT 'collector', source, reason, recorded_at, NULL, NULL, NULL FROM collector_gaps
     ORDER BY recorded_at`,
-  shield_decisions: `SELECT logical_request_id, session_id, lane, destination_class, policy_version,
-    gitleaks_version, privacy_version, action, reasons, transform_count, decision_source, override, elapsed_ms, observed_at,
-    image_version, image_count, image_transform_count, document_count, media_outcome
-    FROM shield_decisions ORDER BY observed_at, event_id`,
-  shield_decision: `SELECT logical_request_id, session_id, lane, destination_class, policy_version,
-    gitleaks_version, privacy_version, action, reasons, transform_count, decision_source, override, elapsed_ms, observed_at,
-    image_version, image_count, image_transform_count, document_count, media_outcome
-    FROM shield_decisions WHERE logical_request_id = ? ORDER BY observed_at, event_id`,
-  shield_policy_transitions: `SELECT logical_request_id, session_id, lane, destination_class, policy_version,
-    gitleaks_version, privacy_version, action, reasons, transform_count, decision_source, override, elapsed_ms, observed_at
-    FROM shield_policy_transitions ORDER BY observed_at, event_id`,
 });
 
 export const AUDIT_QUERY_OPERATIONS = Object.freeze(Object.keys(AUDIT_QUERY_SQL));
@@ -65,8 +53,6 @@ export function queryAuditStore(store, operation, params = {}, { limit = DEFAULT
   const sql = `${AUDIT_QUERY_SQL[operation]}\nLIMIT ?`;
   const values = operation === "request"
     ? [normalized.id, normalized.id, normalized.limit]
-    : operation === "shield_decision"
-      ? [normalized.id, normalized.limit]
     : [normalized.limit];
   return store.query(sql, values);
 }
@@ -249,8 +235,7 @@ function normalizeQueryRequest(request) {
   }
   const limit = normalizeLimit(request.limit ?? params.limit ?? DEFAULT_QUERY_LIMIT);
   if (!AUDIT_QUERY_OPERATIONS.includes(request.operation)) throw queryError("AIRKIT_AUDIT_QUERY_OPERATION_NOT_ALLOWED");
-  if ((request.operation === "request" || request.operation === "shield_decision") && !normalizedArgs.id) throw queryError("AIRKIT_AUDIT_QUERY_INVALID_REQUEST");
-  if (request.operation === "shield_decision" && !isShieldOpaqueId(normalizedArgs.id)) throw queryError("AIRKIT_AUDIT_QUERY_INVALID_SHIELD_IDENTIFIER");
+  if (request.operation === "request" && !normalizedArgs.id) throw queryError("AIRKIT_AUDIT_QUERY_INVALID_REQUEST");
   return {
     version: QUERY_VERSION,
     request_id: request.request_id,
@@ -264,11 +249,8 @@ function normalizeQueryArguments(operation, params, limit) {
   if (!AUDIT_QUERY_OPERATIONS.includes(operation)) throw queryError("AIRKIT_AUDIT_QUERY_OPERATION_NOT_ALLOWED");
   const input = Array.isArray(params) ? { id: params[0] } : (params ?? {});
   const id = input.id;
-  if ((operation === "request" || operation === "shield_decision") && (typeof id !== "string" || id.length === 0)) {
+  if (operation === "request" && (typeof id !== "string" || id.length === 0)) {
     throw queryError("AIRKIT_AUDIT_QUERY_INVALID_REQUEST");
-  }
-  if (operation === "shield_decision" && !isShieldOpaqueId(id)) {
-    throw queryError("AIRKIT_AUDIT_QUERY_INVALID_SHIELD_IDENTIFIER");
   }
   return { id, limit: normalizeLimit(limit) };
 }

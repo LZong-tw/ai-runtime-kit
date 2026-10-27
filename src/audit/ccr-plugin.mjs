@@ -5,12 +5,11 @@ import { dirname } from "node:path";
 import { resolveAuditPaths } from "./paths.mjs";
 import { createAuditQueryClient } from "./query.mjs";
 import { createAuditUiAdapter } from "./ui-contract.mjs";
-import { readShieldOperationalStatus } from "../shield/operational-status.mjs";
 
 const PLUGIN_ID = "airkit-audit-ui";
 const API_PATH = "/api";
-const QUERY_NAMES = ["requests", "sessions", "clients", "accounts", "repos", "usage", "cache", "gaps", "shield_decisions", "shield_policy_transitions"];
-const DETAIL_QUERY_NAMES = new Set(["request", "shield_decision"]);
+const QUERY_NAMES = ["requests", "sessions", "clients", "accounts", "repos", "usage", "cache", "gaps"];
+const DETAIL_QUERY_NAMES = new Set(["request"]);
 let activeFiles;
 
 export default {
@@ -24,7 +23,6 @@ export default {
     });
     const capabilityFile = ctx.pluginConfig?.capabilityFile ?? `${paths.rootDir}/capability`;
     const createQueryClient = ctx.createAuditQueryClient ?? createAuditQueryClient;
-    const shieldStatus = ctx.shieldStatus ?? readShieldOperationalStatus;
     let clientPromise;
     const query = async (name, args = []) => {
       const client = await getClient();
@@ -34,9 +32,9 @@ export default {
     const status = async () => {
       try {
         await query("clients");
-        return { state: "healthy", database: { present: true, ok: true }, service: { loaded: true }, shield: await shieldUiStatus("healthy") };
+        return { state: "healthy", database: { present: true, ok: true }, service: { loaded: true } };
       } catch {
-        return { state: "degraded", database: { present: false, ok: false }, service: { loaded: false }, shield: await shieldUiStatus("unavailable") };
+        return { state: "degraded", database: { present: false, ok: false }, service: { loaded: false } };
       }
     };
     const adapter = createAuditUiAdapter({ query, status });
@@ -111,14 +109,6 @@ export default {
         }));
       }
       return clientPromise;
-    }
-
-    async function shieldUiStatus(audit) {
-      try {
-        return await shieldStatus({ audit });
-      } catch {
-        return { state: "unavailable" };
-      }
     }
   },
   async stop() {
