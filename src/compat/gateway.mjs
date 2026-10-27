@@ -378,7 +378,6 @@ export async function handleCompatibilityMessage({
           messages: policyMessages,
           gate: config.advisor.gate,
         });
-        policyTurn.content.push(structuredClone(call));
         let result;
         let outcome;
         if (advisorUses >= advisorMaxUses(inspection.advisor)) {
@@ -416,6 +415,8 @@ export async function handleCompatibilityMessage({
             });
           }
         }
+        // Only a real consultation counts toward the conversation cap.
+        if (outcome === "called") policyTurn.content.push(structuredClone(call));
         reportAdvisorCall(inspection.advisor, selected, outcome);
         outwardContent.push(result);
         resumeResults.push(bridgeResumeResult(call.id, advisorResultText(result)));

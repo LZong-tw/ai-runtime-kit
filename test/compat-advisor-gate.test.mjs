@@ -257,3 +257,62 @@ test("mapped Advisor routes must bind to Anthropic providers exposing the model"
     ...providers, { name: "review", type: "anthropic_messages", models: ["claude-opus"] },
   ]));
 });
+
+function blockedAdvisor(index) {
+  const id = `srvtoolu_blocked_${index}`;
+  return [
+    { role: "assistant", content: [{ type: "server_tool_use", id, name: "advisor", input: {} }] },
+    { role: "user", content: [{ type: "advisor_tool_result", tool_use_id: id,
+      content: { type: "advisor_result", text: ADVISOR_BLOCKED_TEXT } }] },
+  ];
+}
+
+test("blocked or failed Advisor attempts do not consume the conversation cap", async (t) => {
+  const failed = (index) => [
+    { role: "assistant", content: [{ type: "server_tool_use", id: `srv_err_${index}`, name: "advisor", input: {} }] },
+    { role: "user", content: [{ type: "advisor_tool_result", tool_use_id: `srv_err_${index}`,
+      content: { type: "advisor_tool_result_error", error_code: "unavailable" } }] },
+  ];
+  const { advisorRequests } = await runBridge(t, {
+    messages: [...[1, 2, 3].flatMap(blockedAdvisor), ...failed(4), { role: "user", content: "Ask Advisor" }],
+  });
+  assert.equal(advisorRequests.length, 1);
+});
+
+test("blocked Advisor attempts do not reset the stuck window", () => {
+  assert.equal(isAdvisorAllowed({ model: "gpt", messages: [
+    ...toolHistory(20, 2), ...blockedAdvisor(1),
+  ] }), true);
+});
+
+test("blocked calls within one request do not count toward the cap", async (t) => {
+  const { advisorRequests, diagnostics } = await runBridge(t, {
+    advisor: { gate: { maxCallsPerConversation: 1 } },
+    turns: [[advisorCall("a")], [{ type: "text", text: "Advisor please" }]],
+    messages: [{ role: "user", content: "fix it" }],
+  });
+  assert.equal(advisorRequests.length, 0);
+  assert.deepEqual(diagnostics.map(({ outcome }) => outcome), ["blocked"]);
+  assert.equal(isAdvisorAllowed({ model: "gpt", gate: { maxCallsPerConversation: 1 }, messages: [
+    { role: "user", content: "Ask advisor" }, ...blockedAdvisor(1),
+  ] }), true);
+});
+
+test("system reminders in user messages do not count as asking for Advisor", () => {
+  assert.equal(isAdvisorAllowed({ model: "gpt", messages: [
+    { role: "user", content: "fix the build" },
+    { role: "assistant", content: [{ type: "tool_use", id: "t", name: "Bash", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "ok" },
+      { type: "text", text: "<system-reminder>You have an advisor tool.</system-reminder>" }] },
+  ] }), false);
+});
+
+test("comma-routed selectors classify by model, not provider", () => {
+  const history = [1, 2, 3].flatMap((index) => [
+    { role: "assistant", content: [{ type: "server_tool_use", id: `s${index}`, name: "advisor", input: {} }] },
+    { role: "user", content: [{ type: "advisor_tool_result", tool_use_id: `s${index}`,
+      content: { type: "advisor_result", text: "advice" } }] },
+  ]);
+  assert.equal(isAdvisorAllowed({ model: "claude-proxy,gpt-5.6-sol", messages: history }), false);
+  assert.equal(isAdvisorAllowed({ model: "web_litellm_anthropic,claude-sonnet-5-5", messages: history }), true);
+});
