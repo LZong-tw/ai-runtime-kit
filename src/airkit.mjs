@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { access, chmod, copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { spawn, spawnSync } from "node:child_process";
 import { readdirSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 
@@ -39,7 +39,6 @@ import { buildContextObservability } from "./context-observability.mjs";
 import { createPiAuditRuntime } from "./audit/adapters/pi-extension.mjs";
 import { runAuditCli } from "./audit/cli.mjs";
 import { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
-import { runShieldCli } from "./shield/cli.mjs";
 import {
   catalogCcrOnlyModelIds,
   globalModelWarning,
@@ -48,17 +47,14 @@ import {
   inspectGlobalModel,
 } from "./global-model-guard.mjs";
 import { globalModelRestoreNotice, startGlobalModelWatch, withSignalRestore } from "./global-model-watch.mjs";
-import { DEFAULT_BACKGROUND_HOST_GRACE_MS, backgroundHostUsesAdapter, hasBackgroundClaudeHost, scheduleBackgroundHostRelease } from "./shield/background-host.mjs";
-import { resolveShieldLauncher, resolveShieldLauncherMarker } from "./shield/launchers.mjs";
-import { freePort, startPxpipeHop } from "./shield/pxpipe-hop.mjs";
-import { assertNoPersistedShieldEndpointOverride, buildShieldChildEnv, createShieldDestinationLease, createShieldLaunchId, ensureShieldReady, openShieldApprovalChannel, registerShieldApprovalChannel, renewShieldDestinationLease, resolveShieldRoot, revokeShieldDestinationLease, unregisterShieldApprovalChannel } from "./shield/service.mjs";
+import { DEFAULT_BACKGROUND_HOST_GRACE_MS, backgroundHostUsesAdapter, hasBackgroundClaudeHost, scheduleBackgroundHostRelease } from "./background-host.mjs";
+import { freePort, startPxpipeHop } from "./pxpipe-hop.mjs";
 
 export { calculateRequestCost, resolvePricingVersion } from "./audit/pricing.mjs";
 export { tailHeadroomSavings } from "./audit/reconcile/headroom.mjs";
 export { correlateObservations, buildCacheCohorts } from "./audit/correlation.mjs";
 export { resolveProviderAccountIdentity, resolveRepositoryIdentity } from "./audit/registry.mjs";
 export { createAuditUiAdapter, queryAuditUi, statusAuditUi } from "./audit/ui-contract.mjs";
-export { readShieldStatuslineState, runShieldStatusline, shieldStatuslineState, shieldStatuslineSuffix } from "./shield/statusline-state.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
@@ -966,7 +962,6 @@ export async function exportOssRelease({ outDir }) {
   await mkdir(join(outDir, "src"), { recursive: true });
   await mkdir(join(outDir, "src", "audit"), { recursive: true });
   await mkdir(join(outDir, "src", "compat"), { recursive: true });
-  await mkdir(join(outDir, "src", "shield"), { recursive: true });
   await mkdir(join(outDir, "native"), { recursive: true });
   await mkdir(join(outDir, "profiles"), { recursive: true });
   await mkdir(join(outDir, "scripts"), { recursive: true });
@@ -985,15 +980,14 @@ export async function exportOssRelease({ outDir }) {
   await copyFile(join(here, "context-observability.mjs"), join(outDir, "src", "context-observability.mjs"));
   await copyFile(join(here, "subagent-observability.mjs"), join(outDir, "src", "subagent-observability.mjs"));
   await copyFile(join(here, "launchd-plist.mjs"), join(outDir, "src", "launchd-plist.mjs"));
+  await copyFile(join(here, "background-host.mjs"), join(outDir, "src", "background-host.mjs"));
+  await copyFile(join(here, "pxpipe-hop.mjs"), join(outDir, "src", "pxpipe-hop.mjs"));
   await copyFile(join(here, "global-model-guard.mjs"), join(outDir, "src", "global-model-guard.mjs"));
   await copyFile(join(here, "global-model-watch.mjs"), join(outDir, "src", "global-model-watch.mjs"));
   await copyDirectory(join(here, "audit"), join(outDir, "src", "audit"));
   await copyDirectory(join(here, "completion"), join(outDir, "src", "completion"));
   await copyFile(join(here, "auditd.mjs"), join(outDir, "src", "auditd.mjs"));
   await chmod(join(outDir, "src", "auditd.mjs"), 0o755);
-  await copyDirectory(join(here, "shield"), join(outDir, "src", "shield"));
-  await copyFile(join(here, "shieldd.mjs"), join(outDir, "src", "shieldd.mjs"));
-  await chmod(join(outDir, "src", "shieldd.mjs"), 0o755);
   await copyDirectory(join(repoRoot, "native"), join(outDir, "native"));
   for (const module of [
     "activity.mjs",
@@ -1242,17 +1236,10 @@ function profileGatewayEndpoint(ccrConfig) {
 
 export function buildLaunchPlan(catalog, profileName, options = {}) {
   const profile = findProfile(catalog, profileName);
-  const shield = resolveProfileShield(profile, { enabled: options.shieldEnabled });
   const configDir = resolve(options.configDir ?? defaultConfigDir());
   const templateVars = profileTemplateVars(profile, configDir);
   const launch = resolveLaunchConfig(profile, templateVars);
   const mode = resolveLaunchMode(profile, launch, options.mode);
-  const shieldLauncher = resolveShieldLauncher({
-    launcher: options.launcher ?? "airclaude",
-    mode,
-    headroom: String(options.launcher ?? "airclaude").startsWith("hr-"),
-    ...(shield ? { providerOverride: shield.lane } : {}),
-  });
   const ccrConfig = applyLaunchModeOverlay(buildCcrConfig(catalog, profileName, { configDir }), profile, mode, templateVars);
   assertCcr3Compatible(ccrConfig);
   const compatibility = resolveConfiguredCompatibility(ccrConfig);
@@ -1342,8 +1329,6 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
 
   return {
     profile: basePlan.profile,
-    ...(shield ? { shield } : {}),
-    shieldLauncher,
     mode,
     configDir,
     files: basePlan.files,
@@ -1476,50 +1461,6 @@ async function assertNoInheritedApiKeyHelper(env) {
   }
 }
 
-function shieldLaunchContext(lane, shield, options) {
-  const workspace = resolve(options.cwd ?? process.cwd());
-  const interactive = options.interactive ?? (process.stdin?.isTTY === true && process.stdout?.isTTY === true);
-  const repositoryRoot = readShieldGitValue(["-C", workspace, "rev-parse", "--show-toplevel"], options);
-  const remote = readShieldGitValue(["-C", workspace, "config", "--get", "remote.origin.url"], options);
-  const resolvedRoot = repositoryRoot ? resolve(repositoryRoot) : null;
-  const relativeWorkspace = resolvedRoot && (workspace === resolvedRoot || workspace.startsWith(`${resolvedRoot}${sep}`))
-    ? relative(resolvedRoot, workspace)
-    : null;
-  return {
-    repository: {
-      remoteHash: createHash("sha256").update(remote ?? "unknown").digest("hex"),
-      trustClass: shield?.trustClass ?? "unknown",
-    },
-    pathClasses: [relativeWorkspace === null ? "unknown" : classifyShieldWorkspacePath(relativeWorkspace)],
-    destinationClass: lane,
-    interactive,
-  };
-}
-
-function readShieldGitValue(args, options) {
-  const runGit = options.runGit ?? ((gitArgs) => {
-    const result = spawnSync("git", gitArgs, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-    return result.status === 0 ? result.stdout : null;
-  });
-  try {
-    const value = runGit(args);
-    if (typeof value !== "string") return null;
-    const trimmed = value.trim();
-    return trimmed.length > 0 && trimmed.length <= 2048 && !/[\u0000-\r\n]/.test(trimmed) ? trimmed : null;
-  } catch {
-    return null;
-  }
-}
-
-function classifyShieldWorkspacePath(workspace) {
-  const value = workspace.toLowerCase();
-  if (/(^|[/\\])\.env(?:$|[/\\])/.test(value)) return "environment";
-  if (/(^|[/\\])terraform\.tfstate(?:$|[/\\])/.test(value)) return "terraform_state";
-  if (/(^|[/\\])(credentials?|secrets?)(?:$|[/\\])/.test(value)) return "credential_store";
-  if (/(^|[/\\])(production|prod)(?:$|[/\\])/.test(value)) return "production_config";
-  return "source";
-}
-
 async function resolveGatewayToken(plan, options = {}) {
   const runCommand = options.runCommand ?? runCommandSync;
   const command = plan.launch.gatewayTokenCommand;
@@ -1604,7 +1545,6 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
     ...(options.readGlobalSettings ? { readText: options.readGlobalSettings } : {}),
     ccrOnlyIds,
   }));
-  const profileShield = plan.shield;
   const rendered = renderProfile(catalog, profileName, {
     configDir: plan.configDir,
     ccrConfigPath: plan.files.ccrConfig,
@@ -1622,9 +1562,6 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
       // offline; --doctor is the diagnostic mode, so it reads live state.
       ...(options.doctor
         ? await inspectLiveCcrState(catalog, { ...options, configDir: plan.configDir })
-        : {}),
-      ...(options.doctor && profileShield?.enabled === true
-        ? { shieldRoot: await (options.resolveShieldRoot ?? resolveShieldRoot)({ lane: plan.shieldLauncher.clientLane, env: options.env ?? process.env, ...(options.inspectShieldService ? { inspectService: options.inspectShieldService } : {}) }) }
         : {}),
       runtime: await checkLaunchRuntime(plan, options),
     };
@@ -1675,7 +1612,6 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
   let externalClient;
   if (options.launch !== false) {
     await assertNoInheritedApiKeyHelper(launchEnv);
-    if (profileShield?.enabled === true) await assertNoPersistedShieldEndpointOverride(undefined, launchEnv);
     const { gatewayOrigin, gatewayToken } = await prepareManagedGateway({
       ccrClient,
       currentConfig,
@@ -1695,9 +1631,8 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
         launchInstanceId: options.launchInstanceId ?? null,
         sessionContext: options.sessionContext ?? null,
       });
-    // pxpipe runs whether or not Shield does. It sits in front of the
-    // middleware, so with Shield on it only ever sees redacted traffic. Its
-    // lifetime follows the middleware (including background preservation).
+    // pxpipe sits in front of the middleware. Its lifetime follows the
+    // middleware (including background preservation).
     let pxpipeHop = null;
     if (plan.launch.pxpipe === true) {
       try {
@@ -1723,49 +1658,12 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
       if (middleware) await middleware.close();
       else await pxpipeHop?.close();
     };
-    const shieldTargetOrigin = middleware?.origin ?? pxpipeHop?.origin ?? gatewayOrigin;
-    let shieldReady = null;
-    try {
-      if (profileShield?.enabled === true) {
-        if (plan.shieldLauncher.coverage !== "protected" || plan.shieldLauncher.clientLane !== profileShield.lane) {
-          throw new Error("shield launcher disposition does not match the profile lane");
-        }
-        shieldReady = await (options.ensureShieldReady ?? ensureShieldReady)({
-          env: launchEnv,
-          expectedTargetOrigin: shieldTargetOrigin,
-          lane: plan.shieldLauncher.clientLane,
-        });
-        if (shieldReady.lane === "managed") {
-          shieldReady = await (options.createShieldDestinationLease ?? createShieldDestinationLease)({
-            ready: shieldReady,
-            targetOrigin: shieldTargetOrigin,
-            launcherContext: shieldLaunchContext(plan.shieldLauncher.clientLane, profileShield, options),
-          });
-        }
-      }
-    } catch (error) {
-      await closeHops();
-      throw error;
-    }
     const spawnCommand = options.spawnCommand ?? spawnCommandAsync;
     const inherited = { ...(options.env ?? process.env) };
     for (const key of plan.launch.clearEnv ?? []) delete inherited[key];
-    let shieldApprovalChannel = null;
-    let shieldApprovalRegistered = false;
-    let shieldLeaseRetained = false;
-    let shieldLeaseTimer = null;
-    let shieldLeaseTarget = null;
-    const stopShieldLeaseTimer = () => { if (shieldLeaseTimer !== null) { (options.shieldLeaseClearInterval ?? clearInterval)(shieldLeaseTimer); shieldLeaseTimer = null; } };
-    if (shieldReady?.lane === "managed") {
-      shieldLeaseTarget = shieldTargetOrigin;
-      const schedule = options.shieldLeaseSetInterval ?? setInterval;
-      shieldLeaseTimer = schedule(() => { void (options.renewShieldDestinationLease ?? renewShieldDestinationLease)({ ready: shieldReady, targetOrigin: shieldLeaseTarget }).catch(() => {}); }, 15_000);
-      shieldLeaseTimer.unref?.();
-    }
     const compatibilityLaunch = middleware
-      ? buildCompatibilityLaunch(managed.compatibility, shieldReady?.origin ?? middleware.origin, gatewayToken)
+      ? buildCompatibilityLaunch(managed.compatibility, middleware.origin, gatewayToken)
       : { args: [], env: {} };
-    const shieldLaunchId = shieldReady ? (options.createShieldLaunchId ?? createShieldLaunchId)() : undefined;
     let modelWatch = null;
     let detachModelWatchSignals = () => {};
     // After the child exits, so the notice never lands inside the TUI.
@@ -1775,28 +1673,17 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
       (options.stderr ?? process.stderr).write(globalModelRestoreNotice(modelWatch.stop()));
       modelWatch = null;
     };
-    let shieldCleanedUp = false;
-    const cleanupShieldLaunch = async ({ closeMiddleware = false } = {}) => {
-      if (shieldCleanedUp) return;
-      shieldCleanedUp = true;
-      stopShieldLeaseTimer();
-      if (shieldApprovalRegistered) await (options.unregisterShieldApprovalChannel ?? unregisterShieldApprovalChannel)({ ready: shieldReady, launchId: shieldLaunchId }).catch(() => {});
-      await shieldApprovalChannel?.close?.();
-      await (options.revokeShieldDestinationLease ?? revokeShieldDestinationLease)({ ready: shieldReady }).catch(() => {});
+    // The monitor closes the middleware (and the pxpipe hop behind it); a bare
+    // pxpipe hop has no middleware to ride on, so it is released here.
+    let hopsReleased = false;
+    let hopsRetained = false;
+    const releaseHops = async ({ closeMiddleware = false } = {}) => {
+      if (hopsReleased) return;
+      hopsReleased = true;
       if (closeMiddleware) await closeHops();
       else if (!middleware) await pxpipeHop?.close();
     };
     try {
-      if (shieldReady) {
-        shieldApprovalChannel = await (options.openShieldApprovalChannel ?? openShieldApprovalChannel)({
-          approvalBroker: options.shieldApprovalBroker,
-          createApprovalChannel: options.createShieldApprovalChannel,
-        });
-        if (shieldApprovalChannel !== null) {
-          await (options.registerShieldApprovalChannel ?? registerShieldApprovalChannel)({ ready: shieldReady, channel: shieldApprovalChannel, launchId: shieldLaunchId });
-          shieldApprovalRegistered = true;
-        }
-      }
       const childEnv = {
         ...inherited,
         ...plan.launch.env,
@@ -1820,32 +1707,27 @@ export async function prepareLaunch(catalog, profileName, options = {}) {
       modelWatch = options.watchGlobalModel === false ? null : startGlobalModelWatch({ env: launchEnv, ccrOnlyIds });
       detachModelWatchSignals = withSignalRestore(modelWatch);
       child = spawnCommand(plan.launch.command, [...spawnArgs.head, ...spawnArgs.tail], {
-        env: shieldReady
-          ? buildShieldChildEnv({ ...shieldReady, lane: plan.shieldLauncher.clientLane }, childEnv, shieldLaunchId)
-          : childEnv,
+        env: childEnv,
         stdio: "inherit",
       });
     } catch (error) {
       stopModelWatch();
-      await cleanupShieldLaunch({ closeMiddleware: true });
+      await releaseHops({ closeMiddleware: true });
       throw error;
     }
     try {
-      const lifecycleMiddleware = shieldReady && middleware
-        ? { ...middleware, origin: shieldReady.origin }
-        : middleware;
-      childStatus = await monitorChildLifecycle(lifecycleMiddleware, child, {
+      childStatus = await monitorChildLifecycle(middleware, child, {
         backgroundHostDetector: options.backgroundHostDetector,
         backgroundMiddlewareGraceMs: options.backgroundMiddlewareGraceMs,
         backgroundSetTimeout: options.backgroundSetTimeout,
         preserveForBackground: options.preserveMiddlewareForBackground !== false,
         stderr: options.stderr ?? process.stderr,
-        onPreserveBackground: () => { shieldLeaseRetained = true; },
-        onDeferredClose: async () => await cleanupShieldLaunch(),
+        onPreserveBackground: () => { hopsRetained = true; },
+        onDeferredClose: async () => await releaseHops(),
       });
     } finally {
       stopModelWatch();
-      if (!shieldLeaseRetained) await cleanupShieldLaunch();
+      if (!hopsRetained) await releaseHops();
     }
   }
 
@@ -2051,7 +1933,6 @@ function validateCatalog(catalog) {
     }
     if (profile.ccr) validateCcr(profile.name, profile.ccr);
     validateLaunch(profile);
-    validateShield(profile);
     validateShell(profile);
     validateManagedFiles(profile);
   }
@@ -2064,36 +1945,6 @@ function validateCatalog(catalog) {
       laneWindow(modelEntry, label);
     }
   }
-}
-
-function validateShield(profile) {
-  const shield = profile.shield;
-  if (shield === undefined) return;
-  if (!isPlainObject(shield)) {
-    throw new Error(`profile "${profile.name}" shield must be an object`);
-  }
-  const supportedFields = new Set(["enabled", "lane", "trustClass"]);
-  for (const field of Object.keys(shield)) {
-    if (!supportedFields.has(field)) {
-      throw new Error(`profile "${profile.name}" shield contains unsupported field: ${field}`);
-    }
-  }
-  if (typeof shield.enabled !== "boolean") {
-    throw new Error(`profile "${profile.name}" shield.enabled must be a boolean`);
-  }
-  if (shield.lane !== "managed") {
-    throw new Error(`profile "${profile.name}" shield.lane must be managed`);
-  }
-  if (shield.trustClass !== undefined && !["public", "internal", "restricted", "unknown"].includes(shield.trustClass)) {
-    throw new Error(`profile "${profile.name}" shield.trustClass must be public, internal, restricted, or unknown`);
-  }
-}
-
-export function resolveProfileShield(profile, { enabled } = {}) {
-  const shield = profile?.shield;
-  if (shield === undefined) return null;
-  if (enabled !== undefined && typeof enabled !== "boolean") throw new TypeError("profile Shield override must be a boolean");
-  return Object.freeze({ ...shield, ...(enabled === undefined ? {} : { enabled }) });
 }
 
 function validateLaunch(profile) {
@@ -2429,7 +2280,6 @@ function publicPackage(version) {
       airomp: "src/airomp.mjs",
       airoc: "src/airoc.mjs",
       "airkit-auditd": "src/auditd.mjs",
-      "airkit-shieldd": "src/shieldd.mjs",
     },
     files: [
       "CLAUDE.md",
@@ -2448,9 +2298,6 @@ function publicPackage(version) {
       "scripts/verify-ccr3-e2e.mjs",
       "src",
     ],
-    dependencies: {
-      "@open-policy-agent/opa-wasm": "1.8.0",
-    },
     scripts: {
       check: "node --check src/airkit.mjs && node --check scripts/verify-audit-core.mjs && node --check scripts/verify-audit-clients.mjs && node --check scripts/capture-codex-audit-contract.mjs && node --check scripts/capture-pi-audit-contract.mjs && node --check src/audit/cli.mjs && node --check src/audit/correlation.mjs && node --check src/audit/crypto.mjs && node --check src/audit/daemon.mjs && node --check src/audit/event.mjs && node --check src/audit/export.mjs && node --check src/audit/keychain.mjs && node --check src/audit/migrations.mjs && node --check src/audit/paths.mjs && node --check src/audit/pricing.mjs && node --check src/audit/query.mjs && node --check src/audit/redaction.mjs && node --check src/audit/reconcile/codex.mjs && node --check src/audit/reconcile/headroom.mjs && node --check src/audit/registry.mjs && node --check src/audit/retention.mjs && node --check src/audit/reveal-export.mjs && node --check src/audit/reveal.mjs && node --check src/audit/service.mjs && node --check src/audit/spool.mjs && node --check src/audit/store.mjs && node --check src/audit/transport.mjs && node --check src/audit/ui-contract.mjs && node --check src/auditd.mjs",
       "pack:check": "npm pack --dry-run",
@@ -2481,14 +2328,6 @@ export async function runCli(argv = process.argv.slice(2), options = {}) {
 
   if (command === "audit") {
     return runAuditCli([subcommand, ...rest].filter((arg) => arg !== undefined), { ...options, stdout });
-  }
-
-  if (command === "shield") {
-    return runShieldCli([subcommand, ...rest].filter((arg) => arg !== undefined), {
-      ...options,
-      stdout,
-      loadCatalog: options.loadCatalog ?? (() => options.catalog ?? loadCatalog(options.catalogPath ?? defaultCatalogPath)),
-    });
   }
 
   if (command === "runtime" && subcommand === "check") {
@@ -2677,7 +2516,6 @@ export async function runAirclaudeCli(argv = process.argv.slice(2), options = {}
     launch: !parsed.dryRun && !parsed.doctor,
     mode: parsed.plainClaude ? "plain" : parsed.mode,
     plainClaude: parsed.plainClaude,
-    launcher: resolveShieldLauncherMarker(launchEnv),
     userArgs: parsed.userArgs,
   });
   stdout.write(renderLaunchResult(result, { doctor: parsed.doctor, dryRun: parsed.dryRun }));
@@ -3118,7 +2956,6 @@ function renderAirkitHelp() {
 Commands:
   connect [--profile <name>] [--mode <mode>] [--port <port>] [--config-dir <dir>]
   audit <install|start|stop|status|doctor|update|verify|open|repo|account|requests|request|sessions|clients|accounts|repos|usage|cache|gaps|query|prune|export> [options]
-  shield <install|uninstall|start|stop|status|doctor|policy|privacy|launch> [options]
   runtime check
   runtime update [--write]
   repair codex-takeover [--write]
@@ -3340,7 +3177,7 @@ ${[
 ]
   .map((line) => (line.startsWith("  ") ? line : `- ${line}`))
   .join("\n")}
-${result.shieldRoot ? renderShieldRootLines(result.shieldRoot) : ""}Runtime:
+Runtime:
 ${runtimeLines.join("\n") || "- skipped"}
 Launch:
 - ${result.launch.command} ${[...result.launch.args, ...result.launch.userArgs].map(quoteShell).join(" ")}
@@ -3352,14 +3189,6 @@ Environment:
 - inherited Claude home: CLAUDE_CONFIG_DIR is left untouched
 ${contextEnvLines(result.launch.env)}${autoCompactLines(result.launch.autoCompact)}${result.launch.strictMcp ? "- MCP: strict (user, project and plugin MCP servers are not loaded; only --mcp-config servers)\n" : ""}- cleared: ${(result.launch.clearEnv ?? []).join(", ") || "none"}
 `;
-}
-
-// Says which Shield the launch would use, so a stale ccshield identity reads as
-// a skipped candidate with its reason instead of a bare "service down".
-function renderShieldRootLines({ implementation, rootDir, skipped = [] }) {
-  return `Shield:
-- ${implementation === "ccshield" ? "ccshield" : "legacy AirKit Shield"}: ${rootDir}
-${skipped.map((entry) => `- skipped ${entry.implementation} at ${entry.rootDir ?? "unresolved root"}: ${entry.reason}\n`).join("")}`;
 }
 
 // `launch.context` overrides are invisible in the launch argv but change how the

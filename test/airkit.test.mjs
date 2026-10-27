@@ -8,7 +8,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import * as airkitRuntime from "../src/airkit.mjs";
-import { startCcshieldFixture } from "./fixtures/ccshield-daemon.mjs";
 import * as ccrVerifier from "../scripts/verify-ccr3-e2e.mjs";
 import {
   buildHeartbeatResponse,
@@ -41,11 +40,9 @@ import {
   prepareExternalClient,
   prepareLaunch,
   assertInteractiveResumeLaunch,
-  readShieldStatuslineState,
   runExternalClientCli,
   runAirclaudeCli,
   runCli,
-  shieldStatuslineSuffix,
   updateProfile,
 } from "../src/airkit.mjs";
 
@@ -105,28 +102,6 @@ test("catalog rejects invalid proactive compaction policy", async () => {
       const catalogPath = join(root, `${index}.json`);
       await writeFile(catalogPath, `${JSON.stringify(catalog)}\n`);
       await assert.rejects(loadCatalog(catalogPath), expected);
-    }
-  } finally {
-    await rm(root, { force: true, recursive: true });
-  }
-});
-
-test("Shield profile schema rejects malformed declarations", async () => {
-  const root = await mkdtemp(join(tmpdir(), "airkit-invalid-shield-profile-"));
-  const cases = [
-    [null, /profile "launch-example" shield must be an object/],
-    [{ enabled: "false", lane: "managed" }, /shield.enabled must be a boolean/],
-    [{ enabled: false, lane: "subscription" }, /shield.lane must be managed/],
-    [{ enabled: false, lane: "managed", extra: true }, /shield contains unsupported field: extra/],
-  ];
-
-  try {
-    for (const [index, [shield, expected]] of cases.entries()) {
-      const catalog = launchCatalog();
-      catalog.profiles[0].shield = shield;
-      const catalogPath = join(root, `${index}.json`);
-      await writeFile(catalogPath, `${JSON.stringify(catalog)}\n`);
-      await assert.rejects(loadCatalog(catalogPath, { includeLocal: false }), expected);
     }
   } finally {
     await rm(root, { force: true, recursive: true });
@@ -274,8 +249,8 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
     assert.deepEqual(exportedPackage.files, expectedFiles);
     assert.equal(packageJson.bin["airkit-auditd"], "src/auditd.mjs");
     assert.equal(exportedPackage.bin["airkit-auditd"], "src/auditd.mjs");
-    assert.equal(packageJson.bin["airkit-shieldd"], "src/shieldd.mjs");
-    assert.equal(exportedPackage.bin["airkit-shieldd"], "src/shieldd.mjs");
+    assert.equal(packageJson.bin["airkit-shieldd"], undefined);
+    assert.equal(exportedPackage.bin["airkit-shieldd"], undefined);
     const exportedAirPi = await readFile(join(outDir, "src", "airpi.mjs"), "utf8");
     assert.equal(exportedAirPi.includes("runAirPiCli()") || exportedAirPi.includes("runExternalClientCli(\"pi\")"), true);
     assert.equal((await readFile(join(outDir, "src", "airomp.mjs"), "utf8")).includes("runExternalClientCli(\"omp\")"), true);
@@ -283,15 +258,13 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
     assert.equal((await readFile(join(outDir, "src", "audit", "service.mjs"), "utf8")).includes("installAuditService"), true);
     assert.equal((await readFile(join(outDir, "src", "audit", "cli.mjs"), "utf8")).includes("runAuditCli"), true);
     assert.equal((await readFile(join(outDir, "src", "auditd.mjs"), "utf8")).includes("createAuditDaemon"), true);
-    assert.equal((await readFile(join(outDir, "src", "shield", "cli.mjs"), "utf8")).includes("runShieldCli"), true);
-    assert.equal((await readFile(join(outDir, "src", "shieldd.mjs"), "utf8")).includes("startShieldProxy"), true);
     assert.equal((await readFile(join(outDir, "native", "airkit-audit-auth.swift"), "utf8")).includes("import"), true);
     assert.equal((await readFile(join(outDir, "src", "subagent-observability.mjs"), "utf8")).includes("runSubagentStatusLine"), true);
     for (const candidate of [packageJson, exportedPackage]) {
       assert.equal(candidate.name, expectedIdentity.name);
       assert.deepEqual(candidate.publishConfig, expectedIdentity.publishConfig);
       assert.deepEqual(candidate.repository, expectedIdentity.repository);
-      assert.deepEqual(candidate.dependencies, { "@open-policy-agent/opa-wasm": "1.8.0" });
+      assert.equal(candidate.dependencies, undefined);
     }
     assert.equal(exportedPackage.version, packageJson.version);
     for (const document of ["README.md", "CLAUDE.md"]) {
@@ -3744,43 +3717,6 @@ test("context hook records subagent timelines without an AirClaude profile", asy
   }
 });
 
-test("subagent statusline appends only a Shield lane protection suffix", async () => {
-  const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-suffix-"));
-  const env = { CLAUDE_PLUGIN_DATA: pluginData };
-  const payload = { parent_id: "parent-1", tasks: [{ id: "task-1", agent_id: "child-1" }] };
-  const render = async (statuslineSuffix) => {
-    let output = "";
-    await runSubagentStatusLine({
-      env,
-      statuslineSuffix,
-      input: (async function* () { yield JSON.stringify(payload); })(),
-      output: { write(value) { output += value; } },
-    });
-    return JSON.parse(output);
-  };
-
-  try {
-    const [bare] = await renderSubagentStatusLine(payload, env);
-    assert.deepEqual(await render(" \u00b7 Shield subscription:protected managed:blocked"), {
-      id: "task-1",
-      content: `${bare} \u00b7 Shield subscription:protected managed:blocked`,
-    });
-    for (const rejected of [
-      " \u00b7 Shield subscription:protected managed:blocked \u00b7 http://127.0.0.1:8080",
-      "\u00b7 Shield subscription:protected managed:blocked",
-      " \u00b7 Shield subscription:protected",
-      " \u00b7 Shield subscription:protected managed:blocked cost:$4.10",
-      " \u00b7 Shield managed:protected ../../etc/passwd:protected",
-      " \u00b7 tokens: 4096",
-      undefined,
-    ]) {
-      assert.deepEqual(await render(rejected), { id: "task-1", content: bare }, JSON.stringify(rejected ?? null));
-    }
-  } finally {
-    await rm(pluginData, { force: true, recursive: true });
-  }
-});
-
 test("subagent observability bounds incremental transcript work and retained projection state", async () => {
   const pluginData = await mkdtemp(join(tmpdir(), "airkit-subagent-bounded-"));
   const childTranscript = join(pluginData, "child.jsonl");
@@ -5011,13 +4947,11 @@ test("AirClaude renders an additive session plugin for the heartbeat", async () 
     assert.ok(settings);
     assert.ok(statusline);
     await installProfile(catalog, "launch-example", { configDir, force: true, write: true });
-    assert.match(await readFile(statusline.path, "utf8"), /runShieldStatusline/);
+    assert.match(await readFile(statusline.path, "utf8"), /runSubagentStatusLine/);
 
     // Matching the generated source only proves the string is there. Run the
     // entrypoint the way Claude Code runs it, so a module specifier that does
-    // not resolve, or a producer the sink refuses, fails here instead of
-    // shipping. The expected suffix is computed by the producer against the
-    // same environment, so the two ends stay tied to one lane vocabulary.
+    // not resolve fails here instead of shipping.
     const statuslineHome = await mkdtemp(join(tmpdir(), "airkit-statusline-home-"));
     try {
       const statuslineEnv = { ...process.env, HOME: statuslineHome, CLAUDE_PLUGIN_DATA: statuslineHome };
@@ -5029,10 +4963,9 @@ test("AirClaude renders an additive session plugin for the heartbeat", async () 
       assert.equal(rendered.status, 0, rendered.stderr);
       assert.equal(rendered.stderr, "");
       const row = JSON.parse(rendered.stdout.trim().split("\n")[0]);
-      const expectedSuffix = shieldStatuslineSuffix(await readShieldStatuslineState({ env: statuslineEnv }));
       assert.equal(row.id, "task-1");
-      assert.ok(row.content.endsWith(expectedSuffix), row.content);
-      assert.ok(row.content.length > expectedSuffix.length, "the suffix is appended to a row, not the whole row");
+      assert.ok(row.content.length > 0, row.content);
+      assert.doesNotMatch(row.content, /Shield/);
     } finally {
       await rm(statuslineHome, { force: true, recursive: true });
     }
@@ -6101,105 +6034,10 @@ test("prepareLaunch writes managed files, syncs CCR 3 through RPC, and preserves
   }
 });
 
-test("airclaude --doctor names the ccshield root it would use, or the legacy root and why", async () => {
-  const catalog = launchCatalog();
-  catalog.profiles[0].shield = { enabled: true, lane: "managed" };
-  const catalogPath = await writeLaunchCatalog(catalog);
-  const live = await startCcshieldFixture({ lane: "managed" });
-  const stale = await startCcshieldFixture({ lane: "managed", identity: { lane: "subscription", targetClass: "subscription" } });
-
-  try {
-    const doctor = async (fixture) => {
-      const output = [];
-      const configDir = join(fixture.home, "airkit");
-      const exitCode = await runAirclaudeCli(["--doctor", "--profile", "launch-example", "--config-dir", configDir], {
-        catalogPath,
-        env: { ...fixture.env, DEMO_API_KEY: "runtime-secret" },
-        stdout: { write: (chunk) => output.push(chunk) },
-        ccrClient: ccrTestClient([]),
-        commandExists: async () => true,
-        runCommand: async () => ({ ok: true, status: 0, stdout: "" }),
-        runtimeVersions: passingRuntimeVersions(),
-        spawnCommand: () => { throw new Error("doctor must not launch"); },
-        inspectShieldService: fixture.inspectService,
-      });
-      return { exitCode, text: output.join("") };
-    };
-
-    const chosen = await doctor(live);
-    assert.equal(chosen.exitCode, 0);
-    assert.ok(chosen.text.includes(`Shield:\n- ccshield: ${live.root}\nRuntime:`), chosen.text);
-    assert.equal(chosen.text.includes(live.origin), false);
-
-    const fallback = await doctor(stale);
-    assert.ok(fallback.text.includes(
-      `Shield:\n- legacy AirKit Shield: ${stale.legacyRoot}\n- skipped ccshield at ${stale.root}: identity lane is subscription, not managed\nRuntime:`,
-    ), fallback.text);
-  } finally {
-    await live.close();
-    await stale.close();
-    await rm(resolve(catalogPath, ".."), { force: true, recursive: true });
-  }
-});
-
-test("enabled Shield blocks before AirClaude spawn when preflight fails", async () => {
-  const catalog = launchCatalog();
-  catalog.profiles[0].shield = { enabled: true, lane: "managed" };
-  const configDir = await mkdtemp(join(tmpdir(), "airkit-shield-blocked-launch-"));
-  const spawnCalls = [];
-
-  try {
-    await assert.rejects(
-      prepareLaunch(catalog, "launch-example", {
-        ccrClient: ccrTestClient([]),
-        commandExists: async () => true,
-        configDir,
-        ensureShieldReady: async () => {
-          throw new Error("shield unavailable");
-        },
-        env: { DEMO_API_KEY: "runtime-secret", HOME: configDir },
-        runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
-        runtimeVersions: passingRuntimeVersions(),
-        spawnCommand: (...args) => spawnCalls.push(args),
-      }),
-      /shield unavailable/,
-    );
-    assert.deepEqual(spawnCalls, []);
-  } finally {
-    await rm(configDir, { force: true, recursive: true });
-  }
-});
-
-test("profile-scoped Shield rollback removes only child Shield wiring", () => {
-  const catalog = launchCatalog();
-  catalog.profiles[0].shield = { enabled: true, lane: "managed" };
-
-  const protectedPlan = buildLaunchPlan(catalog, "launch-example", {
-    launcher: "hr-airclaude",
-  });
-  const rollbackPlan = buildLaunchPlan(catalog, "launch-example", {
-    launcher: "hr-airclaude",
-    shieldEnabled: false,
-  });
-
-  assert.deepEqual(protectedPlan.shieldLauncher, {
-    coverage: "protected",
-    clientLane: "managed",
-    destinationClass: "managed",
-    hopChain: ["headroom", "airclaude", "shield", "managed"],
-  });
-  assert.equal(protectedPlan.shield.enabled, true);
-  assert.equal(rollbackPlan.shield.enabled, false);
-  assert.deepEqual(rollbackPlan.ccrConfig, protectedPlan.ccrConfig);
-  assert.deepEqual(rollbackPlan.launch.env, protectedPlan.launch.env);
-  assert.deepEqual(rollbackPlan.launch.clearEnv, protectedPlan.launch.clearEnv);
-});
-
-test("launch.pxpipe fronts the middleware without Shield and closes with it", async () => {
+test("launch.pxpipe fronts the middleware and closes with it", async () => {
   const catalog = compatibilityCatalog();
   catalog.profiles[0].launch.pxpipe = true;
-  delete catalog.profiles[0].shield;
-  const configDir = await mkdtemp(join(tmpdir(), "airkit-pxpipe-noshield-"));
+  const configDir = await mkdtemp(join(tmpdir(), "airkit-pxpipe-launch-"));
   const events = [];
   let childEnv = null;
   try {
@@ -6213,7 +6051,6 @@ test("launch.pxpipe fronts the middleware without Shield and closes with it", as
         events.push(`pxpipe-start:${upstream}`);
         return { origin: "http://127.0.0.1:4700", close: async () => events.push("pxpipe-close") };
       },
-      ensureShieldReady: async () => { throw new Error("Shield must not start"); },
       spawnCommand: (command, args, options) => {
         childEnv = options.env;
         return { once(event, callback) { if (event === "exit") callback(0); } };
@@ -6237,263 +6074,6 @@ test("launch.pxpipe must be a boolean", async () => {
     await assert.rejects(loadCatalog(catalogPath), /launch\.pxpipe must be a boolean/);
   } finally {
     await rm(dir, { force: true, recursive: true });
-  }
-});
-
-test("Shield launch derives a bounded git repository identity and reviewed profile trust", async () => {
-  const catalog = compatibilityCatalog();
-  catalog.profiles[0].shield = { enabled: true, lane: "managed", trustClass: "restricted" };
-  const configDir = await mkdtemp(join(tmpdir(), "airkit-shield-git-context-"));
-  const observed = [];
-  try {
-    await prepareLaunch(catalog, "launch-example", {
-      ccrClient: ccrTestClient([]), commandExists: async () => true, configDir,
-      env: { HOME: configDir, DEMO_API_KEY: "fixture-provider-key" }, interactive: false,
-      runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key" }),
-      runGit: (args) => args.includes("--show-toplevel") ? "/work/restricted-platform\n" : "ssh://git@example.test/platform/restricted.git\n",
-      cwd: "/work/restricted-platform/terraform/production",
-      runtimeVersions: passingRuntimeVersions(),
-      startCompatibilityMiddleware: async () => ({ origin: "http://127.0.0.1:4599", close: async () => {} }),
-      ensureShieldReady: async () => ({ origin: "http://127.0.0.1:8811", capability: "a".repeat(40), lane: "managed", targetClass: "managed" }),
-      createShieldDestinationLease: async (request) => {
-        observed.push(request.launcherContext);
-        return { ...request.ready, capability: "b".repeat(40) };
-      },
-      spawnCommand: () => ({ once(event, callback) { if (event === "exit") callback(0); } }),
-    });
-    assert.deepEqual(observed, [{
-      repository: { remoteHash: createHash("sha256").update("ssh://git@example.test/platform/restricted.git").digest("hex"), trustClass: "restricted" },
-      pathClasses: ["production_config"], destinationClass: "managed", interactive: false,
-    }]);
-    assert.doesNotMatch(JSON.stringify(observed), /restricted-platform|example\.test/);
-  } finally {
-    await rm(configDir, { force: true, recursive: true });
-  }
-});
-
-test("enabled Shield replaces only the spawned AirClaude endpoint and capability", async () => {
-  const catalog = compatibilityCatalog();
-  catalog.profiles[0].shield = { enabled: true, lane: "managed" };
-  const configDir = await mkdtemp(join(tmpdir(), "airkit-shield-enabled-launch-"));
-  const capability = "fixture-capability-012345678901234567890";
-  const events = [];
-  const spawnCalls = [];
-  const leaseTimers = [];
-  const clearedLeaseTimers = [];
-  const childListeners = new Map();
-  let spawned;
-  const spawnedPromise = new Promise((resolve) => { spawned = resolve; });
-  const approvalChannel = {
-    socketPath: "/tmp/airkit-shield-approval-fixture.sock",
-    capability: "a".repeat(32),
-    async close() { events.push("approval-close"); },
-  };
-  const saved = [];
-  const launchEnv = {
-    ANTHROPIC_API_BASE_URL: "https://stale-provider.invalid",
-    ANTHROPIC_BASE_URL: "https://stale-provider.invalid",
-    CLAUDE_CODE_OAUTH_TOKEN: "subscription-oauth-must-not-reach-managed",
-    AIRKIT_SHIELD_CONTROL_CAPABILITY: "control-must-not-reach-child",
-    AIRKIT_SHIELD_APPROVAL_SOCKET: "/tmp/attacker.sock",
-    ANTHROPIC_CUSTOM_HEADERS: "x-airkit-shield-control: control-must-not-reach-child\nx-airkit-shield-approval: attacker\nx-airkit-mode: auto",
-    DEMO_API_KEY: "runtime-secret",
-    HOME: configDir,
-  };
-  const ccrClient = ccrTestClient(saved);
-  ccrClient.ensureGateway = async () => events.push("gateway-ready");
-
-  try {
-    const launch = prepareLaunch(catalog, "launch-example", {
-      ccrClient,
-      commandExists: async () => true,
-      configDir,
-      ensureShieldReady: async (options) => {
-        events.push("shield-ready");
-        assert.equal(options.lane, "managed");
-        assert.equal(options.env, launchEnv);
-        assert.equal(options.expectedTargetOrigin, "http://127.0.0.1:4599");
-        return {
-          origin: "http://127.0.0.1:8811",
-          capability,
-          lane: "managed",
-          targetClass: "managed",
-        };
-      },
-      createShieldDestinationLease: async ({ ready, targetOrigin, launcherContext }) => {
-        events.push("lease-create");
-        assert.equal(ready.capability, capability);
-        assert.equal(targetOrigin, "http://127.0.0.1:4599");
-        assert.deepEqual(launcherContext, {
-          repository: { remoteHash: launcherContext.repository.remoteHash, trustClass: "unknown" },
-          pathClasses: ["unknown"],
-          destinationClass: "managed",
-          interactive: true,
-        });
-        assert.match(launcherContext.repository.remoteHash, /^[a-f0-9]{64}$/);
-        return { ...ready, capability: "lease-capability-012345678901234567890" };
-      },
-      openShieldApprovalChannel: async () => {
-        events.push("approval-open");
-        return approvalChannel;
-      },
-      createShieldLaunchId: () => "9".repeat(32),
-      registerShieldApprovalChannel: async ({ ready, channel, launchId }) => {
-        events.push("approval-register");
-        assert.equal(ready.capability, "lease-capability-012345678901234567890");
-        assert.equal(channel, approvalChannel);
-        assert.equal(launchId, "9".repeat(32));
-      },
-      shieldLeaseSetInterval: (callback, delay) => {
-        assert.equal(delay, 15_000);
-        const timer = { unref() {} };
-        leaseTimers.push({ callback, timer });
-        return timer;
-      },
-      shieldLeaseClearInterval: (timer) => clearedLeaseTimers.push(timer),
-      renewShieldDestinationLease: async ({ ready, targetOrigin }) => {
-        events.push("lease-renew");
-        assert.equal(ready.capability, "lease-capability-012345678901234567890");
-        assert.equal(targetOrigin, "http://127.0.0.1:3456");
-      },
-      env: launchEnv,
-      cwd: "/workspace/production",
-      interactive: true,
-      runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
-      runtimeVersions: passingRuntimeVersions(),
-      startCompatibilityMiddleware: async () => ({ origin: "http://127.0.0.1:4599", close: async () => events.push("middleware-close") }),
-      spawnCommand: (command, args, options) => {
-        events.push("spawn");
-        spawnCalls.push({ args, command, env: options.env });
-        spawned();
-        return {
-          once(event, listener) {
-            childListeners.set(event, listener);
-            return this;
-          },
-        };
-      },
-      revokeShieldDestinationLease: async ({ ready }) => {
-        events.push("lease-revoke");
-        assert.equal(ready.capability, "lease-capability-012345678901234567890");
-      },
-    });
-
-    await spawnedPromise;
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(leaseTimers.length, 1);
-    await leaseTimers[0].callback();
-    childListeners.get("exit")(0);
-    const result = await launch;
-    assert.deepEqual(events, ["gateway-ready", "shield-ready", "lease-create", "approval-open", "approval-register", "spawn", "lease-renew", "middleware-close", "approval-close", "lease-revoke"]);
-    assert.deepEqual(clearedLeaseTimers, [leaseTimers[0].timer]);
-    assert.equal(spawnCalls[0].env.ANTHROPIC_API_BASE_URL, "http://127.0.0.1:8811");
-    assert.equal(spawnCalls[0].env.ANTHROPIC_BASE_URL, "http://127.0.0.1:8811");
-    assert.equal(spawnCalls[0].env.CLAUDE_AGENT_API_BASE_URL, "http://127.0.0.1:8811");
-    const settingsIndex = spawnCalls[0].args.indexOf("--settings");
-    assert.notEqual(settingsIndex, -1);
-    assert.deepEqual(JSON.parse(spawnCalls[0].args[settingsIndex + 1]).env, {
-      ANTHROPIC_API_BASE_URL: "http://127.0.0.1:8811",
-      ANTHROPIC_BASE_URL: "http://127.0.0.1:8811",
-      CLAUDE_AGENT_API_BASE_URL: "http://127.0.0.1:8811",
-      CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0",
-    });
-    assert.doesNotMatch(JSON.stringify({ args: spawnCalls[0].args, env: spawnCalls[0].env }), /127\.0\.0\.1:4599/);
-    assert.equal(
-      spawnCalls[0].env.ANTHROPIC_CUSTOM_HEADERS,
-      `x-airkit-mode: auto\nx-airkit-shield: lease-capability-012345678901234567890\nx-airkit-shield-launch: ${"9".repeat(32)}`,
-    );
-    assert.equal(spawnCalls[0].env.AIRKIT_SHIELD_CAPABILITY, undefined);
-    assert.equal(spawnCalls[0].env.AIRKIT_SHIELD_CONTROL_CAPABILITY, undefined);
-    assert.equal(spawnCalls[0].env.AIRKIT_SHIELD_APPROVAL_SOCKET, undefined);
-    assert.equal(spawnCalls[0].env.CLAUDE_CODE_OAUTH_TOKEN, undefined);
-    assert.doesNotMatch(spawnCalls[0].args.join(" "), /fixture-capability|gateway-key/);
-    assert.doesNotMatch(JSON.stringify(saved), /fixture-capability/);
-    assert.doesNotMatch(JSON.stringify(result), /fixture-capability/);
-    assert.doesNotMatch(JSON.stringify(result), /approval-fixture|aaaaaaaa/);
-  } finally {
-    await rm(configDir, { force: true, recursive: true });
-  }
-});
-
-test("Shield spawn failure clears its approval, lease, timer, and middleware exactly once", async () => {
-  const catalog = compatibilityCatalog();
-  catalog.profiles[0].shield = { enabled: true, lane: "managed" };
-  const configDir = await mkdtemp(join(tmpdir(), "airkit-shield-spawn-cleanup-"));
-  const events = [];
-  const timer = { unref() {} };
-  const channel = { async close() { events.push("approval-close"); } };
-
-  try {
-    await assert.rejects(
-      prepareLaunch(catalog, "launch-example", {
-        ccrClient: Object.assign(ccrTestClient([]), { ensureGateway: async () => events.push("gateway-ready") }),
-        commandExists: async () => true,
-        configDir,
-        env: { DEMO_API_KEY: "runtime-secret", HOME: configDir },
-        ensureShieldReady: async () => {
-          events.push("shield-ready");
-          return { origin: "http://127.0.0.1:8811", capability: "a".repeat(32), lane: "managed", targetClass: "managed" };
-        },
-        createShieldDestinationLease: async ({ ready }) => {
-          events.push("lease-create");
-          return { ...ready, capability: "b".repeat(32) };
-        },
-        openShieldApprovalChannel: async () => {
-          events.push("approval-open");
-          return channel;
-        },
-        registerShieldApprovalChannel: async () => events.push("approval-register"),
-        unregisterShieldApprovalChannel: async () => events.push("approval-unregister"),
-        revokeShieldDestinationLease: async () => events.push("lease-revoke"),
-        shieldLeaseSetInterval: () => timer,
-        shieldLeaseClearInterval: (cleared) => {
-          assert.equal(cleared, timer);
-          events.push("timer-clear");
-        },
-        runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
-        runtimeVersions: passingRuntimeVersions(),
-        startCompatibilityMiddleware: async () => ({ origin: "http://127.0.0.1:4599", async close() { events.push("middleware-close"); } }),
-        spawnCommand: () => { throw new Error("spawn fixture failure"); },
-      }),
-      /spawn fixture failure/,
-    );
-    assert.deepEqual(events, [
-      "gateway-ready", "shield-ready", "lease-create", "approval-open", "approval-register",
-      "timer-clear", "approval-unregister", "approval-close", "lease-revoke", "middleware-close",
-    ]);
-  } finally {
-    await rm(configDir, { force: true, recursive: true });
-  }
-});
-
-test("AirClaude Shield launch blocks a persisted Claude endpoint override before spawn", async () => {
-  const catalog = compatibilityCatalog();
-  catalog.profiles[0].shield = { enabled: true, lane: "managed" };
-  const home = await mkdtemp(join(tmpdir(), "airkit-shield-persisted-launch-"));
-  let spawned = false;
-  try {
-    await mkdir(join(home, ".claude"), { recursive: true });
-    await writeFile(join(home, ".claude", "settings.json"), JSON.stringify({
-      env: { CLAUDE_AGENT_API_BASE_URL: "http://127.0.0.1:4599" },
-    }));
-    await assert.rejects(
-      prepareLaunch(catalog, "launch-example", {
-        ccrClient: ccrTestClient([]),
-        commandExists: async () => true,
-        configDir: home,
-        env: { DEMO_API_KEY: "runtime-secret", HOME: home },
-        ensureShieldReady: async () => ({ origin: "http://127.0.0.1:8811", capability: "a".repeat(32), lane: "managed", targetClass: "managed" }),
-        createShieldDestinationLease: async ({ ready }) => ({ ...ready, capability: "b".repeat(32) }),
-        runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
-        runtimeVersions: passingRuntimeVersions(),
-        startCompatibilityMiddleware: async () => ({ origin: "http://127.0.0.1:4599", async close() {} }),
-        spawnCommand: () => { spawned = true; return { status: 0 }; },
-      }),
-      /Shield launch settings cannot override.*CLAUDE_AGENT_API_BASE_URL/i,
-    );
-    assert.equal(spawned, false);
-  } finally {
-    await rm(home, { force: true, recursive: true });
   }
 });
 
@@ -6671,74 +6251,6 @@ test("prepareLaunch keeps the compatibility adapter alive for a matching backgro
 
     assert.equal(result.childStatus, 0);
     assert.equal(adapterClosed, 0, "background-capable adapters outlive the foreground Claude process");
-  } finally {
-    await rm(configDir, { force: true, recursive: true });
-  }
-});
-
-test("a managed Shield lease renews for a live background host then revokes exactly once", async () => {
-  const catalog = compatibilityCatalog();
-  catalog.profiles[0].shield = { enabled: true, lane: "managed" };
-  const configDir = await mkdtemp(join(tmpdir(), "airkit-shield-background-lease-"));
-  const intervalCallbacks = [];
-  const timeoutCallbacks = [];
-  const cleared = [];
-  const events = [];
-  const detectorOrigins = [];
-  const shieldBackgroundCommand = [
-    "/Applications/Claude.app/Contents/MacOS/claude --bg-pty-host /tmp/session.sock",
-    '--settings {"env":{"ANTHROPIC_API_BASE_URL":"http://127.0.0.1:8811","CLAUDE_AGENT_API_BASE_URL":"http://127.0.0.1:8811"}}',
-  ].join(" ");
-  let active = true;
-
-  try {
-    const result = await prepareLaunch(catalog, "launch-example", {
-      ccrClient: ccrTestClient([]),
-      commandExists: async () => true,
-      configDir,
-      env: { DEMO_API_KEY: "runtime-secret", HOME: configDir },
-      runCommand: async () => ({ ok: true, status: 0, stdout: "gateway-key-from-helper" }),
-      runtimeVersions: passingRuntimeVersions(),
-      startCompatibilityMiddleware: async () => ({
-        close: async () => events.push("middleware-close"),
-        origin: "http://127.0.0.1:4599",
-      }),
-      ensureShieldReady: async () => ({ origin: "http://127.0.0.1:8811", capability: "b".repeat(32), lane: "managed", targetClass: "managed" }),
-      createShieldDestinationLease: async ({ ready }) => ({ ...ready, capability: "c".repeat(32) }),
-      renewShieldDestinationLease: async ({ targetOrigin }) => events.push(`renew:${targetOrigin}`),
-      revokeShieldDestinationLease: async () => events.push("revoke"),
-      openShieldApprovalChannel: async () => null,
-      shieldLeaseSetInterval: (callback, delay) => {
-        assert.equal(delay, 15_000);
-        const timer = { unref() {} };
-        intervalCallbacks.push({ callback, timer });
-        return timer;
-      },
-      shieldLeaseClearInterval: (timer) => cleared.push(timer),
-      backgroundHostDetector: async (origin) => {
-        detectorOrigins.push(origin);
-        return active && airkitRuntime.backgroundHostUsesAdapter(shieldBackgroundCommand, origin);
-      },
-      backgroundMiddlewareGraceMs: 1_000,
-      backgroundSetTimeout: (callback) => {
-        const timer = { unref() {} };
-        timeoutCallbacks.push(callback);
-        return timer;
-      },
-      spawnCommand: () => ({ status: 0 }),
-    });
-
-    assert.equal(result.childStatus, 0);
-    assert.equal(intervalCallbacks.length, 1);
-    await intervalCallbacks[0].callback();
-    assert.deepEqual(events, ["renew:http://127.0.0.1:4599"]);
-    assert.equal(timeoutCallbacks.length, 1);
-    active = false;
-    await timeoutCallbacks[0]();
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.deepEqual(events, ["renew:http://127.0.0.1:4599", "middleware-close", "revoke"]);
-    assert.deepEqual(cleared, [intervalCallbacks[0].timer]);
-    assert.deepEqual(detectorOrigins, ["http://127.0.0.1:8811", "http://127.0.0.1:8811"]);
   } finally {
     await rm(configDir, { force: true, recursive: true });
   }
@@ -7243,26 +6755,6 @@ test("airclaude --doctor reports pxpipe as not required when the profile does no
   const { output } = await airclaudeDoctorPxpipe({ script: "exit 1" });
   assert.match(output, /- info pxpipe: not required by this profile/);
   assert.doesNotMatch(output, /fail pxpipe/);
-});
-
-test("runAirclaudeCli rejects an unpaired Headroom launcher marker before planning a route", async () => {
-  const catalogPath = await writeLaunchCatalog();
-  const configDir = await mkdtemp(join(tmpdir(), "airkit-launch-cli-"));
-
-  try {
-    await assert.rejects(
-      () => runAirclaudeCli(["--dry-run", "--profile", "launch-example", "--config-dir", configDir], {
-        catalogPath,
-        commandExists: async () => true,
-        env: { AIRKIT_SHIELD_LAUNCHER: "headroom/hr-airclaude/v1" },
-        stdout: { write() {} },
-      }),
-      /shield launcher marker/i,
-    );
-  } finally {
-    await rm(configDir, { force: true, recursive: true });
-    await rm(resolve(catalogPath, ".."), { force: true, recursive: true });
-  }
 });
 
 test("resume launches fail clearly when no interactive terminal is attached", () => {
