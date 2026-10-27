@@ -54,8 +54,20 @@ export function startGlobalModelWatch({
     if (outcome.restored) restored.push(outcome.restored);
   };
 
+  // The debounce coalesces bursts, so by the time check() runs a legitimate
+  // pick followed by a CCR id inside one window would be invisible and the
+  // restore would fall back to an older value. Note the legitimate value as
+  // each change arrives instead.
+  const observe = () => {
+    const seen = readModel(fs, resolveTarget(fs, path));
+    if (seen === undefined) return;
+    if (seen === ABSENT) baseline = ABSENT;
+    else if (!ccrOnlyModelReason(seen.model, ccrOnlyIds)) baseline = seen.model;
+  };
+
   const schedule = () => {
     if (stopped) return;
+    try { observe(); } catch {}
     if (timer !== null) clearTimeout(timer);
     timer = setTimeout(() => {
       timer = null;

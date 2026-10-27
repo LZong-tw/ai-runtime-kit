@@ -103,6 +103,26 @@ test("the stat poll restores the key when the file watch delivers no events", as
   });
 });
 
+test("a legitimate pick followed by a CCR id inside one debounce window restores the pick, not the launch value", async () => {
+  await withHome(async ({ env, path }) => {
+    await writeFile(path, JSON.stringify({ model: "opus" }));
+    const listeners = [];
+    const manualFs = { ...fs, watch: (_dir, _opts, listener) => { listeners.push(listener); return { on() {}, close() {} }; } };
+    const watch = startGlobalModelWatch({ env, fs: manualFs, debounceMs: 50, pollMs: 0 });
+    const fire = () => { for (const listener of listeners) listener("rename", "settings.json"); };
+    try {
+      await writeFile(path, JSON.stringify({ model: "sonnet" }));
+      fire();
+      await writeFile(path, JSON.stringify({ model: ROUTE_ID }));
+      fire();
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      assert.equal(JSON.parse(await readFile(path, "utf8")).model, "sonnet");
+    } finally {
+      assert.deepEqual(watch.stop().restored, [{ from: ROUTE_ID, to: "sonnet" }]);
+    }
+  });
+});
+
 test("a launch that started from a CCR-only value has nothing to restore to and writes nothing", async () => {
   await withHome(async ({ env, path }) => {
     await writeFile(path, JSON.stringify({ model: ROUTE_ID }));
