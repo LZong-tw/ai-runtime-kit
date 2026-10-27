@@ -1007,6 +1007,7 @@ export async function exportOssRelease({ outDir }) {
     "prefix-observability.mjs",
     "plugin.mjs",
     "protocol.mjs",
+    "request-errors.mjs",
     "server-history.mjs",
     "server-tools.mjs",
     "tool-search.mjs",
