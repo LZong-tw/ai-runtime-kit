@@ -541,6 +541,30 @@ test("CCR 3 merge preserves canonical fields added to an owned profile", () => {
   );
 });
 
+test("CCR 3 managed profiles pin the mode's Sonnet and Opus lanes", () => {
+  const catalog = launchCatalog();
+  catalog.profiles[0].launch.modes.pro.ccr.Router.sonnet = "demo,steady-coder";
+  catalog.profiles[0].launch.modes.pro.ccr.Router.opus = "demo,strong-coder";
+  const merged = airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {}, {
+    configDir: "/tmp/airkit-profile-model-lanes",
+  });
+  const pick = (id) => {
+    const { smallFastModel, sonnetModel, opusModel } = merged.config.profile.profiles.find((profile) => profile.id === id);
+    return { smallFastModel, sonnetModel, opusModel };
+  };
+
+  assert.deepEqual(pick("airkit-launch-example-pro"), {
+    smallFastModel: "airkit-provider-launch-example-demo/cheap-coder",
+    sonnetModel: "airkit-provider-launch-example-demo/steady-coder",
+    opusModel: "airkit-provider-launch-example-demo/strong-coder",
+  });
+  assert.deepEqual(pick("airkit-launch-example-fast"), {
+    smallFastModel: "airkit-provider-launch-example-demo/cheap-coder",
+    sonnetModel: undefined,
+    opusModel: undefined,
+  });
+});
+
 test("CCR 3 merge translates base routes into gateway rules for bare Claude models", () => {
   const current = {
     Router: {
