@@ -328,7 +328,7 @@ export async function handleCompatibilityMessage({
   const inspection = inspectCompatibilityRequest(body);
   let normalized;
   try {
-    normalized = normalizeCompatibilityHistory(body.messages);
+    normalized = normalizeCompatibilityHistory(body.messages, inspection);
   } catch {
     return routeWholeRequestFallback({ body, headers, config, coreClient, response, signal, audit, requestStore, requestId });
   }
@@ -372,6 +372,7 @@ export async function handleCompatibilityMessage({
     );
 
     if (bridgeCalls.length === 0) {
+      reportForgedCompatibilityText(executorMessage.content, body.model);
       outwardContent.push(...executorMessage.content.map((block) => structuredClone(block)));
       return finalizeMessage(executorMessage, outwardContent, executorUsage, body, advisorUsage);
     }
@@ -583,45 +584,83 @@ function createExecutorTools(tools = [], inspection, activeDeferredTools, maxToo
   return executorTools;
 }
 
-function normalizeCompatibilityHistory(source) {
+// Earlier Advisor/ToolSearch exchanges replay as bridge tool_use/tool_result
+// pairs. Flattening them into assistant text taught executors to write
+// "Advisor result: ..." themselves instead of calling the tool.
+function normalizeCompatibilityHistory(source, inspection) {
   const messages = [];
   const pendingUses = new Map();
   const referencedTools = new Set();
+  const push = (role, content) => {
+    if (content.length === 0) return;
+    const last = messages.at(-1);
+    if (last?.role === role && Array.isArray(last.content)) {
+      last.content = orderToolResultsFirst([...last.content, ...content]);
+    } else {
+      messages.push({ role, content: orderToolResultsFirst(content) });
+    }
+  };
+  const resultBlock = (block, kind) => {
+    consumePendingUse(pendingUses, block.tool_use_id, kind);
+    if (kind === "tool_search") {
+      for (const reference of block.content?.tool_references ?? []) {
+        if (typeof reference?.tool_name === "string") referencedTools.add(reference.tool_name);
+      }
+    }
+    const text = kind === "advisor" ? advisorHistoryText(block) : toolSearchHistoryText(block);
+    return { type: "tool_result", tool_use_id: block.tool_use_id, content: boundedHistoryText(text) };
+  };
   for (const message of Array.isArray(source) ? source : []) {
+    const merges = messages.at(-1)?.role === message?.role && Array.isArray(messages.at(-1)?.content);
+    if (typeof message?.content === "string" && merges) {
+      push(message.role, [{ type: "text", text: message.content }]);
+      continue;
+    }
     if (!Array.isArray(message?.content)) {
       messages.push(structuredClone(message));
       continue;
     }
-    const content = [];
+    let segment = [];
+    const flush = () => {
+      push(message.role, segment);
+      segment = [];
+    };
     for (const block of message.content) {
-      if (block?.type === "server_tool_use") {
-        if (!isCompatibilityServerUse(block)) {
-          content.push(structuredClone(block));
-          continue;
-        }
+      const kind = block?.type === "server_tool_use" ? compatibilityServerUseKind(block) : null;
+      if (kind !== null) {
         if (typeof block.id !== "string" || pendingUses.has(block.id)) throw unsupportedHistory();
-        pendingUses.set(block.id, compatibilityServerUseKind(block));
-        content.push({ type: "text", text: boundedHistoryText(`Compatibility request: ${block.name}`) });
-      } else if (block?.type === "advisor_tool_result") {
-        consumePendingUse(pendingUses, block.tool_use_id, "advisor");
-        content.push({ type: "text", text: boundedHistoryText(advisorHistoryText(block)) });
-      } else if (block?.type === "tool_search_tool_result") {
-        consumePendingUse(pendingUses, block.tool_use_id, "tool_search");
-        const references = block.content?.tool_references;
-        if (Array.isArray(references)) {
-          for (const reference of references) {
-            if (typeof reference?.tool_name === "string") referencedTools.add(reference.tool_name);
-          }
+        if ((kind === "advisor" ? inspection.advisor : inspection.toolSearch) == null) throw unsupportedHistory();
+        if (message.role !== "assistant") throw unsupportedHistory();
+        pendingUses.set(block.id, kind);
+        segment.push({
+          type: "tool_use",
+          id: block.id,
+          name: kind === "advisor" ? ADVISOR_BRIDGE_NAME : TOOL_SEARCH_BRIDGE_NAME,
+          input: structuredClone(block.input ?? {}),
+        });
+      } else if (block?.type === "advisor_tool_result" || block?.type === "tool_search_tool_result") {
+        const result = resultBlock(block, block.type === "advisor_tool_result" ? "advisor" : "tool_search");
+        if (message.role === "assistant") {
+          flush();
+          push("user", [result]);
+        } else {
+          segment.push(result);
         }
-        content.push({ type: "text", text: boundedHistoryText(toolSearchHistoryText(block)) });
       } else {
-        content.push(structuredClone(block));
+        segment.push(structuredClone(block));
       }
     }
-    messages.push({ ...structuredClone(message), content });
+    flush();
   }
   if (pendingUses.size > 0) throw unsupportedHistory();
   return { messages, referencedTools };
+}
+
+function orderToolResultsFirst(content) {
+  return [
+    ...content.filter((block) => block?.type === "tool_result"),
+    ...content.filter((block) => block?.type !== "tool_result"),
+  ];
 }
 
 export function normalizeMessageSystemRoles(body) {
@@ -685,10 +724,6 @@ function normalizeInlineToolReferences(body) {
   return result;
 }
 
-function isCompatibilityServerUse(block) {
-  return compatibilityServerUseKind(block) !== null;
-}
-
 function compatibilityServerUseKind(block) {
   if (block.name === "advisor") return "advisor";
   if (String(block.name ?? "").startsWith("tool_search_tool_")) return "tool_search";
@@ -702,7 +737,7 @@ function consumePendingUse(pendingUses, toolUseId, expectedKind) {
 
 function toolSearchHistoryText(block) {
   if (block.content?.type === "tool_search_tool_result_error") {
-    return `ToolSearch result error: ${String(block.content.error_code ?? "unavailable")}`;
+    return `ToolSearch error: ${String(block.content.error_code ?? "unavailable")}`;
   }
   if (block.content?.type !== "tool_search_tool_search_result") throw unsupportedHistory();
   const names = Array.isArray(block.content.tool_references)
@@ -710,16 +745,16 @@ function toolSearchHistoryText(block) {
         .map((reference) => reference?.tool_name)
         .filter((name) => typeof name === "string")
     : [];
-  return `ToolSearch result: ${names.join(", ") || "no matches"}`;
+  return `Activated deferred tools: ${names.join(", ") || "none"}`;
 }
 
 function advisorHistoryText(block) {
   const content = block.content;
-  if (content?.type === "advisor_result") return `Advisor result: ${String(content.text ?? "")}`;
+  if (content?.type === "advisor_result") return String(content.text ?? "");
   if (content?.type === "advisor_tool_result_error") {
-    return `Advisor result error: ${String(content.error_code ?? "unavailable")}`;
+    return `Advisor unavailable: ${String(content.error_code ?? "unavailable")}`;
   }
-  if (content?.type === "advisor_redacted_result") return "Advisor result: [redacted]";
+  if (content?.type === "advisor_redacted_result") return "[redacted]";
   throw unsupportedHistory();
 }
 
@@ -729,6 +764,20 @@ function boundedHistoryText(value) {
 
 function unsupportedHistory() {
   return new Error("Unsupported compatibility history");
+}
+
+const FORGED_COMPATIBILITY_TEXT = /^(?:Compatibility request:|Advisor result:|ToolSearch result:)/m;
+
+// Logged, not stripped: real prose may quote these labels, and the history
+// replay no longer teaches them, so this only watches for a regression.
+function reportForgedCompatibilityText(content, model) {
+  const forged = content.some((block) => block?.type === "text" && FORGED_COMPATIBILITY_TEXT.test(block.text ?? ""));
+  if (!forged) return;
+  try {
+    process.stderr.write(`[airkit-advisor-forgery] ${JSON.stringify({ model: model ?? null })}\n`);
+  } catch {
+    // Diagnostics must never break the response.
+  }
 }
 
 function reportAdvisorCall(advisor, selected, outcome) {
