@@ -44,7 +44,9 @@ export function openRequestErrorStore({ env = process.env, path, now = Date.now 
     chmodSync(path, 0o600);
     const DatabaseSync = loadDatabaseSync();
     db = new DatabaseSync(path);
-    db.exec(`PRAGMA busy_timeout = 2000; PRAGMA journal_mode = WAL;
+    // DatabaseSync blocks the event loop while it waits on another writer, so
+    // keep the wait short and drop the diagnostic row instead of stalling traffic.
+    db.exec(`PRAGMA busy_timeout = 50; PRAGMA journal_mode = WAL;
       CREATE TABLE IF NOT EXISTS compat_requests (
         request_id TEXT PRIMARY KEY, at INTEGER NOT NULL,
         kind TEXT CHECK(kind IN ('success', 'error', 'fallback_error')),

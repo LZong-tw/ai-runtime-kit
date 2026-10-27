@@ -238,9 +238,11 @@ test("Advisor config validates models, gate values, and unknown gate keys", () =
   const validate = (advisor) => validateCompatibilityConfig({ ...CONFIG, advisor: { mode: "bridge", ...advisor } });
   for (const models of [null, [], "opus", { "bad alias": "review/claude-opus" },
     { opus: 1 }, { opus: "claude-opus" }, { opus: "bad provider/claude-opus" },
-    { opus: "review/gpt-test" }, { opus: "review/anthropic/claude-opus" }]) {
+    { opus: "review/gpt-test" }, { opus: "review/anthropic/claude-opus" },
+    { fable: "review/azure_ai/gpt-test" }, { fable: "review/a/b/claude-fable" }]) {
     assert.throws(() => validate({ models }), /advisor.models/);
   }
+  assert.doesNotThrow(() => validate({ models: { fable: "review/azure_ai/claude-fable-5-1" } }));
   for (const gate of [null, [], "on", { unknown: 1 }, { enabled: 1 },
     { failedToolResults: -1 }, { minToolCalls: 1.5 }, { maxCallsPerConversation: "3" }]) {
     assert.throws(() => validate({ gate }), /advisor.gate/);
