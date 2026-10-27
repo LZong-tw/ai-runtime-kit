@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { createServer } from "node:net";
 import test from "node:test";
 
-import { startPxpipeHop } from "../src/shield/pxpipe-hop.mjs";
+import { startPxpipeHop } from "../src/pxpipe-hop.mjs";
 
 function fakeSpawn(record) {
   return (command, args, options) => {

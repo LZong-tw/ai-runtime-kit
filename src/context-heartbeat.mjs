@@ -456,7 +456,7 @@ export function renderHeartbeatManagedFiles(configDir, runtimeModuleUrl = import
     }] }];
   }
   const script = `import { runHeartbeatHook } from ${JSON.stringify(runtimeModuleUrl)};\nawait runHeartbeatHook(${completionShadow ? '{ env: { ...process.env, AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS: "0" } }' : ""});\n`;
-  const statuslineScript = `import { runShieldStatusline } from ${JSON.stringify(new URL("./shield/statusline-state.mjs", runtimeModuleUrl).href)};\nawait runShieldStatusline();\n`;
+  const statuslineScript = `import { runSubagentStatusLine } from ${JSON.stringify(new URL("./subagent-observability.mjs", runtimeModuleUrl).href)};\nawait runSubagentStatusLine();\n`;
   const settings = {
     subagentStatusLine: {
       type: "command",
