@@ -371,8 +371,8 @@ export async function handleCompatibilityMessage({
         (block.name === ADVISOR_BRIDGE_NAME || block.name === TOOL_SEARCH_BRIDGE_NAME),
     );
 
+    reportForgedCompatibilityText(executorMessage.content, body.model);
     if (bridgeCalls.length === 0) {
-      reportForgedCompatibilityText(executorMessage.content, body.model);
       outwardContent.push(...executorMessage.content.map((block) => structuredClone(block)));
       return finalizeMessage(executorMessage, outwardContent, executorUsage, body, advisorUsage);
     }
@@ -621,6 +621,9 @@ function normalizeCompatibilityHistory(source, inspection) {
       continue;
     }
     let segment = [];
+    // A client tool_use must sit in the assistant turn directly before the user
+    // turn carrying its tool_result, so it rides past any bridge split.
+    let heldToolUses = [];
     const flush = () => {
       push(message.role, segment);
       segment = [];
@@ -641,19 +644,39 @@ function normalizeCompatibilityHistory(source, inspection) {
       } else if (block?.type === "advisor_tool_result" || block?.type === "tool_search_tool_result") {
         const result = resultBlock(block, block.type === "advisor_tool_result" ? "advisor" : "tool_search");
         if (message.role === "assistant") {
+          heldToolUses.push(...segment.filter((item) => item?.type === "tool_use" && !isBridgeToolUse(item)));
+          segment = segment.filter((item) => !heldToolUses.includes(item));
           flush();
           push("user", [result]);
         } else {
           segment.push(result);
         }
+      } else if (message.role === "assistant" && block?.type === "text") {
+        const text = stripImitatedExchange(block.text);
+        if (text) segment.push({ ...structuredClone(block), text });
       } else {
         segment.push(structuredClone(block));
       }
     }
+    segment.push(...heldToolUses);
     flush();
   }
   if (pendingUses.size > 0) throw unsupportedHistory();
   return { messages, referencedTools };
+}
+
+function isBridgeToolUse(block) {
+  return block.name === ADVISOR_BRIDGE_NAME || block.name === TOOL_SEARCH_BRIDGE_NAME;
+}
+
+// Sessions from before bridge-pair replay hold executor text that copied the
+// old flattened labels; replaying it would keep teaching the imitation.
+const IMITATED_EXCHANGE = /^Compatibility request: [^\n]*\n(?:Advisor|ToolSearch) result:/m;
+
+function stripImitatedExchange(text) {
+  if (typeof text !== "string") return text;
+  const match = IMITATED_EXCHANGE.exec(text);
+  return match ? text.slice(0, match.index).trimEnd() : text;
 }
 
 function orderToolResultsFirst(content) {
