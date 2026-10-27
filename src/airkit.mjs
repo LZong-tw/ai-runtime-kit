@@ -35,6 +35,7 @@ import {
 } from "./autocompact.mjs";
 import { startCompatibilityMiddleware } from "./compat/middleware.mjs";
 import { renderHeartbeatManagedFiles } from "./context-heartbeat.mjs";
+import { EDUCATION_DEFAULTS, educationLogPath, renderEducationSummary, summarizeEducationLog } from "./education.mjs";
 import { buildContextObservability } from "./context-observability.mjs";
 import { createPiAuditRuntime } from "./audit/adapters/pi-extension.mjs";
 import { runAuditCli } from "./audit/cli.mjs";
@@ -979,6 +980,7 @@ export async function exportOssRelease({ outDir }) {
   await copyFile(join(here, "context-heartbeat.mjs"), join(outDir, "src", "context-heartbeat.mjs"));
   await copyFile(join(here, "context-observability.mjs"), join(outDir, "src", "context-observability.mjs"));
   await copyFile(join(here, "subagent-observability.mjs"), join(outDir, "src", "subagent-observability.mjs"));
+  await copyFile(join(here, "education.mjs"), join(outDir, "src", "education.mjs"));
   await copyFile(join(here, "launchd-plist.mjs"), join(outDir, "src", "launchd-plist.mjs"));
   await copyFile(join(here, "background-host.mjs"), join(outDir, "src", "background-host.mjs"));
   await copyFile(join(here, "pxpipe-hop.mjs"), join(outDir, "src", "pxpipe-hop.mjs"));
@@ -1986,9 +1988,11 @@ function validateLaunch(profile) {
     }
   }
 
+  validateEducation(profile, profile.launch?.education, "launch.education");
   // Mode definitions stay open: unknown fields (e.g. `description`) are ignored,
   // only the fields AirKit reads are type-checked.
   for (const [mode, definition] of Object.entries(profile.launch?.modes ?? {})) {
+    validateEducation(profile, definition?.education, `launch.modes.${mode}.education`);
     const strictMcp = definition?.strictMcp;
     if (strictMcp !== undefined) {
       if (typeof strictMcp !== "boolean") {
@@ -2328,6 +2332,25 @@ export async function runCli(argv = process.argv.slice(2), options = {}) {
 
   if (command === "audit") {
     return runAuditCli([subcommand, ...rest].filter((arg) => arg !== undefined), { ...options, stdout });
+  }
+
+  if (command === "education" && subcommand === "report") {
+    const days = Number(readFlag(rest, "--days") ?? 7);
+    const samples = Number(readFlag(rest, "--samples") ?? 20);
+    if (!Number.isFinite(days) || days <= 0) throw new Error("--days must be a positive number");
+    if (!Number.isInteger(samples) || samples < 0) throw new Error("--samples must be a non-negative integer");
+    const logPath = readFlag(rest, "--log") ?? educationLogPath(options.env ?? process.env);
+    let text = "";
+    try {
+      text = await readFile(logPath, "utf8");
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      stdout.write(`no education log at ${logPath}; hooks have not fired yet\n`);
+      return 0;
+    }
+    const summary = summarizeEducationLog(text, { now: options.now ?? Date.now(), days, samples });
+    stdout.write(hasFlag(rest, "--json") ? `${JSON.stringify(summary, null, 2)}\n` : renderEducationSummary(summary));
+    return 0;
   }
 
   if (command === "runtime" && subcommand === "check") {
@@ -2956,6 +2979,7 @@ function renderAirkitHelp() {
 Commands:
   connect [--profile <name>] [--mode <mode>] [--port <port>] [--config-dir <dir>]
   audit <install|start|stop|status|doctor|update|verify|open|repo|account|requests|request|sessions|clients|accounts|repos|usage|cache|gaps|query|prune|export> [options]
+  education report [--days <n>] [--samples <n>] [--log <path>] [--json]
   runtime check
   runtime update [--write]
   repair codex-takeover [--write]
@@ -4236,10 +4260,39 @@ function renderManagedFiles(profile, options = {}) {
 
   const binary = profile.launch?.binary ?? profile.shell?.wrappers?.[0]?.command;
   const heartbeat = profile.ccr && shouldAppendReusableRuntimeLessons(binary)
-    ? renderHeartbeatManagedFiles(configDir, undefined, { completionMode: options.completionMode })
+    ? renderHeartbeatManagedFiles(configDir, undefined, { completionMode: options.completionMode, education: profileEducation(profile) })
     : [];
 
   return [...explicit, ...heartbeat];
+}
+
+function validateEducation(profile, education, where) {
+  if (education === undefined || typeof education === "boolean") return;
+  if (!education || typeof education !== "object" || Array.isArray(education)) {
+    throw new Error(`profile "${profile.name}" ${where} must be a boolean or an object`);
+  }
+  for (const [key, value] of Object.entries(education)) {
+    if (!(key in EDUCATION_DEFAULTS)) {
+      throw new Error(`profile "${profile.name}" ${where}.${key} is not an education flag (${Object.keys(EDUCATION_DEFAULTS).join(", ")})`);
+    }
+    const valid = key === "errorHints" ? typeof value === "boolean" : ["off", "shadow", "enforce"].includes(value);
+    if (!valid) {
+      throw new Error(`profile "${profile.name}" ${where}.${key} must be ${key === "errorHints" ? "a boolean" : "off, shadow or enforce"}`);
+    }
+  }
+}
+
+// Education hooks render only when the profile opts in with launch.education
+// or a per-mode launch.modes.<mode>.education block.
+function profileEducation(profile) {
+  const launch = profile.launch ?? {};
+  const modes = Object.fromEntries(
+    Object.entries(launch.modes ?? {})
+      .filter(([, definition]) => definition?.education)
+      .map(([mode, definition]) => [mode, definition.education === true ? {} : definition.education]),
+  );
+  if (!launch.education && Object.keys(modes).length === 0) return null;
+  return { base: launch.education === true || !launch.education ? {} : launch.education, modes };
 }
 
 async function writeTextFile(path, content, { force }) {
