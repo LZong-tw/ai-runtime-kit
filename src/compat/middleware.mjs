@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 
 import { createGatewayClient } from "./gateway.mjs";
 import { createGptActivitySseTransform } from "./activity.mjs";
+import { openRequestErrorStore } from "./request-errors.mjs";
 import {
   createMcpHandler,
   createMessagesHandler,
@@ -29,6 +30,7 @@ export async function startCompatibilityMiddleware({
   auditEmitter = null,
   launchInstanceId = null,
   sessionContext = null,
+  requestStore,
 }) {
   validateCompatibilityConfig(compatibility);
   if (typeof clientToken !== "string" || clientToken.length === 0) {
@@ -50,7 +52,9 @@ export async function startCompatibilityMiddleware({
     compatibility,
     VERIFIED_NATIVE_COMPATIBILITY,
   );
+  if (requestStore === undefined) requestStore = openRequestErrorStore();
   const messages = createMessagesHandler({
+    requestStore,
     config: compatibility,
     coreClient,
     policies,
@@ -60,7 +64,7 @@ export async function startCompatibilityMiddleware({
       ...(launchInstanceId === null ? {} : { launchInstanceId }),
     },
   });
-  const mcp = createMcpHandler({ config: compatibility, coreClient });
+  const mcp = createMcpHandler({ config: compatibility, coreClient, requestStore });
   const server = createServer((request, response) => {
     void handleRequest({
       coreClient,
@@ -76,7 +80,16 @@ export async function startCompatibilityMiddleware({
     });
   });
 
-  await listenLoopback(server, port);
+  const closeRequestStore = () => {
+    try { requestStore?.close(); } catch { /* Diagnostics are best effort. */ }
+  };
+  server.once("close", closeRequestStore);
+  try {
+    await listenLoopback(server, port);
+  } catch (error) {
+    closeRequestStore();
+    throw error;
+  }
   const address = server.address();
   if (address === null || typeof address === "string") {
     await closeServer(server);

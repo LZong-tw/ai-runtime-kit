@@ -294,6 +294,37 @@ fallback attempts are distinct upstream requests, so one Claude turn can
 legitimately appear as more than one UI row. AirKit does not read or write CCR
 SQLite state and does not use private CCR APIs for this observability.
 
+### Compatibility request evidence
+
+The adapter returns `x-airkit-request-id` on Messages responses and
+`error.request_id` on contained forwarding failures. Local diagnostic rows live
+in `${XDG_STATE_HOME:-$HOME/.local/state}/airkit/compat-requests.sqlite`
+(directory mode 0700, database mode 0600). Errors, including whole-request
+fallback rejections, are retained for 30 days; successes for 7 days. Pruning
+runs at open and at most hourly while recording. Storage failures never block
+forwarding. Error evidence includes bounded (64 KiB), credential-redacted
+upstream bodies and filtered headers; treat the database as private diagnostics.
+The `[airkit-fallback]` log includes the same request ID when route logging is on.
+
+```bash
+DB="${XDG_STATE_HOME:-$HOME/.local/state}/airkit/compat-requests.sqlite"
+sqlite3 "$DB" "SELECT request_id, client_status, upstream_status, error_json
+  FROM compat_requests WHERE kind IN ('error', 'fallback_error')
+  ORDER BY at DESC LIMIT 20;"
+# Lower median (p50-ish), milliseconds, per outbound model:
+sqlite3 "$DB" "WITH ranked AS (
+  SELECT out_model, total_ms,
+    row_number() OVER (PARTITION BY out_model ORDER BY total_ms) AS n,
+    count(*) OVER (PARTITION BY out_model) AS cnt
+  FROM compat_requests WHERE total_ms IS NOT NULL
+) SELECT out_model, total_ms AS p50_ms FROM ranked WHERE n = (cnt + 1) / 2;"
+```
+
+Timings are milliseconds from handler entry to upstream dispatch, upstream
+headers, and downstream termination. `transform_ms` covers parsing and rewrites
+before dispatch, excluding the body read. Bridge requests can make multiple
+upstream calls; first-byte timing refers to the first response headers.
+
 To migrate an older source profile, remove Advisor `model`, `fallbackModel`,
 and `mode: "bridge"`; put the model in the generic `fallback` block; add every
 missing family entry; and change `webSearch.mode: "mcp"` to `native-first`.

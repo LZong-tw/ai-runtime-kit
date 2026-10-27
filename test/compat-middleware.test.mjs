@@ -3,7 +3,9 @@ import { createServer, request as httpRequest } from "node:http";
 import { once } from "node:events";
 import { test } from "node:test";
 
-import { startCompatibilityMiddleware } from "../src/compat/middleware.mjs";
+import { startCompatibilityMiddleware as startMiddleware } from "../src/compat/middleware.mjs";
+// Existing middleware tests never open the user's diagnostic database.
+const startCompatibilityMiddleware = (options) => startMiddleware({ requestStore: null, ...options });
 import { createGptActivitySseTransform } from "../src/compat/activity.mjs";
 
 const GATEWAY_TOKEN = "adapter-gateway-token";
@@ -420,18 +422,23 @@ for (const fixture of [
         ? "upstream-executor-rejection"
         : fixture.wantRequestId);
       assert.equal(result.headers.get("x-upstream-secret"), null);
+      const requestId = result.headers.get("x-airkit-request-id");
+      assert.match(requestId, /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
       assert.deepEqual(JSON.parse(body), {
-        error: fixture.wantStatus === 429
-          ? {
-            type: "rate_limit_error",
-            message: "Upstream provider rate limited the request; retry after the indicated delay.",
-          }
-          : {
-            type: "api_error",
-            message: fixture.wantStatus === 403
-              ? "Upstream provider rejected the request"
-              : "compatibility forwarding failed",
-          },
+        error: {
+          ...(fixture.wantStatus === 429
+            ? {
+              type: "rate_limit_error",
+              message: "Upstream provider rate limited the request; retry after the indicated delay.",
+            }
+            : {
+              type: "api_error",
+              message: fixture.wantStatus === 403
+                ? "Upstream provider rejected the request"
+                : "compatibility forwarding failed",
+            }),
+          request_id: requestId,
+        },
       });
       assert.doesNotMatch(body, /private[_-]|adapter-gateway-token|credentials/);
     });

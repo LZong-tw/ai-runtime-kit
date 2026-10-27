@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { recordRequest, serializeError } from "./request-errors.mjs";
 
 import {
   handleCompatibilityMessage,
@@ -94,16 +95,16 @@ function requestLifecycleSignal(request, response) {
   return controller.signal;
 }
 
-function containHandlerFailure(response, error) {
+function containHandlerFailure(response, error, airkitRequestId) {
   if (response?.headersSent !== true && typeof response?.writeHead === "function") {
     const status = publicUpstreamStatus(error);
-    const headers = { "content-type": "application/json" };
+    const headers = { "content-type": "application/json", "x-airkit-request-id": airkitRequestId };
     const retryAfter = status === 429 ? validRetryAfter(error?.headers) ?? "3" : null;
     if (retryAfter !== null) headers["retry-after"] = retryAfter;
     const requestId = validResponseRequestId(error?.headers);
     if (requestId !== null) headers["x-request-id"] = requestId;
     response.writeHead(status, headers);
-    response.end(JSON.stringify({ error: publicFailure(status) }));
+    response.end(JSON.stringify({ error: { ...publicFailure(status), request_id: airkitRequestId } }));
     return "forwarding_failed";
   }
   response?.destroy?.(error instanceof Error ? error : new Error(String(error)));
@@ -150,13 +151,31 @@ function responseHeader(headers, name) {
   return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
 }
 
-export function createMessagesHandler({ config, coreClient, policies, auditEmitter = null, auditContext = null }) {
+export function createMessagesHandler({ config, coreClient, policies, auditEmitter = null, auditContext = null, requestStore = null }) {
   return async (request, response, helpers) => {
+    const startedAt = process.hrtime.bigint();
+    const at = Date.now();
+    const elapsed = () => Number(process.hrtime.bigint() - startedAt) / 1e6;
     const signal = requestLifecycleSignal(request, response);
     const telemetry = beginRequestTelemetry(config.routeLog, request, response);
+    if (requestStore !== null && telemetry.responseTerminal === null) {
+      telemetry.responseTerminal = observeResponseTerminal(response);
+    }
+    response.setHeader?.("x-airkit-request-id", telemetry.requestId);
     let outcome = "completed";
+    let failure = null;
+    let receivedToUpstream = null;
+    let transformMs = null;
+    let firstByteMs = null;
+    let upstreamStatus = null;
+    let fallbackOutModel = null;
+    const onFirstByte = (result) => {
+      firstByteMs ??= elapsed();
+      if (Number.isInteger(result?.status)) upstreamStatus = result.status;
+    };
     try {
       const rawBody = await helpers.readBody(request);
+      const parseStarted = elapsed();
       const parsedBody = parseJsonCopy(rawBody);
       const body = normalizeMessageSystemRoles(parsedBody);
       // Route bare Claude model ids before any forwarding decision: this
@@ -230,6 +249,8 @@ export function createMessagesHandler({ config, coreClient, policies, auditEmitt
           ...(fallbackPolicy.timeoutMs === undefined ? {} : { timeoutMs: fallbackPolicy.timeoutMs }),
         };
         let currentAttempt = null;
+        receivedToUpstream = elapsed();
+        transformMs = receivedToUpstream - parseStarted;
         await coreClient.forwardRaw({
           body: outboundRaw,
           fallback,
@@ -245,14 +266,22 @@ export function createMessagesHandler({ config, coreClient, policies, auditEmitt
               headers: attempt.headers,
             });
           },
-          onResponse: ({ headers }) => {
+          onResponse: ({ headers, status, error, fallbackUsed }) => {
+            onFirstByte({ status });
+            if (fallbackUsed) fallbackOutModel = fallbackPolicy?.selector ?? null;
+            if (error) failure = error;
             telemetry.promptCache = summarizeGatewayResponseHeaders(headers);
           },
         });
         return;
       }
 
+      receivedToUpstream = elapsed();
+      transformMs = receivedToUpstream - parseStarted;
       const message = await handleCompatibilityMessage({
+        requestStore,
+        requestId: telemetry.requestId,
+        onFirstByte,
         body: outboundBody,
         config,
         coreClient,
@@ -269,17 +298,38 @@ export function createMessagesHandler({ config, coreClient, policies, auditEmitt
       if (message !== undefined) {
         telemetry.promptCache = summarizePromptCacheUsage(message.usage, message.model);
         writeAnthropicMessage(response, message, outboundBody.stream === true);
+      } else {
+        fallbackOutModel = compatibilityFallbackSelector(config.fallback);
       }
     } catch (error) {
+      failure = error;
+      upstreamStatus = Number(error?.status ?? error?.statusCode) || upstreamStatus;
       outcome = signal.aborted
         ? "client_aborted"
-        : containHandlerFailure(response, error);
+        : containHandlerFailure(response, error, telemetry.requestId);
     } finally {
       if (outcome === "completed" && signal.aborted) outcome = "client_aborted";
       const terminalEvent = await waitForResponseTerminal(telemetry, outcome);
       if (outcome === "completed" && terminalEvent === "close") outcome = "client_aborted";
       if (outcome === "completed" && terminalEvent === "error") outcome = "response_destroyed";
       logRequestTerminal({ outcome, response, telemetry });
+      recordRequest(requestStore, {
+        request_id: telemetry.requestId,
+        at,
+        kind: failure !== null || upstreamStatus >= 400 || outcome !== "completed" ? "error" : "success",
+        path: telemetry.decision?.path ?? null,
+        mode: telemetry.decision?.mode ?? requestedMode(request?.headers),
+        in_model: telemetry.decision?.inModel ?? null,
+        out_model: fallbackOutModel ?? telemetry.decision?.outModel ?? null,
+        client_status: response.statusCode ?? null,
+        upstream_status: upstreamStatus,
+        outcome,
+        received_to_upstream_ms: receivedToUpstream,
+        upstream_first_byte_ms: firstByteMs,
+        total_ms: elapsed(),
+        transform_ms: transformMs,
+        error_json: failure === null ? null : JSON.stringify(serializeError(failure)),
+      });
     }
   };
 }
@@ -301,7 +351,7 @@ function beginRequestTelemetry(enabled, request, response) {
       decision: null,
       enabled: false,
       finished: false,
-      requestId: null,
+      requestId: safeRequestId(request?.headers),
       promptCache: null,
       responseTerminal: null,
       startedAt: null,
@@ -567,19 +617,33 @@ function isConfiguredCompatibilityRequest(body, policies, config) {
   );
 }
 
-export function createMcpHandler({ config, coreClient }) {
+export function createMcpHandler({ config, coreClient, requestStore = null }) {
   return async (request, response, helpers) => {
+    const startedAt = process.hrtime.bigint();
+    const requestId = safeRequestId(request?.headers);
+    response.setHeader?.("x-airkit-request-id", requestId);
     const signal = requestLifecycleSignal(request, response);
+    const onFailure = (error) => recordRequest(requestStore, {
+      request_id: requestId,
+      kind: "error",
+      path: "mcp",
+      mode: requestedMode(request?.headers),
+      client_status: response.statusCode ?? null,
+      upstream_status: Number(error?.status ?? error?.statusCode) || null,
+      outcome: signal.aborted ? "client_aborted" : "forwarding_failed",
+      total_ms: Number(process.hrtime.bigint() - startedAt) / 1e6,
+      error_json: JSON.stringify(serializeError(error)),
+    });
     try {
-      await handleMcpRequest({ config, coreClient, helpers, request, response, signal });
+      await handleMcpRequest({ config, coreClient, helpers, request, response, signal, onFailure });
     } catch (error) {
-      if (signal.aborted || response?.destroyed === true) return;
-      containHandlerFailure(response, error);
+      if (!signal.aborted && response?.destroyed !== true) containHandlerFailure(response, error, requestId);
+      onFailure(error);
     }
   };
 }
 
-export async function handleMcpRequest({ config, coreClient, helpers, request, response, signal }) {
+export async function handleMcpRequest({ config, coreClient, helpers, request, response, signal, onFailure }) {
     const rawBody = await helpers.readBody(request);
     let requestBody;
     try {
@@ -636,7 +700,8 @@ export async function handleMcpRequest({ config, coreClient, helpers, request, r
         signal,
       });
       sendJsonRpcResult(response, requestBody.id, result);
-    } catch {
+    } catch (error) {
+      onFailure?.(error);
       if (signal?.aborted || response?.destroyed === true) return;
       sendJsonRpcResult(response, requestBody.id, toolError("Web search is unavailable."));
     }
