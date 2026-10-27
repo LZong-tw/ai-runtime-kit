@@ -1174,6 +1174,8 @@ const LAUNCH_CLEARED_ENV = Object.freeze([
   "CLAUDE_CODE_AUTO_COMPACT_PERCENTAGE",
   "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
   "AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS",
+  "AIRCLAUDE_COMPLETION_GUARD_MODE",
+  "AIRCLAUDE_COMPLETION_GUARD_MODELS",
   "CLAUDE_CODE_OAUTH_TOKEN",
   // Cloud-provider selectors reroute Claude Code away from ANTHROPIC_BASE_URL
   // entirely; one inherited from the shell would bypass the CCR gateway.
@@ -2167,11 +2169,28 @@ function validateLaunch(profile) {
     }
     const completionGuard = definition?.completionGuard;
     if (completionGuard !== undefined) {
-      if (!isPlainObject(completionGuard) || Object.keys(completionGuard).some((key) => key !== "maxStopBlocks")) {
-        throw new Error(`profile "${profile.name}" launch.modes.${mode}.completionGuard must contain only maxStopBlocks`);
+      if (!isPlainObject(completionGuard) || Object.keys(completionGuard).some((key) => !["maxStopBlocks", "mode", "models"].includes(key))) {
+        throw new Error(`profile "${profile.name}" launch.modes.${mode}.completionGuard must contain only maxStopBlocks, mode, models`);
       }
       if (!Number.isInteger(completionGuard.maxStopBlocks) || completionGuard.maxStopBlocks < 1 || completionGuard.maxStopBlocks > 3) {
         throw new Error(`profile "${profile.name}" launch.modes.${mode}.completionGuard.maxStopBlocks must be an integer from 1 to 3`);
+      }
+      if (completionGuard.mode !== undefined && !["block", "log"].includes(completionGuard.mode)) {
+        throw new Error(`profile "${profile.name}" launch.modes.${mode}.completionGuard.mode must be one of: block, log`);
+      }
+      if (completionGuard.models !== undefined) {
+        const models = completionGuard.models;
+        if (!Array.isArray(models) || models.length === 0 || models.length > 16
+          || models.some((source) => typeof source !== "string" || source.trim() === "")) {
+          throw new Error(`profile "${profile.name}" launch.modes.${mode}.completionGuard.models must be a non-empty array of at most 16 non-empty regex strings`);
+        }
+        for (const source of models) {
+          try {
+            new RegExp(source, "i");
+          } catch {
+            throw new Error(`profile "${profile.name}" launch.modes.${mode}.completionGuard.models must contain valid JavaScript regular expressions`);
+          }
+        }
       }
     }
   }
@@ -3552,9 +3571,11 @@ function airclaudeLaunchEnv(catalog, profile, mode, ccrConfig, runtimeEnv = proc
   if (compatibility && resolveCompatibilityPolicies(compatibility, VERIFIED_NATIVE_COMPATIBILITY).policies.advisor === "bridge") {
     env.CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL = "1";
   }
-  const maxStopBlocks = profile.launch?.modes?.[mode]?.completionGuard?.maxStopBlocks;
-  if (maxStopBlocks !== undefined) {
-    env.AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS = String(maxStopBlocks);
+  const completionGuard = profile.launch?.modes?.[mode]?.completionGuard;
+  if (completionGuard?.maxStopBlocks !== undefined) {
+    env.AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS = String(completionGuard.maxStopBlocks);
+    if (completionGuard.mode !== undefined) env.AIRCLAUDE_COMPLETION_GUARD_MODE = completionGuard.mode;
+    if (completionGuard.models !== undefined) env.AIRCLAUDE_COMPLETION_GUARD_MODELS = JSON.stringify(completionGuard.models);
   }
 
   for (const [key, route] of sortedRouterEntries(ccrConfig.Router)) {

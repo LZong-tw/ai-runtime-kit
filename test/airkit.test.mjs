@@ -3324,6 +3324,139 @@ test("GPT completion guard continues one Stop after a tool-bearing turn without 
   }
 });
 
+test("completion guard log mode records bounded private decisions and consumes the simulated budget", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-completion-guard-log-"));
+  const env = {
+    AIRCLAUDE_PROFILE: "example-profile",
+    AIRCLAUDE_ACTIVE_MODEL: "provider/GPT-5.6-terra[1m]",
+    AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS: "1",
+    AIRCLAUDE_COMPLETION_GUARD_MODE: "log",
+    CLAUDE_PLUGIN_DATA: pluginData,
+  };
+  const sessionId = "private-log-session-id";
+  const input = { session_id: sessionId, prompt: "private prompt must not persist" };
+  const decisionsPath = join(pluginData, "completion-guard", "decisions.jsonl");
+  try {
+    await processCompletionGuardHook({ ...input, hook_event_name: "PostToolUse", tool_input: { secret: "private tool input" } }, env);
+    assert.equal(await processCompletionGuardHook({ ...input, hook_event_name: "Stop", stop_hook_active: true }, env), null);
+    await assert.rejects(readFile(decisionsPath), { code: "ENOENT" });
+    assert.equal(await processCompletionGuardHook({ ...input, hook_event_name: "Stop" }, env), null);
+    let raw = await readFile(decisionsPath, "utf8");
+    const [first] = raw.trim().split("\n").map(JSON.parse);
+    assert.deepEqual(Object.keys(first).sort(), ["maxStopBlocks", "model", "reason", "session", "stopBlocks", "ts", "wouldBlock"]);
+    assert.equal(first.wouldBlock, true);
+    assert.equal(first.reason, "would-block");
+    assert.equal(first.stopBlocks, 1);
+    assert.equal(first.maxStopBlocks, 1);
+    assert.equal(first.model, "GPT-5.6-terra");
+    assert.equal(new Date(first.ts).toISOString(), first.ts);
+    assert.match(first.session, /^[0-9a-f]{24}$/);
+    assert.notEqual(first.session, sessionId);
+    assert.equal(first.session, createHash("sha256").update(sessionId).digest("hex").slice(0, 24));
+    assert.equal((await stat(decisionsPath)).mode & 0o777, 0o600);
+    assert.equal(await processCompletionGuardHook({ ...input, hook_event_name: "Stop" }, env), null);
+    raw = await readFile(decisionsPath, "utf8");
+    const records = raw.trim().split("\n").map(JSON.parse);
+    assert.equal(records.length, 2);
+    assert.equal(records[1].wouldBlock, false);
+    assert.equal(records[1].reason, "not-armed");
+    assert.equal(records[1].stopBlocks, 1);
+    assert.doesNotMatch(raw, /private-log-session-id|private prompt|private tool input/);
+    await processCompletionGuardHook({ ...input, hook_event_name: "PostToolUse" }, env);
+    assert.equal(await processCompletionGuardHook({ ...input, hook_event_name: "Stop" }, env), null);
+    const exhausted = JSON.parse((await readFile(decisionsPath, "utf8")).trim().split("\n").at(-1));
+    assert.equal(exhausted.reason, "budget-exhausted");
+    assert.equal(exhausted.wouldBlock, false);
+    assert.equal(exhausted.stopBlocks, 1);
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+test("completion guard model allowlist replaces defaults in block and log modes", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-completion-guard-allowlist-"));
+  const env = {
+    AIRCLAUDE_PROFILE: "example-profile",
+    AIRCLAUDE_ACTIVE_MODEL: "deepseek-v4-flash",
+    AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS: "1",
+    AIRCLAUDE_COMPLETION_GUARD_MODELS: '["^gpt-"]',
+    CLAUDE_PLUGIN_DATA: pluginData,
+  };
+  try {
+    for (const mode of ["block", "log"]) {
+      const modeEnv = { ...env, AIRCLAUDE_COMPLETION_GUARD_MODE: mode };
+      await processCompletionGuardHook({ hook_event_name: "PostToolUse", session_id: mode }, modeEnv);
+      assert.equal(await processCompletionGuardHook({ hook_event_name: "Stop", session_id: mode }, modeEnv), null);
+      const key = createHash("sha256").update(mode).digest("hex").slice(0, 24);
+      assert.deepEqual(JSON.parse(await readFile(join(pluginData, "completion-guard", `${key}.json`), "utf8")), { armed: false, stopBlocks: 0 });
+    }
+    await assert.rejects(readFile(join(pluginData, "completion-guard", "decisions.jsonl")), { code: "ENOENT" });
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+test("completion guard disables malformed model allowlists and unknown modes without throwing", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-completion-guard-invalid-"));
+  const env = {
+    AIRCLAUDE_PROFILE: "example-profile",
+    AIRCLAUDE_ACTIVE_MODEL: "gpt-5.6-terra",
+    AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS: "1",
+    CLAUDE_PLUGIN_DATA: pluginData,
+  };
+  try {
+    await processCompletionGuardHook({ hook_event_name: "PostToolUse", session_id: "invalid" }, env);
+    for (const models of ["invalid", "null", "{}", "[]", '["("]', '[""]', '[1]', JSON.stringify(Array(17).fill("gpt"))]) {
+      assert.equal(await processCompletionGuardHook({ hook_event_name: "Stop", session_id: "invalid" }, {
+        ...env, AIRCLAUDE_COMPLETION_GUARD_MODELS: models,
+      }), null);
+    }
+    assert.equal(await processCompletionGuardHook({ hook_event_name: "Stop", session_id: "invalid" }, {
+      ...env, AIRCLAUDE_COMPLETION_GUARD_MODE: "warn",
+    }), null);
+    assert.ok(await processCompletionGuardHook({ hook_event_name: "Stop", session_id: "invalid" }, env));
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+test("completion guard detects the last assistant model in a transcript larger than its tail limit", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-completion-guard-tail-"));
+  const transcriptPath = join(pluginData, "session.jsonl");
+  const env = {
+    AIRCLAUDE_PROFILE: "example-profile",
+    AIRCLAUDE_ACTIVE_MODEL: "claude-opus-5",
+    AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS: "1",
+    CLAUDE_PLUGIN_DATA: pluginData,
+  };
+  try {
+    await writeFile(transcriptPath, `${JSON.stringify({ type: "user", message: "x".repeat(300 * 1024) })}\n${JSON.stringify({ type: "assistant", message: { model: "gpt-5.6-terra" } })}\n${JSON.stringify({ type: "progress" })}\n`);
+    await processCompletionGuardHook({ hook_event_name: "PostToolUse", session_id: "tail" }, env);
+    const response = await processCompletionGuardHook({ hook_event_name: "Stop", session_id: "tail", transcript_path: transcriptPath }, env);
+    assert.equal(response.hookSpecificOutput.hookEventName, "Stop");
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+test("completion guard swallows decision log write failures", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-completion-guard-log-failure-"));
+  const env = {
+    AIRCLAUDE_PROFILE: "example-profile",
+    AIRCLAUDE_ACTIVE_MODEL: "gpt-5.6-terra",
+    AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS: "1",
+    AIRCLAUDE_COMPLETION_GUARD_MODE: "log",
+    CLAUDE_PLUGIN_DATA: pluginData,
+  };
+  try {
+    await processCompletionGuardHook({ hook_event_name: "PostToolUse", session_id: "log-failure" }, env);
+    await mkdir(join(pluginData, "completion-guard", "decisions.jsonl"));
+    assert.equal(await processCompletionGuardHook({ hook_event_name: "Stop", session_id: "log-failure" }, env), null);
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
 test("DeepSeek completion guard continues the full deliverable instead of stopping early", async () => {
   const pluginData = await mkdtemp(join(tmpdir(), "airkit-deepseek-completion-guard-"));
   const env = {
@@ -4748,6 +4881,50 @@ test("observer write failures do not prevent existing PostToolUse completion-gua
     });
   } finally {
     await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+test("completionGuard profile validation accepts log mode and rejects invalid keys and models", async () => {
+  const catalog = launchCatalog();
+  const fast = catalog.profiles[0].launch.modes.fast;
+  fast.completionGuard = { maxStopBlocks: 1, mode: "log", models: ["^gpt-"] };
+  const root = await mkdtemp(join(tmpdir(), "airkit-completion-guard-validation-"));
+  const catalogPath = join(root, "catalog.json");
+  try {
+    await writeFile(catalogPath, JSON.stringify(catalog));
+    await assert.doesNotReject(loadCatalog(catalogPath, { includeLocal: false }));
+    for (const [guard, message] of [
+      [{ maxStopBlocks: 1, mode: "warn" }, /completionGuard.mode must be one of/],
+      [{ maxStopBlocks: 1, models: [] }, /completionGuard.models must be a non-empty array/],
+      [{ maxStopBlocks: 1, models: ["("] }, /completionGuard.models must contain valid JavaScript regular expressions/],
+      [{ maxStopBlocks: 1, models: [""] }, /completionGuard.models/],
+      [{ maxStopBlocks: 1, models: Array(17).fill("gpt") }, /completionGuard.models/],
+      [{ maxStopBlocks: 1, extra: true }, /must contain only maxStopBlocks, mode, models/],
+      [{ mode: "log" }, /completionGuard.maxStopBlocks/],
+    ]) {
+      fast.completionGuard = guard;
+      await writeFile(catalogPath, JSON.stringify(catalog));
+      await assert.rejects(loadCatalog(catalogPath, { includeLocal: false }), message);
+    }
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("launch mode exports its completion guard mode and models only for the selected mode", () => {
+  const catalog = launchCatalog();
+  catalog.profiles[0].launch.modes.fast.completionGuard = { maxStopBlocks: 1, mode: "log", models: ["^gpt-"] };
+  const inherited = {
+    AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS: "1",
+    AIRCLAUDE_COMPLETION_GUARD_MODE: "log",
+    AIRCLAUDE_COMPLETION_GUARD_MODELS: '["^gpt-"]',
+  };
+  const guarded = buildLaunchPlan(catalog, "launch-example", { mode: "fast" });
+  const unguarded = buildLaunchPlan(catalog, "launch-example", { mode: "auto", env: inherited });
+  for (const [key, value] of Object.entries(inherited)) {
+    assert.equal(guarded.launch.env[key], value);
+    assert.equal(unguarded.launch.env[key], undefined);
+    assert.ok(unguarded.launch.clearEnv.includes(key));
   }
 });
 

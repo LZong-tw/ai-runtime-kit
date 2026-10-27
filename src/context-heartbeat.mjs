@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { appendFile, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { processSubagentObservabilityHook } from "./subagent-observability.mjs";
 import { processAuditHook } from "./audit/claude-hook.mjs";
 import { createClaudeAuditHookEmitter } from "./audit/claude-hook-runtime.mjs";
@@ -233,7 +233,9 @@ function truncateSubagentResult(text, artifactPath) {
 export async function processCompletionGuardHook(input, env = process.env) {
   const maxStopBlocks = completionGuardMaxStopBlocks(env);
   const statePath = completionGuardStatePath(input, env);
-  if (!maxStopBlocks || !statePath) return null;
+  const mode = env.AIRCLAUDE_COMPLETION_GUARD_MODE ?? "block";
+  const patterns = completionGuardModelPatterns(env);
+  if (!maxStopBlocks || !statePath || !["block", "log"].includes(mode) || !patterns) return null;
 
   if (input?.hook_event_name === "UserPromptSubmit") {
     await rm(statePath, { force: true });
@@ -248,15 +250,34 @@ export async function processCompletionGuardHook(input, env = process.env) {
 
   if (input?.hook_event_name !== "Stop" || input.stop_hook_active === true) return null;
   const state = await loadCompletionGuardState(statePath);
-  if (!state?.armed || state.stopBlocks >= maxStopBlocks) return null;
+  const eligible = state?.armed && state.stopBlocks < maxStopBlocks;
+  if (mode === "block" && !eligible) return null;
 
-  const model = await completionGuardModel(input, env);
-  if (!isCompletionGuardModel(model)) {
-    await saveCompletionGuardState(statePath, { armed: false, stopBlocks: state.stopBlocks });
+  const model = normalizeCompletionGuardModel(await completionGuardModel(input, env));
+  if (!patterns.some((pattern) => pattern.test(model))) {
+    if (eligible) await saveCompletionGuardState(statePath, { armed: false, stopBlocks: state.stopBlocks });
     return null;
   }
 
-  await saveCompletionGuardState(statePath, { armed: false, stopBlocks: state.stopBlocks + 1 });
+  const stopBlocks = (state?.stopBlocks ?? 0) + (eligible ? 1 : 0);
+  if (eligible) await saveCompletionGuardState(statePath, { armed: false, stopBlocks });
+  if (mode === "log") {
+    try {
+      await mkdir(dirname(statePath), { recursive: true });
+      await appendFile(join(dirname(statePath), "decisions.jsonl"), `${JSON.stringify({
+        ts: new Date().toISOString(),
+        session: basename(statePath, ".json"),
+        model,
+        wouldBlock: Boolean(eligible),
+        reason: eligible ? "would-block" : !state?.armed ? "not-armed" : "budget-exhausted",
+        stopBlocks,
+        maxStopBlocks,
+      })}\n`, { mode: 0o600 });
+    } catch {
+      // Observational logging must not interrupt completion.
+    }
+    return null;
+  }
   return {
     hookSpecificOutput: {
       hookEventName: "Stop",
@@ -273,19 +294,48 @@ async function completionGuardModel(input, env) {
   return env.AIRCLAUDE_ACTIVE_MODEL ?? env.AIRCLAUDE_ROUTE_DEFAULT_MODEL ?? null;
 }
 
-function isCompletionGuardModel(model) {
-  const normalized = String(model ?? "")
+function completionGuardModelPatterns(env) {
+  if (env.AIRCLAUDE_COMPLETION_GUARD_MODELS === undefined) return COMPLETION_GUARD_MODEL_PATTERNS;
+  try {
+    const sources = JSON.parse(env.AIRCLAUDE_COMPLETION_GUARD_MODELS);
+    if (!Array.isArray(sources) || sources.length === 0 || sources.length > 16
+      || sources.some((source) => typeof source !== "string" || source.trim() === "")) return null;
+    return sources.map((source) => new RegExp(source, "i"));
+  } catch {
+    return null;
+  }
+}
+
+function normalizeCompletionGuardModel(model) {
+  return String(model ?? "")
     .trim()
     .split(/[\/,]/)
     .at(-1)
-    ?.replace(/\[1m\]$/i, "");
-  return COMPLETION_GUARD_MODEL_PATTERNS.some((pattern) => pattern.test(normalized ?? ""));
+    ?.replace(/\[1m\]$/i, "") ?? "";
 }
 
 async function readTranscriptModel(transcriptPath) {
   try {
-    const raw = await readFile(transcriptPath, "utf8");
-    const tail = raw.length > TRANSCRIPT_TAIL_LIMIT ? raw.slice(-TRANSCRIPT_TAIL_LIMIT) : raw;
+    const file = await open(transcriptPath, "r");
+    let tail;
+    try {
+      const { size } = await file.stat();
+      const offset = Math.max(0, size - TRANSCRIPT_TAIL_LIMIT);
+      const buffer = Buffer.alloc(Math.min(size, TRANSCRIPT_TAIL_LIMIT));
+      let bytesRead = 0;
+      while (bytesRead < buffer.length) {
+        const result = await file.read(buffer, bytesRead, buffer.length - bytesRead, offset + bytesRead);
+        if (result.bytesRead === 0) break;
+        bytesRead += result.bytesRead;
+      }
+      tail = buffer.subarray(0, bytesRead).toString("utf8");
+      if (offset > 0) {
+        const newline = tail.indexOf("\n");
+        tail = newline < 0 ? "" : tail.slice(newline + 1);
+      }
+    } finally {
+      await file.close();
+    }
     for (const line of tail.split(/\r?\n/).reverse()) {
       if (!line.trim()) continue;
       const record = JSON.parse(line);

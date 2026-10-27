@@ -2,6 +2,33 @@
 
 目前安裝預設為 off；明確指定 `completionMode: "shadow"` 才加入專用 Stop 入口。Shadow 不會阻擋完成、不會扣除 continuation budget，也不會從 stdin 接受 native decoder 或授權宣告。正式 profile 啟用與 production enforcing 仍需另外確認。
 
+## Legacy Stop guard: completionGuard keys
+
+Configure `launch.modes.<mode>.completionGuard` independently of the newer
+completion dispatcher described below:
+
+```json
+{"maxStopBlocks":1,"mode":"log","models":["^gpt-"]}
+```
+
+- `maxStopBlocks` is required: an integer from 1 to 3, limiting Stop nudges per
+  user turn after tool use.
+- `mode` is optional: `"block"` (default) emits the existing continuation nudge;
+  `"log"` never emits a Stop response but consumes the same simulated budget.
+- `models` is optional: 1–16 non-empty JavaScript regex sources, compiled with
+  the case-insensitive `i` flag. This allowlist replaces the default GPT
+  (`^gpt(?:-|$)`) and DeepSeek (`^deepseek-`) patterns. Matching uses the model
+  name without its provider prefix or trailing `[1m]` suffix.
+
+Log mode appends matching, non-recursive Stop decisions to
+`$CLAUDE_PLUGIN_DATA/completion-guard/decisions.jsonl` (file mode `0600`). Each
+record contains only `ts` (ISO timestamp), `session` (24-hex SHA-256 session
+key, never the raw ID), `model` (normalized name), `wouldBlock` (boolean),
+`reason` (`would-block`, `not-armed`, or `budget-exhausted`), `stopBlocks`
+(count after the decision), and `maxStopBlocks`. Non-matching models write no
+log. No prompt, transcript, or tool content is recorded; logging failures are
+ignored. Invalid environment mode or model overrides disable the legacy guard.
+
 ## 已實作的核心邊界
 
 `src/completion` 使用同一份具 RequestKey／generation 的 ledger。只有已接受的 contract 能註冊 required target；model checkpoint 只能提出 bounded metadata，不能自授權、建立可信 receipt 或改寫 authoritative verification。
