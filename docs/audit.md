@@ -9,14 +9,6 @@ Auditd is a collector boundary, not a provider health check and not a
 guarantee that every client is fully observable. Always check the client
 completeness and evidence gaps after enabling it.
 
-Audit is not itself Sensitive Egress Shield enforcement. Shield is disabled by
-default, and enforcement applies only to its declared, explicitly enabled
-launcher lanes. When such a lane is enabled, Shield requires a metadata-only
-Audit acknowledgement or encrypted-spool capacity before forwarding. Neither a
-healthy audit daemon nor an Audit UI row proves that a direct or undeclared
-client was intercepted, blocked, or redacted. See the Shield section in
-[`install.md`](install.md) for provisioning, coverage, and bypass boundaries.
-
 ## Browser audit UI
 
 AirKit registers an `AirKit Audit` app on a loopback-only CCR HTTP backend. The

@@ -23,9 +23,8 @@ function probe(port) {
   });
 }
 
-// Starts a per-launch pxpipe between Shield and the gateway. Shield sees the
-// pxpipe origin as its fixed target; pxpipe forwards to `upstream`. pxpipe
-// only ever receives traffic Shield already redacted.
+// Starts a per-launch pxpipe in front of the gateway (or compatibility
+// middleware); pxpipe forwards to `upstream`.
 export async function startPxpipeHop({ upstream, command = "pxpipe", env = process.env, spawnProcess = spawn, timeoutMs = 10_000, owner = process } = {}) {
   const target = new URL(upstream);
   const loopback = target.hostname === "127.0.0.1" && target.protocol === "http:";

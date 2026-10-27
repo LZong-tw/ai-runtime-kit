@@ -10,8 +10,6 @@ keeps machine state outside git, and verifies the installed launch path.
   [`docs/install.md`](docs/install.md)
 - Local audit daemon, audit UI, exports, retention, client completeness, and
   gap interpretation: [`docs/audit.md`](docs/audit.md)
-- Sensitive Egress Shield provision, policy lifecycle, audit projection, and
-  declared-launcher boundary: the Shield section below
 - Launch-path, routing, statusline, Headroom/cache evidence, and completion
   guard lessons: [`docs/runtime-lessons.md`](docs/runtime-lessons.md)
 - External-client adapter flow for Pi and OpenCode: the `Pi and OpenCode`
@@ -112,86 +110,6 @@ session cookie. It shows the same metadata-only projections and service status
 without turning the audit store into a payload browser. See
 [`docs/audit.md`](docs/audit.md) for the UI surface, safe export path, gated
 reveal flow, and gap interpretation rules.
-
-## Sensitive Egress Shield
-
-AirKit includes a disabled-by-default local Sensitive Egress Shield for
-profiles that explicitly opt into a declared managed launcher lane. It evaluates
-a signed OPA/Wasm policy with provisioned Gitleaks and Privacy worker facts,
-can require a one-time local approval, and writes a
-metadata-only terminal decision before forwarding. Missing or invalid policy,
-assets, audit durability, identity, or approval capability blocks; there is no
-allow-all fallback.
-
-Provisioning is deliberately external and preview-first. Policy bundles,
-Gitleaks, Privacy Filter worker/model assets, public keys, credentials, and
-provider origins are never downloaded during a request or packaged with AirKit.
-After reviewing each preview, explicitly apply only the required local writes:
-
-```bash
-airkit shield policy install --lane managed --bundle <policy-bundle> --public-key <policy-public-key>
-airkit shield privacy provision --lane managed --policy-bundle <policy-bundle> --bundle <privacy-manifest> --gitleaks <gitleaks-executable> --gitleaks-rules <gitleaks-rules.toml>
-airkit shield install --lane managed
-
-airkit shield policy install --lane managed --bundle <policy-bundle> --public-key <policy-public-key> --write
-airkit shield privacy provision --lane managed --bundle <privacy-manifest> --gitleaks <gitleaks-executable> --gitleaks-rules <gitleaks-rules.toml> --write
-airkit shield install --lane managed --write
-airkit shield status --lane managed
-airkit shield doctor --lane managed
-```
-
-Provision and install are per lane. `install` validates that the same lane
-already has a valid signed policy and Privacy/Gitleaks provision; it does not
-download or infer either dependency. Repeat the sequence with
-`--lane subscription` only for an explicitly enabled subscription launcher.
-The explicit `--policy-bundle` makes a clean-lane Privacy preview fully
-read-only; after the reviewed policy write, the Privacy write reads the
-lane-local signed policy bundle.
-
-`--gitleaks-rules` is a Gitleaks configuration TOML you author, and it is the
-only thing that decides what Shield treats as a secret; AirKit ships no rules.
-It is digest-pinned alongside the executable and revalidated before every scan,
-so editing it requires re-running `privacy provision --write`. Shield always
-invokes Gitleaks with one fixed argument vector against the request body on
-stdin — never a repository — and starts by scanning a fixed sentinel that your
-rules must answer with exactly one `private-key` finding. A rules file that
-matches that sentinel under two rule ids, or twice under one, fails the daemon
-closed at startup.
-
-The asset references must resolve to canonical, user-owned regular files, with
-no symlink or group/world write permission. Provisioning verifies SHA-256; the
-Privacy manifest pins its worker/version/protocol and runs a redaction
-self-test. Runtime worker validation repeats before spawn. The policy bundle
-validates signature, compiled Wasm digest/ABI, detector versions, and self-test.
-
-Only declared AirKit-managed launchers are protected when their profile enables
-Shield: `airclaude`, generated `cclaude-*`, `hr-airclaude`, and
-`hr-claude-web`. Subscription `claude-sub` and `hr-claude-sub` are protected
-only when their explicit subscription feature switch is enabled. Direct
-`command claude`, browsers, `curl`, and undeclared wrappers are outside the
-control. A profile must expose that enablement and lane in its own catalog; this
-public repository does not silently enable Shield for a shell or route. Do not
-manually wrap `airclaude` with `shield launch`.
-
-For a managed launch, AirKit binds fresh local compatibility middleware to
-Shield through a one-time control registration. The child receives only a
-bounded, renewable session capability, not a destination, control capability,
-or provider credential; the registration is revoked when the child exits. This
-is an application-level least-privilege boundary, not hostile-principal
-isolation: processes running as the same operating-system user remain within
-that user's trust boundary. A Headroom marker, where an adapter supplies one,
-is shape-validated declarative launcher telemetry, not an authenticated
-identity.
-
-Policy replacement is atomic: a live daemon is quiesced, a reachable old proxy
-rejects the transition, and a replacement must publish matching policy/detector
-identity before it is ready. Exact retry coalescing is bounded, in memory, and
-cannot cross a policy/detector version, lane, destination, digest, or expiry.
-Shield decisions and transitions are visible only as safe metadata in
-`airkit audit open`; the UI never becomes a prompt, match, or credential
-viewer. To roll back, apply a reviewed profile revision with Shield disabled,
-then use `airkit shield stop` if appropriate—do not edit CCR, OAuth, Shield, or
-Audit state by hand.
 
 ## Pi and OpenCode
 
