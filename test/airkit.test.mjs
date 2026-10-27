@@ -7500,3 +7500,93 @@ test("external client launchers print their own help without preparing a route",
     assert.match(output, new RegExp(`${launcher} -- --help`));
   }
 });
+
+async function rpcTimeoutClient(t, handler, extra = {}) {
+  const root = await mkdtemp(join(tmpdir(), "airkit-ccr-rpc-timeout-"));
+  t.after(() => rm(root, { force: true, recursive: true }));
+  const stateDir = join(root, ".claude-code-router");
+  await mkdir(stateDir, { recursive: true });
+  await writeFile(join(stateDir, "service.json"), JSON.stringify({
+    url: "http://127.0.0.1:3462/?ccr_web_token=synthetic-token",
+  }));
+  const sent = [];
+  const starts = [];
+  const client = airkitRuntime.createCcr3Client({
+    env: { HOME: root },
+    fetch: async (url, init) => {
+      const { method, args } = JSON.parse(init.body);
+      sent.push(method);
+      return handler({ method, args, signal: init.signal });
+    },
+    runCommand: async (command, args) => {
+      starts.push(`${command} ${args.join(" ")}`);
+      return { ok: true, status: 0, stdout: "" };
+    },
+    ...extra,
+  });
+  return { client, sent, starts };
+}
+
+const rpcOk = (value) => ({ ok: true, status: 200, json: async () => ({ value }) });
+const hangUntilAborted = (signal) => new Promise((_, reject) => {
+  signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+});
+
+test("saveConfig outlasts a gateway restart longer than the default RPC timeout", async (t) => {
+  const { client, sent } = await rpcTimeoutClient(t, async ({ method, signal }) => {
+    if (method !== "saveConfig") return rpcOk({});
+    await new Promise((settle, reject) => {
+      const timer = setTimeout(settle, 6_000);
+      signal.addEventListener("abort", () => { clearTimeout(timer); reject(signal.reason); }, { once: true });
+    });
+    return rpcOk(true);
+  });
+  await client.saveConfig({ PORT: 3456 });
+  assert.deepEqual(sent, ["saveConfig"], "saveConfig is sent exactly once");
+});
+
+test("a timed-out RPC is not retried and never starts a service", async (t) => {
+  const { client, sent, starts } = await rpcTimeoutClient(
+    t,
+    ({ signal }) => hangUntilAborted(signal),
+    { rpcTimeoutMs: 50 },
+  );
+  await assert.rejects(client.getConfig(), (error) => error.name === "TimeoutError");
+  assert.deepEqual(sent, ["getConfig"]);
+  assert.deepEqual(starts, []);
+});
+
+test("a refused connection still re-reads service.json and starts the service", async (t) => {
+  let refused = true;
+  const { client, sent, starts } = await rpcTimeoutClient(t, async () => {
+    if (refused) {
+      refused = false;
+      throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } });
+    }
+    return rpcOk({ PORT: 3456 });
+  });
+  assert.deepEqual(await client.getConfig(), { PORT: 3456 });
+  assert.deepEqual(sent, ["getConfig", "getConfig"]);
+  assert.equal(starts.length > 0, true, "connection failure still falls back to starting the service");
+});
+
+test("a saveConfig timeout is accepted when the store already holds the target config", async (t) => {
+  const target = { PORT: 3456, Providers: [{ name: "p" }] };
+  const { client, sent } = await rpcTimeoutClient(
+    t,
+    ({ method, signal }) => (method === "saveConfig" ? hangUntilAborted(signal) : rpcOk(target)),
+    { mutatingRpcTimeoutMs: 50 },
+  );
+  await client.saveConfig(structuredClone(target));
+  assert.deepEqual(sent, ["saveConfig", "getConfig"]);
+});
+
+test("a saveConfig timeout still fails when the store does not hold the target config", async (t) => {
+  const { client, sent } = await rpcTimeoutClient(
+    t,
+    ({ method, signal }) => (method === "saveConfig" ? hangUntilAborted(signal) : rpcOk({ PORT: 1 })),
+    { mutatingRpcTimeoutMs: 50 },
+  );
+  await assert.rejects(client.saveConfig({ PORT: 3456 }), (error) => error.name === "TimeoutError");
+  assert.deepEqual(sent, ["saveConfig", "getConfig"]);
+});

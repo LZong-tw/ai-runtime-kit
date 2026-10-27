@@ -4059,6 +4059,10 @@ async function resolveProviderApiKeys(catalog, profileName, plan, options) {
   return apiKeys;
 }
 
+function isAbortError(error) {
+  return error?.name === "TimeoutError" || error?.name === "AbortError";
+}
+
 export function createCcr3Client(options = {}) {
   const stateDir = defaultCcrStateDir(options.env);
   const runCommand = options.runCommand ?? runCommandSync;
@@ -4128,7 +4132,15 @@ export function createCcr3Client(options = {}) {
     }
   }
 
+  // saveConfig and applyProfile restart CCR's core gateway inside the same RPC
+  // and CCR itself waits up to 5s for the new gateway to accept its config, so
+  // the read-RPC budget is too short for them by construction.
+  const mutatingRpcMethods = new Set(["saveConfig", "applyProfile"]);
+
   async function rpc(method, args = []) {
+    const timeoutMs = mutatingRpcMethods.has(method)
+      ? options.mutatingRpcTimeoutMs ?? 30_000
+      : options.rpcTimeoutMs ?? 5_000;
     service ??= await loadService();
     let serviceUrl = new URL(service.url);
     let token = serviceUrl.searchParams.get("ccr_web_token");
@@ -4137,12 +4149,15 @@ export function createCcr3Client(options = {}) {
         method: "POST",
         headers: { "content-type": "application/json", origin: serviceUrl.origin, "x-ccr-web-auth": token },
         body: JSON.stringify({ method, args }),
-        signal: AbortSignal.timeout(options.rpcTimeoutMs ?? 5_000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     let response;
     try {
       response = await request();
-    } catch {
+    } catch (error) {
+      // A timeout means the service answered the connection and is still
+      // working; resending a mutating RPC would only queue a second restart.
+      if (isAbortError(error)) throw error;
       if (options.autoStart === false) throw serviceUnavailable();
       // A restart mints a new port and token, so a connection failure often means
       // only that this client is holding the previous service.json. Re-read and
@@ -4189,7 +4204,18 @@ export function createCcr3Client(options = {}) {
   return {
     getConfig: () => rpc("getConfig"),
     getVersion: async () => (await rpc("getAppInfo")).version,
-    saveConfig: (config) => rpc("saveConfig", [config, { applyProfile: false }]),
+    saveConfig: async (config) => {
+      try {
+        return await rpc("saveConfig", [config, { applyProfile: false }]);
+      } catch (error) {
+        // CCR persists the config before restarting the gateway, so a timeout
+        // usually means the save landed. Accept it only if the store proves it.
+        if (!isAbortError(error)) throw error;
+        const stored = await rpc("getConfig").catch(() => undefined);
+        if (isDeepStrictEqual(stored, config)) return undefined;
+        throw error;
+      }
+    },
     // Runs CCR's apply-all-profiles pass, which is what mints the per-profile
     // gateway key helpers. Callers must have vetted the config through the
     // Codex takeover guards first.
