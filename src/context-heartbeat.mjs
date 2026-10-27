@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFile, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { processSubagentObservabilityHook } from "./subagent-observability.mjs";
 import { processAuditHook } from "./audit/claude-hook.mjs";
@@ -21,6 +21,8 @@ const SESSION_SOURCES = new Set(["startup", "resume", "clear", "compact"]);
 const COMPLETION_GUARD_REASON = "Continue working when safe. Finish every requested deliverable, verify each result, and do not stop after partial completion.";
 const COMPLETION_GUARD_MODEL_PATTERNS = Object.freeze([/^gpt(?:-|$)/i, /^deepseek-/i]);
 const TRANSCRIPT_TAIL_LIMIT = 256 * 1024;
+const COMPLETION_GUARD_LOG_LIMIT = 1024 * 1024;
+const COMPLETION_GUARD_LOG_MODEL_LIMIT = 128;
 const SUBAGENT_TOOL_NAMES = new Set(["Agent", "Task", "TaskOutput"]);
 const SUBAGENT_RESULT_SCAN_LIMIT = 256 * 1024;
 const SUBAGENT_RESULT_MAX_CHARS = 32 * 1024;
@@ -263,11 +265,14 @@ export async function processCompletionGuardHook(input, env = process.env) {
   if (eligible) await saveCompletionGuardState(statePath, { armed: false, stopBlocks });
   if (mode === "log") {
     try {
+      const logPath = join(dirname(statePath), "decisions.jsonl");
       await mkdir(dirname(statePath), { recursive: true });
-      await appendFile(join(dirname(statePath), "decisions.jsonl"), `${JSON.stringify({
+      const size = await stat(logPath).then((info) => info.size, () => 0);
+      if (size >= COMPLETION_GUARD_LOG_LIMIT) await rename(logPath, `${logPath}.1`);
+      await appendFile(logPath, `${JSON.stringify({
         ts: new Date().toISOString(),
         session: basename(statePath, ".json"),
-        model,
+        model: model.slice(0, COMPLETION_GUARD_LOG_MODEL_LIMIT),
         wouldBlock: Boolean(eligible),
         reason: eligible ? "would-block" : !state?.armed ? "not-armed" : "budget-exhausted",
         stopBlocks,
