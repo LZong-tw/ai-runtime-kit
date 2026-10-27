@@ -600,3 +600,106 @@ export async function runEducationHook({ env = process.env, input = process.stdi
   }
   if (response) output.write(`${JSON.stringify(response)}\n`);
 }
+
+// P4 observation: rules stay in shadow for a week, then each is judged by its
+// hand-labelled false-positive rate (spec §6.2/§7). This only counts and
+// samples; deciding precision stays with a human reading the samples.
+export function summarizeEducationLog(text, { now = Date.now(), days = 7, samples = 20 } = {}) {
+  const since = now - days * 86_400_000;
+  const rules = new Map();
+  const sessions = new Set();
+  let records = 0;
+  let malformed = 0;
+  let first = null;
+  for (const line of String(text).split("\n")) {
+    if (!line.trim()) continue;
+    let record;
+    try { record = JSON.parse(line); } catch { malformed += 1; continue; }
+    const ts = Date.parse(record?.ts);
+    if (!Number.isFinite(ts) || ts < since || ts > now) continue;
+    records += 1;
+    if (record.session_id) sessions.add(record.session_id);
+    if (first === null || ts < first) first = ts;
+    const key = record.rule ?? "unknown";
+    const entry = rules.get(key) ?? { rule: key, total: 0, emitted: 0, decisions: {}, models: {}, samples: [], seen: 0 };
+    entry.total += 1;
+    if (record.emitted) entry.emitted += 1;
+    entry.decisions[record.decision ?? "unknown"] = (entry.decisions[record.decision ?? "unknown"] ?? 0) + 1;
+    const family = modelFamily(record.model);
+    entry.models[family] = (entry.models[family] ?? 0) + 1;
+    // Reservoir sampling keyed on the line hash: spread over the whole week,
+    // and the same log always yields the same samples.
+    entry.seen += 1;
+    if (entry.samples.length < samples) entry.samples.push(sampleOf(record));
+    else {
+      const slot = Math.floor(stableFraction(line) * entry.seen);
+      if (slot < samples) entry.samples[slot] = sampleOf(record);
+    }
+    rules.set(key, entry);
+  }
+  const list = [...rules.values()]
+    .map(({ seen, ...entry }) => ({ ...entry, samples: entry.samples.sort((a, b) => a.ts.localeCompare(b.ts)) }))
+    .sort((a, b) => b.total - a.total || a.rule.localeCompare(b.rule));
+  return {
+    since: new Date(since).toISOString(),
+    until: new Date(now).toISOString(),
+    days,
+    coverageDays: first === null ? 0 : Math.round(((now - first) / 86_400_000) * 10) / 10,
+    records,
+    malformed,
+    sessions: sessions.size,
+    rules: list,
+  };
+}
+
+function modelFamily(model) {
+  if (typeof model !== "string" || model === "") return "unknown";
+  if (isClaudeModel(model)) return "claude";
+  const lower = model.toLowerCase();
+  for (const family of ["gpt-6", "gpt", "glm", "kimi", "deepseek", "grok"]) {
+    if (lower.includes(family)) return family;
+  }
+  return "other";
+}
+
+function sampleOf(record) {
+  return {
+    ts: String(record.ts),
+    session_id: record.session_id ?? null,
+    agent_id: record.agent_id ?? null,
+    event: record.event ?? null,
+    tool: record.tool ?? null,
+    model: record.model ?? null,
+    decision: record.decision ?? null,
+    reason: record.reason ? String(record.reason).slice(0, 200) : null,
+  };
+}
+
+function stableFraction(line) {
+  return parseInt(createHash("sha256").update(line).digest("hex").slice(0, 8), 16) / 0x1_0000_0000;
+}
+
+const SAMPLED_DECISIONS = new Set(["deny", "block", "hint"]);
+
+export function renderEducationSummary(summary) {
+  const lines = [
+    `Education log ${summary.since} → ${summary.until} (${summary.days}d window, ${summary.coverageDays}d of data)`,
+    `records ${summary.records}, sessions ${summary.sessions}${summary.malformed ? `, malformed lines ${summary.malformed}` : ""}`,
+  ];
+  if (summary.coverageDays < summary.days) {
+    lines.push(`note: less than ${summary.days} days of data; do not decide enforce yet`);
+  }
+  lines.push("", "rule | total | emitted | decisions | models");
+  for (const entry of summary.rules) {
+    const fmt = (counts) => Object.entries(counts).map(([key, value]) => `${key} ${value}`).join(", ");
+    lines.push(`${entry.rule} | ${entry.total} | ${entry.emitted} | ${fmt(entry.decisions)} | ${fmt(entry.models)}`);
+  }
+  for (const entry of summary.rules) {
+    if (!Object.keys(entry.decisions).some((decision) => SAMPLED_DECISIONS.has(decision))) continue;
+    lines.push("", `## ${entry.rule} — ${entry.samples.length} sample(s) to label true/false positive`);
+    for (const sample of entry.samples) {
+      lines.push(`- ${sample.ts} ${sample.session_id ?? "-"}${sample.agent_id ? `/${sample.agent_id}` : ""} ${sample.event ?? "-"} ${sample.tool ?? "-"} ${sample.model ?? "-"} ${sample.decision ?? "-"}: ${sample.reason ?? ""}`);
+    }
+  }
+  return `${lines.join("\n")}\n`;
+}
