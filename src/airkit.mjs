@@ -339,6 +339,11 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
       scope: "ccr",
       settingsFile: join(configDir, "ccr-profiles", `${managedPrefix}${slug(mode)}`, "settings.json"),
       smallFastModel: managedRouteSelector(modeConfig.Router?.background ?? modeConfig.Router?.default),
+      // CCR exports these as ANTHROPIC_DEFAULT_SONNET/OPUS_MODEL. Left empty,
+      // a subagent spawned with `model: "sonnet"` never reaches the mode's
+      // Sonnet lane; GPT modes saw it served by the background route.
+      ...(modeConfig.Router?.sonnet ? { sonnetModel: managedRouteSelector(modeConfig.Router.sonnet) } : {}),
+      ...(modeConfig.Router?.opus ? { opusModel: managedRouteSelector(modeConfig.Router.opus) } : {}),
       surface: "cli",
     };
   });
