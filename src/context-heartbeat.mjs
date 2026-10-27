@@ -457,6 +457,9 @@ export function renderHeartbeatManagedFiles(configDir, runtimeModuleUrl = import
     }] }];
   }
   const educationEnv = education ? educationHookEnv(education) : null;
+  const educationModes = education?.modes
+    ? Object.fromEntries(Object.entries(education.modes).map(([mode, flags]) => [mode, educationHookEnv({ ...education.base, ...flags })]))
+    : {};
   if (educationEnv) {
     for (const event of EDUCATION_EVENTS) {
       const entry = { hooks: [{ args: ["${CLAUDE_PLUGIN_ROOT}/scripts/education/hook.mjs"], command: "node", type: "command" }] };
@@ -511,7 +514,7 @@ export function renderHeartbeatManagedFiles(configDir, runtimeModuleUrl = import
       relativePath: "plugins/airkit-context/scripts/completion/hook.mjs",
     }] : []),
     ...(educationEnv ? [{
-      content: `import { runEducationHook } from ${JSON.stringify(new URL("./education.mjs", runtimeModuleUrl).href)};\nawait runEducationHook({ env: { ...process.env, ...${JSON.stringify(educationEnv)} } });\n`,
+      content: `import { runEducationHook } from ${JSON.stringify(new URL("./education.mjs", runtimeModuleUrl).href)};\nconst byMode = ${JSON.stringify(educationModes)};\nawait runEducationHook({ env: { ...process.env, ...(byMode[process.env.AIRCLAUDE_MODE] ?? ${JSON.stringify(educationEnv)}) } });\n`,
       label: "AirClaude model education hook",
       path: join(root, "scripts", "education", "hook.mjs"),
       relativePath: "plugins/airkit-context/scripts/education/hook.mjs",
@@ -520,9 +523,12 @@ export function renderHeartbeatManagedFiles(configDir, runtimeModuleUrl = import
 }
 
 // Flags are baked into the generated script so a stray shell export cannot
-// flip a rule to enforce; P3 ships every rule in shadow (log-only).
+// flip a rule to enforce; P3 ships every rule in shadow (log-only). The hook
+// picks per-mode flags by AIRCLAUDE_MODE, which airclaude sets at launch;
+// anything else (plain claude, an unknown mode) gets the profile-wide flags.
 export function educationHookEnv(education = {}) {
-  const flags = { ...EDUCATION_DEFAULTS, ...(education === true ? {} : education) };
+  const { base, modes, ...own } = education === true ? {} : education;
+  const flags = { ...EDUCATION_DEFAULTS, ...base, ...own };
   return Object.fromEntries(Object.entries(EDUCATION_ENV).map(([key, name]) => [name, String(flags[key])]));
 }
 
