@@ -4024,7 +4024,10 @@ async function probeCcr3Runtime(options = {}) {
     });
     return { profileResolved: resolved.ok, version };
   } finally {
-    await runCommand("ccr", ["stop"], { env, timeoutMs: options.commandTimeoutMs ?? 30000 });
+    const stopped = await runCommand("ccr", ["stop"], { env, timeoutMs: options.commandTimeoutMs ?? 30000 });
+    if (!stopped?.ok) {
+      (options.stderr ?? process.stderr).write(`airkit: isolated probe \`ccr stop\` failed: ${stopped?.stderr || `exit ${stopped?.status}`}\n`);
+    }
     await rm(root, { force: true, recursive: true });
   }
 }
