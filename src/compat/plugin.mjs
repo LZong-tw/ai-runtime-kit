@@ -158,10 +158,13 @@ export function createMessagesHandler({ config, coreClient, policies, auditEmitt
     const elapsed = () => Number(process.hrtime.bigint() - startedAt) / 1e6;
     const signal = requestLifecycleSignal(request, response);
     const telemetry = beginRequestTelemetry(config.routeLog, request, response);
+    // Our own id, never the client's x-request-id: a reused or constant client
+    // id would otherwise merge unrelated requests into one stored row.
+    const airkitRequestId = randomUUID();
     if (requestStore !== null && telemetry.responseTerminal === null) {
       telemetry.responseTerminal = observeResponseTerminal(response);
     }
-    response.setHeader?.("x-airkit-request-id", telemetry.requestId);
+    response.setHeader?.("x-airkit-request-id", airkitRequestId);
     let outcome = "completed";
     let failure = null;
     let receivedToUpstream = null;
@@ -280,7 +283,7 @@ export function createMessagesHandler({ config, coreClient, policies, auditEmitt
       transformMs = receivedToUpstream - parseStarted;
       const message = await handleCompatibilityMessage({
         requestStore,
-        requestId: telemetry.requestId,
+        requestId: airkitRequestId,
         onFirstByte,
         body: outboundBody,
         config,
@@ -306,7 +309,7 @@ export function createMessagesHandler({ config, coreClient, policies, auditEmitt
       upstreamStatus = Number(error?.status ?? error?.statusCode) || upstreamStatus;
       outcome = signal.aborted
         ? "client_aborted"
-        : containHandlerFailure(response, error, telemetry.requestId);
+        : containHandlerFailure(response, error, airkitRequestId);
     } finally {
       if (outcome === "completed" && signal.aborted) outcome = "client_aborted";
       const terminalEvent = await waitForResponseTerminal(telemetry, outcome);
@@ -314,7 +317,7 @@ export function createMessagesHandler({ config, coreClient, policies, auditEmitt
       if (outcome === "completed" && terminalEvent === "error") outcome = "response_destroyed";
       logRequestTerminal({ outcome, response, telemetry });
       recordRequest(requestStore, {
-        request_id: telemetry.requestId,
+        request_id: airkitRequestId,
         at,
         kind: failure !== null || upstreamStatus >= 400 || outcome !== "completed" ? "error" : "success",
         path: telemetry.decision?.path ?? null,
@@ -351,7 +354,7 @@ function beginRequestTelemetry(enabled, request, response) {
       decision: null,
       enabled: false,
       finished: false,
-      requestId: safeRequestId(request?.headers),
+      requestId: null,
       promptCache: null,
       responseTerminal: null,
       startedAt: null,
@@ -620,7 +623,7 @@ function isConfiguredCompatibilityRequest(body, policies, config) {
 export function createMcpHandler({ config, coreClient, requestStore = null }) {
   return async (request, response, helpers) => {
     const startedAt = process.hrtime.bigint();
-    const requestId = safeRequestId(request?.headers);
+    const requestId = randomUUID();
     response.setHeader?.("x-airkit-request-id", requestId);
     const signal = requestLifecycleSignal(request, response);
     const onFailure = (error) => recordRequest(requestStore, {
