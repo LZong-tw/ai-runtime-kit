@@ -777,6 +777,13 @@ function bindManagedCompatibilityProvider(ccrConfig, managedProviderIds) {
   for (const [family, fallback] of Object.entries(familyFallbacks)) {
     compatibility[family].fallback.provider = managedProviderIds.get(fallback.provider);
   }
+  if (compatibility.advisor.models !== undefined) {
+    for (const [alias, selector] of Object.entries(compatibility.advisor.models)) {
+      const separator = selector.indexOf("/");
+      const provider = managedProviderIds.get(selector.slice(0, separator));
+      compatibility.advisor.models[alias] = `${provider}/${selector.slice(separator + 1)}`;
+    }
+  }
   for (const fallback of compatibility.transportFallbacks ?? []) {
     fallback.from.provider = managedProviderIds.get(fallback.from.provider);
     fallback.to.provider = managedProviderIds.get(fallback.to.provider);

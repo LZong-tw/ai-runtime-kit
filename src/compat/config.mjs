@@ -1,4 +1,5 @@
 import { assertAnthropicFamilyModel } from "./protocol.mjs";
+import { ADVISOR_CONFIG_KEYS, DEFAULT_ADVISOR_GATE } from "./advisor-policy.mjs";
 
 export const VERIFIED_NATIVE_COMPATIBILITY = Object.freeze({
   webFetch: false,
@@ -39,7 +40,7 @@ const TOOL_SEARCH_KEYS = new Set(["mode", "fallback", "maxToolsByModel"]);
 // turns that never asked for it. "strip" removes the definition and leaves the
 // request on its normal route; "passthrough" restores the old behavior for
 // re-testing once the gateway can resolve the advisor sub-call.
-const ADVISOR_KEYS = new Set([...FAMILY_KEYS, "unsupported"]);
+const ADVISOR_KEYS = new Set([...FAMILY_KEYS, "unsupported", ...ADVISOR_CONFIG_KEYS]);
 const ADVISOR_UNSUPPORTED = Object.freeze(["strip", "passthrough"]);
 export const DEFAULT_ADVISOR_UNSUPPORTED = "strip";
 const FAMILY_FALLBACK_KEYS = new Set(["provider", "model"]);
@@ -76,7 +77,10 @@ export function validateCompatibilityConfig(config) {
   for (const [family, modes] of Object.entries(FAMILY_MODES)) {
     const definition = config[family];
     assertRecord(definition, family, true);
-    if (family === "advisor") rejectRemovedAdvisorConfig(definition);
+    if (family === "advisor") {
+      rejectRemovedAdvisorConfig(definition);
+      validateAdvisorConfig(definition);
+    }
     rejectUnknownKeys(
       definition,
       family === "advisor" ? ADVISOR_KEYS : family === "toolSearch" ? TOOL_SEARCH_KEYS : FAMILY_KEYS,
@@ -228,6 +232,36 @@ export function resolveToolSearchMaxTools(config, model) {
     }
   }
   return bestMatch;
+}
+
+function validateAdvisorConfig(advisor) {
+  if (advisor.models !== undefined) {
+    assertRecord(advisor.models, "advisor.models");
+    for (const [alias, selector] of Object.entries(advisor.models)) {
+      if (!MODE_PATTERN.test(alias)) {
+        throw new Error(`advisor.models key must be an alias identifier: ${alias}`);
+      }
+      if (typeof selector !== "string" || !ROUTE_SELECTOR_PATTERN.test(selector)) {
+        throw new Error(`advisor.models.${alias} must be a provider-qualified model selector`);
+      }
+      const model = selector.slice(selector.indexOf("/") + 1);
+      assertAnthropicFamilyModel(model, `advisor.models.${alias}`);
+      if (model.includes("/")) {
+        throw new Error(`advisor.models.${alias} must use a provider-local Claude model identifier`);
+      }
+    }
+  }
+  if (advisor.gate !== undefined) {
+    assertRecord(advisor.gate, "advisor.gate");
+    rejectUnknownKeys(advisor.gate, new Set(Object.keys(DEFAULT_ADVISOR_GATE)), "advisor.gate");
+    for (const [key, value] of Object.entries(advisor.gate)) {
+      if (key === "enabled") {
+        if (typeof value !== "boolean") throw new Error("advisor.gate.enabled must be a boolean");
+      } else if (!Number.isInteger(value) || value < 0) {
+        throw new Error(`advisor.gate.${key} must be a non-negative integer`);
+      }
+    }
+  }
 }
 
 function validateRouteTable(routes, label) {
@@ -410,7 +444,17 @@ export function resolveCompatibilityPolicies(config, nativeCapabilities = {}) {
 
   const advisorUnsupported = config.advisor.unsupported ?? DEFAULT_ADVISOR_UNSUPPORTED;
 
-  return Object.freeze({ fallback, familyFallbacks, policies, advisorUnsupported });
+  const advisorModels = Object.freeze(Object.fromEntries(
+    Object.entries(config.advisor.models ?? {}).map(([alias, selector]) => {
+      const separator = selector.indexOf("/");
+      return [alias.toLowerCase(), Object.freeze({
+        provider: selector.slice(0, separator),
+        model: selector.slice(separator + 1),
+      })];
+    }),
+  ));
+
+  return Object.freeze({ fallback, familyFallbacks, policies, advisorUnsupported, advisorModels });
 }
 
 export function compatibilityFallbackSelector(fallback) {
@@ -418,8 +462,12 @@ export function compatibilityFallbackSelector(fallback) {
 }
 
 export function validateCompatibilityProviderBinding(config, providers) {
-  const { fallback, familyFallbacks } = resolveCompatibilityPolicies(config, {});
-  for (const [label, selected] of [["fallback", fallback], ...Object.entries(familyFallbacks)]) {
+  const { fallback, familyFallbacks, advisorModels } = resolveCompatibilityPolicies(config, {});
+  for (const [label, selected] of [
+    ["fallback", fallback],
+    ...Object.entries(familyFallbacks),
+    ...Object.entries(advisorModels).map(([alias, route]) => [`advisor.models.${alias}`, route]),
+  ]) {
     validateFallbackProvider(selected, providers, label);
   }
 }

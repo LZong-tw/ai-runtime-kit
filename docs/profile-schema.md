@@ -282,6 +282,34 @@ this legacy MCP capability `unverified` without a live probe. To leave
 migration mode, change only `webSearch.mode` from `mcp` to `native-first`; no
 MCP registration is then rendered.
 
+### Advisor bridge policy
+
+`advisor.models` maps case-insensitive aliases to Anthropic `provider/model`
+selectors, for example `{ "opus": "review/claude-opus-5-5" }`. The bridge
+uses the Advisor definition's requested model, trying an exact alias first,
+then the fable/opus/sonnet/haiku family for full Claude IDs. Unmapped requests
+use `advisor.fallback`, then the shared `fallback`.
+
+For non-Claude executors, `advisor.gate.enabled` defaults to `true`.
+`advisor.gate.failedToolResults` (default `2`) or an assistant change-of-approach
+statement must accompany at least `advisor.gate.minToolCalls` (default `20`)
+since the previous Advisor call. The latest real user message containing
+`advisor` or `顧問` bypasses these thresholds, but not
+`advisor.gate.maxCallsPerConversation` (default `3`). All three limits accept
+non-negative integers. Counts come from conversation history and the current
+bridge loop; use/result pairs count once. Claude executors are not gated,
+and the tool's per-request `max_uses` still applies.
+
+`NON_CLAUDE_ADVISOR_PROMPT`, exported from `src/compat/advisor-policy.mjs`, is
+included in the non-Claude bridge tool description, not wired to `modelPrompts`:
+
+> Do not call Advisor at the start or end of routine work, nor once per user turn. Call it only after two different approaches to the same problem failed, or before an irreversible architectural decision.
+
+Blocked calls retain the tool and return a normal Advisor result explaining
+that it is reserved for genuinely stuck work. Each call emits one
+`[airkit-advisor]` stderr JSON line with requested model, selected provider/model,
+and outcome (`called`, `blocked`, `max_uses`, or `unavailable`), never content.
+
 ## Launch fields
 
 ```json
