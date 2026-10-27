@@ -26,7 +26,9 @@ record contains only `ts` (ISO timestamp), `session` (24-hex SHA-256 session
 key, never the raw ID), `model` (normalized name), `wouldBlock` (boolean),
 `reason` (`would-block`, `not-armed`, or `budget-exhausted`), `stopBlocks`
 (count after the decision), and `maxStopBlocks`. Non-matching models write no
-log. No prompt, transcript, or tool content is recorded; logging failures are
+log. When the log reaches 1 MiB it is renamed to `decisions.jsonl.1`
+(replacing any previous one), so at most about 2 MiB is kept; `model` is capped
+at 128 characters. No prompt, transcript, or tool content is recorded; logging failures are
 ignored. Invalid environment mode or model overrides disable the legacy guard.
 
 ## 已實作的核心邊界

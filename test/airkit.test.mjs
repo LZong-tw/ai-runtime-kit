@@ -3457,6 +3457,48 @@ test("completion guard swallows decision log write failures", async () => {
   }
 });
 
+test("completion guard decision log rotates once at its size cap instead of growing without bound", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-completion-guard-log-cap-"));
+  const env = {
+    AIRCLAUDE_PROFILE: "example-profile",
+    AIRCLAUDE_ACTIVE_MODEL: "gpt-5.6-terra",
+    AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS: "1",
+    AIRCLAUDE_COMPLETION_GUARD_MODE: "log",
+    CLAUDE_PLUGIN_DATA: pluginData,
+  };
+  const dir = join(pluginData, "completion-guard");
+  const decisionsPath = join(dir, "decisions.jsonl");
+  try {
+    await mkdir(dir, { recursive: true });
+    await writeFile(decisionsPath, `${"x".repeat(1024 * 1024)}\n`, { mode: 0o600 });
+    assert.equal(await processCompletionGuardHook({ hook_event_name: "Stop", session_id: "cap" }, env), null);
+    assert.equal((await stat(`${decisionsPath}.1`)).size, 1024 * 1024 + 1);
+    const lines = (await readFile(decisionsPath, "utf8")).trim().split("\n");
+    assert.equal(lines.length, 1);
+    assert.equal(JSON.parse(lines[0]).reason, "not-armed");
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
+test("completion guard decision log truncates oversized model names", async () => {
+  const pluginData = await mkdtemp(join(tmpdir(), "airkit-completion-guard-log-model-"));
+  const env = {
+    AIRCLAUDE_PROFILE: "example-profile",
+    AIRCLAUDE_ACTIVE_MODEL: `gpt-${"a".repeat(4000)}`,
+    AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS: "1",
+    AIRCLAUDE_COMPLETION_GUARD_MODE: "log",
+    CLAUDE_PLUGIN_DATA: pluginData,
+  };
+  try {
+    await processCompletionGuardHook({ hook_event_name: "Stop", session_id: "long-model" }, env);
+    const record = JSON.parse(await readFile(join(pluginData, "completion-guard", "decisions.jsonl"), "utf8"));
+    assert.equal(record.model.length, 128);
+  } finally {
+    await rm(pluginData, { force: true, recursive: true });
+  }
+});
+
 test("DeepSeek completion guard continues the full deliverable instead of stopping early", async () => {
   const pluginData = await mkdtemp(join(tmpdir(), "airkit-deepseek-completion-guard-"));
   const env = {
