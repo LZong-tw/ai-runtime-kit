@@ -1,10 +1,11 @@
 import { chmodSync, mkdirSync, openSync, closeSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { createRequire } from "node:module";
 import { xdgStateHome } from "../audit/paths.mjs";
 import { redactEvidence } from "../audit/redaction.mjs";
 
 export const MAX_UPSTREAM_BODY_BYTES = 64 * 1024;
+const require = createRequire(import.meta.url);
 const DAY = 24 * 60 * 60 * 1000;
 const NOOP_STORE = Object.freeze({ record() {}, prune() {}, close() {} });
 const COLUMNS = [
@@ -16,6 +17,23 @@ const PRIVATE_HEADERS = new Set([
   "authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key", "x-ccr-core-auth",
 ]);
 
+// Loaded on first open: a top-level import would print node's SQLite
+// ExperimentalWarning on every CLI command that merely imports the gateway.
+function loadDatabaseSync() {
+  const emitWarning = process.emitWarning;
+  process.emitWarning = function (warning, ...rest) {
+    const text = String(warning?.message ?? warning);
+    const type = typeof rest[0] === "string" ? rest[0] : rest[0]?.type ?? warning?.name;
+    if (type === "ExperimentalWarning" && text.includes("SQLite")) return;
+    return emitWarning.call(this, warning, ...rest);
+  };
+  try {
+    return require("node:sqlite").DatabaseSync;
+  } finally {
+    process.emitWarning = emitWarning;
+  }
+}
+
 export function openRequestErrorStore({ env = process.env, path, now = Date.now } = {}) {
   let db;
   try {
@@ -24,6 +42,7 @@ export function openRequestErrorStore({ env = process.env, path, now = Date.now 
     // Create privately before SQLite opens it (including its WAL sidecars).
     closeSync(openSync(path, "a", 0o600));
     chmodSync(path, 0o600);
+    const DatabaseSync = loadDatabaseSync();
     db = new DatabaseSync(path);
     db.exec(`PRAGMA busy_timeout = 2000; PRAGMA journal_mode = WAL;
       CREATE TABLE IF NOT EXISTS compat_requests (
