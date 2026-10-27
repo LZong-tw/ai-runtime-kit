@@ -152,7 +152,7 @@ test("successful passthrough records finite per-request timings and preserves by
   assert.deepEqual(response.body, core.rawResponseBody);
   const [row] = rows();
   assert.equal(row.kind, "success");
-  assert.equal(row.request_id, "fixture-request");
+  assert.match(row.request_id, /^[a-f0-9-]{36}$/);
   assert.equal(response.headers["x-airkit-request-id"], row.request_id);
   assert.equal(row.upstream_status, 202);
   assert.equal(row.in_model, "executor");
@@ -261,8 +261,8 @@ test("raw upstream rejection preserves bytes and the authoritative AirKit reques
     }),
   });
   assert.equal(response.body.toString(), original);
-  assert.equal(response.headers["x-airkit-request-id"], "fixture-request");
   const [row] = rows();
+  assert.equal(response.headers["x-airkit-request-id"], row.request_id);
   assert.equal(row.kind, "error");
   assert.equal(JSON.parse(row.error_json).upstreamBody, original);
   assertTimings(row);
@@ -371,7 +371,34 @@ test("middleware accepts an injected store and returns the request ID without to
     method: "POST", headers: { "x-api-key": "fixture-key", "content-type": "application/json", "x-request-id": "middleware-request" },
     body: JSON.stringify({ model: "claude-sonnet", messages: [] }),
   });
-  assert.equal(response.headers.get("x-airkit-request-id"), "middleware-request");
+  const airkitRequestId = response.headers.get("x-airkit-request-id");
+  assert.match(airkitRequestId, /^[a-f0-9-]{36}$/);
   assert.deepEqual(await response.json(), { type: "message", content: [] });
-  assert.equal(rows()[0].request_id, "middleware-request");
+  assert.equal(rows()[0].request_id, airkitRequestId);
+});
+
+test("a reused client x-request-id never merges two requests into one stored row", async (t) => {
+  const { store, rows } = database(t);
+  const headers = { "x-request-id": "client-reused-id" };
+  const failed = await invoke({
+    store, headers,
+    coreClient: createPluginCoreClient({ async forwardRaw() { throw new Error("first attempt lost"); } }),
+  });
+  const succeeded = await invoke({
+    store, headers,
+    coreClient: createPluginCoreClient({
+      async forwardRaw({ response, onResponse }) {
+        onResponse?.({ headers: new Headers(), status: 200, error: null });
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end("{}");
+      },
+    }),
+  });
+  const ids = [failed, succeeded].map((response) => response.headers["x-airkit-request-id"]);
+  assert.notEqual(ids[0], ids[1]);
+  assert.equal(rows().length, 2);
+  const errorRow = rows().find((row) => row.request_id === ids[0]);
+  assert.equal(errorRow.kind, "error");
+  assert.equal(JSON.parse(errorRow.error_json).message, "first attempt lost");
+  assert.equal(rows().find((row) => row.request_id === ids[1]).kind, "success");
 });
