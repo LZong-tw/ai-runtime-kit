@@ -39,6 +39,7 @@ test("resolves all six policies and verified native web capabilities", () => {
 
   assert.deepEqual(resolved, {
     advisorUnsupported: "strip",
+    advisorModels: {},
     fallback: VALID_CONFIG.fallback,
     familyFallbacks: {},
     policies: {

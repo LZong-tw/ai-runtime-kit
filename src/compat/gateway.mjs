@@ -20,6 +20,13 @@ import { bridgeToolSearch, canApplyToolSearchBudget } from "./tool-search.mjs";
 import { allowlistedUsage } from "../audit/redaction.mjs";
 import { describeStablePrefix } from "./prefix-observability.mjs";
 import { normalizeResponsesThinkingHistory } from "./reasoning-history.mjs";
+import {
+  ADVISOR_BLOCKED_TEXT,
+  NON_CLAUDE_ADVISOR_PROMPT,
+  isAdvisorAllowed,
+  isClaudeExecutor,
+  resolveAdvisorRoute,
+} from "./advisor-policy.mjs";
 
 const TOOL_SEARCH_BRIDGE_NAME = "airkit_tool_search";
 const ADVISOR_BRIDGE_NAME = "airkit_advisor";
@@ -303,6 +310,8 @@ export async function handleCompatibilityMessage({
   const advisorUsage = [];
   const outwardContent = [];
   const messages = normalized.messages;
+  const policyMessages = structuredClone(body.messages ?? []);
+  const advisorPolicies = resolveCompatibilityPolicies(config, {});
   let advisorUses = 0;
 
   for (let iteration = 0; iteration < MAX_EXECUTOR_ITERATIONS; iteration += 1) {
@@ -314,6 +323,7 @@ export async function handleCompatibilityMessage({
         inspection,
         activeDeferredTools,
         resolveToolSearchMaxTools(config, body.model),
+        !isClaudeExecutor(body.model),
       ),
       stream: false,
     };
@@ -339,6 +349,8 @@ export async function handleCompatibilityMessage({
     }
 
     const resumeResults = [];
+    const policyTurn = { role: "assistant", content: [] };
+    policyMessages.push(policyTurn);
     let hasNormalToolCall = false;
     for (const call of executorMessage.content) {
       if (
@@ -346,6 +358,7 @@ export async function handleCompatibilityMessage({
         (call.name !== ADVISOR_BRIDGE_NAME && call.name !== TOOL_SEARCH_BRIDGE_NAME)
       ) {
         outwardContent.push(structuredClone(call));
+        policyTurn.content.push(structuredClone(call));
         if (call?.type === "tool_use") hasNormalToolCall = true;
         continue;
       }
@@ -359,18 +372,30 @@ export async function handleCompatibilityMessage({
         };
         outwardContent.push(serverUse);
 
+        const selected = resolveAdvisorRoute(inspection.advisor?.model, advisorPolicies);
+        const allowed = isAdvisorAllowed({
+          model: body.model,
+          messages: policyMessages,
+          gate: config.advisor.gate,
+        });
+        policyTurn.content.push(structuredClone(call));
         let result;
+        let outcome;
         if (advisorUses >= advisorMaxUses(inspection.advisor)) {
+          outcome = "max_uses";
           result = createAdvisorToolResult({
             toolUseId: serverUseId,
             errorCode: "max_uses_exceeded",
           });
+        } else if (!allowed) {
+          outcome = "blocked";
+          result = createAdvisorToolResult({ toolUseId: serverUseId, text: ADVISOR_BLOCKED_TEXT });
         } else {
           advisorUses += 1;
           const advisorMessage = await requestAdvisor({
             body,
             headers,
-            config,
+            selected,
             coreClient,
             messages,
             executorMessage,
@@ -379,8 +404,10 @@ export async function handleCompatibilityMessage({
             audit,
           });
           if (advisorMessage === null) {
+            outcome = "unavailable";
             result = createAdvisorToolResult({ toolUseId: serverUseId, errorCode: "unavailable" });
           } else {
+            outcome = "called";
             advisorUsage.push(copyUsage(advisorMessage.usage));
             result = createAdvisorToolResult({
               toolUseId: serverUseId,
@@ -389,11 +416,13 @@ export async function handleCompatibilityMessage({
             });
           }
         }
+        reportAdvisorCall(inspection.advisor, selected, outcome);
         outwardContent.push(result);
         resumeResults.push(bridgeResumeResult(call.id, advisorResultText(result)));
         continue;
       }
 
+      policyTurn.content.push(structuredClone(call));
       const serverUse = {
         type: "server_tool_use",
         id: serverUseId,
@@ -480,7 +509,7 @@ export function writeAnthropicMessage(response, message, stream) {
   response.end();
 }
 
-function createExecutorTools(tools = [], inspection, activeDeferredTools, maxTools = null) {
+function createExecutorTools(tools = [], inspection, activeDeferredTools, maxTools = null, nonClaude = false) {
   const ordinaryTools = [];
   const selectedDeferredTools = [];
   for (const tool of Array.isArray(tools) ? tools : []) {
@@ -505,7 +534,8 @@ function createExecutorTools(tools = [], inspection, activeDeferredTools, maxToo
       description: "Get an independent second opinion from the configured Advisor. "
         + "Use this when the user asks to find, ask, consult, or discuss with Advisor "
         + "(for example, \"找 Advisor\"). Wait for advisor_tool_result before continuing, "
-        + "and never claim Advisor was consulted without a returned result.",
+        + "and never claim Advisor was consulted without a returned result."
+        + (nonClaude ? ` ${NON_CLAUDE_ADVISOR_PROMPT}` : ""),
       input_schema: { type: "object", properties: {}, additionalProperties: false },
     });
   }
@@ -672,10 +702,23 @@ function unsupportedHistory() {
   return new Error("Unsupported compatibility history");
 }
 
+function reportAdvisorCall(advisor, selected, outcome) {
+  try {
+    process.stderr.write(`[airkit-advisor] ${JSON.stringify({
+      requested: advisor?.model ?? null,
+      provider: selected.provider,
+      model: selected.model,
+      outcome,
+    })}\n`);
+  } catch {
+    // Never let logging interfere with the request.
+  }
+}
+
 async function requestAdvisor({
   body,
   headers,
-  config,
+  selected,
   coreClient,
   messages,
   executorMessage,
@@ -683,8 +726,6 @@ async function requestAdvisor({
   signal,
   audit,
 }) {
-  const { fallback, familyFallbacks } = resolveCompatibilityPolicies(config, {});
-  const selected = familyFallbacks.advisor ?? fallback;
   const transcript = boundedTranscript([
     ...messages,
     { role: "assistant", content: executorMessage.content },

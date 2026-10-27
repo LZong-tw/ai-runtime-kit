@@ -505,6 +505,7 @@ test("Advisor bridge uses the configured Anthropic model and resumes the executo
     message({ content: [{ type: "text", text: "The boundary is now clear." }] }),
   ], {
     body: {
+      messages: [{ role: "user", content: "Ask Advisor for a second opinion." }],
       tools: [{
         type: "advisor_20260301",
         name: "advisor",
@@ -555,6 +556,7 @@ async function captureAdvisorTranscript(messages, executorContent, { model, tool
       tools: [...tools, { type: "advisor_20260301", name: "advisor", model: "claude-opus-5", max_uses: 2 }],
     },
     advisorMode: "bridge",
+    advisorGate: { enabled: false },
   });
   await handleCompatibilityMessage(fixture.input);
   const prompt = fixture.calls[1].body.messages[0].content;
@@ -2726,7 +2728,10 @@ function createBridgeFixture(script, options = {}) {
         webSearch: { mode: "native-first" },
         webFetch: { mode: "native-first" },
         codeExecution: { mode: "anthropic-fallback" },
-        advisor: { mode: options.advisorMode ?? "anthropic-fallback" },
+        advisor: {
+          mode: options.advisorMode ?? "anthropic-fallback",
+          ...(options.advisorGate === undefined ? {} : { gate: options.advisorGate }),
+        },
         mcpConnector: { mode: "anthropic-fallback" },
       },
       coreClient,
