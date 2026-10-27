@@ -244,9 +244,11 @@ function validateAdvisorConfig(advisor) {
       if (typeof selector !== "string" || !ROUTE_SELECTOR_PATTERN.test(selector)) {
         throw new Error(`advisor.models.${alias} must be a provider-qualified model selector`);
       }
-      const model = selector.slice(selector.indexOf("/") + 1);
-      assertAnthropicFamilyModel(model, `advisor.models.${alias}`);
-      if (model.includes("/")) {
+      // One gateway namespace is allowed (LiteLLM's "azure_ai/claude-fable-5-1");
+      // the last segment must be the Claude id, and "anthropic/" stays rejected.
+      const segments = selector.slice(selector.indexOf("/") + 1).split("/");
+      assertAnthropicFamilyModel(segments.at(-1), `advisor.models.${alias}`);
+      if (segments.length > 2 || (segments.length === 2 && /^anthropic$/i.test(segments[0]))) {
         throw new Error(`advisor.models.${alias} must use a provider-local Claude model identifier`);
       }
     }
