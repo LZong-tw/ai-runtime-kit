@@ -10,11 +10,14 @@ export const DEFAULT_ADVISOR_GATE = Object.freeze({
 export const ADVISOR_BLOCKED_TEXT = "Advisor is reserved for when you are genuinely stuck: try at least two approaches first.";
 
 const APPROACH_CHANGE = /different approach|switch(?:ing)? approach|try another approach|new approach|換個方法|換方法/i;
+const SYSTEM_REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
 const CLAUDE_FAMILIES = ["fable", "opus", "sonnet", "haiku"];
 
 export function isClaudeExecutor(model) {
   if (typeof model !== "string") return false;
-  return /claude/i.test(model.slice(model.indexOf("/") + 1));
+  // Routed selectors look like "provider,model" or "provider/model"; only the
+  // model part decides, so a provider named after Claude cannot bypass gating.
+  return /claude/i.test(model.slice(Math.max(model.indexOf(","), model.indexOf("/")) + 1));
 }
 
 export function resolveAdvisorRoute(requested, { advisorModels, familyFallbacks, fallback }) {
@@ -35,6 +38,16 @@ export function isAdvisorAllowed({ model, messages = [], gate = {} }) {
   const limits = { ...DEFAULT_ADVISOR_GATE, ...gate };
   if (isClaudeExecutor(model) || !limits.enabled) return true;
 
+  // Blocked or failed Advisor attempts never reached a reviewer, so they must
+  // neither consume the conversation cap nor reset the "since last call" window.
+  const discounted = new Set();
+  for (const message of messages) {
+    for (const block of Array.isArray(message?.content) ? message.content : []) {
+      if (block?.type === "advisor_tool_result" && !isConsultation(block.content)) {
+        discounted.add(block.tool_use_id);
+      }
+    }
+  }
   const seenCalls = new Set();
   let calls = 0;
   let toolCalls = 0;
@@ -47,7 +60,7 @@ export function isAdvisorAllowed({ model, messages = [], gate = {} }) {
       : Array.isArray(message?.content) ? message.content : [];
     if (message?.role === "user") {
       const text = blocks.filter((block) => block?.type === "text" && typeof block.text === "string")
-        .map((block) => block.text).join("\n");
+        .map((block) => block.text.replace(SYSTEM_REMINDER, "")).join("\n");
       if (text.trim() !== "") latestUserText = text;
     }
     for (const block of blocks) {
@@ -57,6 +70,7 @@ export function isAdvisorAllowed({ model, messages = [], gate = {} }) {
       );
       if (advisorUse || block?.type === "advisor_tool_result") {
         const id = advisorUse ? block.id : block.tool_use_id;
+        if (id !== undefined && discounted.has(id)) continue;
         if (id === undefined || !seenCalls.has(id)) {
           calls += 1;
           if (id !== undefined) seenCalls.add(id);
@@ -78,4 +92,9 @@ export function isAdvisorAllowed({ model, messages = [], gate = {} }) {
   if (/advisor|顧問/i.test(latestUserText)) return true;
   return toolCalls >= limits.minToolCalls &&
     (failures >= limits.failedToolResults || changedApproach);
+}
+
+function isConsultation(content) {
+  if (content?.type === "advisor_redacted_result") return true;
+  return content?.type === "advisor_result" && content.text !== ADVISOR_BLOCKED_TEXT;
 }
