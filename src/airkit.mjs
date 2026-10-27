@@ -997,6 +997,7 @@ export async function exportOssRelease({ outDir }) {
   await copyDirectory(join(repoRoot, "native"), join(outDir, "native"));
   for (const module of [
     "activity.mjs",
+    "advisor-policy.mjs",
     "config.mjs",
     "effort.mjs",
     "reasoning-history.mjs",
