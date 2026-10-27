@@ -52,7 +52,7 @@ function homeFromEnv(env) {
   return typeof env?.HOME === "string" && env.HOME.length > 0 ? env.HOME : homedir();
 }
 
-function xdgStateHome(env) {
+export function xdgStateHome(env) {
   if (typeof env?.XDG_STATE_HOME === "string" && env.XDG_STATE_HOME.length > 0) {
     return env.XDG_STATE_HOME;
   }

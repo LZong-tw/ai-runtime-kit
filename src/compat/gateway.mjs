@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { MAX_UPSTREAM_BODY_BYTES, recordRequest, serializeError, truncateUpstreamBody } from "./request-errors.mjs";
 import { readFileSync } from "node:fs";
 import {
   ADVISOR_TOOL_TYPE,
@@ -114,21 +115,25 @@ export function createCoreClient({ config, fetchImpl = fetch, readFile = readFil
   });
 
   return {
-    async requestFallback(body, headers, signal) {
-      return fetchImpl(endpoint, {
+    async requestFallback(body, headers, signal, { onFirstByte } = {}) {
+      const result = await fetchImpl(endpoint, {
         method: "POST",
         headers: coreHeaders(headers),
         body: JSON.stringify(body),
         signal,
       });
+      onFirstByte?.(result);
+      return result;
     },
-    async requestMessage(body, headers, signal) {
+    async requestMessage(body, headers, signal, { onFirstByte } = {}) {
       const result = await fetchImpl(endpoint, {
         method: "POST",
         headers: coreHeaders(headers),
         body: JSON.stringify({ ...body, stream: false }),
         signal,
       });
+      onFirstByte?.(result);
+      await assertUpstreamOk(result);
       try {
         return attachCoreResponseMetadata(await parseCoreMessageResponse(result), result);
       } catch (error) {
@@ -162,8 +167,9 @@ export function createCoreClient({ config, fetchImpl = fetch, readFile = readFil
         result = retry.response ?? createTimeoutResponse();
         await onAttempt?.({ phase: "response", body: fallback.body, status: result.status, headers: result.headers });
       }
-      onResponse?.({ fallbackUsed, headers: result.headers, status: result.status });
-      await pipeCoreResponse(result, response, signal);
+      const error = rawResponseError(result);
+      onResponse?.({ fallbackUsed, headers: result.headers, status: result.status, error });
+      await pipeCoreResponse(result, response, signal, null, error);
     },
   };
 }
@@ -202,21 +208,25 @@ export function createGatewayClient({ origin, token, providers = [], fetchImpl =
   };
 
   return {
-    async requestFallback(body, headers, signal) {
-      return request({
+    async requestFallback(body, headers, signal, { onFirstByte } = {}) {
+      const result = await request({
         body: JSON.stringify(body),
         headers: { ...headers, "content-type": "application/json" },
         path: "/v1/messages",
         signal,
       });
+      onFirstByte?.(result);
+      return result;
     },
-    async requestMessage(body, headers, signal) {
+    async requestMessage(body, headers, signal, { onFirstByte } = {}) {
       const result = await request({
         body: JSON.stringify({ ...body, stream: false }),
         headers: { ...headers, "content-type": "application/json" },
         path: "/v1/messages",
         signal,
       });
+      onFirstByte?.(result);
+      await assertUpstreamOk(result);
       try {
         return attachCoreResponseMetadata(await parseCoreMessageResponse(result), result);
       } catch (error) {
@@ -262,8 +272,9 @@ export function createGatewayClient({ origin, token, providers = [], fetchImpl =
         result = retry.response ?? createTimeoutResponse();
         await onAttempt?.({ phase: "response", body: fallback.body, status: result.status, headers: result.headers });
       }
-      onResponse?.({ fallbackUsed, headers: result.headers, status: result.status });
-      await pipeCoreResponse(result, response, signal, responseTransformFactory?.({ body }));
+      const error = rawResponseError(result);
+      onResponse?.({ fallbackUsed, headers: result.headers, status: result.status, error });
+      await pipeCoreResponse(result, response, signal, responseTransformFactory?.({ body }), error);
     },
     async forward({ body, headers, method = "GET", path, response, signal }) {
       const result = await request({ body, headers, method, path, signal });
@@ -288,13 +299,30 @@ export async function handleCompatibilityMessage({
   signal,
   auditEmitter = null,
   auditContext = null,
+  requestStore = null,
+  requestId = null,
+  onFirstByte = null,
 }) {
+  // The client hook runs at fetch resolution, before parsing the response body.
+  // The resolution callback also supports injected clients without that hook.
+  if (onFirstByte !== null) {
+    const original = coreClient;
+    coreClient = { ...original };
+    for (const method of ["requestMessage", "requestFallback"]) {
+      if (typeof original[method] !== "function") continue;
+      coreClient[method] = async (body, headers, signal) => {
+        const result = await original[method](body, headers, signal, { onFirstByte });
+        onFirstByte(result);
+        return result;
+      };
+    }
+  }
   body = normalizeMessageSystemRoles(body);
   const audit = createAttemptAudit({ auditEmitter, auditContext, body });
   const serverTools = inspectServerToolRequest(body);
   const serverHistory = inspectPendingServerHistory(body);
   if (requiresWholeRequestFallback({ body, config, serverHistory, serverTools })) {
-    return routeWholeRequestFallback({ body, headers, config, coreClient, response, signal, audit });
+    return routeWholeRequestFallback({ body, headers, config, coreClient, response, signal, audit, requestStore, requestId });
   }
 
   const inspection = inspectCompatibilityRequest(body);
@@ -302,7 +330,7 @@ export async function handleCompatibilityMessage({
   try {
     normalized = normalizeCompatibilityHistory(body.messages);
   } catch {
-    return routeWholeRequestFallback({ body, headers, config, coreClient, response, signal, audit });
+    return routeWholeRequestFallback({ body, headers, config, coreClient, response, signal, audit, requestStore, requestId });
   }
 
   const activeDeferredTools = new Set(normalized.referencedTools);
@@ -439,7 +467,7 @@ export async function handleCompatibilityMessage({
         toolUseId: serverUseId,
       });
       if (bridged.kind === "fallback") {
-        return routeWholeRequestFallback({ body, headers, config, coreClient, response, signal, audit });
+        return routeWholeRequestFallback({ body, headers, config, coreClient, response, signal, audit, requestStore, requestId });
       }
       const result = bridged.block;
       for (const reference of result.content.tool_references ?? []) {
@@ -457,7 +485,7 @@ export async function handleCompatibilityMessage({
     messages.push({ role: "user", content: resumeResults });
   }
 
-  return routeWholeRequestFallback({ body, headers, config, coreClient, response, signal, audit });
+  return routeWholeRequestFallback({ body, headers, config, coreClient, response, signal, audit, requestStore, requestId });
 }
 
 export function writeAnthropicMessage(response, message, stream) {
@@ -1144,7 +1172,9 @@ async function requestCoreMessage(coreClient, body, headers, publicMessage, sign
       actual: actualFromMessage(error),
       usage: null,
     });
-    const wrapped = new Error(publicMessage);
+    const wrapped = new Error(publicMessage, { cause: error });
+    if (error?.upstreamBody !== undefined) wrapped.upstreamBody = error.upstreamBody;
+    if (error?.upstreamBodyTruncated !== undefined) wrapped.upstreamBodyTruncated = error.upstreamBodyTruncated;
     const status = responseErrorStatus(error);
     if (status !== null) wrapped.status = status;
     if (error?.headers !== undefined) wrapped.headers = error.headers;
@@ -1354,7 +1384,7 @@ function serverToolDefinitionRequiresFallback(config, policies, family) {
   return mode === "anthropic-fallback" || mode === "mcp";
 }
 
-async function routeWholeRequestFallback({ body, headers, config, coreClient, response, signal, audit = null }) {
+async function routeWholeRequestFallback({ body, headers, config, coreClient, response, signal, audit = null, requestStore = null, requestId = null }) {
   const requestFallback = coreClient.requestFallback?.bind(coreClient) ??
     coreClient.requestMessage.bind(coreClient);
   const route = createFallbackRouter({
@@ -1380,10 +1410,29 @@ async function routeWholeRequestFallback({ body, headers, config, coreClient, re
       }
     },
   });
-  const result = await route({ body, headers, signal });
+  let result = await route({ body, headers, signal });
   const families = fallbackFamilies(body);
-  reportFallbackRejection(config, families, result);
-  const annotated = await annotateAdvisorRejection(families, result);
+  reportFallbackRejection(config, families, result, requestId);
+  let raw;
+  if (result?.status >= 400) {
+    raw = result.body ? await collectStream(result.body) : Buffer.alloc(0);
+    const error = Object.assign(new Error("Anthropic fallback request rejected"), {
+      status: result.status, headers: result.headers, families,
+    });
+    recordRequest(requestStore, {
+      request_id: requestId,
+      kind: "fallback_error",
+      path: "compat",
+      in_model: body?.model ?? null,
+      out_model: compatibilityFallbackSelector(config.fallback),
+      client_status: result.status,
+      upstream_status: result.status,
+      outcome: "fallback_rejected",
+      error_json: JSON.stringify(serializeError(error, { upstreamBody: raw.toString("utf8") })),
+    });
+    if (result.body) result = replayResult(result, raw);
+  }
+  const annotated = await annotateAdvisorRejection(families, result, raw);
   if (response === undefined) return annotated;
   await pipeCoreResponse(annotated, response, signal);
 }
@@ -1415,7 +1464,7 @@ function fallbackFamilies(body) {
 // rejections have their own causes — a workspace that does not carry the
 // entitlement, most commonly — and printing the sub-call explanation for every
 // server tool would just be a new confident guess in place of the old one.
-function reportFallbackRejection(config, families, result) {
+function reportFallbackRejection(config, families, result, requestId) {
   if (config?.routeLog !== true) return;
   if (typeof result?.status !== "number" || result.status < 400) return;
   try {
@@ -1427,6 +1476,7 @@ function reportFallbackRejection(config, families, result) {
     process.stderr.write(`[airkit-fallback] ${JSON.stringify({
       at: new Date().toISOString(),
       families,
+      requestId,
       status: result.status,
       ...(hint ? { hint } : {}),
     })}\n`);
@@ -1456,7 +1506,7 @@ const ADVISOR_REJECTION_NOTE = " [AirKit] This error came from the upstream " +
 // another family's rejection has a different cause. The bytes are read once and
 // replayed either way, so a body that turns out not to qualify is still
 // delivered whole.
-async function annotateAdvisorRejection(families, result) {
+async function annotateAdvisorRejection(families, result, collected) {
   if (!families.includes("advisor")) return result;
   if (typeof result?.status !== "number" || result.status < 400) return result;
   if (!result.body) return result;
@@ -1464,9 +1514,9 @@ async function annotateAdvisorRejection(families, result) {
   if (!contentType.includes("application/json")) return result;
   if (readHeader(result, "content-encoding")) return result;
 
-  let raw;
+  let raw = collected;
   try {
-    raw = await collectStream(result.body);
+    raw ??= await collectStream(result.body);
   } catch {
     return result;
   }
@@ -1655,12 +1705,47 @@ function readGeneratedCoreToken(path, readFile) {
   return token;
 }
 
+async function assertUpstreamOk(response) {
+  if (response.status >= 200 && response.status < 300) return;
+  const chunks = [];
+  let length = 0;
+  const reader = response.body?.getReader();
+  try {
+    while (reader && length <= MAX_UPSTREAM_BODY_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(Buffer.from(value).subarray(0, MAX_UPSTREAM_BODY_BYTES + 1 - length));
+      length += value.byteLength;
+    }
+  } finally {
+    if (reader) {
+      void reader.cancel().catch(() => {});
+      reader.releaseLock();
+    }
+  }
+  const evidence = truncateUpstreamBody(Buffer.concat(chunks).toString("utf8"));
+  throw Object.assign(new Error("CCR upstream rejected the Messages request"), {
+    status: response.status,
+    headers: response.headers,
+    ...evidence,
+    upstreamBodyTruncated: evidence.upstreamBodyTruncated || length > MAX_UPSTREAM_BODY_BYTES,
+  });
+}
+
 async function parseCoreMessageResponse(response) {
   return response.json();
 }
 
-async function pipeCoreResponse(result, response, signal, transform = null) {
+function rawResponseError(result) {
+  return result.status >= 400 ? Object.assign(new Error("CCR upstream rejected the Messages request"), {
+    status: result.status, headers: result.headers,
+  }) : null;
+}
+
+async function pipeCoreResponse(result, response, signal, transform = null, errorEvidence = null) {
   const headers = Object.fromEntries(result.headers);
+  const requestId = response.getHeader?.("x-airkit-request-id");
+  if (typeof requestId === "string") headers["x-airkit-request-id"] = requestId;
   response.writeHead(result.status, headers);
   if (result.body === null) {
     await endResponse(response, signal);
@@ -1668,10 +1753,16 @@ async function pipeCoreResponse(result, response, signal, transform = null) {
   }
 
   const reader = result.body.getReader();
+  const evidenceChunks = [];
+  let evidenceBytes = 0;
   try {
     while (true) {
       const { done, value } = await waitForPassthrough(reader.read(), response, signal);
       if (done) break;
+      if (errorEvidence !== null && evidenceBytes <= MAX_UPSTREAM_BODY_BYTES) {
+        evidenceChunks.push(Buffer.from(value).subarray(0, MAX_UPSTREAM_BODY_BYTES + 1 - evidenceBytes));
+        evidenceBytes += value.byteLength;
+      }
       const transformed = transform?.push(value) ?? value;
       if (transformed.byteLength > 0 && !response.write(Buffer.from(transformed))) {
         await waitForResponseEvent(response, "drain", signal);
@@ -1686,6 +1777,10 @@ async function pipeCoreResponse(result, response, signal, transform = null) {
     await reader.cancel(error).catch(() => {});
     throw error;
   } finally {
+    if (errorEvidence !== null) {
+      Object.assign(errorEvidence, truncateUpstreamBody(Buffer.concat(evidenceChunks).toString("utf8")));
+      errorEvidence.upstreamBodyTruncated ||= evidenceBytes > MAX_UPSTREAM_BODY_BYTES;
+    }
     reader.releaseLock();
   }
 }
