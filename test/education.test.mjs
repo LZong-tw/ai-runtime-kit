@@ -55,6 +55,21 @@ async function writeAgent(transcriptPath, agentId, prompt, model = "gpt-6-sol") 
   ].join("\n") + "\n");
 }
 
+// Background agents can end by calling SubagentHandback: the report travels in
+// the tool input and the final assistant message has no text at all.
+async function writeHandbackAgent(transcriptPath, agentId, prompt, report, { delivered = true } = {}) {
+  const dir = join(transcriptPath.slice(0, -".jsonl".length), "subagents");
+  await mkdir(dir, { recursive: true });
+  const result = delivered
+    ? { type: "tool_result", tool_use_id: `hb-${agentId}`, content: [{ type: "text", text: '{"success":true,"message":"Report delivered to your caller."}' }] }
+    : { type: "tool_result", tool_use_id: `hb-${agentId}`, is_error: true, content: "Delivery failed." };
+  await writeFile(join(dir, `agent-${agentId}.jsonl`), [
+    JSON.stringify({ type: "user", message: { role: "user", content: prompt } }),
+    JSON.stringify({ type: "assistant", message: { model: "gpt-6-sol", content: [{ type: "tool_use", id: `hb-${agentId}`, name: "SubagentHandback", input: { message: report } }] } }),
+    JSON.stringify({ type: "user", message: { role: "user", content: [result] } }),
+  ].join("\n") + "\n");
+}
+
 test("flags: valid values parse, missing or invalid fall back to off/false and are reported", () => {
   assert.deepEqual(readEducationConfig(flags({ AIRCLAUDE_EDUCATION_ERROR_HINTS: "true" })), {
     config: { spawnGuard: "shadow", subagentReport: "shadow", subagentNudge: "shadow", errorHints: true },
@@ -222,6 +237,87 @@ test("Stop blocks once per turn on an unread finished background agent, and quot
     await processEducationHook({ ...f.base, hook_event_name: "UserPromptSubmit", prompt: "continue" }, env);
     const quoted = await processEducationHook({ ...stop, last_assistant_message: "Agent b1 says: the retry loop at src/compat/gateway.mjs:252 never caps attempts." }, env);
     assert.equal(quoted, null);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a report delivered through SubagentHandback counts as read and as the agent's result", async () => {
+  const f = await fixture();
+  try {
+    const env = f.env({ AIRCLAUDE_EDUCATION_SUBAGENT_REPORT: "enforce", AIRCLAUDE_EDUCATION_SUBAGENT_NUDGE: "enforce" });
+    const ask = "Audit it.\nFinish with STATUS: done|blocked|partial, EVIDENCE: <paths>, OPEN: <items>.";
+    const report = "STATUS: done\nEVIDENCE: src/compat/gateway.mjs:252\nOPEN: none";
+    await processEducationHook({ ...f.base, hook_event_name: "UserPromptSubmit", prompt: "investigate in parallel" }, env);
+    for (const id of ["h1", "h2"]) {
+      await processEducationHook({ ...f.base, hook_event_name: "PostToolUse", tool_name: "Agent", tool_input: { description: `Audit ${id}` }, tool_response: { isAsync: true, agentId: id, outputFile: `/tmp/${id}.output` } }, env);
+    }
+    await writeHandbackAgent(f.transcript, "h1", ask, report);
+    await writeHandbackAgent(f.transcript, "h2", ask, report, { delivered: false });
+    const subagentStop = { ...f.base, hook_event_name: "SubagentStop", agent_type: "general-purpose", stop_hook_active: false, last_assistant_message: "" };
+    assert.equal(await processEducationHook({ ...subagentStop, agent_id: "h1" }, env), null, "the handback carries STATUS");
+    assert.equal(await processEducationHook({ ...subagentStop, agent_id: "h2" }, env), null);
+
+    const stop = await processEducationHook({ ...f.base, hook_event_name: "Stop", stop_hook_active: false, last_assistant_message: "Done.", background_tasks: [] }, env);
+    assert.equal(stop.decision, "block", "an undelivered handback is still an unread result");
+    assert.match(stop.reason, /h2/);
+    assert.doesNotMatch(stop.reason, /h1/);
+    const records = await f.logs();
+    const sources = records.filter((entry) => entry.event === "SubagentStop").map((entry) => [entry.rule, entry.evidence.resultSource]);
+    assert.deepEqual(sources, [["status-log", "handback"], ["status-log", "handback"]]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("Stop only hints when an unread agent's result is empty", async () => {
+  const f = await fixture();
+  try {
+    const env = f.env({ AIRCLAUDE_EDUCATION_SUBAGENT_NUDGE: "enforce" });
+    await processEducationHook({ ...f.base, hook_event_name: "UserPromptSubmit", prompt: "investigate in parallel" }, env);
+    await processEducationHook({ ...f.base, hook_event_name: "PostToolUse", tool_name: "Agent", tool_input: { description: "Audit gateway" }, tool_response: { isAsync: true, agentId: "c2", outputFile: "/tmp/c2.output" } }, env);
+    await processEducationHook({ ...f.base, hook_event_name: "SubagentStop", agent_id: "c2", agent_type: "general-purpose", last_assistant_message: "" }, env);
+    const stop = { ...f.base, hook_event_name: "Stop", stop_hook_active: false, last_assistant_message: "Done.", background_tasks: [] };
+    const first = await processEducationHook(stop, env);
+    assert.equal(first.decision, undefined);
+    assert.match(first.hookSpecificOutput.additionalContext, /c2/);
+    assert.equal(await processEducationHook(stop, env), null, "one hint per turn");
+    const [record] = (await f.logs()).filter((entry) => entry.rule === "unread-result");
+    assert.equal(record.decision, "hint");
+    assert.deepEqual(record.evidence.emptyResult, ["c2"]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("SubagentStop never blocks a Claude subagent", async () => {
+  const f = await fixture();
+  try {
+    const env = f.env({ AIRCLAUDE_EDUCATION_SUBAGENT_REPORT: "enforce" });
+    await writeAgent(f.transcript, "k1", "Look into it.\nFinish with STATUS: done|blocked|partial", "claude-sonnet-5");
+    const stop = { ...f.base, hook_event_name: "SubagentStop", agent_id: "k1", agent_type: "general-purpose", stop_hook_active: false, last_assistant_message: "I looked." };
+    assert.equal(await processEducationHook(stop, env), null);
+    const [record] = (await f.logs()).filter((entry) => entry.event === "SubagentStop");
+    assert.equal(record.rule, "status-missing");
+    assert.equal(record.decision, "block");
+    assert.equal(record.emitted, false);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("fork agents are a known type; an empty agent_type stays log-only", async () => {
+  const f = await fixture();
+  try {
+    const env = f.env({ AIRCLAUDE_EDUCATION_SUBAGENT_REPORT: "enforce" });
+    const ask = "Look into it.\nFinish with STATUS: done|blocked|partial";
+    await writeAgent(f.transcript, "f1", ask);
+    await writeAgent(f.transcript, "f2", ask);
+    const stop = { ...f.base, hook_event_name: "SubagentStop", stop_hook_active: false, last_assistant_message: "I looked." };
+    assert.equal((await processEducationHook({ ...stop, agent_id: "f1", agent_type: "fork" }, env)).decision, "block");
+    assert.equal(await processEducationHook({ ...stop, agent_id: "f2", agent_type: "" }, env), null);
+    const rules = (await f.logs()).filter((entry) => entry.event === "SubagentStop").map((entry) => entry.rule);
+    assert.deepEqual(rules, ["status-missing", "status-unknown-agent-type"]);
   } finally {
     await f.cleanup();
   }
