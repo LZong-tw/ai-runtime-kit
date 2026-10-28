@@ -50,6 +50,7 @@ const KNOWN_AGENT_TYPES = new Set([
   "statusline-setup",
   "claude-code-guide",
   "output-style-setup",
+  "fork",
 ]);
 const READ_ONLY_AGENT_TYPES = new Set(["Explore", "Plan", "claude-code-guide"]);
 const FAN_OUT = /平行|並行|同時|分頭|各自|多個\s*reviewer|in parallel|parallel(?:ize|ly)?|fan[- ]?out|每個.{0,40}都|subagents?|workflow|teammates?|子代理/i;
@@ -469,13 +470,42 @@ async function onSubagentStart(input, state) {
   return null;
 }
 
-// §4.4.2: every parent, Claude included. Blocks only when the subagent's own
-// prompt asked for STATUS, at most once per agent.
-async function onSubagentStop(input, state, config, log) {
+// An agent that ends with SubagentHandback has no closing text: its report is
+// the tool input, and the parent receives it as a message once the tool
+// result says it was delivered.
+async function handback(path) {
+  if (typeof path !== "string") return null;
+  try {
+    let found = null;
+    for (const record of parseLines(await readTail(path))) {
+      const content = Array.isArray(record?.message?.content) ? record.message.content : [];
+      for (const block of content) {
+        if (record.type === "assistant" && block?.type === "tool_use" && block.name === "SubagentHandback" && typeof block.input?.message === "string") {
+          found = { id: block.id, message: block.input.message, delivered: false };
+        } else if (found && record.type === "user" && block?.type === "tool_result" && block.tool_use_id === found.id) {
+          found.delivered = block.is_error !== true;
+        }
+      }
+    }
+    return found;
+  } catch {
+    return null;
+  }
+}
+
+// §4.4.2: non-Claude subagents only, like the other gated rules. Blocks only
+// when the subagent's own prompt asked for STATUS, at most once per agent.
+async function onSubagentStop(input, state, config, model, log) {
   if (typeof input.agent_id !== "string") return null;
-  const message = String(input.last_assistant_message ?? "");
-  const statusReported = STATUS_LINE.test(message);
   const transcriptPath = agentTranscriptPath(input);
+  let message = String(input.last_assistant_message ?? "");
+  let resultSource = message ? "last-message" : "none";
+  const handed = message ? null : await handback(transcriptPath);
+  if (handed) {
+    message = handed.message;
+    resultSource = "handback";
+  }
+  const statusReported = STATUS_LINE.test(message);
   const spawn = upsertSpawn(state, input.agent_id, {
     agentType: input.agent_type ?? null,
     endedAt: new Date().toISOString(),
@@ -483,6 +513,7 @@ async function onSubagentStop(input, state, config, log) {
     result: message.slice(0, MAX_RESULT_CHARS),
     transcriptPath,
   });
+  if (handed?.delivered) markRead(spawn, "handback");
   if (config.subagentReport === "off") return null;
   const contract = subagentPromptContract(await firstUserPrompt(transcriptPath));
   const knownType = KNOWN_AGENT_TYPES.has(input.agent_type);
@@ -494,14 +525,14 @@ async function onSubagentStop(input, state, config, log) {
     rule = "status-missing";
     block = input.stop_hook_active !== true && !spawn.reportBlocked;
   }
-  const emit = block && config.subagentReport === "enforce";
+  const emit = block && gated(config.subagentReport, model);
   if (emit) spawn.reportBlocked = true;
   await log({
     rule,
     decision: block ? "block" : "log-only",
     emitted: emit,
     reason: block ? STATUS_REASON : null,
-    evidence: { agentType: input.agent_type ?? null, contract, statusReported, stopHookActive: input.stop_hook_active === true },
+    evidence: { agentType: input.agent_type ?? null, contract, statusReported, resultSource, stopHookActive: input.stop_hook_active === true },
   });
   return emit ? { decision: "block", reason: STATUS_REASON } : null;
 }
@@ -524,7 +555,8 @@ async function assistantTextsSince(path, since) {
 
 // §4.4.3: parent only, non-Claude only. A finished background agent whose
 // result the parent never used blocks once per turn; running agents get a
-// "don't poll" note instead of a block.
+// "don't poll" note instead of a block. With no stored result there is no
+// evidence either way, so those agents only get a hint.
 async function onStop(input, state, config, model, log) {
   if (typeof input.agent_id === "string" || config.subagentNudge === "off") return null;
   const background = Array.isArray(input.background_tasks) ? input.background_tasks : [];
@@ -539,11 +571,13 @@ async function onStop(input, state, config, model, log) {
   if (unread.length > 0) {
     const list = unread.map((spawn) => `${spawn.agentId} (${spawn.description || "no description"})`).join(", ");
     const reason = `Finished background agents have results you have not read: ${list}. Read their output (TaskOutput or the output file) and use it before ending the turn.`;
-    const block = input.stop_hook_active !== true && state.stopBlockedTurn !== state.turn;
-    const emit = block && gated(config.subagentNudge, model);
+    const empty = unread.filter((spawn) => !spawn.result).map((spawn) => spawn.agentId);
+    const once = input.stop_hook_active !== true && state.stopBlockedTurn !== state.turn;
+    const decision = !once ? "log-only" : empty.length < unread.length ? "block" : "hint";
+    const emit = once && gated(config.subagentNudge, model);
     if (emit) state.stopBlockedTurn = state.turn;
-    await log({ rule: "unread-result", decision: block ? "block" : "log-only", emitted: emit, reason, evidence: { agents: unread.map((spawn) => spawn.agentId), stopHookActive: input.stop_hook_active === true } });
-    if (emit) return { decision: "block", reason };
+    await log({ rule: "unread-result", decision, emitted: emit, reason, evidence: { agents: unread.map((spawn) => spawn.agentId), emptyResult: empty, stopHookActive: input.stop_hook_active === true } });
+    if (emit) return decision === "block" ? { decision: "block", reason } : context("Stop", reason);
   }
   if (running.length > 0) {
     const note = `${running.length} agent${running.length === 1 ? "" : "s"} still running; completion notices will arrive — end the turn or keep working, don't poll.`;
@@ -573,7 +607,7 @@ export async function processEducationHook(input, env = process.env) {
   else if (eventName === "PostToolUse") response = await onPostToolUse(input, state, config, model, log);
   else if (eventName === "PostToolUseFailure") response = await onPostToolUseFailure(input, state, config, model, log);
   else if (eventName === "SubagentStart") response = await onSubagentStart(input, state);
-  else if (eventName === "SubagentStop") response = await onSubagentStop(input, state, config, log);
+  else if (eventName === "SubagentStop") response = await onSubagentStop(input, state, config, model, log);
   else if (eventName === "Stop") response = await onStop(input, state, config, model, log);
   await saveState(path, state);
   return response;
