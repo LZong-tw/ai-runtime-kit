@@ -13,7 +13,25 @@ const APPROACH_CHANGE = /different approach|switch(?:ing)? approach|try another 
 const SYSTEM_REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
 const CLAUDE_FAMILIES = ["fable", "opus", "sonnet", "haiku"];
 
-export function isClaudeExecutor(model) {
+const CCR_ROUTE_ID = /^(?:[^/,]+[/,])?claude-ccr-h([0-9a-f]{2,4096})(?:\[1m\])?$/i;
+
+// CCR packs a /model pick of a provider route into an opaque `claude-ccr-h<hex>`
+// id. Model-keyed decisions must see the route it encodes, not its `claude-`
+// wrapper. Anything that is not a well-formed route id comes back unchanged.
+export function effectiveModel(model) {
+  if (typeof model !== "string") return model;
+  const match = CCR_ROUTE_ID.exec(model.trim());
+  if (!match || match[1].length % 2 !== 0) return model;
+  try {
+    const route = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(match[1], "hex"));
+    return /^[^/,\s]+[/,][^/,\s]+$/.test(route) ? route : model;
+  } catch {
+    return model;
+  }
+}
+
+export function isClaudeExecutor(selector) {
+  const model = effectiveModel(selector);
   if (typeof model !== "string") return false;
   // Routed selectors look like "provider,model" or "provider/model"; only the
   // model part decides, so a provider named after Claude cannot bypass gating.
