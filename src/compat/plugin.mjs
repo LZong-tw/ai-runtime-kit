@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { compatLog } from "./diagnostics.mjs";
 import { recordRequest, serializeError } from "./request-errors.mjs";
 
 import {
@@ -440,16 +441,11 @@ function describeRouteDecision({ body, mode, outboundBody, path, stablePrefix })
 // supplements CCR's native outer-gateway entry without exposing credentials.
 function logRouteDecision({ enabled, decision, request, requestId }) {
   if (enabled !== true) return;
-  try {
-    process.stderr.write(`[airkit-route] ${JSON.stringify({
-      at: new Date().toISOString(),
-      authId: presentedCredentialId(request?.headers),
-      ...decision,
-      requestId,
-    })}\n`);
-  } catch {
-    // never let logging interfere with the request
-  }
+  compatLog.write("airkit-route", {
+    authId: presentedCredentialId(request?.headers),
+    ...decision,
+    requestId,
+  });
 }
 
 function logRequestTerminal({ outcome, response, telemetry }) {
@@ -464,8 +460,7 @@ function logRequestTerminal({ outcome, response, telemetry }) {
       stream: false,
     };
     const elapsed = Number(process.hrtime.bigint() - telemetry.startedAt) / 1_000_000;
-    process.stderr.write(`[airkit-request] ${JSON.stringify({
-      at: new Date().toISOString(),
+    compatLog.write("airkit-request", {
       requestId: telemetry.requestId,
       path: decision.path,
       mode: decision.mode,
@@ -481,7 +476,7 @@ function logRequestTerminal({ outcome, response, telemetry }) {
       ...(decision.stablePrefix ? { stablePrefix: decision.stablePrefix } : {}),
       cacheCohort: classifyCacheCohort(telemetry.stablePrefix, telemetry.promptCache),
       ...(telemetry.promptCache ? { promptCache: telemetry.promptCache } : {}),
-    })}\n`);
+    });
   } catch {
     // never let logging interfere with the request
   }

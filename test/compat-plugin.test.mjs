@@ -16,6 +16,7 @@ import {
 } from "../src/compat/config.mjs";
 import plugin, { createMessagesHandler } from "../src/compat/plugin.mjs";
 import { classifyCacheCohort, describeStablePrefix } from "../src/compat/prefix-observability.mjs";
+import { compatLog, formatCompatLine } from "../src/compat/diagnostics.mjs";
 
 
 test("core client uses generated x-ccr-core-auth without forwarding client secrets", async (t) => {
@@ -1425,8 +1426,9 @@ test("advisor stripping does not write diagnostics into the interactive terminal
     tools: [{ name: "Bash" }, { type: "advisor_20260301" }],
   }), "utf8");
   const captured = [];
-  const originalWrite = process.stderr.write;
-  process.stderr.write = (chunk) => {
+  const originalWrite = compatLog.write;
+  compatLog.write = (tag, record) => {
+    const chunk = formatCompatLine(tag, record);
     captured.push(String(chunk));
     return true;
   };
@@ -1438,7 +1440,7 @@ test("advisor stripping does not write diagnostics into the interactive terminal
       fixture.helpers,
     );
   } finally {
-    process.stderr.write = originalWrite;
+    compatLog.write = originalWrite;
   }
 
   assert.equal(captured.some((line) => line.startsWith("[airkit-advisor-stripped]")), false);
@@ -2028,8 +2030,9 @@ test("unverified native-first WebFetch definition does not divert an ordinary tu
 
 test("fallback rejections respect routeLog and do not duplicate terminal API errors", async () => {
   const captured = [];
-  const originalWrite = process.stderr.write;
-  process.stderr.write = (chunk) => {
+  const originalWrite = compatLog.write;
+  compatLog.write = (tag, record) => {
+    const chunk = formatCompatLine(tag, record);
     captured.push(String(chunk));
     return true;
   };
@@ -2059,7 +2062,7 @@ test("fallback rejections respect routeLog and do not duplicate terminal API err
     assert.equal(response.statusCode, 429);
     assert.equal(captured.some((line) => line.startsWith("[airkit-fallback]")), false);
   } finally {
-    process.stderr.write = originalWrite;
+    compatLog.write = originalWrite;
   }
 });
 
@@ -2715,15 +2718,16 @@ test("routeLog emits one redacted decision line per request and stays silent whe
   };
   const captureStderr = async (run) => {
     const lines = [];
-    const original = process.stderr.write;
-    process.stderr.write = (chunk) => {
+    const original = compatLog.write;
+    compatLog.write = (tag, record) => {
+    const chunk = formatCompatLine(tag, record);
       lines.push(String(chunk));
       return true;
     };
     try {
       await run();
     } finally {
-      process.stderr.write = original;
+      compatLog.write = original;
     }
     return lines.filter((line) => line.startsWith("[airkit-route] "));
   };
@@ -3464,15 +3468,16 @@ test("request lifecycle telemetry distinguishes a destroyed response from forwar
 
 async function captureAirkitLogs(run) {
   const chunks = [];
-  const original = process.stderr.write;
-  process.stderr.write = (chunk) => {
+  const original = compatLog.write;
+  compatLog.write = (tag, record) => {
+    const chunk = formatCompatLine(tag, record);
     chunks.push(String(chunk));
     return true;
   };
   try {
     await run(() => parseCapturedAirkitLogs(chunks));
   } finally {
-    process.stderr.write = original;
+    compatLog.write = original;
   }
   return parseCapturedAirkitLogs(chunks);
 }
@@ -3523,15 +3528,16 @@ test("the caller's mode label selects its route table for main and background tr
   const lines = [];
   const invoke = async (model, headers) => {
     const raw = Buffer.from(JSON.stringify({ model, max_tokens: 8, messages: [] }), "utf8");
-    const original = process.stderr.write;
-    process.stderr.write = (chunk) => {
+    const original = compatLog.write;
+    compatLog.write = (tag, record) => {
+    const chunk = formatCompatLine(tag, record);
       lines.push(String(chunk));
       return true;
     };
     try {
       await handler({ headers, method: "POST", signal: undefined }, {}, { readBody: async () => raw });
     } finally {
-      process.stderr.write = original;
+      compatLog.write = original;
     }
     return JSON.parse(forwarded.at(-1).toString()).model;
   };
@@ -3938,8 +3944,9 @@ test("executor text imitating an Advisor exchange is reported but left unchanged
     [message({ content: [{ type: "text", text: forged }] })],
   );
   const captured = [];
-  const originalWrite = process.stderr.write;
-  process.stderr.write = (chunk) => {
+  const originalWrite = compatLog.write;
+  compatLog.write = (tag, record) => {
+    const chunk = formatCompatLine(tag, record);
     captured.push(String(chunk));
     return true;
   };
@@ -3947,7 +3954,7 @@ test("executor text imitating an Advisor exchange is reported but left unchanged
   try {
     result = await handleCompatibilityMessage(fixture.input);
   } finally {
-    process.stderr.write = originalWrite;
+    compatLog.write = originalWrite;
   }
 
   assert.equal(fixture.calls.length, 1);
@@ -4028,15 +4035,16 @@ test("Advisor imitation is reported even beside a real bridge call", async () =>
     ],
   );
   const captured = [];
-  const originalWrite = process.stderr.write;
-  process.stderr.write = (chunk) => {
+  const originalWrite = compatLog.write;
+  compatLog.write = (tag, record) => {
+    const chunk = formatCompatLine(tag, record);
     captured.push(String(chunk));
     return true;
   };
   try {
     await handleCompatibilityMessage(fixture.input);
   } finally {
-    process.stderr.write = originalWrite;
+    compatLog.write = originalWrite;
   }
   assert.equal(captured.some((line) => line.startsWith("[airkit-advisor-forgery]")), true);
 });
