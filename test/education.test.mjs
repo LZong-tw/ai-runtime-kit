@@ -268,6 +268,18 @@ test("subagent hooks use the subagent's own model, not the parent's", async () =
   }
 });
 
+test("SubagentStop records the subagent's own model", async () => {
+  const f = await fixture("claude-sonnet-5");
+  try {
+    await writeAgent(f.transcript, "e1", "Just do it.", "kimi-k3");
+    await processEducationHook({ ...f.base, hook_event_name: "SubagentStop", agent_id: "e1", agent_type: "general-purpose", last_assistant_message: "done" }, f.env());
+    const [record] = (await f.logs()).filter((entry) => entry.event === "SubagentStop");
+    assert.equal(record.model, "kimi-k3");
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("invalid flags log a config error and every rule passes", async () => {
   const f = await fixture();
   try {
