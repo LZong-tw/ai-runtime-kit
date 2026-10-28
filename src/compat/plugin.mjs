@@ -29,6 +29,7 @@ import {
   ensureGptMinimumOutputTokens,
   rewriteClaudeEffortForOpenAI,
 } from "./effort.mjs";
+import { createMainModelFollower } from "./model-follow.mjs";
 import { inspectPendingServerHistory } from "./server-history.mjs";
 import {
   inspectServerToolRequest,
@@ -152,6 +153,7 @@ function responseHeader(headers, name) {
 }
 
 export function createMessagesHandler({ config, coreClient, policies, auditEmitter = null, auditContext = null, requestStore = null }) {
+  const followMainModel = createMainModelFollower(config);
   return async (request, response, helpers) => {
     const startedAt = process.hrtime.bigint();
     const at = Date.now();
@@ -187,10 +189,13 @@ export function createMessagesHandler({ config, coreClient, policies, auditEmitt
       // here covers the raw passthrough and the executor path; the
       // whole-request fallback sets its own provider-qualified selector and
       // is unaffected. Each launch mode wants a different target model, so the
-      // caller's own mode label picks the table.
+      // caller's own mode label picks the table. A subagent following the
+      // main thread's /model pick takes that exact model string first, so it
+      // gets the same routing as the main thread.
       const mode = requestedMode(request?.headers);
-      const routed = routeBareClaudeModel(body, resolveModeRoutes(config, mode), config.launchModel ?? null, config.modeRoutes ?? null);
-      const routedBody = routed ?? body;
+      const followedBody = followMainModel(body, request?.headers) ?? body;
+      const routed = routeBareClaudeModel(followedBody, resolveModeRoutes(config, mode), config.launchModel ?? null, config.modeRoutes ?? null);
+      const routedBody = routed ?? followedBody;
       // Before the compatibility decision, apply the configured Advisor policy.
       // Fallback mode strips an unresolved definition before it can divert an
       // otherwise ordinary request; bridge mode keeps it so the gateway can
@@ -201,7 +206,7 @@ export function createMessagesHandler({ config, coreClient, policies, auditEmitt
         ? stripServerToolFamily(routedBody, "advisor")
         : routedBody;
       const clientToolScopedBody = stripExcludedClientTools(scopedBody, config, policies);
-      const modeEffort = typeof body?.model === "string" && body.model.startsWith("claude-sonnet-")
+      const modeEffort = typeof followedBody?.model === "string" && followedBody.model.startsWith("claude-sonnet-")
         ? resolveModeEffort(config, mode)
         : null;
       const effortAdjustedBody = rewriteClaudeEffortForOpenAI(clientToolScopedBody, modeEffort);

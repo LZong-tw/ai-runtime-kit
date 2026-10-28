@@ -737,3 +737,34 @@ test("modelPrompts validation rejects malformed rules", async () => {
     assert.throws(() => validateCompatibilityConfig({ ...VALID_CONFIG, modelPrompts }), pattern);
   }
 });
+
+test("followMainModel names its lanes and roles and rejects anything wider", () => {
+  const follow = { enabled: true, lanes: ["sonnet"], roles: ["subagent"] };
+  validateCompatibilityConfig({ ...VALID_CONFIG, followMainModel: follow });
+  validateCompatibilityConfig({
+    ...VALID_CONFIG,
+    followMainModel: { enabled: true, lanes: ["sonnet", "opus"], roles: ["subagent", "workflow"] },
+  });
+  validateCompatibilityConfig({ ...VALID_CONFIG, followMainModel: { enabled: false } });
+
+  const bad = [
+    [[], /followMainModel must be an object/],
+    [{ ...follow, enabled: "yes" }, /followMainModel\.enabled must be a boolean/],
+    [{ lanes: ["sonnet"], roles: ["subagent"] }, /followMainModel\.enabled must be a boolean/],
+    [{ ...follow, extra: true }, /unknown followMainModel key: extra/],
+    [{ enabled: true, roles: ["subagent"] }, /followMainModel\.lanes must be a non-empty list of: sonnet, opus/],
+    [{ ...follow, lanes: [] }, /followMainModel\.lanes/],
+    [{ ...follow, lanes: ["background"] }, /followMainModel\.lanes/],
+    [{ ...follow, lanes: ["sonnet", "sonnet"] }, /followMainModel\.lanes/],
+    [{ enabled: true, lanes: ["sonnet"] }, /followMainModel\.roles must be a non-empty list of: subagent, workflow/],
+    [{ ...follow, roles: ["auxiliary"] }, /followMainModel\.roles/],
+    [{ ...follow, roles: ["main"] }, /followMainModel\.roles/],
+  ];
+  for (const [followMainModel, pattern] of bad) {
+    assert.throws(
+      () => validateCompatibilityConfig({ ...VALID_CONFIG, followMainModel }),
+      pattern,
+      JSON.stringify(followMainModel),
+    );
+  }
+});
