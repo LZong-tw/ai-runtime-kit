@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { createFallbackRouter } from "../src/compat/fallback.mjs";
 import { createCoreClient, handleCompatibilityMessage } from "../src/compat/gateway.mjs";
 import { inspectPendingServerHistory } from "../src/compat/server-history.mjs";
+import { compatLog, formatCompatLine } from "../src/compat/diagnostics.mjs";
 
 const VALID_CONFIG = {
   fallback: {
@@ -866,15 +867,14 @@ function fallbackBody(overrides = {}) {
 async function captureFallbackLog(run) {
   const PREFIX = "[airkit-fallback] ";
   const lines = [];
-  const original = process.stderr.write;
-  process.stderr.write = (chunk, ...rest) => {
-    lines.push(String(chunk));
-    return original.call(process.stderr, chunk, ...rest);
+  const original = compatLog.write;
+  compatLog.write = (tag, record) => {
+    lines.push(formatCompatLine(tag, record));
   };
   try {
     await run();
   } finally {
-    process.stderr.write = original;
+    compatLog.write = original;
   }
   return lines
     .filter((line) => line.startsWith(PREFIX))

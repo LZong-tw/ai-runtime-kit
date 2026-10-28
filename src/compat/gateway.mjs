@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { compatLog } from "./diagnostics.mjs";
 import { MAX_UPSTREAM_BODY_BYTES, recordRequest, serializeError, truncateUpstreamBody } from "./request-errors.mjs";
 import { readFileSync } from "node:fs";
 import {
@@ -26,6 +27,7 @@ import {
   NON_CLAUDE_ADVISOR_PROMPT,
   isAdvisorAllowed,
   isClaudeExecutor,
+  isAdvisorRouteSubstituted,
   resolveAdvisorRoute,
 } from "./advisor-policy.mjs";
 
@@ -446,7 +448,7 @@ export async function handleCompatibilityMessage({
         }
         // Only a real consultation counts toward the conversation cap.
         if (outcome === "called") policyTurn.content.push(structuredClone(call));
-        reportAdvisorCall(inspection.advisor, selected, outcome);
+        reportAdvisorCall(inspection.advisor, selected, isAdvisorRouteSubstituted(inspection.advisor?.model, advisorPolicies), outcome);
         outwardContent.push(result);
         resumeResults.push(bridgeResumeResult(call.id, advisorResultText(result)));
         continue;
@@ -796,24 +798,17 @@ const FORGED_COMPATIBILITY_TEXT = /^(?:Compatibility request:|Advisor result:|To
 function reportForgedCompatibilityText(content, model) {
   const forged = content.some((block) => block?.type === "text" && FORGED_COMPATIBILITY_TEXT.test(block.text ?? ""));
   if (!forged) return;
-  try {
-    process.stderr.write(`[airkit-advisor-forgery] ${JSON.stringify({ model: model ?? null })}\n`);
-  } catch {
-    // Diagnostics must never break the response.
-  }
+  compatLog.write("airkit-advisor-forgery", { model: model ?? null });
 }
 
-function reportAdvisorCall(advisor, selected, outcome) {
-  try {
-    process.stderr.write(`[airkit-advisor] ${JSON.stringify({
-      requested: advisor?.model ?? null,
-      provider: selected.provider,
-      model: selected.model,
-      outcome,
-    })}\n`);
-  } catch {
-    // Never let logging interfere with the request.
-  }
+function reportAdvisorCall(advisor, selected, substituted, outcome) {
+  compatLog.write("airkit-advisor", {
+    requested: advisor?.model ?? null,
+    provider: selected.provider,
+    model: selected.model,
+    substituted,
+    outcome,
+  });
 }
 
 async function requestAdvisor({
@@ -1545,13 +1540,12 @@ function reportFallbackRejection(config, families, result, requestId) {
       : families.length > 0
       ? "fallback routed this request to the configured Anthropic route and the upstream rejected it, so the server tool has to be supported there"
       : null;
-    process.stderr.write(`[airkit-fallback] ${JSON.stringify({
-      at: new Date().toISOString(),
+    compatLog.write("airkit-fallback", {
       families,
       requestId,
       status: result.status,
       ...(hint ? { hint } : {}),
-    })}\n`);
+    });
   } catch {
     // never let logging interfere with the request
   }
