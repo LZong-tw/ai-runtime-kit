@@ -565,7 +565,7 @@ export async function processEducationHook(input, env = process.env) {
   if (Object.values(config).every((value) => value === "off" || value === false)) return null;
   const path = statePath(env, input.session_id);
   const state = await loadState(path);
-  const model = ["PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop"].includes(eventName) ? await actorModel(input) : null;
+  const model = ["PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStop", "Stop"].includes(eventName) ? await actorModel(input) : null;
   const log = (record) => logRecord(env, { ...base, model, flags: config, ...record });
   let response = null;
   if (eventName === "UserPromptSubmit") response = await onUserPrompt(input, state);
