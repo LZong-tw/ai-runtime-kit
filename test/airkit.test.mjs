@@ -1449,6 +1449,28 @@ test("plain Claude launch uses managed CCR without AirClaude argument overlays",
   }
 });
 
+test("followMainModel turns on Claude Code's gateway hint headers for middleware launches only", () => {
+  const withFollow = (followMainModel) => {
+    const catalog = compatibilityCatalog();
+    catalog.profiles[0].launch.modes.plain = {};
+    if (followMainModel !== null) catalog.profiles[0].ccr.plugins[0].config.followMainModel = followMainModel;
+    return catalog;
+  };
+  const enabled = { enabled: true, lanes: ["sonnet"], roles: ["subagent"] };
+
+  const plan = buildLaunchPlan(withFollow(enabled), "launch-example", { mode: "auto" });
+  assert.equal(plan.launch.env.CLAUDE_CODE_GATEWAY_HINT_HEADERS, "1");
+  assert.equal(plan.launch.clearEnv.includes("CLAUDE_CODE_GATEWAY_HINT_HEADERS"), false);
+
+  const plain = buildLaunchPlan(withFollow(enabled), "launch-example", { mode: "plain", plainClaude: true });
+  assert.equal(plain.launch.env.CLAUDE_CODE_GATEWAY_HINT_HEADERS, undefined, "plain runs no middleware");
+
+  for (const followMainModel of [null, { enabled: false }]) {
+    const off = buildLaunchPlan(withFollow(followMainModel), "launch-example", { mode: "auto" });
+    assert.equal(off.launch.env.CLAUDE_CODE_GATEWAY_HINT_HEADERS, undefined, JSON.stringify(followMainModel));
+  }
+});
+
 test("mode-specific append prompt applies only to its selected managed mode", () => {
   const catalog = launchCatalog();
   catalog.profiles[0].launch.modes.auto.appendSystemPrompt = "DeepSeek-only evidence delta";
