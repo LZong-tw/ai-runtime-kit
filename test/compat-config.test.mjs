@@ -388,6 +388,28 @@ test("routeLog accepts booleans and rejects everything else", () => {
   );
 });
 
+test("sseKeepalive accepts bounded first-headers and ping intervals", () => {
+  validateCompatibilityConfig({ ...VALID_CONFIG, sseKeepalive: { firstHeadersMs: 15_000, pingIntervalMs: 60_000 } });
+  validateCompatibilityConfig({ ...VALID_CONFIG, sseKeepalive: { pingIntervalMs: 30_000 } });
+  validateCompatibilityConfig({ ...VALID_CONFIG, sseKeepalive: {} });
+
+  for (const value of [999, 100_001, 1.5, "15000", null]) {
+    assert.throws(
+      () => validateCompatibilityConfig({ ...VALID_CONFIG, sseKeepalive: { firstHeadersMs: value } }),
+      /sseKeepalive\.firstHeadersMs must be an integer from 1000 through 100000/,
+    );
+    assert.throws(
+      () => validateCompatibilityConfig({ ...VALID_CONFIG, sseKeepalive: { pingIntervalMs: value } }),
+      /sseKeepalive\.pingIntervalMs must be an integer from 1000 through 100000/,
+    );
+  }
+  assert.throws(
+    () => validateCompatibilityConfig({ ...VALID_CONFIG, sseKeepalive: { intervalMs: 15_000 } }),
+    /unknown sseKeepalive key: intervalMs/,
+  );
+  assert.throws(() => validateCompatibilityConfig({ ...VALID_CONFIG, sseKeepalive: 15_000 }), /sseKeepalive/);
+});
+
 test("ToolSearch can apply exact and family-wide client-tool limits", () => {
   const config = {
     ...VALID_CONFIG,

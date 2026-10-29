@@ -5,11 +5,20 @@
 // generation used to fail even though the upstream was still working.
 //
 // For a stream:true client the reply is SSE anyway, so the headers can go out
-// early. A keepalive commits 200 + SSE headers after one quiet interval and
-// then sends Anthropic `ping` events until a writer claims the stream. Replies
-// that finish within the first interval are written exactly as before.
+// early. A keepalive commits 200 + SSE headers and a first Anthropic `ping`
+// after one quiet delay, then pings at a slower interval until a writer claims
+// the stream. Replies that finish within the first delay are written exactly
+// as before.
+//
+// The two timings answer different budgets. pxpipe allows 300 s for the first
+// byte and 120 s of silence after it (pxpipe-proxy dist/core/proxy.js:19,:21),
+// so the first delay stays short and the interval stays under 120 s. Claude
+// Code stops resetting its idle watchdog after 30 consecutive pings and its
+// idle timeout is at least 300 s, so fewer pings buy a longer generation:
+// 30 pings at 60 s cover 30 minutes, where 15 s pings ran out after 7.5.
 
-export const DEFAULT_SSE_KEEPALIVE_MS = 15_000;
+export const DEFAULT_SSE_FIRST_HEADERS_MS = 15_000;
+export const DEFAULT_SSE_PING_INTERVAL_MS = 60_000;
 
 const SSE_HEADERS = Object.freeze({
   "cache-control": "no-cache",
@@ -19,8 +28,12 @@ const SSE_HEADERS = Object.freeze({
 
 const keepalives = new WeakMap();
 
-export function startSseKeepalive(response, { intervalMs = DEFAULT_SSE_KEEPALIVE_MS, signal } = {}) {
-  const state = { pinging: false, timer: null };
+export function startSseKeepalive(response, {
+  firstHeadersMs = DEFAULT_SSE_FIRST_HEADERS_MS,
+  pingIntervalMs = DEFAULT_SSE_PING_INTERVAL_MS,
+  signal,
+} = {}) {
+  const state = { pinging: false, timer: null, clear: null };
   const ping = () => {
     if (signal?.aborted === true || response.writableEnded === true || response.destroyed === true) {
       return stop(state);
@@ -31,8 +44,15 @@ export function startSseKeepalive(response, { intervalMs = DEFAULT_SSE_KEEPALIVE
     }
     response.write("event: ping\ndata: {\"type\":\"ping\"}\n\n");
   };
-  state.timer = setInterval(ping, intervalMs);
-  state.timer.unref?.();
+  const schedule = (handle, clear) => {
+    state.timer = handle;
+    state.clear = clear;
+    handle.unref?.();
+  };
+  schedule(setTimeout(() => {
+    ping();
+    if (state.timer !== null) schedule(setInterval(ping, pingIntervalMs), clearInterval);
+  }, firstHeadersMs), clearTimeout);
   keepalives.set(response, state);
   signal?.addEventListener?.("abort", () => stop(state), { once: true });
   response.once?.("close", () => stop(state));
@@ -111,6 +131,6 @@ function parseErrorEnvelope(body) {
 }
 
 function stop(state) {
-  if (state.timer !== null) clearInterval(state.timer);
+  if (state.timer !== null) state.clear(state.timer);
   state.timer = null;
 }
