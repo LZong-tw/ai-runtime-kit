@@ -237,7 +237,8 @@ fallback rejections, are retained for 30 days; successes for 7 days. Pruning
 runs at open and at most hourly while recording. Storage failures never block
 forwarding. Error evidence includes bounded (64 KiB), credential-redacted
 upstream bodies and filtered headers; treat the database as private diagnostics.
-The `[airkit-fallback]` log includes the same request ID when route logging is on.
+The `[airkit-fallback]` line in `~/.claude-code-router/logs/airkit-compat.log`
+includes the same request ID when route logging is on.
 
 ```bash
 DB="${XDG_STATE_HOME:-$HOME/.local/state}/airkit/compat-requests.sqlite"

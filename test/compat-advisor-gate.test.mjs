@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { handleCompatibilityMessage } from "../src/compat/gateway.mjs";
+import { compatLog, compatLogPath } from "../src/compat/diagnostics.mjs";
 import {
   resolveCompatibilityPolicies,
   validateCompatibilityConfig,
@@ -57,7 +62,9 @@ async function runBridge(t, {
 } = {}) {
   const calls = [];
   const logs = [];
-  const mock = t.mock.method(process.stderr, "write", (line) => { logs.push(line); return true; });
+  const tty = [];
+  const stderr = t.mock.method(process.stderr, "write", (line) => { tty.push(String(line)); return true; });
+  const mock = t.mock.method(compatLog, "write", (tag, record) => { logs.push({ tag, record }); });
   let turn = 0;
   const result = await handleCompatibilityMessage({
     body: {
@@ -85,10 +92,12 @@ async function runBridge(t, {
     },
   });
   mock.mock.restore();
+  stderr.mock.restore();
+  assert.deepEqual(tty.filter((line) => line.includes("[airkit-")), [], "diagnostics must not reach the terminal");
   const advisorRequests = calls.filter((body) => body.tools === undefined);
-  const diagnostics = logs.map((line) => {
-    assert.match(line, /^\[airkit-advisor\] \{[^\n]*\}\n$/);
-    return JSON.parse(line.slice("[airkit-advisor] ".length));
+  const diagnostics = logs.map(({ tag, record }) => {
+    assert.equal(tag, "airkit-advisor");
+    return record;
   });
   assert.equal(diagnostics.length, turns.flat().filter((block) => block.name === "airkit_advisor").length);
   return { result, calls, advisorRequests, diagnostics };
@@ -110,9 +119,38 @@ test("Advisor aliases and full Claude IDs select a frozen mapped provider/model"
     });
     assert.equal(advisorRequests[0].model, expected);
     assert.deepEqual(diagnostics, [{
-      requested, provider: "review", model: expected.split("/")[1], outcome: "called",
+      requested, provider: "review", model: expected.split("/")[1], substituted: false, outcome: "called",
     }]);
   }
+});
+
+test("Advisor log flags a requested model that fell back to another route", async (t) => {
+  const { advisorRequests, diagnostics } = await runBridge(t, {
+    advisor: { models: { opus: "review/claude-opus-5-5" } },
+    requested: "claude-fable-5-1",
+    messages: [{ role: "user", content: "Ask Advisor" }],
+  });
+  assert.equal(advisorRequests[0].model, "anthropic/claude-sonnet");
+  assert.deepEqual(diagnostics, [{
+    requested: "claude-fable-5-1", provider: "anthropic", model: "claude-sonnet", substituted: true, outcome: "called",
+  }]);
+});
+
+test("compat diagnostics append to the AirKit compat log file, never the terminal", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "airkit-compat-log-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const env = { HOME: home };
+  assert.equal(compatLogPath(env), join(home, ".claude-code-router", "logs", "airkit-compat.log"));
+  assert.equal(compatLogPath({ ...env, AIRKIT_COMPAT_LOG: join(home, "x.log") }), join(home, "x.log"));
+  const tty = [];
+  t.mock.method(process.stderr, "write", (line) => { tty.push(line); return true; });
+  compatLog.write("airkit-advisor", { requested: "fable", outcome: "called" }, env);
+  compatLog.write("airkit-fallback", { status: 400 }, env);
+  assert.deepEqual(tty, []);
+  const lines = readFileSync(compatLogPath(env), "utf8").trimEnd().split("\n");
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /^\[airkit-advisor\] \{"at":"[^"]+","requested":"fable","outcome":"called"\}$/);
+  assert.match(lines[1], /^\[airkit-fallback\] /);
 });
 
 test("unmapped Advisor alias selects family fallback before shared fallback", async (t) => {
@@ -134,7 +172,9 @@ test("non-Claude executor without a trigger gets normal blocked results and keep
   assert.equal(calls[1].messages.at(-1).content[0].content, ADVISOR_BLOCKED_TEXT);
   assert.ok(calls.every((body) => body.tools.some((tool) => tool.name === "airkit_advisor")));
   assert.ok(calls[0].tools.find((tool) => tool.name === "airkit_advisor").description.includes(NON_CLAUDE_ADVISOR_PROMPT));
-  assert.deepEqual(diagnostics, [{ requested: null, provider: "anthropic", model: "claude-sonnet", outcome: "blocked" }]);
+  assert.deepEqual(diagnostics, [{
+    requested: null, provider: "anthropic", model: "claude-sonnet", substituted: false, outcome: "blocked",
+  }]);
 });
 
 test("latest real user asking 顧問 allows Advisor even after tool-only user messages", async (t) => {

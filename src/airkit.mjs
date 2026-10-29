@@ -995,6 +995,7 @@ export async function exportOssRelease({ outDir }) {
     "activity.mjs",
     "advisor-policy.mjs",
     "config.mjs",
+    "diagnostics.mjs",
     "effort.mjs",
     "reasoning-history.mjs",
     "fallback.mjs",
