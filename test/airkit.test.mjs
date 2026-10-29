@@ -369,6 +369,7 @@ test("OSS package allowlist excludes tests and migration artifacts", async () =>
       "protocol.mjs",
       "server-history.mjs",
       "server-tools.mjs",
+      "sse-keepalive.mjs",
       "tool-search.mjs",
     ]) {
       assert.equal(

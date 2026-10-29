@@ -36,6 +36,7 @@ export async function createPluginFixture(options = {}) {
   const handlers = await createPluginHandlers({
     coreClient,
     requestStore: options.requestStore,
+    sseKeepalive: options.sseKeepalive,
     pluginConfig: { ...structuredClone(COMPLETE_PLUGIN_CONFIG), ...options.pluginConfig },
   });
   const { mcp } = handlers;
@@ -66,13 +67,13 @@ export async function createPluginFixture(options = {}) {
 }
 
 export async function createPluginHandlers({
-  config = structuredClone(PLUGIN_RUNTIME_CONFIG), coreClient, pluginConfig, requestStore = null,
+  config = structuredClone(PLUGIN_RUNTIME_CONFIG), coreClient, pluginConfig, requestStore = null, sseKeepalive,
 }) {
   await plugin.setup({ config, coreClient, pluginConfig });
   const { policies } = resolveCompatibilityPolicies(pluginConfig, VERIFIED_NATIVE_COMPATIBILITY);
   return {
     mcp: { handler: createMcpHandler({ config: pluginConfig, coreClient, requestStore }) },
-    messages: { handler: createMessagesHandler({ config: pluginConfig, coreClient, policies, requestStore }) },
+    messages: { handler: createMessagesHandler({ config: pluginConfig, coreClient, policies, requestStore, sseKeepalive }) },
   };
 }
 
@@ -172,6 +173,8 @@ export function createRecordingResponse({ backpressure = false, endEvent = "fini
     setHeader(name, value) { this.headers[name.toLowerCase()] = value; },
     getHeader(name) { return this.headers[name.toLowerCase()]; },
     writeHead(statusCode, headers) {
+      // Node throws ERR_HTTP_HEADERS_SENT here; a silent overwrite would hide a double write.
+      if (this.headersSent) throw Object.assign(new Error("headers already sent"), { code: "ERR_HTTP_HEADERS_SENT" });
       this.statusCode = statusCode;
       this.headersSent = true;
       this.headers = { ...this.headers, ...Object.fromEntries(

@@ -23,6 +23,7 @@ const CONFIG_KEYS = new Set([
   "modelPrompts",
   "routeLog",
   "routes",
+  "sseKeepalive",
   "transportFallbacks",
   ...Object.keys(FAMILY_MODES),
 ]);
@@ -46,6 +47,7 @@ export const DEFAULT_ADVISOR_UNSUPPORTED = "strip";
 const FAMILY_FALLBACK_KEYS = new Set(["provider", "model"]);
 const ROUTE_KEYS = new Set(["default", "background", "opus", "sonnet"]);
 const ROUTE_SELECTOR_PATTERN = /^[a-z0-9][a-z0-9._-]*\/\S+$/i;
+const SSE_KEEPALIVE_KEYS = new Set(["firstHeadersMs", "pingIntervalMs"]);
 const TRANSPORT_FALLBACK_KEYS = new Set(["from", "to", "statuses", "scope", "timeoutMs"]);
 const TRANSPORT_FALLBACK_TARGET_KEYS = new Set(["provider", "model"]);
 const TRANSPORT_FALLBACK_SCOPES = new Set(["all", "classifier"]);
@@ -114,6 +116,8 @@ export function validateCompatibilityConfig(config) {
   if (config.routeLog !== undefined && typeof config.routeLog !== "boolean") {
     throw new Error("routeLog must be a boolean");
   }
+
+  if (config.sseKeepalive !== undefined) validateSseKeepalive(config.sseKeepalive);
 
   if (config.launchModel !== undefined && !isSupportedLaunchModelId(config.launchModel)) {
     throw new Error("launchModel must be a bare claude-* model id or a dedicated airkit-* id");
@@ -304,6 +308,19 @@ function validateTransportFallback(fallback, label) {
   if (fallback.timeoutMs !== undefined &&
     (!Number.isInteger(fallback.timeoutMs) || fallback.timeoutMs < 1_000 || fallback.timeoutMs > 120_000)) {
     throw new Error(`${label}.timeoutMs must be an integer from 1000 through 120000`);
+  }
+}
+
+// Both timings must stay under pxpipe's 120 s idle budget with room for timer
+// drift; the first delay must also stay under its 300 s headers budget.
+function validateSseKeepalive(keepalive) {
+  assertRecord(keepalive, "sseKeepalive");
+  rejectUnknownKeys(keepalive, SSE_KEEPALIVE_KEYS, "sseKeepalive");
+  for (const key of SSE_KEEPALIVE_KEYS) {
+    const value = keepalive[key];
+    if (value !== undefined && (!Number.isInteger(value) || value < 1_000 || value > 100_000)) {
+      throw new Error(`sseKeepalive.${key} must be an integer from 1000 through 100000`);
+    }
   }
 }
 

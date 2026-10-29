@@ -190,6 +190,46 @@ explain whether a prior-message prefix looked reusable and whether usage later
 reported a hit or miss; they never become outbound provider fields and never
 rewrite the Claude request body.
 
+## Compat replies and proxy header timeouts
+
+The compatibility path calls its upstream with `stream: false` and buffers the
+whole reply: the executor loop may make several calls (tool search, Advisor)
+before it knows the final message, and the forged-text guards and audit need
+the full content. A proxy in front of the gateway that waits a bounded time for
+response headers (pxpipe: 300 s) would otherwise cut a long generation with a
+504 while the upstream is still working.
+
+For a `stream: true` client, `src/compat/sse-keepalive.mjs` commits `200`,
+SSE headers, and a first Anthropic `ping` after a quiet delay (15 s), then
+pings every 60 s until a writer claims the stream. The two timings answer
+different budgets. pxpipe allows 300 s for the first byte and 120 s of silence
+after it, so the first delay is short and the interval stays under 120 s.
+Claude Code stops resetting its idle watchdog after 30 consecutive pings and
+idles out after no less than 300 s, so pings are spaced out: 30 pings at 60 s
+cover 30 minutes of generation, where 15 s pings ran out after 7.5. Both values
+are set by the compat config's `sseKeepalive` (see `docs/profile-schema.md`). The final message, or a whole-request
+fallback's SSE body, follows on the same connection. A failure after the
+headers went out is reported as an SSE `error` event; a fallback rejection
+relays the upstream error body as that event. A client disconnect aborts the
+upstream call and stops the pings.
+
+Replies that finish inside the first delay, `stream: false` clients, and
+the raw passthrough path are unchanged; the HTTP status of a fast rejection is
+still the real one. Once pings have started, the status line is `200` even when
+the request later fails, so a failed stream must be read from its `error`
+event, not its status code. The `compat_requests` diagnostic rows follow the
+same rule: `client_status` is the `200` the client received, and
+`upstream_status` keeps the upstream's real code.
+
+That `error` event keeps the upstream's Anthropic error type and message
+(`overloaded_error`, `rate_limit_error`, ...). When the upstream body is not an
+Anthropic error envelope, the type comes from the upstream status (529 is
+`overloaded_error`, 429 is `rate_limit_error`), never a blanket `api_error`:
+Claude Code retries a failed stream only on 529 or `overloaded_error`, and the
+status line can no longer say 529. A `Retry-After` header cannot follow a
+committed `200` either, so its value is appended to the message as
+`(retry-after: N)`; clients that only honour the header will not see it.
+
 ## Verification contract
 
 Before release:
