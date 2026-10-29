@@ -20,6 +20,7 @@ import { inspectServerToolRequest } from "./server-tools.mjs";
 import { bridgeToolSearch, canApplyToolSearchBudget } from "./tool-search.mjs";
 import { allowlistedUsage } from "../audit/redaction.mjs";
 import { describeStablePrefix } from "./prefix-observability.mjs";
+import { claimSseStream, writeSseError } from "./sse-keepalive.mjs";
 import { normalizeResponsesThinkingHistory } from "./reasoning-history.mjs";
 import {
   ADVISOR_BLOCKED_TEXT,
@@ -500,11 +501,13 @@ export function writeAnthropicMessage(response, message, stream) {
     return;
   }
 
-  response.writeHead(200, {
-    "cache-control": "no-cache",
-    connection: "keep-alive",
-    "content-type": "text/event-stream",
-  });
+  if (!claimSseStream(response)) {
+    response.writeHead(200, {
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+      "content-type": "text/event-stream",
+    });
+  }
   writeSse(response, "message_start", {
     type: "message_start",
     message: {
@@ -1815,10 +1818,16 @@ function rawResponseError(result) {
 }
 
 async function pipeCoreResponse(result, response, signal, transform = null, errorEvidence = null) {
-  const headers = Object.fromEntries(result.headers);
   const requestId = response.getHeader?.("x-airkit-request-id");
-  if (typeof requestId === "string") headers["x-airkit-request-id"] = requestId;
-  response.writeHead(result.status, headers);
+  if (claimSseStream(response)) {
+    // The client already holds 200 + SSE headers, so a rejection can only be
+    // told through the stream itself.
+    if (result.status >= 400) return endWithSseError(result, response, signal, requestId);
+  } else {
+    const headers = Object.fromEntries(result.headers);
+    if (typeof requestId === "string") headers["x-airkit-request-id"] = requestId;
+    response.writeHead(result.status, headers);
+  }
   if (result.body === null) {
     await endResponse(response, signal);
     return;
@@ -1855,6 +1864,24 @@ async function pipeCoreResponse(result, response, signal, transform = null, erro
     }
     reader.releaseLock();
   }
+}
+
+async function endWithSseError(result, response, signal, requestId) {
+  const raw = result.body === null ? Buffer.alloc(0) : await collectStream(result.body);
+  let error;
+  try {
+    error = JSON.parse(raw.toString("utf8"));
+  } catch {
+    error = null;
+  }
+  if (error?.type !== "error" || !isRecord(error.error)) {
+    error = {
+      type: "error",
+      error: { type: "api_error", message: `Upstream provider rejected the request (HTTP ${result.status})`, request_id: requestId },
+    };
+  }
+  writeSseError(response, error);
+  await endResponse(response, signal);
 }
 
 async function endResponse(response, signal) {

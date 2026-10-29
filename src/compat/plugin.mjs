@@ -7,6 +7,7 @@ import {
   normalizeMessageSystemRoles,
   writeAnthropicMessage,
 } from "./gateway.mjs";
+import { DEFAULT_SSE_KEEPALIVE_MS, sseKeepaliveOwnsStream, startSseKeepalive, writeSseError } from "./sse-keepalive.mjs";
 import {
   DEFAULT_ADVISOR_UNSUPPORTED,
   VERIFIED_NATIVE_COMPATIBILITY,
@@ -96,6 +97,13 @@ function requestLifecycleSignal(request, response) {
 }
 
 function containHandlerFailure(response, error, airkitRequestId) {
+  if (sseKeepaliveOwnsStream(response)) {
+    // Only headers and pings went out, so the failure still fits the stream.
+    const status = publicUpstreamStatus(error);
+    writeSseError(response, { type: "error", error: { ...publicFailure(status), request_id: airkitRequestId } });
+    response.end();
+    return "forwarding_failed";
+  }
   if (response?.headersSent !== true && typeof response?.writeHead === "function") {
     const status = publicUpstreamStatus(error);
     const headers = { "content-type": "application/json", "x-airkit-request-id": airkitRequestId };
@@ -151,7 +159,10 @@ function responseHeader(headers, name) {
   return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
 }
 
-export function createMessagesHandler({ config, coreClient, policies, auditEmitter = null, auditContext = null, requestStore = null }) {
+export function createMessagesHandler({
+  config, coreClient, policies, auditEmitter = null, auditContext = null, requestStore = null,
+  sseKeepaliveMs = DEFAULT_SSE_KEEPALIVE_MS,
+}) {
   return async (request, response, helpers) => {
     const startedAt = process.hrtime.bigint();
     const at = Date.now();
@@ -172,6 +183,7 @@ export function createMessagesHandler({ config, coreClient, policies, auditEmitt
     let firstByteMs = null;
     let upstreamStatus = null;
     let fallbackOutModel = null;
+    let stopKeepalive = null;
     const onFirstByte = (result) => {
       firstByteMs ??= elapsed();
       if (Number.isInteger(result?.status)) upstreamStatus = result.status;
@@ -281,6 +293,9 @@ export function createMessagesHandler({ config, coreClient, policies, auditEmitt
 
       receivedToUpstream = elapsed();
       transformMs = receivedToUpstream - parseStarted;
+      if (outboundBody.stream === true) {
+        stopKeepalive = startSseKeepalive(response, { intervalMs: sseKeepaliveMs, signal });
+      }
       const message = await handleCompatibilityMessage({
         requestStore,
         requestId: airkitRequestId,
@@ -311,6 +326,7 @@ export function createMessagesHandler({ config, coreClient, policies, auditEmitt
         ? "client_aborted"
         : containHandlerFailure(response, error, airkitRequestId);
     } finally {
+      stopKeepalive?.();
       if (outcome === "completed" && signal.aborted) outcome = "client_aborted";
       const terminalEvent = await waitForResponseTerminal(telemetry, outcome);
       if (outcome === "completed" && terminalEvent === "close") outcome = "client_aborted";
