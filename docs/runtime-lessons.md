@@ -217,7 +217,9 @@ Replies that finish inside the first delay, `stream: false` clients, and
 the raw passthrough path are unchanged; the HTTP status of a fast rejection is
 still the real one. Once pings have started, the status line is `200` even when
 the request later fails, so a failed stream must be read from its `error`
-event, not its status code.
+event, not its status code. The `compat_requests` diagnostic rows follow the
+same rule: `client_status` is the `200` the client received, and
+`upstream_status` keeps the upstream's real code.
 
 That `error` event keeps the upstream's Anthropic error type and message
 (`overloaded_error`, `rate_limit_error`, ...). When the upstream body is not an
