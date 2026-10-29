@@ -1006,6 +1006,7 @@ export async function exportOssRelease({ outDir }) {
     "request-errors.mjs",
     "server-history.mjs",
     "server-tools.mjs",
+    "sse-keepalive.mjs",
     "tool-search.mjs",
   ]) {
     await copyFile(join(here, "compat", module), join(outDir, "src", "compat", module));
