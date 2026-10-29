@@ -60,6 +60,56 @@ export function writeSseError(response, error) {
   response.write(`event: error\ndata: ${JSON.stringify(error)}\n\n`);
 }
 
+// Anthropic's error types by HTTP status. Once pings have committed a 200, the
+// error event's type is the only retry signal a client has left: Claude Code
+// retries a stream that fails with `overloaded_error`, and treats `api_error`
+// as final.
+const ERROR_TYPES = new Map([
+  [400, "invalid_request_error"],
+  [401, "authentication_error"],
+  [402, "billing_error"],
+  [403, "permission_error"],
+  [404, "not_found_error"],
+  [413, "request_too_large"],
+  [429, "rate_limit_error"],
+  [500, "api_error"],
+  [504, "timeout_error"],
+  [529, "overloaded_error"],
+]);
+
+// Builds the SSE error event for an upstream rejection that arrives after the
+// headers went out. An Anthropic error envelope in the upstream body is kept
+// as is; anything else gets the type that matches the upstream status. The
+// status line already said 200, so a Retry-After header can only travel in the
+// message text.
+export function upstreamSseError({ status, body = null, retryAfter = null, message, requestId = null }) {
+  const event = parseErrorEnvelope(body) ?? {
+    type: "error",
+    error: {
+      type: ERROR_TYPES.get(status) ?? "api_error",
+      message: message ?? `Upstream provider rejected the request (HTTP ${status})`,
+      ...(requestId === null ? {} : { request_id: requestId }),
+    },
+  };
+  if (typeof event.error.type !== "string") event.error.type = ERROR_TYPES.get(status) ?? "api_error";
+  if (retryAfter !== null && typeof event.error.message === "string") {
+    event.error.message += ` (retry-after: ${retryAfter})`;
+  }
+  return event;
+}
+
+function parseErrorEnvelope(body) {
+  if (body === null || body === undefined) return null;
+  try {
+    const parsed = JSON.parse(Buffer.isBuffer(body) ? body.toString("utf8") : String(body));
+    const valid = parsed?.type === "error" && parsed.error !== null && typeof parsed.error === "object" &&
+      !Array.isArray(parsed.error);
+    return valid ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 function stop(state) {
   if (state.timer !== null) clearInterval(state.timer);
   state.timer = null;

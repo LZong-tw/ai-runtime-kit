@@ -213,6 +213,15 @@ still the real one. Once pings have started, the status line is `200` even when
 the request later fails, so a failed stream must be read from its `error`
 event, not its status code.
 
+That `error` event keeps the upstream's Anthropic error type and message
+(`overloaded_error`, `rate_limit_error`, ...). When the upstream body is not an
+Anthropic error envelope, the type comes from the upstream status (529 is
+`overloaded_error`, 429 is `rate_limit_error`), never a blanket `api_error`:
+Claude Code retries a failed stream only on 529 or `overloaded_error`, and the
+status line can no longer say 529. A `Retry-After` header cannot follow a
+committed `200` either, so its value is appended to the message as
+`(retry-after: N)`; clients that only honour the header will not see it.
+
 ## Verification contract
 
 Before release:
