@@ -214,11 +214,32 @@ test("an upstream failure after the headers went out ends the stream with an SSE
   const frames = sseEvents(response.body);
   assert.equal(frames.at(-1).event, "error");
   assert.equal(frames.at(-1).data.type, "error");
-  assert.equal(frames.at(-1).data.error.type, "api_error");
+  // Claude Code retries a stream only when the error names overloaded_error.
+  assert.equal(frames.at(-1).data.error.type, "overloaded_error");
   assert.equal(frames.at(-1).data.error.request_id, response.headers["x-airkit-request-id"]);
   const pings = pingCount(response);
   await new Promise((resolve) => setTimeout(resolve, KEEPALIVE_MS * 4));
   assert.equal(pingCount(response), pings, "no write after the stream ended");
+});
+
+test("an executor rejection after the pings keeps the upstream error type, message, and retry delay", async () => {
+  const { fixture, pending } = await slowExecutorFixture();
+  const response = createRecordingResponse();
+  const handled = send(fixture, textRequest(true), response);
+
+  await waitFor(() => pingCount(response) >= 1, "the first ping");
+  pending[0].reject(Object.assign(new Error("rate limited"), {
+    status: 429,
+    headers: new Headers({ "retry-after": "7" }),
+    upstreamBody: JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "Slow down" } }),
+  }));
+  await handled;
+
+  const { error } = sseEvents(response.body).at(-1).data;
+  assert.equal(error.type, "rate_limit_error");
+  assert.match(error.message, /^Slow down/);
+  assert.match(error.message, /retry-after: 7/);
+  assert.equal(error.request_id, response.headers["x-airkit-request-id"]);
 });
 
 test("a client disconnect aborts the upstream call and stops the pings", async () => {
@@ -292,4 +313,36 @@ test("a slow fallback rejection after the headers went out becomes the upstream 
   assert.equal(response.ended, true);
   const frames = sseEvents(response.body);
   assert.deepEqual(frames.at(-1), { event: "error", data: upstreamError });
+});
+
+test("a fallback rejection without an Anthropic error body still names its status type", async () => {
+  const { fixture, pending } = await slowFallbackFixture();
+  const response = createRecordingResponse();
+  const handled = send(fixture, codeExecutionRequest(), response);
+
+  await waitFor(() => pingCount(response) >= 1, "the first ping");
+  pending[0].resolve(new Response("<html>busy</html>", { status: 529, headers: { "content-type": "text/html" } }));
+  await handled;
+
+  const { error } = sseEvents(response.body).at(-1).data;
+  assert.equal(error.type, "overloaded_error");
+  assert.equal(error.request_id, response.headers["x-airkit-request-id"]);
+});
+
+test("a rate-limited fallback after the pings carries the retry delay it can no longer send as a header", async () => {
+  const { fixture, pending } = await slowFallbackFixture();
+  const response = createRecordingResponse();
+  const handled = send(fixture, codeExecutionRequest(), response);
+
+  await waitFor(() => pingCount(response) >= 1, "the first ping");
+  const upstreamError = { type: "error", error: { type: "rate_limit_error", message: "Slow down" } };
+  pending[0].resolve(new Response(JSON.stringify(upstreamError), {
+    status: 429,
+    headers: { "content-type": "application/json", "retry-after": "12" },
+  }));
+  await handled;
+
+  const { error } = sseEvents(response.body).at(-1).data;
+  assert.equal(error.type, "rate_limit_error");
+  assert.equal(error.message, "Slow down (retry-after: 12)");
 });

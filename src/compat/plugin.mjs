@@ -7,7 +7,13 @@ import {
   normalizeMessageSystemRoles,
   writeAnthropicMessage,
 } from "./gateway.mjs";
-import { DEFAULT_SSE_KEEPALIVE_MS, sseKeepaliveOwnsStream, startSseKeepalive, writeSseError } from "./sse-keepalive.mjs";
+import {
+  DEFAULT_SSE_KEEPALIVE_MS,
+  sseKeepaliveOwnsStream,
+  startSseKeepalive,
+  upstreamSseError,
+  writeSseError,
+} from "./sse-keepalive.mjs";
 import {
   DEFAULT_ADVISOR_UNSUPPORTED,
   VERIFIED_NATIVE_COMPATIBILITY,
@@ -100,7 +106,14 @@ function containHandlerFailure(response, error, airkitRequestId) {
   if (sseKeepaliveOwnsStream(response)) {
     // Only headers and pings went out, so the failure still fits the stream.
     const status = publicUpstreamStatus(error);
-    writeSseError(response, { type: "error", error: { ...publicFailure(status), request_id: airkitRequestId } });
+    const event = upstreamSseError({
+      status,
+      body: error?.upstreamBody ?? null,
+      retryAfter: validRetryAfter(error?.headers),
+      message: publicFailure(status).message,
+    });
+    event.error.request_id ??= airkitRequestId;
+    writeSseError(response, event);
     response.end();
     return "forwarding_failed";
   }

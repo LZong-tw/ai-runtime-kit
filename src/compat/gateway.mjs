@@ -20,7 +20,7 @@ import { inspectServerToolRequest } from "./server-tools.mjs";
 import { bridgeToolSearch, canApplyToolSearchBudget } from "./tool-search.mjs";
 import { allowlistedUsage } from "../audit/redaction.mjs";
 import { describeStablePrefix } from "./prefix-observability.mjs";
-import { claimSseStream, writeSseError } from "./sse-keepalive.mjs";
+import { claimSseStream, upstreamSseError, writeSseError } from "./sse-keepalive.mjs";
 import { normalizeResponsesThinkingHistory } from "./reasoning-history.mjs";
 import {
   ADVISOR_BLOCKED_TEXT,
@@ -1868,19 +1868,12 @@ async function pipeCoreResponse(result, response, signal, transform = null, erro
 
 async function endWithSseError(result, response, signal, requestId) {
   const raw = result.body === null ? Buffer.alloc(0) : await collectStream(result.body);
-  let error;
-  try {
-    error = JSON.parse(raw.toString("utf8"));
-  } catch {
-    error = null;
-  }
-  if (error?.type !== "error" || !isRecord(error.error)) {
-    error = {
-      type: "error",
-      error: { type: "api_error", message: `Upstream provider rejected the request (HTTP ${result.status})`, request_id: requestId },
-    };
-  }
-  writeSseError(response, error);
+  writeSseError(response, upstreamSseError({
+    status: result.status,
+    body: raw,
+    retryAfter: result.headers?.get?.("retry-after") ?? null,
+    requestId: typeof requestId === "string" ? requestId : null,
+  }));
   await endResponse(response, signal);
 }
 
