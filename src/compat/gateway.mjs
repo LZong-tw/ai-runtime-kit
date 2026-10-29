@@ -20,7 +20,7 @@ import { inspectServerToolRequest } from "./server-tools.mjs";
 import { bridgeToolSearch, canApplyToolSearchBudget } from "./tool-search.mjs";
 import { allowlistedUsage } from "../audit/redaction.mjs";
 import { describeStablePrefix } from "./prefix-observability.mjs";
-import { claimSseStream, upstreamSseError, writeSseError } from "./sse-keepalive.mjs";
+import { claimSseStream, sseKeepaliveOwnsStream, upstreamSseError, writeSseError } from "./sse-keepalive.mjs";
 import { normalizeResponsesThinkingHistory } from "./reasoning-history.mjs";
 import {
   ADVISOR_BLOCKED_TEXT,
@@ -1500,7 +1500,9 @@ async function routeWholeRequestFallback({ body, headers, config, coreClient, re
       path: "compat",
       in_model: body?.model ?? null,
       out_model: compatibilityFallbackSelector(config.fallback),
-      client_status: result.status,
+      // After the keepalive committed 200, the rejection reaches the client as
+      // an SSE error event on that 200; only upstream_status keeps the real code.
+      client_status: response !== undefined && sseKeepaliveOwnsStream(response) ? 200 : result.status,
       upstream_status: result.status,
       outcome: "fallback_rejected",
       error_json: JSON.stringify(serializeError(error, { upstreamBody: raw.toString("utf8") })),

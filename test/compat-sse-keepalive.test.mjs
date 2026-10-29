@@ -422,3 +422,34 @@ test("the messages handler takes its keepalive timing from the compat config", a
   await handled;
   assert.equal(pingCount(response), 1, "the 60 s interval has not elapsed");
 });
+
+test("both audit rows of a post-ping fallback rejection record the 200 the client saw", async () => {
+  const rows = [];
+  const pending = [];
+  const fixture = await createPluginFixture({
+    sseKeepalive: { firstHeadersMs: KEEPALIVE_MS, pingIntervalMs: KEEPALIVE_MS },
+    requestStore: { record(row) { rows.push(structuredClone(row)); }, close() {} },
+    coreClient: createPluginCoreClient({
+      requestFallback(body, headers, signal) {
+        const call = { signal, ...deferred() };
+        pending.push(call);
+        return call.promise;
+      },
+    }),
+  });
+  const response = createRecordingResponse();
+  const handled = send(fixture, codeExecutionRequest(), response);
+
+  await waitFor(() => pingCount(response) >= 1, "the first ping");
+  pending[0].resolve(new Response(JSON.stringify({ type: "error", error: { type: "overloaded_error", message: "Overloaded" } }), {
+    status: 529,
+    headers: { "content-type": "application/json" },
+  }));
+  await handled;
+
+  const requestId = response.headers["x-airkit-request-id"];
+  const mine = rows.filter((row) => row.request_id === requestId);
+  assert.ok(mine.length >= 2, "the fallback rejection and the terminal row");
+  assert.deepEqual(mine.map((row) => row.client_status), mine.map(() => 200));
+  assert.equal(mine.find((row) => row.kind === "fallback_error").upstream_status, 529);
+});
