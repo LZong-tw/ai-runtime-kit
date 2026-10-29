@@ -36,7 +36,7 @@ export async function createPluginFixture(options = {}) {
   const handlers = await createPluginHandlers({
     coreClient,
     requestStore: options.requestStore,
-    sseKeepaliveMs: options.sseKeepaliveMs,
+    sseKeepalive: options.sseKeepalive,
     pluginConfig: { ...structuredClone(COMPLETE_PLUGIN_CONFIG), ...options.pluginConfig },
   });
   const { mcp } = handlers;
@@ -67,13 +67,13 @@ export async function createPluginFixture(options = {}) {
 }
 
 export async function createPluginHandlers({
-  config = structuredClone(PLUGIN_RUNTIME_CONFIG), coreClient, pluginConfig, requestStore = null, sseKeepaliveMs,
+  config = structuredClone(PLUGIN_RUNTIME_CONFIG), coreClient, pluginConfig, requestStore = null, sseKeepalive,
 }) {
   await plugin.setup({ config, coreClient, pluginConfig });
   const { policies } = resolveCompatibilityPolicies(pluginConfig, VERIFIED_NATIVE_COMPATIBILITY);
   return {
     mcp: { handler: createMcpHandler({ config: pluginConfig, coreClient, requestStore }) },
-    messages: { handler: createMessagesHandler({ config: pluginConfig, coreClient, policies, requestStore, sseKeepaliveMs }) },
+    messages: { handler: createMessagesHandler({ config: pluginConfig, coreClient, policies, requestStore, sseKeepalive }) },
   };
 }
 

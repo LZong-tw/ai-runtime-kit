@@ -199,15 +199,21 @@ the full content. A proxy in front of the gateway that waits a bounded time for
 response headers (pxpipe: 300 s) would otherwise cut a long generation with a
 504 while the upstream is still working.
 
-For a `stream: true` client, `src/compat/sse-keepalive.mjs` commits `200` and
-SSE headers after one quiet interval (15 s) and then writes Anthropic `ping`
-events until a writer claims the stream. The final message, or a whole-request
+For a `stream: true` client, `src/compat/sse-keepalive.mjs` commits `200`,
+SSE headers, and a first Anthropic `ping` after a quiet delay (15 s), then
+pings every 60 s until a writer claims the stream. The two timings answer
+different budgets. pxpipe allows 300 s for the first byte and 120 s of silence
+after it, so the first delay is short and the interval stays under 120 s.
+Claude Code stops resetting its idle watchdog after 30 consecutive pings and
+idles out after no less than 300 s, so pings are spaced out: 30 pings at 60 s
+cover 30 minutes of generation, where 15 s pings ran out after 7.5. Both values
+are set by the compat config's `sseKeepalive` (see `docs/profile-schema.md`). The final message, or a whole-request
 fallback's SSE body, follows on the same connection. A failure after the
 headers went out is reported as an SSE `error` event; a fallback rejection
 relays the upstream error body as that event. A client disconnect aborts the
 upstream call and stops the pings.
 
-Replies that finish inside the first interval, `stream: false` clients, and
+Replies that finish inside the first delay, `stream: false` clients, and
 the raw passthrough path are unchanged; the HTTP status of a fast rejection is
 still the real one. Once pings have started, the status line is `200` even when
 the request later fails, so a failed stream must be read from its `error`

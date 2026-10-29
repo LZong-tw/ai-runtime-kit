@@ -8,7 +8,6 @@ import {
   writeAnthropicMessage,
 } from "./gateway.mjs";
 import {
-  DEFAULT_SSE_KEEPALIVE_MS,
   sseKeepaliveOwnsStream,
   startSseKeepalive,
   upstreamSseError,
@@ -174,7 +173,7 @@ function responseHeader(headers, name) {
 
 export function createMessagesHandler({
   config, coreClient, policies, auditEmitter = null, auditContext = null, requestStore = null,
-  sseKeepaliveMs = DEFAULT_SSE_KEEPALIVE_MS,
+  sseKeepalive = null,
 }) {
   return async (request, response, helpers) => {
     const startedAt = process.hrtime.bigint();
@@ -307,7 +306,7 @@ export function createMessagesHandler({
       receivedToUpstream = elapsed();
       transformMs = receivedToUpstream - parseStarted;
       if (outboundBody.stream === true) {
-        stopKeepalive = startSseKeepalive(response, { intervalMs: sseKeepaliveMs, signal });
+        stopKeepalive = startSseKeepalive(response, { ...config?.sseKeepalive, ...sseKeepalive, signal });
       }
       const message = await handleCompatibilityMessage({
         requestStore,

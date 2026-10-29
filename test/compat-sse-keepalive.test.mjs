@@ -8,6 +8,7 @@ import {
   createRecordingResponse,
   message,
 } from "./helpers/compat-fixtures.mjs";
+import * as keepalive from "../src/compat/sse-keepalive.mjs";
 
 // pxpipe gives up on a hop that sends no response headers for 300 s. These tests
 // shrink the keepalive interval to a few milliseconds and hold the upstream call
@@ -79,7 +80,7 @@ function codeExecutionRequest() {
 async function slowExecutorFixture() {
   const pending = [];
   const fixture = await createPluginFixture({
-    sseKeepaliveMs: KEEPALIVE_MS,
+    sseKeepalive: { firstHeadersMs: KEEPALIVE_MS, pingIntervalMs: KEEPALIVE_MS },
     coreClient: createPluginCoreClient({
       requestMessage(body, headers, signal) {
         const call = { body: structuredClone(body), signal, ...deferred() };
@@ -143,7 +144,7 @@ test("a stream:false client still gets one JSON response with no early bytes", a
 
 test("a fast stream:true reply is written exactly as before, without pings", async () => {
   const fixture = await createPluginFixture({
-    sseKeepaliveMs: 60_000,
+    sseKeepalive: { firstHeadersMs: 60_000 },
     coreClient: createPluginCoreClient({
       async requestMessage() { return message({ content: [{ type: "text", text: "quick" }] }); },
     }),
@@ -157,7 +158,7 @@ test("a fast stream:true reply is written exactly as before, without pings", asy
 
 test("a fast upstream rejection keeps its real HTTP status and retry-after", async () => {
   const fixture = await createPluginFixture({
-    sseKeepaliveMs: 60_000,
+    sseKeepalive: { firstHeadersMs: 60_000 },
     coreClient: createPluginCoreClient({
       async requestMessage() {
         throw Object.assign(new Error("rate limited"), { status: 429, headers: { "retry-after": "7" } });
@@ -262,7 +263,7 @@ test("a client disconnect aborts the upstream call and stops the pings", async (
 async function slowFallbackFixture() {
   const pending = [];
   const fixture = await createPluginFixture({
-    sseKeepaliveMs: KEEPALIVE_MS,
+    sseKeepalive: { firstHeadersMs: KEEPALIVE_MS, pingIntervalMs: KEEPALIVE_MS },
     coreClient: createPluginCoreClient({
       requestFallback(body, headers, signal) {
         const call = { body: structuredClone(body), signal, ...deferred() };
@@ -345,4 +346,79 @@ test("a rate-limited fallback after the pings carries the retry delay it can no 
   const { error } = sseEvents(response.body).at(-1).data;
   assert.equal(error.type, "rate_limit_error");
   assert.equal(error.message, "Slow down (retry-after: 12)");
+});
+
+function fakeResponse() {
+  const response = {
+    headersSent: false,
+    statusCode: null,
+    writes: [],
+    writeHead(status) { this.statusCode = status; this.headersSent = true; },
+    write(chunk) { this.writes.push(String(chunk)); },
+  };
+  return response;
+}
+
+// pxpipe allows 300 s for the first byte and 120 s of silence after it; Claude
+// Code stops resetting its idle watchdog after 30 consecutive pings. A short
+// first delay keeps the headers well inside pxpipe's budget, and 60 s between
+// pings stretches Claude Code's 30-ping allowance to 30 minutes.
+test("the keepalive commits headers after 15 s and then pings every 60 s by default", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  assert.equal(keepalive.DEFAULT_SSE_FIRST_HEADERS_MS, 15_000);
+  assert.equal(keepalive.DEFAULT_SSE_PING_INTERVAL_MS, 60_000);
+  const response = fakeResponse();
+  const stop = keepalive.startSseKeepalive(response);
+
+  t.mock.timers.tick(14_999);
+  assert.equal(response.headersSent, false);
+  t.mock.timers.tick(1);
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.writes.length, 1, "the first ping goes out with the headers");
+  t.mock.timers.tick(59_999);
+  assert.equal(response.writes.length, 1);
+  t.mock.timers.tick(1);
+  assert.equal(response.writes.length, 2);
+  t.mock.timers.tick(60_000);
+  assert.equal(response.writes.length, 3);
+  stop();
+  t.mock.timers.tick(120_000);
+  assert.equal(response.writes.length, 3);
+});
+
+test("the first-headers delay and the ping interval are set independently", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const response = fakeResponse();
+  const stop = keepalive.startSseKeepalive(response, { firstHeadersMs: 2_000, pingIntervalMs: 7_000 });
+
+  t.mock.timers.tick(1_999);
+  assert.equal(response.headersSent, false);
+  t.mock.timers.tick(1);
+  assert.equal(response.writes.length, 1);
+  t.mock.timers.tick(6_999);
+  assert.equal(response.writes.length, 1);
+  t.mock.timers.tick(1);
+  assert.equal(response.writes.length, 2);
+  stop();
+});
+
+test("the messages handler takes its keepalive timing from the compat config", async () => {
+  const pending = [];
+  const fixture = await createPluginFixture({
+    pluginConfig: { sseKeepalive: { firstHeadersMs: 1_000, pingIntervalMs: 60_000 } },
+    coreClient: createPluginCoreClient({
+      requestMessage(body, headers, signal) {
+        const call = { signal, ...deferred() };
+        pending.push(call);
+        return call.promise;
+      },
+    }),
+  });
+  const response = createRecordingResponse();
+  const handled = send(fixture, textRequest(true), response);
+
+  await waitFor(() => pingCount(response) >= 1, "the configured first headers", 3_000);
+  pending[0].resolve(message({ content: [{ type: "text", text: "done" }] }));
+  await handled;
+  assert.equal(pingCount(response), 1, "the 60 s interval has not elapsed");
 });

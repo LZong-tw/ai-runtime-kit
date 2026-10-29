@@ -232,6 +232,23 @@ classifier marker only. Supported statuses are 401, 408, 429, 499, 500, 502,
 Transport fallback is disabled for ordinary requests when the entry is scoped
 to `classifier`, and it never changes the caller's primary route unless the
 configured status or timeout condition occurs.
+`sseKeepalive` tunes how a buffered compat reply keeps a `stream: true`
+client's connection alive:
+
+```json
+{ "firstHeadersMs": 15000, "pingIntervalMs": 60000 }
+```
+
+`firstHeadersMs` (default 15,000) is the quiet delay before AirKit commits
+`200` + SSE headers and the first `ping`; `pingIntervalMs` (default 60,000) is
+the gap between later pings. Each accepts an integer from 1,000 through
+100,000 ms. The ceiling keeps both under pxpipe's 120 s idle budget, and the
+first delay far under its 300 s headers budget. Fewer pings are better for
+Claude Code, which stops resetting its idle watchdog after 30 consecutive
+pings: at 60 s that allowance covers 30 minutes of generation, at 15 s only
+7.5 minutes. Its idle timeout is at least 300 s, so a 60 s gap never trips it.
+See `docs/runtime-lessons.md` for the rest of the keepalive contract.
+
 Removed Advisor bridge fields such as `advisor.model` and
 `advisor.fallbackModel` are rejected with a migration error; their replacement
 is either the shared `fallback` section or `advisor.fallback`.
