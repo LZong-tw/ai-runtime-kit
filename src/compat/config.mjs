@@ -1,5 +1,5 @@
 import { assertAnthropicFamilyModel } from "./protocol.mjs";
-import { ADVISOR_CONFIG_KEYS, DEFAULT_ADVISOR_GATE } from "./advisor-policy.mjs";
+import { ADVISOR_CONFIG_KEYS, DEFAULT_ADVISOR_GATE, effectiveModel } from "./advisor-policy.mjs";
 
 export const VERIFIED_NATIVE_COMPATIBILITY = Object.freeze({
   webFetch: false,
@@ -17,6 +17,7 @@ const FAMILY_MODES = Object.freeze({
 
 const CONFIG_KEYS = new Set([
   "fallback",
+  "followMainModel",
   "launchModel",
   "modeEffort",
   "modeRoutes",
@@ -46,6 +47,10 @@ const ADVISOR_UNSUPPORTED = Object.freeze(["strip", "passthrough"]);
 export const DEFAULT_ADVISOR_UNSUPPORTED = "strip";
 const FAMILY_FALLBACK_KEYS = new Set(["provider", "model"]);
 const ROUTE_KEYS = new Set(["default", "background", "opus", "sonnet"]);
+const FOLLOW_MAIN_MODEL_KEYS = new Set(["enabled", "lanes", "roles"]);
+// Background (haiku) traffic never follows: it is the cheap lane by design.
+export const FOLLOW_MAIN_MODEL_LANES = Object.freeze(["sonnet", "opus"]);
+export const FOLLOW_MAIN_MODEL_ROLES = Object.freeze(["subagent", "workflow"]);
 const ROUTE_SELECTOR_PATTERN = /^[a-z0-9][a-z0-9._-]*\/\S+$/i;
 const SSE_KEEPALIVE_KEYS = new Set(["firstHeadersMs", "pingIntervalMs"]);
 const TRANSPORT_FALLBACK_KEYS = new Set(["from", "to", "statuses", "scope", "timeoutMs"]);
@@ -135,6 +140,8 @@ export function validateCompatibilityConfig(config) {
     }
   }
 
+  if (config.followMainModel !== undefined) validateFollowMainModel(config.followMainModel);
+
   if (config.routes !== undefined) validateRouteTable(config.routes, "routes");
 
   if (config.modelPrompts !== undefined) validateModelPrompts(config.modelPrompts);
@@ -218,7 +225,8 @@ export function resolveModeEffort(config, mode) {
   return typeof effort === "string" ? effort.trim().toLowerCase() : null;
 }
 
-export function resolveToolSearchMaxTools(config, model) {
+export function resolveToolSearchMaxTools(config, selector) {
+  const model = effectiveModel(selector);
   const limits = config?.toolSearch?.maxToolsByModel;
   if (!isRecord(limits) || typeof model !== "string") return null;
   const bareModel = model.includes("/") ? model.slice(model.lastIndexOf("/") + 1) : model;
@@ -541,6 +549,26 @@ function assertRecord(value, field, required = false) {
   }
 }
 
+// Lanes and roles are required once enabled so the profile states which
+// subagent traffic may leave the mode's lanes, instead of inheriting a default.
+function validateFollowMainModel(value) {
+  assertRecord(value, "followMainModel");
+  rejectUnknownKeys(value, FOLLOW_MAIN_MODEL_KEYS, "followMainModel");
+  if (typeof value.enabled !== "boolean") {
+    throw new Error("followMainModel.enabled must be a boolean");
+  }
+  for (const [key, allowed] of [["lanes", FOLLOW_MAIN_MODEL_LANES], ["roles", FOLLOW_MAIN_MODEL_ROLES]]) {
+    const list = value[key];
+    if (list === undefined && value.enabled === false) continue;
+    if (
+      !Array.isArray(list) || list.length === 0 || new Set(list).size !== list.length ||
+      list.some((entry) => !allowed.includes(entry))
+    ) {
+      throw new Error(`followMainModel.${key} must be a non-empty list of: ${allowed.join(", ")}`);
+    }
+  }
+}
+
 function rejectUnknownKeys(value, allowed, field) {
   for (const key of Object.keys(value)) {
     if (!allowed.has(key)) throw new Error(`unknown ${field} key: ${key}`);
@@ -580,7 +608,8 @@ function validateModelPrompts(rules) {
 // Matches against the provider-local model id (after "provider/" or "provider,"),
 // so one rule covers the same model on OnePortal and Web LiteLLM. First match
 // wins; Claude ids and permission-classifier calls are never touched.
-export function resolveModelPrompt(config, model, body = null) {
+export function resolveModelPrompt(config, selector, body = null) {
+  const model = effectiveModel(selector);
   if (!Array.isArray(config?.modelPrompts) || typeof model !== "string") return null;
   if (isAutoModeClassifierRequest(body)) return null;
   const bareModel = model.slice(Math.max(model.lastIndexOf("/"), model.lastIndexOf(",")) + 1);

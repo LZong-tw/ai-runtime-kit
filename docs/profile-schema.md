@@ -153,6 +153,42 @@ Claude Code forwards an id it does not recognize verbatim; the only cost is
 that it assumes a 32000 max output, which
 `launch.context.maxOutputTokens` restores.
 
+Subagents ask for a Claude family (`model: "sonnet"` arrives as a bare
+`claude-sonnet-*` id), so by default they land on the launch mode's Sonnet or
+Opus lane even after the user has switched the main thread with `/model`. The
+compatibility config's opt-in `followMainModel` changes that:
+
+```json
+"followMainModel": { "enabled": true, "lanes": ["sonnet"], "roles": ["subagent"] }
+```
+
+The adapter remembers the main thread's latest explicit pick per Claude Code
+session, and a subagent request from the same session whose family lane is in
+`lanes` and whose request class is in `roles` is sent with that exact model
+string, so it routes exactly as the main thread does. `lanes` accepts `sonnet`
+and `opus`; `roles` accepts `subagent` and `workflow`. Both are required once
+enabled. Haiku background traffic, compaction, auxiliary and side-reply
+requests, and the auto-mode classifier never follow.
+
+Only a pick that is neither the launch id nor a Claude family id counts: a
+`/model` choice of Sonnet or Opus already has its own lane, so it clears the
+stored pick instead of being copied onto subagents. Picks are held in memory
+per launcher process (at most 256 sessions, 24 hours each) and are not shared
+between sessions.
+
+Telling main from subagent traffic needs Claude Code's gateway hint headers.
+When `followMainModel.enabled` is true, the launcher sets
+`CLAUDE_CODE_GATEWAY_HINT_HEADERS=1` for every launch that runs the adapter
+(not for plain launches); the gateway's header allowlist keeps those headers
+from going upstream. A request without a recognized
+`x-claude-code-request-class` or without a session id
+(`x-claude-code-session-id`, else the body's `metadata.user_id`) neither
+records nor follows a pick, so the mode's lanes apply as before.
+
+A followed subagent keeps the context window, output limit and auto-compact
+threshold Claude Code chose for its launch, not values matched to the followed
+model.
+
 This is what lets bare Claude model names — plain `claude` launched outside a
 named profile, including its constant claude-haiku background requests —
 resolve at the gateway instead of failing model resolution with
