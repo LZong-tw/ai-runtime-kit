@@ -190,6 +190,29 @@ explain whether a prior-message prefix looked reusable and whether usage later
 reported a hit or miss; they never become outbound provider fields and never
 rewrite the Claude request body.
 
+## Compat replies and proxy header timeouts
+
+The compatibility path calls its upstream with `stream: false` and buffers the
+whole reply: the executor loop may make several calls (tool search, Advisor)
+before it knows the final message, and the forged-text guards and audit need
+the full content. A proxy in front of the gateway that waits a bounded time for
+response headers (pxpipe: 300 s) would otherwise cut a long generation with a
+504 while the upstream is still working.
+
+For a `stream: true` client, `src/compat/sse-keepalive.mjs` commits `200` and
+SSE headers after one quiet interval (15 s) and then writes Anthropic `ping`
+events until a writer claims the stream. The final message, or a whole-request
+fallback's SSE body, follows on the same connection. A failure after the
+headers went out is reported as an SSE `error` event; a fallback rejection
+relays the upstream error body as that event. A client disconnect aborts the
+upstream call and stops the pings.
+
+Replies that finish inside the first interval, `stream: false` clients, and
+the raw passthrough path are unchanged; the HTTP status of a fast rejection is
+still the real one. Once pings have started, the status line is `200` even when
+the request later fails, so a failed stream must be read from its `error`
+event, not its status code.
+
 ## Verification contract
 
 Before release:
