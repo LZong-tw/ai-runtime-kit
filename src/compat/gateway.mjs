@@ -21,6 +21,7 @@ import { inspectServerToolRequest } from "./server-tools.mjs";
 import { bridgeToolSearch, canApplyToolSearchBudget } from "./tool-search.mjs";
 import { allowlistedUsage } from "../audit/redaction.mjs";
 import { describeStablePrefix } from "./prefix-observability.mjs";
+import { claimSseStream, sseKeepaliveOwnsStream, upstreamSseError, writeSseError } from "./sse-keepalive.mjs";
 import { normalizeResponsesThinkingHistory } from "./reasoning-history.mjs";
 import {
   ADVISOR_BLOCKED_TEXT,
@@ -502,11 +503,13 @@ export function writeAnthropicMessage(response, message, stream) {
     return;
   }
 
-  response.writeHead(200, {
-    "cache-control": "no-cache",
-    connection: "keep-alive",
-    "content-type": "text/event-stream",
-  });
+  if (!claimSseStream(response)) {
+    response.writeHead(200, {
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+      "content-type": "text/event-stream",
+    });
+  }
   writeSse(response, "message_start", {
     type: "message_start",
     message: {
@@ -1492,7 +1495,9 @@ async function routeWholeRequestFallback({ body, headers, config, coreClient, re
       path: "compat",
       in_model: body?.model ?? null,
       out_model: compatibilityFallbackSelector(config.fallback),
-      client_status: result.status,
+      // After the keepalive committed 200, the rejection reaches the client as
+      // an SSE error event on that 200; only upstream_status keeps the real code.
+      client_status: response !== undefined && sseKeepaliveOwnsStream(response) ? 200 : result.status,
       upstream_status: result.status,
       outcome: "fallback_rejected",
       error_json: JSON.stringify(serializeError(error, { upstreamBody: raw.toString("utf8") })),
@@ -1809,10 +1814,16 @@ function rawResponseError(result) {
 }
 
 async function pipeCoreResponse(result, response, signal, transform = null, errorEvidence = null) {
-  const headers = Object.fromEntries(result.headers);
   const requestId = response.getHeader?.("x-airkit-request-id");
-  if (typeof requestId === "string") headers["x-airkit-request-id"] = requestId;
-  response.writeHead(result.status, headers);
+  if (claimSseStream(response)) {
+    // The client already holds 200 + SSE headers, so a rejection can only be
+    // told through the stream itself.
+    if (result.status >= 400) return endWithSseError(result, response, signal, requestId);
+  } else {
+    const headers = Object.fromEntries(result.headers);
+    if (typeof requestId === "string") headers["x-airkit-request-id"] = requestId;
+    response.writeHead(result.status, headers);
+  }
   if (result.body === null) {
     await endResponse(response, signal);
     return;
@@ -1849,6 +1860,17 @@ async function pipeCoreResponse(result, response, signal, transform = null, erro
     }
     reader.releaseLock();
   }
+}
+
+async function endWithSseError(result, response, signal, requestId) {
+  const raw = result.body === null ? Buffer.alloc(0) : await collectStream(result.body);
+  writeSseError(response, upstreamSseError({
+    status: result.status,
+    body: raw,
+    retryAfter: result.headers?.get?.("retry-after") ?? null,
+    requestId: typeof requestId === "string" ? requestId : null,
+  }));
+  await endResponse(response, signal);
 }
 
 async function endResponse(response, signal) {
