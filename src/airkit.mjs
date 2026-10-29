@@ -1001,6 +1001,7 @@ export async function exportOssRelease({ outDir }) {
     "fallback.mjs",
     "gateway.mjs",
     "middleware.mjs",
+    "model-follow.mjs",
     "prefix-observability.mjs",
     "plugin.mjs",
     "protocol.mjs",
@@ -1359,6 +1360,13 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
         // profile env; the direct spawn must carry it itself or gateway
         // models vanish from /model.
         CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
+        // Subagents can follow the main thread's /model pick only if the
+        // middleware can tell the two apart: this makes Claude Code send
+        // x-claude-code-request-class, which the gateway's header allowlist
+        // keeps from going upstream. Plain launches run no middleware.
+        ...(!plainClaude && configuredCompatibility(ccrConfig)?.followMainModel?.enabled === true
+          ? { CLAUDE_CODE_GATEWAY_HINT_HEADERS: "1" }
+          : {}),
       },
       // When the profile pins a gateway address the spawn keeps it; otherwise
       // the live CCR config supplies the base URLs at spawn time.

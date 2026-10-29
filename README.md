@@ -189,6 +189,12 @@ the retryable HTTP statuses, and optionally `scope: "classifier"` plus a
 `timeoutMs`. A classifier-scoped entry applies only to AirKit's auto-mode
 security classifier; ordinary model traffic remains on its selected route.
 
+Subagents normally use the launch mode's Sonnet and Opus lanes even after a
+`/model` switch on the main thread. Setting `followMainModel` in the
+compatibility config makes them follow the main thread's current pick instead;
+see [`docs/profile-schema.md`](docs/profile-schema.md) for the lanes, roles and
+limits.
+
 When `advisor.mode` is `bridge`, AirKit sends a bounded plain-text transcript
 to the configured Advisor family fallback and wraps the returned text in the
 official `advisor_tool_result` shape. This is a compatibility simulation and
