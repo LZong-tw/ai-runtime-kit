@@ -20,18 +20,24 @@ export function isClaudeExecutor(model) {
   return /claude/i.test(model.slice(Math.max(model.indexOf(","), model.indexOf("/")) + 1));
 }
 
-export function resolveAdvisorRoute(requested, { advisorModels, familyFallbacks, fallback }) {
-  if (typeof requested === "string") {
-    const normalized = requested.toLowerCase();
-    const aliases = [normalized];
-    if (normalized.startsWith("claude-")) {
-      aliases.push(...CLAUDE_FAMILIES.filter((family) => normalized.includes(family)));
-    }
-    for (const alias of aliases) {
-      if (Object.hasOwn(advisorModels, alias)) return advisorModels[alias];
-    }
+function mappedAdvisorRoute(requested, advisorModels) {
+  if (typeof requested !== "string") return null;
+  const normalized = requested.toLowerCase();
+  const aliases = [normalized];
+  if (normalized.startsWith("claude-")) {
+    aliases.push(...CLAUDE_FAMILIES.filter((family) => normalized.includes(family)));
   }
-  return familyFallbacks.advisor ?? fallback;
+  const alias = aliases.find((candidate) => Object.hasOwn(advisorModels, candidate));
+  return alias === undefined ? null : advisorModels[alias];
+}
+
+export function resolveAdvisorRoute(requested, { advisorModels, familyFallbacks, fallback }) {
+  return mappedAdvisorRoute(requested, advisorModels) ?? familyFallbacks.advisor ?? fallback;
+}
+
+// A requested Advisor model with no advisor.models entry runs on the fallback route.
+export function isAdvisorRouteSubstituted(requested, { advisorModels }) {
+  return typeof requested === "string" && mappedAdvisorRoute(requested, advisorModels) === null;
 }
 
 export function isAdvisorAllowed({ model, messages = [], gate = {} }) {

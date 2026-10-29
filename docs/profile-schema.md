@@ -306,9 +306,16 @@ included in the non-Claude bridge tool description, not wired to `modelPrompts`:
 > Do not call Advisor at the start or end of routine work, nor once per user turn. Call it only after two different approaches to the same problem failed, or before an irreversible architectural decision.
 
 Blocked calls retain the tool and return a normal Advisor result explaining
-that it is reserved for genuinely stuck work. Each call emits one
-`[airkit-advisor]` stderr JSON line with requested model, selected provider/model,
-and outcome (`called`, `blocked`, `max_uses`, or `unavailable`), never content.
+that it is reserved for genuinely stuck work. Each call appends one
+`[airkit-advisor]` JSON line to `~/.claude-code-router/logs/airkit-compat.log`
+(override with `AIRKIT_COMPAT_LOG`) with requested model, selected
+provider/model, `substituted` (true when a requested model had no
+`advisor.models` entry and ran on the fallback route), and outcome (`called`,
+`blocked`, `max_uses`, or `unavailable`), never content. The gateway also runs
+inside the `airclaude` launcher, so compatibility diagnostics
+(`[airkit-advisor]`, `[airkit-advisor-forgery]`, `[airkit-fallback]`,
+`[airkit-route]`, `[airkit-request]`) never go to stderr, where they would land
+in Claude Code's input box.
 
 ## Launch fields
 

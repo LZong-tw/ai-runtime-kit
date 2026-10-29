@@ -10,6 +10,7 @@ import {
   COMPLETE_PLUGIN_CONFIG, createCoreFixture, createPluginCoreClient, createPluginFixture,
   createPluginRequest, createRecordingResponse,
 } from "./helpers/compat-fixtures.mjs";
+import { compatLog, formatCompatLine } from "../src/compat/diagnostics.mjs";
 
 const DAY = 86_400_000;
 const ordinaryBody = { model: "executor", messages: [] };
@@ -188,7 +189,7 @@ test("fallback rejection stores body/families and terminal timings without chang
   const { store, rows } = database(t);
   const original = Buffer.from(' {"type":"error","error":{"message":"tool unavailable"}}\n');
   const logs = [];
-  t.mock.method(process.stderr, "write", (line) => { logs.push(String(line)); return true; });
+  t.mock.method(compatLog, "write", (tag, record) => { logs.push(formatCompatLine(tag, record)); });
   const response = await invoke({
     store,
     body: { ...ordinaryBody, tools: [{ type: "code_execution_20260521", name: "code_execution" }] },
