@@ -7432,6 +7432,46 @@ test("airomp launches OMP through the local adapter with Anthropic credentials, 
   assert.equal(calls[1].spawnOptions.env.ANTHROPIC_OAUTH_TOKEN, undefined);
 });
 
+test("airomp scopes the adapter api-key override to the anthropic provider", async () => {
+  // omp applies --api-key to whichever provider the session selects, and that
+  // runtime key outranks the provider's own models.yml apiKey. Passing the
+  // adapter token alongside a non-anthropic --provider would send it to that
+  // provider's gateway instead of its configured key.
+  const launch = async (argv) => {
+    let spawned;
+    await runExternalClientCli("omp", ["--profile", "launch-example", ...argv], {
+      catalog: { profiles: [{ name: "launch-example" }] },
+      env: { PATH: "/usr/bin" },
+      createPiAuditRuntime: async () => null,
+      prepareExternalClient: async () => ({
+        externalClient: { origin: "http://127.0.0.1:4312/v1", token: "local-token", close: async () => {} },
+      }),
+      spawnCommand: (_command, args) => {
+        spawned = args;
+        return { status: 0 };
+      },
+    });
+    return spawned;
+  };
+
+  assert.deepEqual(
+    await launch(["--provider", "airkit", "--model", "airkit-provider-web-litellm/gpt-5.6-sol"]),
+    ["--provider", "airkit", "--model", "airkit-provider-web-litellm/gpt-5.6-sol"],
+  );
+  assert.deepEqual(
+    await launch(["--provider=airkit", "--model", "x/y"]),
+    ["--provider=airkit", "--model", "x/y"],
+  );
+  assert.deepEqual(
+    await launch(["--provider", "anthropic", "--model", "claude-opus-5"]),
+    ["--api-key", "local-token", "--provider", "anthropic", "--model", "claude-opus-5"],
+  );
+  assert.deepEqual(
+    await launch(["--provider=Anthropic"]),
+    ["--model", "claude-sonnet-5", "--api-key", "local-token", "--provider=Anthropic"],
+  );
+});
+
 
 test("airoc launches OpenCode in fullscreen TUI mode without overriding explicit client flags", async () => {
   const calls = [];
