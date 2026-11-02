@@ -1846,7 +1846,10 @@ export async function runExternalClientCli(client, argv = process.argv.slice(2),
     }
     if (!hasExternalOption(parsed.userArgs, "--provider")) clientArgs.push("--provider", "anthropic");
     if (!hasExternalOption(parsed.userArgs, "--model")) clientArgs.push("--model", "claude-sonnet-5");
-    if (client === "omp" && !hasExternalOption(parsed.userArgs, "--api-key")) {
+    // omp binds --api-key to the session's provider and lets it outrank that
+    // provider's models.yml key, so only hand the adapter token to anthropic.
+    const provider = externalOptionValue(parsed.userArgs, "--provider") ?? "anthropic";
+    if (client === "omp" && provider.toLowerCase() === "anthropic" && !hasExternalOption(parsed.userArgs, "--api-key")) {
       clientArgs.push("--api-key", adapter.token);
     }
     clientArgs.push(...parsed.userArgs);
@@ -2794,6 +2797,14 @@ function parseExternalClientArgs(argv) {
 
 function hasExternalOption(args, name) {
   return args.some((arg) => arg === name || arg.startsWith(`${name}=`));
+}
+
+function externalOptionValue(args, name) {
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === name) return args[index + 1];
+    if (args[index].startsWith(`${name}=`)) return args[index].slice(name.length + 1);
+  }
+  return undefined;
 }
 
 function hasExternalOptionValue(args, names, expected) {
