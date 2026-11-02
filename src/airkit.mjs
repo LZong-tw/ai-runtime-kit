@@ -28,6 +28,7 @@ import {
   collapseSettingsArgs,
   estimateFixedContext,
   laneWindow,
+  validateAutoCompactRatio,
   resolveAutoCompactPolicy,
   thrashWarnings,
   userSetsAutoCompact,
@@ -1280,6 +1281,7 @@ export function buildLaunchPlan(catalog, profileName, options = {}) {
         return catalogModelEntry(catalog, provider, model);
       },
       label: `profile "${profile.name}" mode "${mode}"`,
+      defaultRatio: profile.launch?.context?.autoCompactRatio ?? null,
     });
   // Checked only once the policy is active, so an inactive launch never parses
   // --settings it did not parse before.
@@ -1963,6 +1965,7 @@ function validateCatalog(catalog) {
 }
 
 function validateLaunch(profile) {
+  validateAutoCompactRatio(`profile "${profile.name}" launch.context`, profile.launch?.context?.autoCompactRatio);
   const pxpipe = profile.launch?.pxpipe;
   if (pxpipe !== undefined && typeof pxpipe !== "boolean") {
     throw new Error(`profile "${profile.name}" launch.pxpipe must be a boolean`);
@@ -1973,7 +1976,7 @@ function validateLaunch(profile) {
       throw new Error(`profile "${profile.name}" launch.context must be an object`);
     }
 
-    const supportedFields = new Set(["autoCompactPercentage", "autoCompactWindow", "maxOutputTokens"]);
+    const supportedFields = new Set(["autoCompactPercentage", "autoCompactRatio", "autoCompactWindow", "maxOutputTokens"]);
     for (const field of Object.keys(context)) {
       if (!supportedFields.has(field)) {
         throw new Error(`profile "${profile.name}" launch.context contains unsupported field: ${field}`);
