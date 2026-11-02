@@ -53,22 +53,41 @@ function ratioWindow(ratio, contextWindow, maxOutput) {
   return Math.floor((contextWindow - reserve) * ratio) + reserve + TRIGGER_BUFFER;
 }
 
-export function laneWindow(entry, label) {
+// Every lane compacts at its model's real context window times a ratio: the
+// entry's own `autoCompact.ratio` when set, otherwise the profile default.
+// A fixed `autoCompact.window` still wins for callers that pin one.
+export function laneWindow(entry, label, defaultRatio = null) {
   const policy = entry?.autoCompact;
-  if (policy === undefined || policy.window === "auto") return null;
-  const contextWindow = Number.isInteger(entry.contextWindow) && entry.contextWindow > 0 ? entry.contextWindow : null;
+  if (policy?.window === "auto") return null;
+  const contextWindow = Number.isInteger(entry?.contextWindow) && entry.contextWindow > 0 ? entry.contextWindow : null;
+  const ratio = policy?.ratio ?? (policy?.window === undefined ? defaultRatio : null);
   let window;
-  if (policy.ratio !== undefined) {
-    if (contextWindow === null) throw new Error(`${label}.autoCompact.ratio needs a contextWindow`);
+  if (ratio !== null && ratio !== undefined) {
+    if (contextWindow === null) {
+      if (policy?.ratio !== undefined) throw new Error(`${label}.autoCompact.ratio needs a contextWindow`);
+      return null;
+    }
     const maxOutput = Number.isInteger(entry.maxOutputTokens) ? entry.maxOutputTokens : DEFAULT_MAX_OUTPUT;
-    window = ratioWindow(policy.ratio, contextWindow, maxOutput);
-  } else {
+    window = ratioWindow(ratio, contextWindow, maxOutput);
+    // A default ratio on a small window lifts to the floor rather than failing
+    // the whole launch; an explicit per-model ratio below it is still an error.
+    if (policy?.ratio === undefined) window = Math.max(window, Math.min(MIN_WINDOW, contextWindow));
+  } else if (policy?.window !== undefined) {
     window = policy.window;
+  } else {
+    return null;
   }
-  if (window < MIN_WINDOW) {
+  if (window < MIN_WINDOW && window < (contextWindow ?? Infinity)) {
     throw new Error(`${label}.autoCompact resolves to ${window}, below the ${MIN_WINDOW} floor`);
   }
   return Math.min(window, MAX_WINDOW, contextWindow ?? MAX_WINDOW);
+}
+
+export function validateAutoCompactRatio(label, value) {
+  if (value === undefined) return;
+  if (typeof value !== "number" || !(value > 0 && value <= 1)) {
+    throw new Error(`${label}.autoCompactRatio must be a number in (0, 1]`);
+  }
 }
 
 function versionAtLeast(version, minimum) {
@@ -87,7 +106,7 @@ function clientKey(model) {
 
 // lookupEntry(route) returns the catalog model entry serving a "provider,model"
 // route, or null.
-export function resolveAutoCompactPolicy({ enabled, binaryEligible, claudeCodeVersion, router, launchModel, lookupEntry, label }) {
+export function resolveAutoCompactPolicy({ enabled, binaryEligible, claudeCodeVersion, router, launchModel, lookupEntry, label, defaultRatio = null }) {
   if (!enabled) return { status: "inactive", reason: "flag off" };
   if (!binaryEligible) return { status: "inactive", reason: "launch binary is not claude" };
   if (!claudeCodeVersion) return { status: "inactive", reason: "Claude Code version unknown" };
@@ -99,7 +118,7 @@ export function resolveAutoCompactPolicy({ enabled, binaryEligible, claudeCodeVe
   for (const lane of ["default", "opus", "sonnet", "background"]) {
     const route = router?.[lane] ?? router?.default;
     if (typeof route !== "string") continue;
-    lanes[lane] = { route, window: laneWindow(lookupEntry(route), `${label} ${lane} lane (${route})`) };
+    lanes[lane] = { route, window: laneWindow(lookupEntry(route), `${label} ${lane} lane (${route})`, defaultRatio) };
   }
 
   const byModel = {};
