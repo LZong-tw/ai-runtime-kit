@@ -449,3 +449,15 @@ test("dry-run of a mode without the flag prints neither line", async () => {
   assert.doesNotMatch(output, /MCP: strict/);
   assert.equal(calls.filter((call) => call === "claude --version").length, 1);
 });
+
+test("a profile default ratio sizes every lane from its real context window", () => {
+  assert.equal(laneWindow({ contextWindow: 1_000_000 }, "m", 0.25), 278_000);
+  assert.equal(laneWindow({ contextWindow: 500_000 }, "m", 0.25), 153_000);
+  // Small windows lift to the floor instead of failing the launch.
+  assert.equal(laneWindow({ contextWindow: 200_000 }, "m", 0.25), 100_000);
+  // A model's own ratio wins over the default.
+  assert.equal(laneWindow({ contextWindow: 200_000, autoCompact: { ratio: 0.85 } }, "m", 0.25), 186_000);
+  // No real window means no per-model value, not a guess.
+  assert.equal(laneWindow({}, "m", 0.25), null);
+  assert.equal(laneWindow({ contextWindow: 1_000_000 }, "m"), null);
+});

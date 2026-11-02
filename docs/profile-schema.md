@@ -415,6 +415,7 @@ in Claude Code's input box.
   strips or adds the `[1m]` marker at launch to match the selected default
   route's catalog context, while the compatibility adapter always uses the
   bare `airkit-mode` id.
+- `context.autoCompactRatio`: optional number in `(0, 1]`. With `perModelAutoCompact`, each lane compacts at its model's real `contextWindow` times this ratio (a model's own `autoCompact.ratio` wins). Windows that land under 100K lift to 100K; models with no catalog `contextWindow` get no per-model value.
 - `context.maxOutputTokens`: optional integer from `1024` through `512000`
   passed as `CLAUDE_CODE_MAX_OUTPUT_TOKENS` to the managed AirClaude child.
   Claude Code derives max output from the launch model id and falls back to
