@@ -519,17 +519,50 @@ test("Stop only hints when an unread agent's result is empty", async () => {
   }
 });
 
-test("SubagentStop never blocks a Claude subagent", async () => {
+// Decision 4: the STATUS check is the one rule that is not model-gated.
+test("SubagentStop blocks a Claude subagent whose prompt asked for STATUS", async () => {
   const f = await fixture();
   try {
     const env = f.env({ AIRCLAUDE_EDUCATION_SUBAGENT_REPORT: "enforce" });
     await writeAgent(f.transcript, "k1", "Look into it.\nFinish with STATUS: done|blocked|partial", "claude-sonnet-5");
     const stop = { ...f.base, hook_event_name: "SubagentStop", agent_id: "k1", agent_type: "general-purpose", stop_hook_active: false, last_assistant_message: "I looked." };
-    assert.equal(await processEducationHook(stop, env), null);
+    const first = await processEducationHook(stop, env);
+    assert.equal(first.decision, "block");
+    assert.equal(await processEducationHook(stop, env), null, "at most one block per agent");
     const [record] = (await f.logs()).filter((entry) => entry.event === "SubagentStop");
     assert.equal(record.rule, "status-missing");
-    assert.equal(record.decision, "block");
-    assert.equal(record.emitted, false);
+    assert.equal(record.emitted, true);
+    assert.equal(record.model, "claude-sonnet-5");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("SubagentStop for a Claude subagent stays log-only without a STATUS prompt or under shadow", async () => {
+  const f = await fixture("claude-sonnet-5");
+  try {
+    await writeAgent(f.transcript, "k2", "Just look into it.", "claude-sonnet-5");
+    await writeAgent(f.transcript, "k3", "Look into it.\nFinish with STATUS: done|blocked|partial", "claude-sonnet-5");
+    const stop = { ...f.base, hook_event_name: "SubagentStop", agent_type: "general-purpose", stop_hook_active: false, last_assistant_message: "I looked." };
+    assert.equal(await processEducationHook({ ...stop, agent_id: "k2" }, f.env({ AIRCLAUDE_EDUCATION_SUBAGENT_REPORT: "enforce" })), null);
+    assert.equal(await processEducationHook({ ...stop, agent_id: "k3" }, f.env()), null);
+    const records = (await f.logs()).filter((entry) => entry.event === "SubagentStop");
+    assert.deepEqual(records.map((entry) => [entry.rule, entry.decision, entry.emitted]), [
+      ["status-log", "log-only", false],
+      ["status-missing", "block", false],
+    ]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("SubagentStop blocks when both the parent and the subagent are Claude", async () => {
+  const f = await fixture("claude-opus-5");
+  try {
+    const env = f.env({ AIRCLAUDE_EDUCATION_SUBAGENT_REPORT: "enforce" });
+    await writeAgent(f.transcript, "k4", "Look into it.\nFinish with STATUS: done|blocked|partial", "claude-sonnet-5");
+    const stop = { ...f.base, hook_event_name: "SubagentStop", agent_id: "k4", agent_type: "general-purpose", stop_hook_active: false, last_assistant_message: "I looked." };
+    assert.equal((await processEducationHook(stop, env)).decision, "block");
   } finally {
     await f.cleanup();
   }
