@@ -126,22 +126,112 @@ test("fixed format means an output instruction, not a mention of JSON, schema or
   assert.equal(subagentPromptContract("Return results in JSON.\nkeys: a, b\nnotes\nFinish with STATUS: done"), "fixed-format");
 });
 
+// Rule set 2 lost these (rule set 1 caught them through a bare \bjson\b); a
+// JSON-only subagent misread as "status" would be blocked into adding STATUS.
+test("fixed format covers zh-TW and 'must be JSON' output instructions", () => {
+  for (const prompt of [
+    "請以 JSON 格式回傳結果\n最後寫 STATUS: done",
+    "回傳 JSON，不要其他文字\nSTATUS: done",
+    "用 JSON 回覆",
+    "輸出成 JSON 格式",
+    "Your answer must be valid JSON only.\nFinish with STATUS: done",
+    "Respond in JSON.",
+    "Output as JSON",
+  ]) {
+    assert.equal(subagentPromptContract(prompt), "fixed-format", prompt);
+  }
+});
+
+test("fixed format needs the format in the same clause as the output verb", () => {
+  for (const prompt of [
+    "Return to the main branch and check the schema",
+    "Read their output ... the output is JSON-ish",
+    "Output goes to report.json. Finish with STATUS: done",
+    "Return the parsed package.json fields",
+    "回傳 package.json 的內容",
+    "Reply to the reviewer about the JSON parser",
+  ]) {
+    assert.notEqual(subagentPromptContract(prompt), "fixed-format", prompt);
+  }
+});
+
 test("bash-enoent needs a named missing path and skips sandbox, permission and missing-command errors", () => {
   const bash = (error) => errorHint({ tool_name: "Bash", tool_input: { command: error }, error }).rule;
-  for (const error of ["ls: foo: No such file or directory", "rg: x: No such file or directory (os error 2)", "npm error code ENOENT\nnpm error path /repo/package.json", "Error: ENOENT: no such file or directory, open '/tmp/foo'"]) {
+  for (const error of [
+    "ls: foo: No such file or directory",
+    "rg: x: No such file or directory (os error 2)",
+    "npm error code ENOENT\nnpm error path /repo/package.json",
+    "Error: ENOENT: no such file or directory, open '/tmp/foo'",
+    // zsh reports a failed cd in lower case; rule set 2 never matched it.
+    "Exit code 1\ncd: no such file or directory: /nope",
+    "Exit code 1\nbash: cd: /nope: No such file or directory",
+    'Exit code 2\n"runs/out.json": No such file or directory (os error 2)',
+    "Exit code 2\njq: error: Could not open file /tmp/pods.json: No such file or directory",
+  ]) {
     assert.equal(bash(error), "bash-enoent", error);
   }
-  for (const error of ["mkdir: x: Operation not permitted\nNo such file or directory", "fatal: failed to move '/a' to '/b': Operation not permitted\nNo such file or directory", "zsh: command not found: foo", "ENOENT", "sandbox: /foo: No such file or directory", "EPERM\nENOENT /foo"]) {
+  for (const error of [
+    "mkdir: x: Operation not permitted\nNo such file or directory",
+    "fatal: failed to move '/a' to '/b': Operation not permitted\nNo such file or directory",
+    "zsh: command not found: foo",
+    "ENOENT",
+    "sandbox: /foo: No such file or directory",
+    "EPERM\nENOENT /foo",
+    // The path has to be on the line that reports the missing file.
+    "ugrep: warning: : No such file or directory\nfoo/bar baz",
+    "=== any k8s ===\nNo such file or directory\n/usr/bin/foo 'x'",
+    "Error: No such file or directory",
+  ]) {
     assert.equal(bash(error), null, error);
   }
 });
 
-test("classifier denials get no hint and never count toward repeat-failure", () => {
-  const denied = errorHint({ tool_name: "Bash", tool_input: { command: "x" }, error: "Blocked by classifier" });
-  assert.deepEqual([denied.rule, denied.classifier], [null, true]);
-  assert.equal(errorHint({ tool_name: "Bash", tool_input: { command: "x" }, error: "Auto mode classifier denied" }, denied.callHash).rule, null);
-  const plain = errorHint({ tool_name: "Bash", tool_input: { command: "x" }, error: "the classifier model crashed" });
-  assert.equal(plain.classifier, undefined, "a bare 'classifier' in a tool error is not a permission denial");
+// Claude Code's own denial texts, cut to their opening sentences, from local
+// transcripts 2026-07..11 (approximate counts in brackets). Free-text reasons
+// and commands are redacted.
+const FINAL_DENIALS = [
+  // [~500]
+  "Permission for this action was denied by the Claude Code auto mode classifier. Reason: Blocked by classifier. If you have other tasks that don't depend on this action, continue working on those.",
+  // [~140]
+  "Permission for this action was denied by the Claude Code auto mode classifier. Reason: The server-side auto mode classifier judged this action dangerous (it gave no explanation). If you have other tasks that don't depend on this action, continue working on those.",
+  // [~430, reason is free text]
+  "Permission for this action was denied by the Claude Code auto mode classifier. Reason: [Category] <redacted reason>.. If you have other tasks that don't depend on this action, continue working on those.",
+  // older wording, no "classifier" in it at all
+  "Permission for this action has been denied. Reason: <redacted reason>.. If you have other tasks that don't depend on this action, continue working on those.",
+  "Permission to use WebFetch has been denied. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat.",
+  "Permission to use Bash with command <redacted>\n<redacted second line> has been denied.",
+  "Permission for this command was denied by a built-in Claude Code safety check, not by the user.",
+  "Permission for this tool use was denied. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). Try a different approach or report the limitation to complete your task.",
+  // toolUseResult carries an "Error: " prefix
+  "Error: Permission for this action was denied by the Claude Code auto mode classifier. Reason: Blocked by classifier.",
+];
+const TRANSIENT_DENIALS = [
+  // [~30] rule set 2 matched none of its patterns
+  "Permission for this action has been denied. Reason: Stage 2 classifier error - blocking based on stage 1 assessment. If you have other tasks that don't depend on this action, continue working on those.",
+  // [~95]
+  "Permission for this action was denied by the Claude Code auto mode classifier. Reason: Stage 2 classifier error - blocking based on stage 1 assessment (usually transient — retrying often succeeds). If you have other tasks that don't depend on this action, continue working on those.",
+  // [~75]
+  "Auto mode could not evaluate this action and is blocking it for safety — run with --debug for details. This is not a judgment that the action is unsafe.",
+  // [~110]
+  "claude-sonnet-5[1m] is temporarily unavailable (timed out), so auto mode cannot determine the safety of Bash right now. Wait a moment and then try this action again.",
+];
+
+test("real permission denials get no hint and never count toward repeat-failure", () => {
+  for (const [errors, kind] of [[FINAL_DENIALS, "final"], [TRANSIENT_DENIALS, "transient"]]) {
+    for (const error of errors) {
+      const denied = errorHint({ tool_name: "Bash", tool_input: { command: "x" }, error });
+      assert.deepEqual([denied.rule, denied.denied], [null, kind], error);
+      assert.equal(errorHint({ tool_name: "Bash", tool_input: { command: "x" }, error }, denied.callHash).rule, null, error);
+    }
+  }
+  for (const error of [
+    "the classifier model crashed",
+    "Blocked by classifier",
+    "rm: x: Permission denied",
+    "grep output: Permission for this action was denied by the Claude Code auto mode classifier.",
+  ]) {
+    assert.equal(errorHint({ tool_name: "Bash", tool_input: { command: "x" }, error }).denied, undefined, error);
+  }
 });
 
 test("a classifier denial between two identical failures leaves the repeat visible", async () => {
@@ -227,17 +317,42 @@ test("D1 blocks respawning an unread background agent with the same task", async
   }
 });
 
-test("a classifier-rejected spawn is never resent (D4)", async () => {
-  const f = await fixture();
-  try {
-    const env = f.env({ AIRCLAUDE_EDUCATION_SPAWN_GUARD: "enforce" });
-    const toolInput = { description: "Deploy", prompt: "deploy it" };
-    await processEducationHook({ ...f.base, hook_event_name: "UserPromptSubmit", prompt: "use subagents" }, env);
-    await processEducationHook({ ...f.base, hook_event_name: "PostToolUseFailure", tool_name: "Agent", tool_input: toolInput, error: "Permission for this action was denied by the Claude Code auto mode classifier." }, env);
-    const out = await processEducationHook({ ...f.base, hook_event_name: "PreToolUse", tool_name: "Agent", tool_input: toolInput }, env);
-    assert.match(out.hookSpecificOutput.permissionDecisionReason, /classifier/);
-  } finally {
-    await f.cleanup();
+test("a finally denied spawn is never resent (D4), whoever denied it", async () => {
+  for (const error of [FINAL_DENIALS[0], FINAL_DENIALS[3], FINAL_DENIALS[7]]) {
+    const f = await fixture();
+    try {
+      const env = f.env({ AIRCLAUDE_EDUCATION_SPAWN_GUARD: "enforce", AIRCLAUDE_EDUCATION_SUBAGENT_NUDGE: "enforce" });
+      const toolInput = { description: "Deploy", prompt: "deploy it" };
+      await processEducationHook({ ...f.base, hook_event_name: "UserPromptSubmit", prompt: "use subagents" }, env);
+      assert.equal(await processEducationHook({ ...f.base, hook_event_name: "PostToolUseFailure", tool_name: "Agent", tool_input: toolInput, error }, env), null, error);
+      const out = await processEducationHook({ ...f.base, hook_event_name: "PreToolUse", tool_name: "Agent", tool_input: toolInput }, env);
+      assert.match(out.hookSpecificOutput.permissionDecisionReason, /already denied by a permission check/, error);
+      const logged = await f.logs();
+      assert.ok(logged.some((entry) => entry.rule === "spawn-rejected"), error);
+      assert.ok(!logged.some((entry) => entry.rule === "subagent-cut"), "a denial is not a subagent that ended without a report");
+    } finally {
+      await f.cleanup();
+    }
+  }
+});
+
+test("a transiently denied spawn may be retried: no D4, no downgrade, no subagent-cut", async () => {
+  for (const error of TRANSIENT_DENIALS) {
+    const f = await fixture();
+    try {
+      const env = f.env({ AIRCLAUDE_EDUCATION_SPAWN_GUARD: "enforce", AIRCLAUDE_EDUCATION_SUBAGENT_NUDGE: "enforce" });
+      const toolInput = { description: "Deploy", prompt: "deploy it" };
+      await processEducationHook({ ...f.base, hook_event_name: "UserPromptSubmit", prompt: "use subagents" }, env);
+      assert.equal(await processEducationHook({ ...f.base, hook_event_name: "PostToolUseFailure", tool_name: "Agent", tool_input: toolInput, error }, env), null, error);
+      await processEducationHook({ ...f.base, hook_event_name: "PreToolUse", tool_name: "Agent", tool_input: toolInput }, env);
+      const logged = await f.logs();
+      assert.deepEqual(logged.filter((entry) => entry.rule !== "spawn-allow").map((entry) => entry.rule), ["spawn-denied-transient"], error);
+      const retry = logged.find((entry) => entry.rule === "spawn-allow");
+      assert.ok(retry, error);
+      assert.ok(!JSON.stringify(retry).includes("previous-spawn-rejected"), error);
+    } finally {
+      await f.cleanup();
+    }
   }
 });
 
