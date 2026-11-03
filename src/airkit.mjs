@@ -2355,6 +2355,9 @@ export async function runCli(argv = process.argv.slice(2), options = {}) {
     const samples = Number(readFlag(rest, "--samples") ?? 20);
     if (!Number.isFinite(days) || days <= 0) throw new Error("--days must be a positive number");
     if (!Number.isInteger(samples) || samples < 0) throw new Error("--samples must be a non-negative integer");
+    const rulesFlag = readFlag(rest, "--rules");
+    const rules = rulesFlag === null ? null : Number(rulesFlag);
+    if (rules !== null && (!Number.isInteger(rules) || rules < 1)) throw new Error("--rules must be a positive integer");
     const logPath = readFlag(rest, "--log") ?? educationLogPath(options.env ?? process.env);
     let text = "";
     try {
@@ -2364,7 +2367,7 @@ export async function runCli(argv = process.argv.slice(2), options = {}) {
       stdout.write(`no education log at ${logPath}; hooks have not fired yet\n`);
       return 0;
     }
-    const summary = summarizeEducationLog(text, { now: options.now ?? Date.now(), days, samples });
+    const summary = summarizeEducationLog(text, { now: options.now ?? Date.now(), days, samples, rules });
     stdout.write(hasFlag(rest, "--json") ? `${JSON.stringify(summary, null, 2)}\n` : renderEducationSummary(summary));
     return 0;
   }
@@ -3003,7 +3006,7 @@ function renderAirkitHelp() {
 Commands:
   connect [--profile <name>] [--mode <mode>] [--port <port>] [--config-dir <dir>]
   audit <install|start|stop|status|doctor|update|verify|open|repo|account|requests|request|sessions|clients|accounts|repos|usage|cache|gaps|query|prune|export> [options]
-  education report [--days <n>] [--samples <n>] [--log <path>] [--json]
+  education report [--days <n>] [--samples <n>] [--rules <n>] [--log <path>] [--json]
   runtime check
   runtime update [--write]
   repair codex-takeover [--write]

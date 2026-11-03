@@ -57,10 +57,23 @@ const FAN_OUT = /平行|並行|同時|分頭|各自|多個\s*reviewer|in paralle
 const BROAD_SEARCH = /search|find|locate|explore|survey|scan|grep|look (?:for|through)|搜尋|找出|盤點|調查/i;
 const LIST_LINE = /^\s*(?:[-*•]|\d+[.)、])\s+\S/;
 const ITEM_TOKEN = /(?:!\d+|#\d+|\b[A-Z][A-Z0-9]+-\d+\b|(?:~|\.{1,2})?\/[\w.@-]+(?:\/[\w.@-]+)+)/g;
-const FIXED_FORMAT = /verbatim|原文照錄|原樣|逐字|\bjson\b|json schema|\bschema\b|exact(?:ly)? (?:format|this format)|固定格式|only output|output only/i;
+// Only an output instruction counts as a fixed format. The 44e50e8 pattern
+// matched any "verbatim", "schema" or ".json" path anywhere in the prompt, so
+// the replay (internal reports/model-perf) found most "fixed-format" records
+// were workflow preambles and file names.
+const FIXED_FORMAT = /(?:return|output|respond|reply)\b[^\n]{0,100}(?:(?:as|in|with)\s+(?:only\s+)?(?:json|schema)\b|(?:only\s+)?(?<![\w./-])json\b(?!\.\w)|(?:this\s+)?schema\b|exactly this format|verbatim)|原文照錄|原樣輸出|逐字輸出|只輸出|固定格式|照下列格式/i;
 const STATUS_ASK = /\bSTATUS:/;
 const STATUS_LINE = /^\s*\**STATUS\**\s*:/m;
-const CLASSIFIER_DENIAL = /denied by the Claude Code auto mode classifier|classifier/i;
+// Claude Code's own auto-mode wording. A bare "classifier" also matched
+// ordinary tool errors that happened to mention one.
+const CLASSIFIER_DENIAL = /auto mode classifier|Blocked by classifier|classifier judged this action|Auto mode could not evaluate/i;
+// A Bash ENOENT is a cwd/path mistake only when the error names a path and is
+// not really a sandbox, permission or missing-command failure.
+const BASH_NOT_PATH = /Operation not permitted|EPERM|sandbox|command not found|Permission denied/i;
+const BASH_PATH_EVIDENCE = /\S+:\s*\S+:\s*No such file or directory|\bpath\s+\S+|(?:open|stat|scandir|access|unlink|mkdir)\s+['"`]?\S+|['"`][^'"`\n]+['"`]|(?:ENOENT|No such file or directory)\s*:\s*\S+|\/[\w.@-]+(?:\/[\w.@-]+)*/i;
+// Bumped whenever a rule's matching changes, so a shadow window can be read
+// from one rule set only (education report --rules).
+export const EDUCATION_RULES_VERSION = 2;
 const STATUS_REASON = "Finish your reply with the report the task asked for: STATUS: done|blocked|partial, EVIDENCE: <paths/commands>, OPEN: <items>.";
 
 export function readEducationConfig(env = process.env) {
@@ -126,10 +139,13 @@ export function errorHint(input, previousFailHash) {
   const tool = input?.tool_name;
   const error = String(input?.error ?? "");
   const callHash = hash([tool, input?.tool_input ?? null]);
+  // A classifier denial is a permission decision, not a failed attempt: it
+  // gets no hint and must not count toward repeat-failure.
+  if (CLASSIFIER_DENIAL.test(error)) return { rule: null, hint: null, callHash, classifier: true };
   if (previousFailHash && previousFailHash === callHash) {
     return { rule: "repeat-failure", hint: "Identical failing call repeated; change approach.", callHash };
   }
-  if (tool === "Bash" && /No such file or directory|ENOENT/.test(error)) {
+  if (tool === "Bash" && /No such file or directory|ENOENT/.test(error) && !BASH_NOT_PATH.test(error) && BASH_PATH_EVIDENCE.test(error)) {
     // P0.5 fixture: the hook's cwd stays at the project directory after a
     // Bash `cd`, so printing it would point the model at the wrong place.
     return { rule: "bash-enoent", hint: "Bash cwd persists across calls; run `pwd` or use absolute paths.", callHash };
@@ -307,7 +323,7 @@ async function logRecord(env, record) {
   try {
     const path = educationLogPath(env);
     await mkdir(dirname(path), { recursive: true });
-    await appendFile(path, `${JSON.stringify({ ts: new Date().toISOString(), ...record })}\n`);
+    await appendFile(path, `${JSON.stringify({ ts: new Date().toISOString(), rules: EDUCATION_RULES_VERSION, ...record })}\n`);
   } catch {
     // Logging must never break the session.
   }
@@ -455,7 +471,7 @@ async function onPostToolUseFailure(input, state, config, model, log) {
   }
 
   const found = errorHint(input, state.lastFailHash);
-  state.lastFailHash = found.callHash;
+  if (!found.classifier) state.lastFailHash = found.callHash;
   if (found.rule) {
     const emit = config.errorHints === true && model !== null && !isClaudeModel(model);
     await log({ rule: found.rule, decision: "hint", emitted: emit, reason: found.hint, evidence: { tool, error: error.slice(0, 200) } });
@@ -638,7 +654,7 @@ export async function runEducationHook({ env = process.env, input = process.stdi
 // P4 observation: rules stay in shadow for a week, then each is judged by its
 // hand-labelled false-positive rate (spec §6.2/§7). This only counts and
 // samples; deciding precision stays with a human reading the samples.
-export function summarizeEducationLog(text, { now = Date.now(), days = 7, samples = 20 } = {}) {
+export function summarizeEducationLog(text, { now = Date.now(), days = 7, samples = 20, rules: rulesVersion = null } = {}) {
   const since = now - days * 86_400_000;
   const rules = new Map();
   const sessions = new Set();
@@ -651,6 +667,8 @@ export function summarizeEducationLog(text, { now = Date.now(), days = 7, sample
     try { record = JSON.parse(line); } catch { malformed += 1; continue; }
     const ts = Date.parse(record?.ts);
     if (!Number.isFinite(ts) || ts < since || ts > now) continue;
+    // Records written before EDUCATION_RULES_VERSION existed carry no version: rule set 1.
+    if (rulesVersion !== null && (record.rules ?? 1) !== rulesVersion) continue;
     records += 1;
     if (record.session_id) sessions.add(record.session_id);
     if (first === null || ts < first) first = ts;
@@ -678,6 +696,7 @@ export function summarizeEducationLog(text, { now = Date.now(), days = 7, sample
     since: new Date(since).toISOString(),
     until: new Date(now).toISOString(),
     days,
+    rulesVersion,
     coverageDays: first === null ? 0 : Math.round(((now - first) / 86_400_000) * 10) / 10,
     records,
     malformed,
@@ -719,6 +738,7 @@ export function renderEducationSummary(summary) {
   const lines = [
     `Education log ${summary.since} → ${summary.until} (${summary.days}d window, ${summary.coverageDays}d of data)`,
     `records ${summary.records}, sessions ${summary.sessions}${summary.malformed ? `, malformed lines ${summary.malformed}` : ""}`,
+    summary.rulesVersion === null || summary.rulesVersion === undefined ? `rule sets: all (current ${EDUCATION_RULES_VERSION}; pass --rules ${EDUCATION_RULES_VERSION} to read only it)` : `rule set ${summary.rulesVersion} only`,
   ];
   if (summary.coverageDays < summary.days) {
     lines.push(`note: less than ${summary.days} days of data; do not decide enforce yet`);
