@@ -60,6 +60,22 @@ test("launch.education renders the hook; per-mode flags override the profile-wid
   assert.match(script, /"AIRCLAUDE_EDUCATION_SUBAGENT_NUDGE":"off"/, "fallback is the profile-wide set");
 });
 
+test("per-rule overrides from the profile and the mode merge instead of replacing each other", async () => {
+  const value = catalog({ education: { rules: { D3: "off" } } }, { auto: {}, gpt: { education: { rules: { "read-missing": "enforce" } } } });
+  await withCatalog(value, async (loaded, dir) => {
+    assert.equal(educationFiles(planInstall(loaded, "edu", { configDir: dir })).length, 1);
+  });
+  const files = renderHeartbeatManagedFiles("/cfg", undefined, {
+    education: { base: { rules: { D3: "off", "read-missing": "shadow" } }, modes: { gpt: { errorHints: true, rules: { "read-missing": "enforce" } } } },
+  });
+  const script = files.find((file) => file.relativePath.endsWith("education/hook.mjs")).content;
+  const byMode = JSON.parse(script.match(/const byMode = (.*);/)[1]);
+  assert.deepEqual(JSON.parse(byMode.gpt.AIRCLAUDE_EDUCATION_RULES), { D3: "off", "read-missing": "enforce" });
+  assert.equal(byMode.gpt.AIRCLAUDE_EDUCATION_ERROR_HINTS, "true");
+  const fallback = JSON.parse(script.match(/\?\? (\{.*\})\) \} \}\);/)[1]);
+  assert.deepEqual(JSON.parse(fallback.AIRCLAUDE_EDUCATION_RULES), { D3: "off", "read-missing": "shadow" }, "fallback carries the profile-wide rules");
+});
+
 test("a per-mode block alone is enough to opt the profile in", async () => {
   await withCatalog(catalog({}, { auto: {}, gpt: { education: true } }), async (loaded, dir) => {
     assert.equal(educationFiles(planInstall(loaded, "edu", { configDir: dir })).length, 1);
@@ -70,6 +86,12 @@ test("invalid education flags fail catalog validation", async () => {
   await assert.rejects(withCatalog(catalog({ education: { spawnGuard: "on" } }), async () => {}), /launch\.education\.spawnGuard must be off, shadow or enforce/);
   await assert.rejects(withCatalog(catalog({}, { gpt: { education: { errorHints: "yes" } } }), async () => {}), /launch\.modes\.gpt\.education\.errorHints must be a boolean/);
   await assert.rejects(withCatalog(catalog({ education: { guard: "shadow" } }), async () => {}), /launch\.education\.guard is not an education flag/);
+  await assert.rejects(withCatalog(catalog({ education: { rules: { nope: "shadow" } } }), async () => {}), /launch\.education\.rules\.nope is not an education rule/);
+  await assert.rejects(withCatalog(catalog({}, { gpt: { education: { rules: { "read-missing": true } } } }), async () => {}), /launch\.modes\.gpt\.education\.rules\.read-missing must be off, shadow or enforce/);
+  await assert.rejects(withCatalog(catalog({ education: { rules: ["D3"] } }), async () => {}), /launch\.education\.rules must be an object/);
+  await withCatalog(catalog({ education: { errorHints: "enforce", rules: { D3: "off" } } }), async (loaded, dir) => {
+    assert.equal(educationFiles(planInstall(loaded, "edu", { configDir: dir })).length, 1);
+  });
 });
 
 test("the generated hook script picks flags by AIRCLAUDE_MODE at run time", async () => {
@@ -91,6 +113,7 @@ test("the generated hook script picks flags by AIRCLAUDE_MODE at run time", asyn
     const records = (await readFile(log, "utf8")).trim().split("\n").map((entry) => JSON.parse(entry));
     assert.deepEqual(records.map((record) => record.rule), ["read-missing"]);
     assert.equal(records[0].emitted, false, "shadow profile-wide flags never emit");
+    assert.ok(!script.content.includes("AIRCLAUDE_EDUCATION_RULES"), "no rule overrides, no rules env");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

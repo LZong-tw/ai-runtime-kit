@@ -73,13 +73,33 @@ async function writeHandbackAgent(transcriptPath, agentId, prompt, report, { del
 
 test("flags: valid values parse, missing or invalid fall back to off/false and are reported", () => {
   assert.deepEqual(readEducationConfig(flags({ AIRCLAUDE_EDUCATION_ERROR_HINTS: "true" })), {
-    config: { spawnGuard: "shadow", subagentReport: "shadow", subagentNudge: "shadow", errorHints: true },
+    config: { spawnGuard: "shadow", subagentReport: "shadow", subagentNudge: "shadow", errorHints: true, rules: {} },
     errors: [],
   });
   const bad = readEducationConfig({ AIRCLAUDE_EDUCATION_SPAWN_GUARD: "on" });
   assert.equal(bad.config.spawnGuard, "off");
   assert.equal(bad.config.errorHints, false);
-  assert.equal(bad.errors.length, 4);
+  assert.equal(bad.errors.length, 4, "an unset rules env is not an error");
+  assert.equal(readEducationConfig(flags({ AIRCLAUDE_EDUCATION_ERROR_HINTS: "enforce" })).config.errorHints, "enforce");
+});
+
+test("flags: per-rule overrides parse; bad JSON drops them, a bad entry turns that rule off", () => {
+  const rules = (raw) => readEducationConfig(flags({ AIRCLAUDE_EDUCATION_RULES: raw }));
+  assert.deepEqual(rules('{"read-missing":"enforce","D3":"off"}'), {
+    config: { spawnGuard: "shadow", subagentReport: "shadow", subagentNudge: "shadow", errorHints: false, rules: { "read-missing": "enforce", D3: "off" } },
+    errors: [],
+  });
+  for (const raw of ["{nope", "[]", "null", '"D3"']) {
+    const parsed = rules(raw);
+    assert.deepEqual(parsed.config.rules, {}, raw);
+    assert.equal(parsed.errors.length, 1, raw);
+  }
+  const unknown = rules('{"status-log":"enforce","D1":"enforce"}');
+  assert.deepEqual(unknown.config.rules, { D1: "enforce" }, "log-only records cannot be switched one by one");
+  assert.match(unknown.errors[0], /status-log/);
+  const invalid = rules('{"D1":"on","D2":true}');
+  assert.deepEqual(invalid.config.rules, { D1: "off", D2: "off" });
+  assert.equal(invalid.errors.length, 2);
 });
 
 test("prompt features count list items and fan-out intent", () => {
@@ -642,6 +662,120 @@ test("SubagentStop records the subagent's own model", async () => {
   }
 });
 
+test("a rule override wins over its group in both directions", async () => {
+  const f = await fixture();
+  try {
+    const failure = { ...f.base, hook_event_name: "PostToolUseFailure", tool_name: "Read", tool_input: { file_path: "/x" }, error: "File does not exist." };
+    const env = f.env({ AIRCLAUDE_EDUCATION_RULES: JSON.stringify({ "read-missing": "enforce" }) });
+    const on = await processEducationHook(failure, env);
+    assert.match(on.hookSpecificOutput.additionalContext, /ls\/rg/, "errorHints=false, read-missing=enforce emits for gpt");
+    await writeAssistant(f.transcript, "claude-sonnet-5");
+    assert.equal(await processEducationHook({ ...failure, tool_input: { file_path: "/y" } }, env), null, "still model-gated");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a rule switched off neither logs nor emits, but its state still updates", async () => {
+  const f = await fixture();
+  try {
+    const env = f.env({ AIRCLAUDE_EDUCATION_ERROR_HINTS: "true", AIRCLAUDE_EDUCATION_RULES: JSON.stringify({ "edit-mismatch": "off" }) });
+    const failure = { ...f.base, hook_event_name: "PostToolUseFailure", tool_name: "Edit", tool_input: { file_path: "/a", old_string: "x" }, error: "String to replace not found in file." };
+    assert.equal(await processEducationHook(failure, env), null);
+    assert.deepEqual((await f.logs()).map((entry) => entry.rule), []);
+    const repeat = await processEducationHook(failure, env);
+    assert.match(repeat.hookSpecificOutput.additionalContext, /Identical failing call/, "lastFailHash was kept");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("D3 off lets a cold spawn through under an enforced spawn guard", async () => {
+  const f = await fixture();
+  try {
+    const env = f.env({ AIRCLAUDE_EDUCATION_SPAWN_GUARD: "enforce", AIRCLAUDE_EDUCATION_RULES: JSON.stringify({ D3: "off" }) });
+    await processEducationHook({ ...f.base, hook_event_name: "UserPromptSubmit", prompt: "fix the flaky test" }, env);
+    assert.equal(await processEducationHook({ ...f.base, hook_event_name: "PreToolUse", tool_name: "Agent", tool_input: { description: "fix test", prompt: "fix it" } }, env), null);
+    assert.deepEqual((await f.logs()).map((entry) => entry.rule), ["spawn-allow"]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a spawn rule switched off is skipped, so the next rule in the chain decides", async () => {
+  const run = async (rules) => {
+    const f = await fixture();
+    try {
+      const env = f.env({ AIRCLAUDE_EDUCATION_SPAWN_GUARD: "enforce", AIRCLAUDE_EDUCATION_RULES: JSON.stringify(rules) });
+      const toolInput = { description: "Deploy", prompt: "deploy it" };
+      await processEducationHook({ ...f.base, hook_event_name: "UserPromptSubmit", prompt: "use subagents" }, env);
+      await processEducationHook({ ...f.base, hook_event_name: "PostToolUse", tool_name: "Agent", tool_input: toolInput, tool_response: { isAsync: true, agentId: "g1", outputFile: "/tmp/g1.output" } }, env);
+      await processEducationHook({ ...f.base, hook_event_name: "SubagentStop", agent_id: "g1", agent_type: "general-purpose", last_assistant_message: "done" }, env);
+      await processEducationHook({ ...f.base, hook_event_name: "PostToolUseFailure", tool_name: "Agent", tool_input: toolInput, error: FINAL_DENIALS[0] }, env);
+      await processEducationHook({ ...f.base, hook_event_name: "PreToolUse", tool_name: "Agent", tool_input: toolInput }, env);
+      const [record] = (await f.logs()).filter((entry) => entry.event === "PreToolUse");
+      return [record.rule, record.decision];
+    } finally {
+      await f.cleanup();
+    }
+  };
+  assert.deepEqual(await run({}), ["D4", "deny"]);
+  assert.deepEqual(await run({ D4: "off" }), ["D2", "deny"]);
+  assert.deepEqual(await run({ D1: "off", D2: "off", D3: "off", D4: "off" }), ["spawn-allow", "allow"]);
+});
+
+test("unread-result off stops the Stop block but keeps the running note", async () => {
+  const f = await fixture();
+  try {
+    const env = f.env({ AIRCLAUDE_EDUCATION_SUBAGENT_NUDGE: "enforce", AIRCLAUDE_EDUCATION_RULES: JSON.stringify({ "unread-result": "off" }) });
+    await processEducationHook({ ...f.base, hook_event_name: "PostToolUse", tool_name: "Agent", tool_input: { description: "a" }, tool_response: { isAsync: true, agentId: "h1" } }, env);
+    await processEducationHook({ ...f.base, hook_event_name: "PostToolUse", tool_name: "Agent", tool_input: { description: "b" }, tool_response: { isAsync: true, agentId: "h2" } }, env);
+    await processEducationHook({ ...f.base, hook_event_name: "SubagentStop", agent_id: "h1", agent_type: "general-purpose", last_assistant_message: "Found it in src/compat/gateway.mjs:252" }, env);
+    const out = await processEducationHook({ ...f.base, hook_event_name: "Stop", stop_hook_active: false, background_tasks: [{ id: "h2", type: "subagent", status: "running" }] }, env);
+    assert.match(out.hookSpecificOutput.additionalContext, /still running/);
+    assert.deepEqual((await f.logs()).filter((entry) => entry.event === "Stop").map((entry) => entry.rule), ["running-note"]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("every group off but one rule enforced still runs the hook", async () => {
+  const f = await fixture();
+  try {
+    const env = f.env({
+      AIRCLAUDE_EDUCATION_SPAWN_GUARD: "off",
+      AIRCLAUDE_EDUCATION_SUBAGENT_REPORT: "off",
+      AIRCLAUDE_EDUCATION_SUBAGENT_NUDGE: "off",
+      AIRCLAUDE_EDUCATION_ERROR_HINTS: "false",
+      AIRCLAUDE_EDUCATION_RULES: JSON.stringify({ D3: "enforce" }),
+    });
+    await processEducationHook({ ...f.base, hook_event_name: "UserPromptSubmit", prompt: "fix the flaky test" }, env);
+    const denied = await processEducationHook({ ...f.base, hook_event_name: "PreToolUse", tool_name: "Agent", tool_input: { description: "fix test", prompt: "fix it" } }, env);
+    assert.equal(denied.hookSpecificOutput.permissionDecision, "deny");
+    await writeAgent(f.transcript, "m1", "Just do it.");
+    await processEducationHook({ ...f.base, hook_event_name: "SubagentStop", agent_id: "m1", agent_type: "general-purpose", last_assistant_message: "done" }, env);
+    assert.deepEqual((await f.logs()).map((entry) => entry.rule), ["D3"], "log-only records follow their group");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("status-missing can be switched on while its group is off, and off while its group enforces", async () => {
+  const f = await fixture();
+  try {
+    await writeAgent(f.transcript, "n1", "Look into it.\nFinish with STATUS: done|blocked|partial");
+    await writeAgent(f.transcript, "n2", "Look into it.\nFinish with STATUS: done|blocked|partial");
+    const stop = { ...f.base, hook_event_name: "SubagentStop", agent_type: "general-purpose", stop_hook_active: false, last_assistant_message: "I looked." };
+    const on = f.env({ AIRCLAUDE_EDUCATION_SUBAGENT_REPORT: "off", AIRCLAUDE_EDUCATION_RULES: JSON.stringify({ "status-missing": "enforce" }) });
+    assert.equal((await processEducationHook({ ...stop, agent_id: "n1" }, on)).decision, "block");
+    const off = f.env({ AIRCLAUDE_EDUCATION_SUBAGENT_REPORT: "enforce", AIRCLAUDE_EDUCATION_RULES: JSON.stringify({ "status-missing": "off" }) });
+    assert.equal(await processEducationHook({ ...stop, agent_id: "n2" }, off), null);
+    assert.deepEqual((await f.logs()).map((entry) => [entry.rule, entry.decision]), [["status-missing", "block"], ["status-log", "log-only"]]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("invalid flags log a config error and every rule passes", async () => {
   const f = await fixture();
   try {
@@ -649,6 +783,20 @@ test("invalid flags log a config error and every rule passes", async () => {
     assert.equal(await processEducationHook({ ...f.base, hook_event_name: "PreToolUse", tool_name: "Agent", tool_input: { prompt: "x" } }, env), null);
     const [record] = await f.logs();
     assert.equal(record.decision, "config-error");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a broken rules env logs a config error and falls back to the groups", async () => {
+  const f = await fixture();
+  try {
+    const env = f.env({ AIRCLAUDE_EDUCATION_SPAWN_GUARD: "enforce", AIRCLAUDE_EDUCATION_RULES: "{D3:off" });
+    await processEducationHook({ ...f.base, hook_event_name: "UserPromptSubmit", prompt: "fix the flaky test" }, env);
+    const denied = await processEducationHook({ ...f.base, hook_event_name: "PreToolUse", tool_name: "Agent", tool_input: { description: "fix test", prompt: "fix it" } }, env);
+    assert.equal(denied.hookSpecificOutput.permissionDecision, "deny");
+    const logged = await f.logs();
+    assert.ok(logged.some((entry) => entry.decision === "config-error" && entry.reason.includes("AIRCLAUDE_EDUCATION_RULES")));
   } finally {
     await f.cleanup();
   }
@@ -686,4 +834,7 @@ test("managed files add the education hook only on request, in shadow by default
   assert.match(script, /"AIRCLAUDE_EDUCATION_SPAWN_GUARD":"shadow"/);
   assert.match(script, /"AIRCLAUDE_EDUCATION_ERROR_HINTS":"false"/);
   assert.deepEqual(educationHookEnv({ errorHints: true }).AIRCLAUDE_EDUCATION_ERROR_HINTS, "true");
+  assert.ok(!script.includes("AIRCLAUDE_EDUCATION_RULES"), "no overrides, no rules env");
+  assert.deepEqual(Object.keys(educationHookEnv({ errorHints: true })).length, 4);
+  assert.equal(educationHookEnv({ rules: { "read-missing": "enforce" } }).AIRCLAUDE_EDUCATION_RULES, '{"read-missing":"enforce"}');
 });
