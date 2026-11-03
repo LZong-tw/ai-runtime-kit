@@ -834,7 +834,7 @@ test("managed files add the education hook only on request, in shadow by default
   assert.match(script, /"AIRCLAUDE_EDUCATION_SPAWN_GUARD":"shadow"/);
   assert.match(script, /"AIRCLAUDE_EDUCATION_ERROR_HINTS":"false"/);
   assert.deepEqual(educationHookEnv({ errorHints: true }).AIRCLAUDE_EDUCATION_ERROR_HINTS, "true");
-  assert.ok(!script.includes("AIRCLAUDE_EDUCATION_RULES"), "no overrides, no rules env");
-  assert.deepEqual(Object.keys(educationHookEnv({ errorHints: true })).length, 4);
+  assert.match(script, /"AIRCLAUDE_EDUCATION_RULES":"\{\}"/, "no overrides still bakes an empty set");
+  assert.equal(Object.keys(educationHookEnv({ errorHints: true })).length, 5);
   assert.equal(educationHookEnv({ rules: { "read-missing": "enforce" } }).AIRCLAUDE_EDUCATION_RULES, '{"read-missing":"enforce"}');
 });

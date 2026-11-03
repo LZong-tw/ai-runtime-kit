@@ -102,8 +102,10 @@ test("the generated hook script picks flags by AIRCLAUDE_MODE at run time", asyn
     const script = files.find((file) => file.relativePath.endsWith("education/hook.mjs"));
     const path = join(dir, "hook.mjs");
     await writeFile(path, script.content);
+    // A stray shell export must not switch a rule back on in an all-off mode.
+    const stray = JSON.stringify({ "read-missing": "enforce" });
     const run = (mode) => new Promise((resolve, reject) => {
-      const child = execFile(process.execPath, [path], { env: { HOME: dir, AIRCLAUDE_MODE: mode } }, (error, stdout) => (error ? reject(error) : resolve(stdout)));
+      const child = execFile(process.execPath, [path], { env: { HOME: dir, AIRCLAUDE_MODE: mode, AIRCLAUDE_EDUCATION_RULES: stray } }, (error, stdout) => (error ? reject(error) : resolve(stdout)));
       child.stdin.end(JSON.stringify({ hook_event_name: "PostToolUseFailure", session_id: "s1", tool_name: "Read", tool_input: { file_path: "/x" }, error: "File does not exist." }));
     });
     const log = join(dir, ".claude-code-router", "logs", "airkit-education.jsonl");
@@ -113,7 +115,7 @@ test("the generated hook script picks flags by AIRCLAUDE_MODE at run time", asyn
     const records = (await readFile(log, "utf8")).trim().split("\n").map((entry) => JSON.parse(entry));
     assert.deepEqual(records.map((record) => record.rule), ["read-missing"]);
     assert.equal(records[0].emitted, false, "shadow profile-wide flags never emit");
-    assert.ok(!script.content.includes("AIRCLAUDE_EDUCATION_RULES"), "no rule overrides, no rules env");
+    assert.equal(records[0].flags.rules["read-missing"], undefined, "the baked empty rules win over the stray export");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
