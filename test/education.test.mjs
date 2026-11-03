@@ -93,7 +93,7 @@ test("prompt features count list items and fan-out intent", () => {
 test("subagent contract needs STATUS in the closing lines and yields to fixed formats", () => {
   assert.equal(subagentPromptContract("Do X.\nFinish with STATUS: done|blocked|partial, EVIDENCE: paths"), "status");
   assert.equal(subagentPromptContract("Example transcript:\nSTATUS: done\nmore\ncontext\nhere\nNow summarize it."), "none");
-  assert.equal(subagentPromptContract("Return the JSON schema below verbatim.\nSTATUS: done"), "fixed-format");
+  assert.equal(subagentPromptContract("Return the JSON schema below verbatim."), "fixed-format");
   assert.equal(subagentPromptContract(null), "none");
 });
 
@@ -122,19 +122,20 @@ test("fixed format means an output instruction, not a mention of JSON, schema or
   for (const prompt of ["Return ONLY JSON matching this schema", "Return results in JSON", "Reply with exactly this format:", "Output the diff verbatim", "只輸出表格", "照下列格式回覆"]) {
     assert.equal(subagentPromptContract(prompt), "fixed-format", prompt);
   }
-  // §4.4.2 rule 1: a fixed-format instruction anywhere still wins over STATUS.
-  assert.equal(subagentPromptContract("Return results in JSON.\nkeys: a, b\nnotes\nFinish with STATUS: done"), "fixed-format");
+  // Rule set 4: an explicit closing STATUS request beats an earlier format phrase.
+  assert.equal(subagentPromptContract("Return results in JSON.\nkeys: a, b\nnotes\nFinish with STATUS: done"), "status");
+  assert.equal(subagentPromptContract("Return results in JSON.\nFinish with STATUS: done\nthen\nstop\nhere"), "fixed-format");
 });
 
 // Rule set 2 lost these (rule set 1 caught them through a bare \bjson\b); a
 // JSON-only subagent misread as "status" would be blocked into adding STATUS.
 test("fixed format covers zh-TW and 'must be JSON' output instructions", () => {
   for (const prompt of [
-    "請以 JSON 格式回傳結果\n最後寫 STATUS: done",
-    "回傳 JSON，不要其他文字\nSTATUS: done",
+    "請以 JSON 格式回傳結果",
+    "回傳 JSON，不要其他文字",
     "用 JSON 回覆",
     "輸出成 JSON 格式",
-    "Your answer must be valid JSON only.\nFinish with STATUS: done",
+    "Your answer must be valid JSON only.",
     "Respond in JSON.",
     "Output as JSON",
   ]) {
@@ -150,8 +151,26 @@ test("fixed format needs the format in the same clause as the output verb", () =
     "Return the parsed package.json fields",
     "回傳 package.json 的內容",
     "Reply to the reviewer about the JSON parser",
+    // Rule set 4 counterexamples: descriptions of data, not output formats.
+    "API 回傳的 JSON 有缺欄位，請調查",
+    "The config file must be valid JSON.",
+    "The endpoint accepts JSON only.",
+    "Parse the output JSON and list failures.",
+    "Reply in the PR thread with the schema link.",
   ]) {
     assert.notEqual(subagentPromptContract(prompt), "fixed-format", prompt);
+  }
+});
+
+test("a closing STATUS request wins over any fixed-format phrase", () => {
+  for (const prompt of [
+    "請以 JSON 格式回傳結果\n最後寫 STATUS: done",
+    "回傳 JSON，不要其他文字\nSTATUS: done",
+    "Your answer must be valid JSON only.\nFinish with STATUS: done",
+    "Return the JSON schema below verbatim.\nSTATUS: done",
+    "API 回傳的 JSON 有缺欄位\nFinish with STATUS: done|blocked|partial",
+  ]) {
+    assert.equal(subagentPromptContract(prompt), "status", prompt);
   }
 });
 
@@ -181,6 +200,9 @@ test("bash-enoent needs a named missing path and skips sandbox, permission and m
     "ugrep: warning: : No such file or directory\nfoo/bar baz",
     "=== any k8s ===\nNo such file or directory\n/usr/bin/foo 'x'",
     "Error: No such file or directory",
+    // "no" is the first word of the message, not a path.
+    "Error: ENOENT: no such file or directory",
+    "ENOENT: no such file or directory",
   ]) {
     assert.equal(bash(error), null, error);
   }
@@ -215,6 +237,27 @@ const TRANSIENT_DENIALS = [
   // [~110]
   "claude-sonnet-5[1m] is temporarily unavailable (timed out), so auto mode cannot determine the safety of Bash right now. Wait a moment and then try this action again.",
 ];
+
+const USER_DENIAL = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.";
+
+test("a user rejection is a user denial: no hint, no repeat-failure", () => {
+  for (const error of [USER_DENIAL, `Error: ${USER_DENIAL}`]) {
+    const denied = errorHint({ tool_name: "Bash", tool_input: { command: "x" }, error });
+    assert.deepEqual([denied.rule, denied.denied], [null, "user"], error);
+    assert.equal(errorHint({ tool_name: "Bash", tool_input: { command: "x" }, error }, denied.callHash).rule, null, error);
+  }
+});
+
+test("a denial sentence on a later line of Bash output is not a denial", () => {
+  for (const error of [
+    "Exit code 1\nPermission for this action was denied by the Claude Code auto mode classifier. Reason: x",
+    "Exit code 1\ngrep hit:\nPermission to use Bash has been denied.",
+    `Exit code 1\n${USER_DENIAL}`,
+    `\n${USER_DENIAL}`,
+  ]) {
+    assert.equal(errorHint({ tool_name: "Bash", tool_input: { command: "x" }, error }).denied, undefined, error);
+  }
+});
 
 test("real permission denials get no hint and never count toward repeat-failure", () => {
   for (const [errors, kind] of [[FINAL_DENIALS, "final"], [TRANSIENT_DENIALS, "transient"]]) {
@@ -333,6 +376,23 @@ test("a finally denied spawn is never resent (D4), whoever denied it", async () 
     } finally {
       await f.cleanup();
     }
+  }
+});
+
+test("a user-rejected spawn is logged as a user denial, never subagent-cut", async () => {
+  const f = await fixture();
+  try {
+    const env = f.env({ AIRCLAUDE_EDUCATION_SPAWN_GUARD: "enforce", AIRCLAUDE_EDUCATION_SUBAGENT_NUDGE: "enforce" });
+    const toolInput = { description: "Deploy", prompt: "deploy it" };
+    await processEducationHook({ ...f.base, hook_event_name: "UserPromptSubmit", prompt: "use subagents" }, env);
+    assert.equal(await processEducationHook({ ...f.base, hook_event_name: "PostToolUseFailure", tool_name: "Agent", tool_input: toolInput, error: USER_DENIAL }, env), null);
+    assert.equal(await processEducationHook({ ...f.base, hook_event_name: "PostToolUseFailure", tool_name: "Agent", tool_input: toolInput, error: USER_DENIAL }, env), null);
+    const rules = (await f.logs()).map((entry) => entry.rule);
+    assert.ok(rules.includes("spawn-denied-user"));
+    assert.ok(!rules.includes("subagent-cut"));
+    assert.ok(!rules.includes("repeat-failure"));
+  } finally {
+    await f.cleanup();
   }
 });
 

@@ -65,19 +65,23 @@ const ITEM_TOKEN = /(?:!\d+|#\d+|\b[A-Z][A-Z0-9]+-\d+\b|(?:~|\.{1,2})?\/[\w.@-]+
 // verb ("Return to the main branch and check the schema") and dropped the
 // zh-TW "以 JSON 格式回傳" forms rule set 1 caught. Now the verb and the format
 // must share a clause and the format must be what is returned.
-const OUTPUT_VERB = String.raw`(?:return|output|respond|reply|answer|emit|print)\b`;
+// Rule set 4: a verb used as a noun ("Parse the output JSON") is not an
+// instruction, so the verb may not follow an article or possessive.
+const OUTPUT_VERB = String.raw`(?<!\b(?:the|a|an|its|their|your|our|this|that|parse|parsed|of)\s+)(?:return|output|respond|reply|answer|emit|print)\b`;
 const SAME_CLAUSE = String.raw`[^\n.;:!?。；：！？]{0,60}?`;
 const JSON_WORD = String.raw`(?<![\w./-])json(?![\w-]|\.\w)`;
 const ZH_OUTPUT_VERB = "(?:回傳|回覆|回應|輸出|產出|返回)";
 const FIXED_FORMAT = new RegExp(
   [
     `${OUTPUT_VERB}(?:\\s+(?:a|an|the|only|valid|raw|strict|pure))*\\s+${JSON_WORD}`,
-    `${OUTPUT_VERB}${SAME_CLAUSE}\\b(?:as|in|with|using)\\s+(?:(?:a|an|the|only|valid|raw|strict|this|that|following)\\s+)*(?:${JSON_WORD}|schema\\b)`,
+    `${OUTPUT_VERB}${SAME_CLAUSE}\\b(?:as|in|with|using)\\s+(?:(?:a|an|the|only|valid|raw|strict|this|that|following)\\s+)*(?:${JSON_WORD}|schema\\b(?!\\s+(?:link|url|file|path|docs?|version|migration|change|id)\\b))`,
     `${OUTPUT_VERB}${SAME_CLAUSE}\\bonly\\s+(?:valid\\s+)?${JSON_WORD}`,
     `${OUTPUT_VERB}${SAME_CLAUSE}(?:exactly this format|\\bverbatim\\b)`,
-    `\\b(?:must|should)\\s+be\\s+(?:valid\\s+)?${JSON_WORD}`,
-    `\\b${JSON_WORD}\\s+only\\b`,
-    `${ZH_OUTPUT_VERB}[^\\n。；！？]{0,12}?${JSON_WORD}`,
+    // "The config must be valid JSON" describes a file; only the reply's own
+    // format is an instruction. A bare "accepts JSON only" no longer counts.
+    `\\b(?:answer|reply|response|output)\\s+(?:must|should)\\s+be\\s+(?:valid\\s+)?${JSON_WORD}`,
+    // "回傳 JSON" / "輸出成 JSON", not "API 回傳的 JSON".
+    `${ZH_OUTPUT_VERB}\\s*(?:成|為)?\\s*(?:純|合法的?|一個|一份)?\\s*${JSON_WORD}`,
     `(?:以|用)\\s*${JSON_WORD}\\s*(?:格式)?[^\\n。；！？]{0,8}?${ZH_OUTPUT_VERB}`,
     "原文照錄|原樣輸出|逐字輸出|只輸出|固定格式|照下列格式",
   ].join("|"),
@@ -93,9 +97,12 @@ const STATUS_LINE = /^\s*\**STATUS\**\s*:/m;
 //   Permission for this tool use was denied. The tool use was rejected ...
 //   Auto mode could not evaluate this action and is blocking it for safety ...
 //   <model> is temporarily unavailable, so auto mode cannot determine the safety of <Tool> ...
-// Anchored at a line start (after an optional "Error: ") so tool output that
-// merely quotes one of these sentences is not a denial.
-const PERMISSION_DENIAL = /^[ \t]*(?:Error:[ \t]*)?(?:Permission for this (?:action|command|tool use) (?:was|has been) denied|Permission to use \S+(?: with command [\s\S]{0,4000}?)? has been denied|Auto mode could not evaluate this action|\S+ is temporarily unavailable\b[^\n]*\bso auto mode cannot determine)/m;
+//   The user doesn't want to proceed with this tool use. The tool use was rejected ...
+// Anchored at the start of the error (after an optional "Error: "), not at any
+// line start, so Bash output that prints one of these sentences on a later
+// line is not a denial.
+const USER_DENIAL = /^[ \t]*(?:Error:[ \t]*)?The user doesn't want to proceed with this tool use\b/;
+const PERMISSION_DENIAL = /^[ \t]*(?:Error:[ \t]*)?(?:Permission for this (?:action|command|tool use) (?:was|has been) denied|Permission to use \S+(?: with command [\s\S]{0,4000}?)? has been denied|Auto mode could not evaluate this action|\S+ is temporarily unavailable\b[^\n]*\bso auto mode cannot determine)/;
 // The classifier itself says these clear on retry, so they must not mark a
 // spawn as rejected for good.
 const TRANSIENT_DENIAL = /usually transient|Stage 2 classifier error|Auto mode could not evaluate|temporarily unavailable/i;
@@ -109,11 +116,13 @@ const BASH_NOT_PATH = /Operation not permitted|EPERM|sandbox|command not found|P
 const BASH_PATH_ON_LINE = new RegExp(
   [
     // ls: foo: No such file or directory
-    String.raw`[^\s:]+:\s*[^\s:]+:\s*No such file or directory`,
+    // (but not "Error: ENOENT: no such file or directory")
+    String.raw`(?<!\S)(?!(?:Error|ENOENT)\b)[^\s:]+:\s*(?!(?:Error|ENOENT)\b)[^\s:]+:\s*No such file or directory`,
     // rg/jq: "dir/x": No such file ..., Could not open file /tmp/x.json: No such file ...
     String.raw`(?:['"\x60][^'"\x60\n]+['"\x60]|[^\s:'"\x60]*[/.][^\s:'"\x60]*):\s*No such file or directory`,
     // zsh cd, Python: no such file or directory: /nope
-    String.raw`(?:ENOENT|No such file or directory)\s*:\s*[^\s:]+`,
+    // ("no" in "ENOENT: no such file or directory" is not a path)
+    String.raw`(?:ENOENT|No such file or directory)\s*:\s*(?!no such file\b)[^\s:,]+`,
     // Node: ENOENT: no such file or directory, open '/tmp/foo'
     String.raw`(?:ENOENT|No such file or directory)[^\n]*?\b(?:open|stat|lstat|scandir|access|unlink|mkdir|rmdir|rename|chdir|realpath)\s+['"\x60]?[^\s'"\x60]+`,
   ].join("|"),
@@ -122,7 +131,7 @@ const BASH_PATH_ON_LINE = new RegExp(
 const NPM_ENOENT_PATH = /^npm (?:error|ERR!) path \S+/m;
 // Bumped whenever a rule's matching changes, so a shadow window can be read
 // from one rule set only (education report --rules).
-export const EDUCATION_RULES_VERSION = 3;
+export const EDUCATION_RULES_VERSION = 4;
 const STATUS_REASON = "Finish your reply with the report the task asked for: STATUS: done|blocked|partial, EVIDENCE: <paths/commands>, OPEN: <items>.";
 
 export function readEducationConfig(env = process.env) {
@@ -178,9 +187,11 @@ export function promptFeatures(prompt) {
 // so a quoted transcript or example that mentions STATUS does not.
 export function subagentPromptContract(prompt) {
   const text = typeof prompt === "string" ? prompt : "";
-  if (FIXED_FORMAT.test(text)) return "fixed-format";
   const tail = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(-3);
-  return tail.some((line) => STATUS_ASK.test(line) && !/^```/.test(line)) ? "status" : "none";
+  // Rule set 4: the closing STATUS request is the explicit contract; an
+  // earlier format phrase must not turn it into fixed-format.
+  if (tail.some((line) => STATUS_ASK.test(line) && !/^```/.test(line))) return "status";
+  return FIXED_FORMAT.test(text) ? "fixed-format" : "none";
 }
 
 function bashNamesMissingPath(error) {
@@ -195,6 +206,7 @@ export function errorHint(input, previousFailHash) {
   const callHash = hash([tool, input?.tool_input ?? null]);
   // A permission denial is a decision, not a failed attempt: it gets no hint
   // and must not count toward repeat-failure.
+  if (USER_DENIAL.test(error)) return { rule: null, hint: null, callHash, denied: "user" };
   if (PERMISSION_DENIAL.test(error)) return { rule: null, hint: null, callHash, denied: TRANSIENT_DENIAL.test(error) ? "transient" : "final" };
   if (previousFailHash && previousFailHash === callHash) {
     return { rule: "repeat-failure", hint: "Identical failing call repeated; change approach.", callHash };
@@ -516,6 +528,11 @@ async function onPostToolUseFailure(input, state, config, model, log) {
     if (found.denied === "final") {
       state.rejectedSpawns.push(hash(input.tool_input ?? {}));
       await log({ rule: "spawn-rejected", decision: "log-only", emitted: false, reason: null, evidence: { inputHash: hash(input.tool_input ?? {}) } });
+    } else if (found.denied === "user") {
+      // The user said no; resending the same spawn is as wrong as after a
+      // classifier denial, but it is logged apart from permission checks.
+      state.rejectedSpawns.push(hash(input.tool_input ?? {}));
+      await log({ rule: "spawn-denied-user", decision: "log-only", emitted: false, reason: null, evidence: { inputHash: hash(input.tool_input ?? {}) } });
     } else if (found.denied === "transient") {
       // Retrying is what the denial itself recommends, so D4 must not fire.
       await log({ rule: "spawn-denied-transient", decision: "log-only", emitted: false, reason: null, evidence: { inputHash: hash(input.tool_input ?? {}) } });
