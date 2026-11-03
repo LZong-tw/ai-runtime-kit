@@ -61,19 +61,68 @@ const ITEM_TOKEN = /(?:!\d+|#\d+|\b[A-Z][A-Z0-9]+-\d+\b|(?:~|\.{1,2})?\/[\w.@-]+
 // matched any "verbatim", "schema" or ".json" path anywhere in the prompt, so
 // the replay (internal reports/model-perf) found most "fixed-format" records
 // were workflow preambles and file names.
-const FIXED_FORMAT = /(?:return|output|respond|reply)\b[^\n]{0,100}(?:(?:as|in|with)\s+(?:only\s+)?(?:json|schema)\b|(?:only\s+)?(?<![\w./-])json\b(?!\.\w)|(?:this\s+)?schema\b|exactly this format|verbatim)|原文照錄|原樣輸出|逐字輸出|只輸出|固定格式|照下列格式/i;
+// Rule set 2 let "schema"/"JSON" sit anywhere within 100 characters of the
+// verb ("Return to the main branch and check the schema") and dropped the
+// zh-TW "以 JSON 格式回傳" forms rule set 1 caught. Now the verb and the format
+// must share a clause and the format must be what is returned.
+const OUTPUT_VERB = String.raw`(?:return|output|respond|reply|answer|emit|print)\b`;
+const SAME_CLAUSE = String.raw`[^\n.;:!?。；：！？]{0,60}?`;
+const JSON_WORD = String.raw`(?<![\w./-])json(?![\w-]|\.\w)`;
+const ZH_OUTPUT_VERB = "(?:回傳|回覆|回應|輸出|產出|返回)";
+const FIXED_FORMAT = new RegExp(
+  [
+    `${OUTPUT_VERB}(?:\\s+(?:a|an|the|only|valid|raw|strict|pure))*\\s+${JSON_WORD}`,
+    `${OUTPUT_VERB}${SAME_CLAUSE}\\b(?:as|in|with|using)\\s+(?:(?:a|an|the|only|valid|raw|strict|this|that|following)\\s+)*(?:${JSON_WORD}|schema\\b)`,
+    `${OUTPUT_VERB}${SAME_CLAUSE}\\bonly\\s+(?:valid\\s+)?${JSON_WORD}`,
+    `${OUTPUT_VERB}${SAME_CLAUSE}(?:exactly this format|\\bverbatim\\b)`,
+    `\\b(?:must|should)\\s+be\\s+(?:valid\\s+)?${JSON_WORD}`,
+    `\\b${JSON_WORD}\\s+only\\b`,
+    `${ZH_OUTPUT_VERB}[^\\n。；！？]{0,12}?${JSON_WORD}`,
+    `(?:以|用)\\s*${JSON_WORD}\\s*(?:格式)?[^\\n。；！？]{0,8}?${ZH_OUTPUT_VERB}`,
+    "原文照錄|原樣輸出|逐字輸出|只輸出|固定格式|照下列格式",
+  ].join("|"),
+  "i",
+);
 const STATUS_ASK = /\bSTATUS:/;
 const STATUS_LINE = /^\s*\**STATUS\**\s*:/m;
-// Claude Code's own auto-mode wording. A bare "classifier" also matched
-// ordinary tool errors that happened to mention one.
-const CLASSIFIER_DENIAL = /auto mode classifier|Blocked by classifier|classifier judged this action|Auto mode could not evaluate/i;
-// A Bash ENOENT is a cwd/path mistake only when the error names a path and is
-// not really a sandbox, permission or missing-command failure.
+// Claude Code's permission denials, seen in real transcripts (2026-07..11):
+//   Permission for this action was denied by the Claude Code auto mode classifier. Reason: ...
+//   Permission for this action has been denied. Reason: Stage 2 classifier error - ...
+//   Permission to use <Tool> [with command ...] has been denied.
+//   Permission for this command was denied by a built-in Claude Code safety check ...
+//   Permission for this tool use was denied. The tool use was rejected ...
+//   Auto mode could not evaluate this action and is blocking it for safety ...
+//   <model> is temporarily unavailable, so auto mode cannot determine the safety of <Tool> ...
+// Anchored at a line start (after an optional "Error: ") so tool output that
+// merely quotes one of these sentences is not a denial.
+const PERMISSION_DENIAL = /^[ \t]*(?:Error:[ \t]*)?(?:Permission for this (?:action|command|tool use) (?:was|has been) denied|Permission to use \S+(?: with command [\s\S]{0,4000}?)? has been denied|Auto mode could not evaluate this action|\S+ is temporarily unavailable\b[^\n]*\bso auto mode cannot determine)/m;
+// The classifier itself says these clear on retry, so they must not mark a
+// spawn as rejected for good.
+const TRANSIENT_DENIAL = /usually transient|Stage 2 classifier error|Auto mode could not evaluate|temporarily unavailable/i;
+// A Bash ENOENT is a cwd/path mistake only when the line reporting it names a
+// path and the error is not really a sandbox, permission or missing-command
+// failure. Rule set 2 took a path or quoted string from anywhere in the
+// output, so stray echo/test lines counted, and missed zsh's lowercase
+// "cd: no such file or directory: /nope".
+const BASH_ENOENT = /No such file or directory|ENOENT/i;
 const BASH_NOT_PATH = /Operation not permitted|EPERM|sandbox|command not found|Permission denied/i;
-const BASH_PATH_EVIDENCE = /\S+:\s*\S+:\s*No such file or directory|\bpath\s+\S+|(?:open|stat|scandir|access|unlink|mkdir)\s+['"`]?\S+|['"`][^'"`\n]+['"`]|(?:ENOENT|No such file or directory)\s*:\s*\S+|\/[\w.@-]+(?:\/[\w.@-]+)*/i;
+const BASH_PATH_ON_LINE = new RegExp(
+  [
+    // ls: foo: No such file or directory
+    String.raw`[^\s:]+:\s*[^\s:]+:\s*No such file or directory`,
+    // rg/jq: "dir/x": No such file ..., Could not open file /tmp/x.json: No such file ...
+    String.raw`(?:['"\x60][^'"\x60\n]+['"\x60]|[^\s:'"\x60]*[/.][^\s:'"\x60]*):\s*No such file or directory`,
+    // zsh cd, Python: no such file or directory: /nope
+    String.raw`(?:ENOENT|No such file or directory)\s*:\s*[^\s:]+`,
+    // Node: ENOENT: no such file or directory, open '/tmp/foo'
+    String.raw`(?:ENOENT|No such file or directory)[^\n]*?\b(?:open|stat|lstat|scandir|access|unlink|mkdir|rmdir|rename|chdir|realpath)\s+['"\x60]?[^\s'"\x60]+`,
+  ].join("|"),
+  "i",
+);
+const NPM_ENOENT_PATH = /^npm (?:error|ERR!) path \S+/m;
 // Bumped whenever a rule's matching changes, so a shadow window can be read
 // from one rule set only (education report --rules).
-export const EDUCATION_RULES_VERSION = 2;
+export const EDUCATION_RULES_VERSION = 3;
 const STATUS_REASON = "Finish your reply with the report the task asked for: STATUS: done|blocked|partial, EVIDENCE: <paths/commands>, OPEN: <items>.";
 
 export function readEducationConfig(env = process.env) {
@@ -134,18 +183,23 @@ export function subagentPromptContract(prompt) {
   return tail.some((line) => STATUS_ASK.test(line) && !/^```/.test(line)) ? "status" : "none";
 }
 
+function bashNamesMissingPath(error) {
+  if (NPM_ENOENT_PATH.test(error)) return true;
+  return error.split(/\r?\n/).some((line) => BASH_ENOENT.test(line) && BASH_PATH_ON_LINE.test(line));
+}
+
 export function errorHint(input, previousFailHash) {
   if (input?.is_interrupt === true) return null;
   const tool = input?.tool_name;
   const error = String(input?.error ?? "");
   const callHash = hash([tool, input?.tool_input ?? null]);
-  // A classifier denial is a permission decision, not a failed attempt: it
-  // gets no hint and must not count toward repeat-failure.
-  if (CLASSIFIER_DENIAL.test(error)) return { rule: null, hint: null, callHash, classifier: true };
+  // A permission denial is a decision, not a failed attempt: it gets no hint
+  // and must not count toward repeat-failure.
+  if (PERMISSION_DENIAL.test(error)) return { rule: null, hint: null, callHash, denied: TRANSIENT_DENIAL.test(error) ? "transient" : "final" };
   if (previousFailHash && previousFailHash === callHash) {
     return { rule: "repeat-failure", hint: "Identical failing call repeated; change approach.", callHash };
   }
-  if (tool === "Bash" && /No such file or directory|ENOENT/.test(error) && !BASH_NOT_PATH.test(error) && BASH_PATH_EVIDENCE.test(error)) {
+  if (tool === "Bash" && BASH_ENOENT.test(error) && !BASH_NOT_PATH.test(error) && bashNamesMissingPath(error)) {
     // P0.5 fixture: the hook's cwd stays at the project directory after a
     // Bash `cd`, so printing it would point the model at the wrong place.
     return { rule: "bash-enoent", hint: "Bash cwd persists across calls; run `pwd` or use absolute paths.", callHash };
@@ -367,7 +421,7 @@ async function onPreToolUse(input, state, config, model, log) {
   const silent = sameTask.find((spawn) => spawn.endedAt && !spawn.statusReported && !spawn.read);
   const pending = sameTask.find((spawn) => !spawn.endedAt || !spawn.read);
   if (state.rejectedSpawns.includes(inputHash)) {
-    deny = { rule: "D4", reason: "This exact spawn was already rejected by the permission classifier. Change the request or do the work directly." };
+    deny = { rule: "D4", reason: "This exact spawn was already denied by a permission check. Change the request or do the work directly." };
   } else if (silent) {
     deny = { rule: "D2", reason: `Inspect ${silent.agentId}'s transcript (or do it yourself) before respawning.` };
   } else if (pending) {
@@ -456,11 +510,15 @@ async function onPostToolUseFailure(input, state, config, model, log) {
   if (input.is_interrupt === true) return null;
   const error = String(input.error ?? "");
   const responses = [];
+  const found = errorHint(input, state.lastFailHash);
 
   if (SPAWN_TOOLS.has(tool) && isParent) {
-    if (CLASSIFIER_DENIAL.test(error)) {
+    if (found.denied === "final") {
       state.rejectedSpawns.push(hash(input.tool_input ?? {}));
       await log({ rule: "spawn-rejected", decision: "log-only", emitted: false, reason: null, evidence: { inputHash: hash(input.tool_input ?? {}) } });
+    } else if (found.denied === "transient") {
+      // Retrying is what the denial itself recommends, so D4 must not fire.
+      await log({ rule: "spawn-denied-transient", decision: "log-only", emitted: false, reason: null, evidence: { inputHash: hash(input.tool_input ?? {}) } });
     } else if (config.subagentNudge !== "off") {
       const reason = error.replace(/\s+/g, " ").slice(0, 160) || "unknown error";
       const hint = `Subagent ended without a report (${reason}); read its transcript or do the work directly.`;
@@ -470,8 +528,7 @@ async function onPostToolUseFailure(input, state, config, model, log) {
     }
   }
 
-  const found = errorHint(input, state.lastFailHash);
-  if (!found.classifier) state.lastFailHash = found.callHash;
+  if (!found.denied) state.lastFailHash = found.callHash;
   if (found.rule) {
     const emit = config.errorHints === true && model !== null && !isClaudeModel(model);
     await log({ rule: found.rule, decision: "hint", emitted: emit, reason: found.hint, evidence: { tool, error: error.slice(0, 200) } });
