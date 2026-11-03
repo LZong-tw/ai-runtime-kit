@@ -36,7 +36,7 @@ import {
 } from "./autocompact.mjs";
 import { startCompatibilityMiddleware } from "./compat/middleware.mjs";
 import { renderHeartbeatManagedFiles } from "./context-heartbeat.mjs";
-import { EDUCATION_DEFAULTS, educationLogPath, renderEducationSummary, summarizeEducationLog } from "./education.mjs";
+import { EDUCATION_DEFAULTS, EDUCATION_RULES, educationLogPath, renderEducationSummary, summarizeEducationLog } from "./education.mjs";
 import { buildContextObservability } from "./context-observability.mjs";
 import { createPiAuditRuntime } from "./audit/adapters/pi-extension.mjs";
 import { runAuditCli } from "./audit/cli.mjs";
@@ -4325,12 +4325,30 @@ function validateEducation(profile, education, where) {
     throw new Error(`profile "${profile.name}" ${where} must be a boolean or an object`);
   }
   for (const [key, value] of Object.entries(education)) {
-    if (!(key in EDUCATION_DEFAULTS)) {
-      throw new Error(`profile "${profile.name}" ${where}.${key} is not an education flag (${Object.keys(EDUCATION_DEFAULTS).join(", ")})`);
+    if (key === "rules") {
+      validateEducationRules(profile, value, `${where}.rules`);
+      continue;
     }
-    const valid = key === "errorHints" ? typeof value === "boolean" : ["off", "shadow", "enforce"].includes(value);
+    if (!(key in EDUCATION_DEFAULTS)) {
+      throw new Error(`profile "${profile.name}" ${where}.${key} is not an education flag (${[...Object.keys(EDUCATION_DEFAULTS), "rules"].join(", ")})`);
+    }
+    const valid = ["off", "shadow", "enforce"].includes(value) || (key === "errorHints" && typeof value === "boolean");
     if (!valid) {
-      throw new Error(`profile "${profile.name}" ${where}.${key} must be ${key === "errorHints" ? "a boolean" : "off, shadow or enforce"}`);
+      throw new Error(`profile "${profile.name}" ${where}.${key} must be ${key === "errorHints" ? "a boolean or off, shadow or enforce" : "off, shadow or enforce"}`);
+    }
+  }
+}
+
+function validateEducationRules(profile, rules, where) {
+  if (!rules || typeof rules !== "object" || Array.isArray(rules)) {
+    throw new Error(`profile "${profile.name}" ${where} must be an object`);
+  }
+  for (const [rule, level] of Object.entries(rules)) {
+    if (!Object.hasOwn(EDUCATION_RULES, rule)) {
+      throw new Error(`profile "${profile.name}" ${where}.${rule} is not an education rule (${Object.keys(EDUCATION_RULES).join(", ")})`);
+    }
+    if (!["off", "shadow", "enforce"].includes(level)) {
+      throw new Error(`profile "${profile.name}" ${where}.${rule} must be off, shadow or enforce`);
     }
   }
 }

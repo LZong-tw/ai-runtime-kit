@@ -3,7 +3,7 @@ import { appendFile, mkdir, open, readFile, rename, rm, stat, writeFile } from "
 import { basename, dirname, join } from "node:path";
 import { processSubagentObservabilityHook } from "./subagent-observability.mjs";
 import { processAuditHook } from "./audit/claude-hook.mjs";
-import { EDUCATION_DEFAULTS, EDUCATION_ENV, EDUCATION_EVENTS } from "./education.mjs";
+import { EDUCATION_DEFAULTS, EDUCATION_ENV, EDUCATION_EVENTS, EDUCATION_RULES_ENV } from "./education.mjs";
 import { createClaudeAuditHookEmitter } from "./audit/claude-hook-runtime.mjs";
 
 export const HEARTBEAT_CONTEXT_LIMIT = 512;
@@ -458,7 +458,7 @@ export function renderHeartbeatManagedFiles(configDir, runtimeModuleUrl = import
   }
   const educationEnv = education ? educationHookEnv(education) : null;
   const educationModes = education?.modes
-    ? Object.fromEntries(Object.entries(education.modes).map(([mode, flags]) => [mode, educationHookEnv({ ...education.base, ...flags })]))
+    ? Object.fromEntries(Object.entries(education.modes).map(([mode, flags]) => [mode, educationHookEnv({ base: education.base, ...flags })]))
     : {};
   if (educationEnv) {
     for (const event of EDUCATION_EVENTS) {
@@ -529,7 +529,12 @@ export function renderHeartbeatManagedFiles(configDir, runtimeModuleUrl = import
 export function educationHookEnv(education = {}) {
   const { base, modes, ...own } = education === true ? {} : education;
   const flags = { ...EDUCATION_DEFAULTS, ...base, ...own };
-  return Object.fromEntries(Object.entries(EDUCATION_ENV).map(([key, name]) => [name, String(flags[key])]));
+  const env = Object.fromEntries(Object.entries(EDUCATION_ENV).map(([key, name]) => [name, String(flags[key])]));
+  // Mode rules add to the profile-wide ones instead of replacing them. Left out
+  // when empty so profiles without overrides render the same hook script.
+  const rules = { ...base?.rules, ...own.rules };
+  if (Object.keys(rules).length > 0) env[EDUCATION_RULES_ENV] = JSON.stringify(rules);
+  return env;
 }
 
 function routeContext(env, extra = []) {

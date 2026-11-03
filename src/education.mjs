@@ -1,8 +1,9 @@
 // Non-Claude model education hooks (spec 2026-10-15, §4.3–§5).
 //
 // Every rule is evaluated and logged to airkit-education.jsonl. A rule only
-// changes what Claude Code sees when its flag is "enforce" (or errorHints is
-// true) and, for the model-gated rules, the acting model is not Claude.
+// changes what Claude Code sees when its level — a per-rule override, else its
+// group flag — is "enforce" and, for the model-gated rules, the acting model is
+// not Claude.
 // Anything unexpected — bad flags, unreadable transcripts, state races — is
 // logged and the hook lets the call through.
 import { createHash } from "node:crypto";
@@ -22,6 +23,25 @@ export const EDUCATION_DEFAULTS = Object.freeze({
   subagentNudge: "shadow",
   errorHints: false,
 });
+// Rules that can be switched one by one (launch.education.rules), keyed by the
+// rule name the log uses, mapped to the group flag they fall back to.
+// Log-only records (status-log, spawn-allow, …) follow their group.
+export const EDUCATION_RULES = Object.freeze({
+  D1: "spawnGuard",
+  D2: "spawnGuard",
+  D3: "spawnGuard",
+  D4: "spawnGuard",
+  "status-missing": "subagentReport",
+  "poll-nudge": "subagentNudge",
+  "subagent-cut": "subagentNudge",
+  "unread-result": "subagentNudge",
+  "running-note": "subagentNudge",
+  "repeat-failure": "errorHints",
+  "bash-enoent": "errorHints",
+  "edit-mismatch": "errorHints",
+  "read-missing": "errorHints",
+});
+export const EDUCATION_RULES_ENV = "AIRCLAUDE_EDUCATION_RULES";
 export const EDUCATION_EVENTS = Object.freeze([
   "UserPromptSubmit",
   "PreToolUse",
@@ -141,6 +161,7 @@ export function readEducationConfig(env = process.env) {
     const raw = env[name];
     if (key === "errorHints") {
       if (raw === "true" || raw === "false") config[key] = raw === "true";
+      else if (LEVELS.has(raw)) config[key] = raw;
       else {
         config[key] = false;
         errors.push(`${name}=${raw === undefined ? "<unset>" : JSON.stringify(raw)}`);
@@ -153,7 +174,49 @@ export function readEducationConfig(env = process.env) {
       errors.push(`${name}=${raw === undefined ? "<unset>" : JSON.stringify(raw)}`);
     }
   }
+  config.rules = readRuleOverrides(env[EDUCATION_RULES_ENV], errors);
   return { config, errors };
+}
+
+// Hook scripts rendered before per-rule switches never set the env, so unset
+// is not an error. A bad override turns that rule off; bad JSON drops them all.
+function readRuleOverrides(raw, errors) {
+  const rules = {};
+  if (raw === undefined) return rules;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    errors.push(`${EDUCATION_RULES_ENV}=${JSON.stringify(String(raw).slice(0, 200))}`);
+    return rules;
+  }
+  for (const [rule, level] of Object.entries(parsed)) {
+    if (!Object.hasOwn(EDUCATION_RULES, rule)) {
+      errors.push(`${EDUCATION_RULES_ENV}.${rule} (unknown rule)`);
+    } else if (LEVELS.has(level)) {
+      rules[rule] = level;
+    } else {
+      rules[rule] = "off";
+      errors.push(`${EDUCATION_RULES_ENV}.${rule}=${JSON.stringify(level)}`);
+    }
+  }
+  return rules;
+}
+
+// A per-rule override wins over its group. errorHints=false has always logged
+// without emitting, so it reads as shadow here.
+function ruleLevel(config, rule) {
+  const level = config.rules?.[rule] ?? config[EDUCATION_RULES[rule]];
+  if (level === true) return "enforce";
+  if (level === false) return "shadow";
+  return level;
+}
+
+function ruleOn(config, rule) {
+  return ruleLevel(config, rule) !== "off";
 }
 
 export function educationLogPath(env = process.env) {
@@ -412,7 +475,8 @@ async function onUserPrompt(input, state) {
 }
 
 async function onPreToolUse(input, state, config, model, log) {
-  if (!SPAWN_TOOLS.has(input.tool_name) || config.spawnGuard === "off") return null;
+  if (!SPAWN_TOOLS.has(input.tool_name)) return null;
+  if (config.spawnGuard === "off" && !["D1", "D2", "D3", "D4"].some((rule) => ruleOn(config, rule))) return null;
   const toolInput = input.tool_input ?? {};
   const descNorm = normalizeTask(toolInput.description || toolInput.prompt);
   const inputHash = hash(toolInput);
@@ -432,16 +496,19 @@ async function onPreToolUse(input, state, config, model, log) {
   const sameTask = state.spawns.filter((spawn) => spawn.descNorm && spawn.descNorm === descNorm);
   const silent = sameTask.find((spawn) => spawn.endedAt && !spawn.statusReported && !spawn.read);
   const pending = sameTask.find((spawn) => !spawn.endedAt || !spawn.read);
-  if (state.rejectedSpawns.includes(inputHash)) {
+  // A rule switched off is skipped, so a later rule in the chain can still deny.
+  if (ruleOn(config, "D4") && state.rejectedSpawns.includes(inputHash)) {
     deny = { rule: "D4", reason: "This exact spawn was already denied by a permission check. Change the request or do the work directly." };
-  } else if (silent) {
+  } else if (ruleOn(config, "D2") && silent) {
     deny = { rule: "D2", reason: `Inspect ${silent.agentId}'s transcript (or do it yourself) before respawning.` };
-  } else if (pending) {
+  } else if (ruleOn(config, "D1") && pending) {
     deny = { rule: "D1", reason: `An agent with this task is running/unread (${pending.agentId}). Read its output or transcript first.` };
-  } else if (signals.length === 0 && state.ownCalls === 0) {
+  } else if (ruleOn(config, "D3") && signals.length === 0 && state.ownCalls === 0) {
     deny = { rule: "D3", reason: "Investigate directly first; spawn when work proves parallelizable." };
   }
-  const emit = deny !== null && gated(config.spawnGuard, model);
+  // spawn-allow is log-only and follows the group.
+  if (deny === null && config.spawnGuard === "off") return null;
+  const emit = deny !== null && gated(ruleLevel(config, deny.rule), model);
   await log({
     rule: deny?.rule ?? "spawn-allow",
     decision: deny ? "deny" : "allow",
@@ -497,8 +564,8 @@ async function onPostToolUse(input, state, config, model, log) {
       spawn.polls += 1;
       if (spawn.polls > POLL_LIMIT && !spawn.nudged) over.push(spawn);
     }
-    if (over.length === 0 || config.subagentNudge === "off") return null;
-    const emit = gated(config.subagentNudge, model);
+    if (over.length === 0 || !ruleOn(config, "poll-nudge")) return null;
+    const emit = gated(ruleLevel(config, "poll-nudge"), model);
     for (const spawn of over) spawn.nudged = true;
     const hint = "Stop polling; completion arrives on its own, or read its output/transcript.";
     await log({ rule: "poll-nudge", decision: "hint", emitted: emit, reason: hint, evidence: { tool, agents: over.map((spawn) => spawn.agentId), polls: over.map((spawn) => spawn.polls) } });
@@ -536,18 +603,18 @@ async function onPostToolUseFailure(input, state, config, model, log) {
     } else if (found.denied === "transient") {
       // Retrying is what the denial itself recommends, so D4 must not fire.
       await log({ rule: "spawn-denied-transient", decision: "log-only", emitted: false, reason: null, evidence: { inputHash: hash(input.tool_input ?? {}) } });
-    } else if (config.subagentNudge !== "off") {
+    } else if (ruleOn(config, "subagent-cut")) {
       const reason = error.replace(/\s+/g, " ").slice(0, 160) || "unknown error";
       const hint = `Subagent ended without a report (${reason}); read its transcript or do the work directly.`;
-      const emit = gated(config.subagentNudge, model);
+      const emit = gated(ruleLevel(config, "subagent-cut"), model);
       await log({ rule: "subagent-cut", decision: "hint", emitted: emit, reason: hint, evidence: { tool } });
       if (emit) responses.push(hint);
     }
   }
 
   if (!found.denied) state.lastFailHash = found.callHash;
-  if (found.rule) {
-    const emit = config.errorHints === true && model !== null && !isClaudeModel(model);
+  if (found.rule && ruleOn(config, found.rule)) {
+    const emit = gated(ruleLevel(config, found.rule), model);
     await log({ rule: found.rule, decision: "hint", emitted: emit, reason: found.hint, evidence: { tool, error: error.slice(0, 200) } });
     if (emit) responses.push(found.hint);
   }
@@ -604,18 +671,22 @@ async function onSubagentStop(input, state, config, model, log) {
     transcriptPath,
   });
   if (handed?.delivered) markRead(spawn, "handback");
-  if (config.subagentReport === "off") return null;
+  const groupOn = config.subagentReport !== "off";
+  const missingLevel = ruleLevel(config, "status-missing");
+  if (!groupOn && missingLevel === "off") return null;
   const contract = subagentPromptContract(await firstUserPrompt(transcriptPath));
   const knownType = KNOWN_AGENT_TYPES.has(input.agent_type);
   let rule = "status-log";
   let block = false;
   if (contract === "fixed-format") rule = "status-fixed-format";
   else if (!knownType) rule = "status-unknown-agent-type";
-  else if (contract === "status" && !statusReported) {
+  else if (contract === "status" && !statusReported && missingLevel !== "off") {
     rule = "status-missing";
     block = input.stop_hook_active !== true && !spawn.reportBlocked;
   }
-  const emit = block && config.subagentReport === "enforce";
+  // The log-only status-* records follow the group.
+  if (rule !== "status-missing" && !groupOn) return null;
+  const emit = block && missingLevel === "enforce";
   if (emit) spawn.reportBlocked = true;
   await log({
     rule,
@@ -648,7 +719,10 @@ async function assistantTextsSince(path, since) {
 // "don't poll" note instead of a block. With no stored result there is no
 // evidence either way, so those agents only get a hint.
 async function onStop(input, state, config, model, log) {
-  if (typeof input.agent_id === "string" || config.subagentNudge === "off") return null;
+  if (typeof input.agent_id === "string") return null;
+  const unreadOn = ruleOn(config, "unread-result");
+  const runningOn = ruleOn(config, "running-note");
+  if (!unreadOn && !runningOn) return null;
   const background = Array.isArray(input.background_tasks) ? input.background_tasks : [];
   const running = background.filter((task) => task?.type === "subagent" && task.status === "running");
   const ended = state.spawns.filter((spawn) => spawn.background && spawn.endedAt && !spawn.read);
@@ -658,20 +732,20 @@ async function onStop(input, state, config, model, log) {
     for (const spawn of ended) if (texts.some((text) => quotes(text, spawn))) markRead(spawn, "quoted");
   }
   const unread = ended.filter((spawn) => !spawn.read);
-  if (unread.length > 0) {
+  if (unreadOn && unread.length > 0) {
     const list = unread.map((spawn) => `${spawn.agentId} (${spawn.description || "no description"})`).join(", ");
     const reason = `Finished background agents have results you have not read: ${list}. Read their output (TaskOutput or the output file) and use it before ending the turn.`;
     const empty = unread.filter((spawn) => !spawn.result).map((spawn) => spawn.agentId);
     const once = input.stop_hook_active !== true && state.stopBlockedTurn !== state.turn;
     const decision = !once ? "log-only" : empty.length < unread.length ? "block" : "hint";
-    const emit = once && gated(config.subagentNudge, model);
+    const emit = once && gated(ruleLevel(config, "unread-result"), model);
     if (emit) state.stopBlockedTurn = state.turn;
     await log({ rule: "unread-result", decision, emitted: emit, reason, evidence: { agents: unread.map((spawn) => spawn.agentId), emptyResult: empty, stopHookActive: input.stop_hook_active === true } });
     if (emit) return decision === "block" ? { decision: "block", reason } : context("Stop", reason);
   }
-  if (running.length > 0) {
+  if (runningOn && running.length > 0) {
     const note = `${running.length} agent${running.length === 1 ? "" : "s"} still running; completion notices will arrive — end the turn or keep working, don't poll.`;
-    const emit = gated(config.subagentNudge, model);
+    const emit = gated(ruleLevel(config, "running-note"), model);
     await log({ rule: "running-note", decision: "hint", emitted: emit, reason: note, evidence: { agents: running.map((task) => task.id) } });
     if (emit) return context("Stop", note);
   }
@@ -686,7 +760,8 @@ export async function processEducationHook(input, env = process.env) {
   if (errors.length > 0) {
     await logRecord(env, { ...base, rule: "config", decision: "config-error", emitted: false, reason: `invalid or missing ${errors.join(", ")}; affected rules pass` });
   }
-  if (Object.values(config).every((value) => value === "off" || value === false)) return null;
+  const groupsOff = Object.keys(EDUCATION_ENV).every((key) => config[key] === "off" || config[key] === false);
+  if (groupsOff && Object.values(config.rules).every((level) => level === "off")) return null;
   const path = statePath(env, input.session_id);
   const state = await loadState(path);
   const model = ["PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStop", "Stop"].includes(eventName) ? await actorModel(input) : null;
