@@ -530,10 +530,9 @@ export function educationHookEnv(education = {}) {
   const { base, modes, ...own } = education === true ? {} : education;
   const flags = { ...EDUCATION_DEFAULTS, ...base, ...own };
   const env = Object.fromEntries(Object.entries(EDUCATION_ENV).map(([key, name]) => [name, String(flags[key])]));
-  // Mode rules add to the profile-wide ones instead of replacing them. Left out
-  // when empty so profiles without overrides render the same hook script.
-  const rules = { ...base?.rules, ...own.rules };
-  if (Object.keys(rules).length > 0) env[EDUCATION_RULES_ENV] = JSON.stringify(rules);
+  // Mode rules add to the profile-wide ones instead of replacing them. Baked
+  // even when empty, or a stray shell export would supply the overrides.
+  env[EDUCATION_RULES_ENV] = JSON.stringify({ ...base?.rules, ...own.rules });
   return env;
 }
 
