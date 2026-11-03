@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { educationHookEnv, renderHeartbeatManagedFiles } from "../src/context-heartbeat.mjs";
 import {
   EDUCATION_EVENTS,
+  EDUCATION_RULES_VERSION,
   errorHint,
   isClaudeModel,
   processEducationHook,
@@ -55,6 +56,21 @@ async function writeAgent(transcriptPath, agentId, prompt, model = "gpt-6-sol") 
   ].join("\n") + "\n");
 }
 
+// Background agents can end by calling SubagentHandback: the report travels in
+// the tool input and the final assistant message has no text at all.
+async function writeHandbackAgent(transcriptPath, agentId, prompt, report, { delivered = true } = {}) {
+  const dir = join(transcriptPath.slice(0, -".jsonl".length), "subagents");
+  await mkdir(dir, { recursive: true });
+  const result = delivered
+    ? { type: "tool_result", tool_use_id: `hb-${agentId}`, content: [{ type: "text", text: '{"success":true,"message":"Report delivered to your caller."}' }] }
+    : { type: "tool_result", tool_use_id: `hb-${agentId}`, is_error: true, content: "Delivery failed." };
+  await writeFile(join(dir, `agent-${agentId}.jsonl`), [
+    JSON.stringify({ type: "user", message: { role: "user", content: prompt } }),
+    JSON.stringify({ type: "assistant", message: { model: "gpt-6-sol", content: [{ type: "tool_use", id: `hb-${agentId}`, name: "SubagentHandback", input: { message: report } }] } }),
+    JSON.stringify({ type: "user", message: { role: "user", content: [result] } }),
+  ].join("\n") + "\n");
+}
+
 test("flags: valid values parse, missing or invalid fall back to off/false and are reported", () => {
   assert.deepEqual(readEducationConfig(flags({ AIRCLAUDE_EDUCATION_ERROR_HINTS: "true" })), {
     config: { spawnGuard: "shadow", subagentReport: "shadow", subagentNudge: "shadow", errorHints: true },
@@ -77,7 +93,7 @@ test("prompt features count list items and fan-out intent", () => {
 test("subagent contract needs STATUS in the closing lines and yields to fixed formats", () => {
   assert.equal(subagentPromptContract("Do X.\nFinish with STATUS: done|blocked|partial, EVIDENCE: paths"), "status");
   assert.equal(subagentPromptContract("Example transcript:\nSTATUS: done\nmore\ncontext\nhere\nNow summarize it."), "none");
-  assert.equal(subagentPromptContract("Return the JSON schema below verbatim.\nSTATUS: done"), "fixed-format");
+  assert.equal(subagentPromptContract("Return the JSON schema below verbatim."), "fixed-format");
   assert.equal(subagentPromptContract(null), "none");
 });
 
@@ -92,6 +108,192 @@ test("error hints follow the fixture-verified rules", () => {
   const first = errorHint({ tool_name: "Bash", tool_input: { command: "x" }, error: "boom" });
   assert.equal(first.rule, null);
   assert.equal(errorHint({ tool_name: "Bash", tool_input: { command: "x" }, error: "boom" }, first.callHash).rule, "repeat-failure");
+});
+
+// The workflow harness preamble says "relays, verbatim"; under 44e50e8 that
+// alone turned every STATUS contract into fixed-format.
+const harnessPrompt = "Read profiles/catalog.json.\nThe harness relays, verbatim and indented below.\nInvestigate carefully.\nUse local evidence.\nFinish with STATUS: done|blocked|partial";
+
+test("fixed format means an output instruction, not a mention of JSON, schema or verbatim", () => {
+  assert.equal(subagentPromptContract(harnessPrompt), "status");
+  assert.equal(subagentPromptContract("Read profiles/catalog.json"), "none");
+  assert.equal(subagentPromptContract("Return catalog.json"), "none");
+  assert.equal(subagentPromptContract("Check the schema migration.\nFinish with STATUS: done"), "status");
+  for (const prompt of ["Return ONLY JSON matching this schema", "Return results in JSON", "Reply with exactly this format:", "Output the diff verbatim", "只輸出表格", "照下列格式回覆"]) {
+    assert.equal(subagentPromptContract(prompt), "fixed-format", prompt);
+  }
+  // Rule set 4: an explicit closing STATUS request beats an earlier format phrase.
+  assert.equal(subagentPromptContract("Return results in JSON.\nkeys: a, b\nnotes\nFinish with STATUS: done"), "status");
+  assert.equal(subagentPromptContract("Return results in JSON.\nFinish with STATUS: done\nthen\nstop\nhere"), "fixed-format");
+});
+
+// Rule set 2 lost these (rule set 1 caught them through a bare \bjson\b); a
+// JSON-only subagent misread as "status" would be blocked into adding STATUS.
+test("fixed format covers zh-TW and 'must be JSON' output instructions", () => {
+  for (const prompt of [
+    "請以 JSON 格式回傳結果",
+    "回傳 JSON，不要其他文字",
+    "用 JSON 回覆",
+    "輸出成 JSON 格式",
+    "Your answer must be valid JSON only.",
+    "Respond in JSON.",
+    "Output as JSON",
+  ]) {
+    assert.equal(subagentPromptContract(prompt), "fixed-format", prompt);
+  }
+});
+
+test("fixed format needs the format in the same clause as the output verb", () => {
+  for (const prompt of [
+    "Return to the main branch and check the schema",
+    "Read their output ... the output is JSON-ish",
+    "Output goes to report.json. Finish with STATUS: done",
+    "Return the parsed package.json fields",
+    "回傳 package.json 的內容",
+    "Reply to the reviewer about the JSON parser",
+    // Rule set 4 counterexamples: descriptions of data, not output formats.
+    "API 回傳的 JSON 有缺欄位，請調查",
+    "The config file must be valid JSON.",
+    "The endpoint accepts JSON only.",
+    "Parse the output JSON and list failures.",
+    "Reply in the PR thread with the schema link.",
+  ]) {
+    assert.notEqual(subagentPromptContract(prompt), "fixed-format", prompt);
+  }
+});
+
+test("a closing STATUS request wins over any fixed-format phrase", () => {
+  for (const prompt of [
+    "請以 JSON 格式回傳結果\n最後寫 STATUS: done",
+    "回傳 JSON，不要其他文字\nSTATUS: done",
+    "Your answer must be valid JSON only.\nFinish with STATUS: done",
+    "Return the JSON schema below verbatim.\nSTATUS: done",
+    "API 回傳的 JSON 有缺欄位\nFinish with STATUS: done|blocked|partial",
+  ]) {
+    assert.equal(subagentPromptContract(prompt), "status", prompt);
+  }
+});
+
+test("bash-enoent needs a named missing path and skips sandbox, permission and missing-command errors", () => {
+  const bash = (error) => errorHint({ tool_name: "Bash", tool_input: { command: error }, error }).rule;
+  for (const error of [
+    "ls: foo: No such file or directory",
+    "rg: x: No such file or directory (os error 2)",
+    "npm error code ENOENT\nnpm error path /repo/package.json",
+    "Error: ENOENT: no such file or directory, open '/tmp/foo'",
+    // zsh reports a failed cd in lower case; rule set 2 never matched it.
+    "Exit code 1\ncd: no such file or directory: /nope",
+    "Exit code 1\nbash: cd: /nope: No such file or directory",
+    'Exit code 2\n"runs/out.json": No such file or directory (os error 2)',
+    "Exit code 2\njq: error: Could not open file /tmp/pods.json: No such file or directory",
+  ]) {
+    assert.equal(bash(error), "bash-enoent", error);
+  }
+  for (const error of [
+    "mkdir: x: Operation not permitted\nNo such file or directory",
+    "fatal: failed to move '/a' to '/b': Operation not permitted\nNo such file or directory",
+    "zsh: command not found: foo",
+    "ENOENT",
+    "sandbox: /foo: No such file or directory",
+    "EPERM\nENOENT /foo",
+    // The path has to be on the line that reports the missing file.
+    "ugrep: warning: : No such file or directory\nfoo/bar baz",
+    "=== any k8s ===\nNo such file or directory\n/usr/bin/foo 'x'",
+    "Error: No such file or directory",
+    // "no" is the first word of the message, not a path.
+    "Error: ENOENT: no such file or directory",
+    "ENOENT: no such file or directory",
+  ]) {
+    assert.equal(bash(error), null, error);
+  }
+});
+
+// Claude Code's own denial texts, cut to their opening sentences, from local
+// transcripts 2026-07..11 (approximate counts in brackets). Free-text reasons
+// and commands are redacted.
+const FINAL_DENIALS = [
+  // [~500]
+  "Permission for this action was denied by the Claude Code auto mode classifier. Reason: Blocked by classifier. If you have other tasks that don't depend on this action, continue working on those.",
+  // [~140]
+  "Permission for this action was denied by the Claude Code auto mode classifier. Reason: The server-side auto mode classifier judged this action dangerous (it gave no explanation). If you have other tasks that don't depend on this action, continue working on those.",
+  // [~430, reason is free text]
+  "Permission for this action was denied by the Claude Code auto mode classifier. Reason: [Category] <redacted reason>.. If you have other tasks that don't depend on this action, continue working on those.",
+  // older wording, no "classifier" in it at all
+  "Permission for this action has been denied. Reason: <redacted reason>.. If you have other tasks that don't depend on this action, continue working on those.",
+  "Permission to use WebFetch has been denied. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat.",
+  "Permission to use Bash with command <redacted>\n<redacted second line> has been denied.",
+  "Permission for this command was denied by a built-in Claude Code safety check, not by the user.",
+  "Permission for this tool use was denied. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). Try a different approach or report the limitation to complete your task.",
+  // toolUseResult carries an "Error: " prefix
+  "Error: Permission for this action was denied by the Claude Code auto mode classifier. Reason: Blocked by classifier.",
+];
+const TRANSIENT_DENIALS = [
+  // [~30] rule set 2 matched none of its patterns
+  "Permission for this action has been denied. Reason: Stage 2 classifier error - blocking based on stage 1 assessment. If you have other tasks that don't depend on this action, continue working on those.",
+  // [~95]
+  "Permission for this action was denied by the Claude Code auto mode classifier. Reason: Stage 2 classifier error - blocking based on stage 1 assessment (usually transient — retrying often succeeds). If you have other tasks that don't depend on this action, continue working on those.",
+  // [~75]
+  "Auto mode could not evaluate this action and is blocking it for safety — run with --debug for details. This is not a judgment that the action is unsafe.",
+  // [~110]
+  "claude-sonnet-5[1m] is temporarily unavailable (timed out), so auto mode cannot determine the safety of Bash right now. Wait a moment and then try this action again.",
+];
+
+const USER_DENIAL = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.";
+
+test("a user rejection is a user denial: no hint, no repeat-failure", () => {
+  for (const error of [USER_DENIAL, `Error: ${USER_DENIAL}`]) {
+    const denied = errorHint({ tool_name: "Bash", tool_input: { command: "x" }, error });
+    assert.deepEqual([denied.rule, denied.denied], [null, "user"], error);
+    assert.equal(errorHint({ tool_name: "Bash", tool_input: { command: "x" }, error }, denied.callHash).rule, null, error);
+  }
+});
+
+test("a denial sentence on a later line of Bash output is not a denial", () => {
+  for (const error of [
+    "Exit code 1\nPermission for this action was denied by the Claude Code auto mode classifier. Reason: x",
+    "Exit code 1\ngrep hit:\nPermission to use Bash has been denied.",
+    `Exit code 1\n${USER_DENIAL}`,
+    `\n${USER_DENIAL}`,
+  ]) {
+    assert.equal(errorHint({ tool_name: "Bash", tool_input: { command: "x" }, error }).denied, undefined, error);
+  }
+});
+
+test("real permission denials get no hint and never count toward repeat-failure", () => {
+  for (const [errors, kind] of [[FINAL_DENIALS, "final"], [TRANSIENT_DENIALS, "transient"]]) {
+    for (const error of errors) {
+      const denied = errorHint({ tool_name: "Bash", tool_input: { command: "x" }, error });
+      assert.deepEqual([denied.rule, denied.denied], [null, kind], error);
+      assert.equal(errorHint({ tool_name: "Bash", tool_input: { command: "x" }, error }, denied.callHash).rule, null, error);
+    }
+  }
+  for (const error of [
+    "the classifier model crashed",
+    "Blocked by classifier",
+    "rm: x: Permission denied",
+    "grep output: Permission for this action was denied by the Claude Code auto mode classifier.",
+  ]) {
+    assert.equal(errorHint({ tool_name: "Bash", tool_input: { command: "x" }, error }).denied, undefined, error);
+  }
+});
+
+test("a classifier denial between two identical failures leaves the repeat visible", async () => {
+  const f = await fixture();
+  try {
+    const env = f.env({ AIRCLAUDE_EDUCATION_ERROR_HINTS: "true" });
+    const fail = { ...f.base, hook_event_name: "PostToolUseFailure", tool_name: "Bash", tool_input: { command: "make" }, error: "make: *** [all] Error 2" };
+    const denied = { ...fail, tool_input: { command: "rm -rf build" }, error: "Permission for this action was denied by the Claude Code auto mode classifier." };
+    await processEducationHook(fail, env);
+    assert.equal(await processEducationHook(denied, env), null);
+    assert.equal(await processEducationHook(denied, env), null, "a re-denied call is not a repeat failure");
+    const again = await processEducationHook(fail, env);
+    assert.match(again.hookSpecificOutput.additionalContext, /Identical failing call/);
+    const logged = await f.logs();
+    assert.deepEqual(logged.map((entry) => entry.rule), ["repeat-failure"]);
+    assert.ok(logged.every((entry) => entry.rules === EDUCATION_RULES_VERSION));
+  } finally {
+    await f.cleanup();
+  }
 });
 
 test("Claude detection and result shingles ignore the description", () => {
@@ -158,17 +360,59 @@ test("D1 blocks respawning an unread background agent with the same task", async
   }
 });
 
-test("a classifier-rejected spawn is never resent (D4)", async () => {
+test("a finally denied spawn is never resent (D4), whoever denied it", async () => {
+  for (const error of [FINAL_DENIALS[0], FINAL_DENIALS[3], FINAL_DENIALS[7]]) {
+    const f = await fixture();
+    try {
+      const env = f.env({ AIRCLAUDE_EDUCATION_SPAWN_GUARD: "enforce", AIRCLAUDE_EDUCATION_SUBAGENT_NUDGE: "enforce" });
+      const toolInput = { description: "Deploy", prompt: "deploy it" };
+      await processEducationHook({ ...f.base, hook_event_name: "UserPromptSubmit", prompt: "use subagents" }, env);
+      assert.equal(await processEducationHook({ ...f.base, hook_event_name: "PostToolUseFailure", tool_name: "Agent", tool_input: toolInput, error }, env), null, error);
+      const out = await processEducationHook({ ...f.base, hook_event_name: "PreToolUse", tool_name: "Agent", tool_input: toolInput }, env);
+      assert.match(out.hookSpecificOutput.permissionDecisionReason, /already denied by a permission check/, error);
+      const logged = await f.logs();
+      assert.ok(logged.some((entry) => entry.rule === "spawn-rejected"), error);
+      assert.ok(!logged.some((entry) => entry.rule === "subagent-cut"), "a denial is not a subagent that ended without a report");
+    } finally {
+      await f.cleanup();
+    }
+  }
+});
+
+test("a user-rejected spawn is logged as a user denial, never subagent-cut", async () => {
   const f = await fixture();
   try {
-    const env = f.env({ AIRCLAUDE_EDUCATION_SPAWN_GUARD: "enforce" });
+    const env = f.env({ AIRCLAUDE_EDUCATION_SPAWN_GUARD: "enforce", AIRCLAUDE_EDUCATION_SUBAGENT_NUDGE: "enforce" });
     const toolInput = { description: "Deploy", prompt: "deploy it" };
     await processEducationHook({ ...f.base, hook_event_name: "UserPromptSubmit", prompt: "use subagents" }, env);
-    await processEducationHook({ ...f.base, hook_event_name: "PostToolUseFailure", tool_name: "Agent", tool_input: toolInput, error: "Permission for this action was denied by the Claude Code auto mode classifier." }, env);
-    const out = await processEducationHook({ ...f.base, hook_event_name: "PreToolUse", tool_name: "Agent", tool_input: toolInput }, env);
-    assert.match(out.hookSpecificOutput.permissionDecisionReason, /classifier/);
+    assert.equal(await processEducationHook({ ...f.base, hook_event_name: "PostToolUseFailure", tool_name: "Agent", tool_input: toolInput, error: USER_DENIAL }, env), null);
+    assert.equal(await processEducationHook({ ...f.base, hook_event_name: "PostToolUseFailure", tool_name: "Agent", tool_input: toolInput, error: USER_DENIAL }, env), null);
+    const rules = (await f.logs()).map((entry) => entry.rule);
+    assert.ok(rules.includes("spawn-denied-user"));
+    assert.ok(!rules.includes("subagent-cut"));
+    assert.ok(!rules.includes("repeat-failure"));
   } finally {
     await f.cleanup();
+  }
+});
+
+test("a transiently denied spawn may be retried: no D4, no downgrade, no subagent-cut", async () => {
+  for (const error of TRANSIENT_DENIALS) {
+    const f = await fixture();
+    try {
+      const env = f.env({ AIRCLAUDE_EDUCATION_SPAWN_GUARD: "enforce", AIRCLAUDE_EDUCATION_SUBAGENT_NUDGE: "enforce" });
+      const toolInput = { description: "Deploy", prompt: "deploy it" };
+      await processEducationHook({ ...f.base, hook_event_name: "UserPromptSubmit", prompt: "use subagents" }, env);
+      assert.equal(await processEducationHook({ ...f.base, hook_event_name: "PostToolUseFailure", tool_name: "Agent", tool_input: toolInput, error }, env), null, error);
+      await processEducationHook({ ...f.base, hook_event_name: "PreToolUse", tool_name: "Agent", tool_input: toolInput }, env);
+      const logged = await f.logs();
+      assert.deepEqual(logged.filter((entry) => entry.rule !== "spawn-allow").map((entry) => entry.rule), ["spawn-denied-transient"], error);
+      const retry = logged.find((entry) => entry.rule === "spawn-allow");
+      assert.ok(retry, error);
+      assert.ok(!JSON.stringify(retry).includes("previous-spawn-rejected"), error);
+    } finally {
+      await f.cleanup();
+    }
   }
 });
 
@@ -227,6 +471,91 @@ test("Stop blocks once per turn on an unread finished background agent, and quot
   }
 });
 
+test("a report delivered through SubagentHandback counts as read and as the agent's result", async () => {
+  const f = await fixture();
+  try {
+    const env = f.env({ AIRCLAUDE_EDUCATION_SUBAGENT_REPORT: "enforce", AIRCLAUDE_EDUCATION_SUBAGENT_NUDGE: "enforce" });
+    const ask = "Audit it.\nFinish with STATUS: done|blocked|partial, EVIDENCE: <paths>, OPEN: <items>.";
+    const report = "STATUS: done\nEVIDENCE: src/compat/gateway.mjs:252\nOPEN: none";
+    await processEducationHook({ ...f.base, hook_event_name: "UserPromptSubmit", prompt: "investigate in parallel" }, env);
+    for (const id of ["h1", "h2"]) {
+      await processEducationHook({ ...f.base, hook_event_name: "PostToolUse", tool_name: "Agent", tool_input: { description: `Audit ${id}` }, tool_response: { isAsync: true, agentId: id, outputFile: `/tmp/${id}.output` } }, env);
+    }
+    await writeHandbackAgent(f.transcript, "h1", ask, report);
+    await writeHandbackAgent(f.transcript, "h2", ask, report, { delivered: false });
+    const subagentStop = { ...f.base, hook_event_name: "SubagentStop", agent_type: "general-purpose", stop_hook_active: false, last_assistant_message: "" };
+    assert.equal(await processEducationHook({ ...subagentStop, agent_id: "h1" }, env), null, "the handback carries STATUS");
+    assert.equal(await processEducationHook({ ...subagentStop, agent_id: "h2" }, env), null);
+
+    const stop = await processEducationHook({ ...f.base, hook_event_name: "Stop", stop_hook_active: false, last_assistant_message: "Done.", background_tasks: [] }, env);
+    assert.equal(stop.decision, "block", "an undelivered handback is still an unread result");
+    assert.match(stop.reason, /h2/);
+    assert.doesNotMatch(stop.reason, /h1/);
+    const records = await f.logs();
+    const sources = records.filter((entry) => entry.event === "SubagentStop").map((entry) => [entry.rule, entry.evidence.resultSource]);
+    assert.deepEqual(sources, [["status-log", "handback"], ["status-log", "handback"]]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("Stop only hints when an unread agent's result is empty", async () => {
+  const f = await fixture();
+  try {
+    const env = f.env({ AIRCLAUDE_EDUCATION_SUBAGENT_NUDGE: "enforce" });
+    await processEducationHook({ ...f.base, hook_event_name: "UserPromptSubmit", prompt: "investigate in parallel" }, env);
+    await processEducationHook({ ...f.base, hook_event_name: "PostToolUse", tool_name: "Agent", tool_input: { description: "Audit gateway" }, tool_response: { isAsync: true, agentId: "c2", outputFile: "/tmp/c2.output" } }, env);
+    await processEducationHook({ ...f.base, hook_event_name: "SubagentStop", agent_id: "c2", agent_type: "general-purpose", last_assistant_message: "" }, env);
+    const stop = { ...f.base, hook_event_name: "Stop", stop_hook_active: false, last_assistant_message: "Done.", background_tasks: [] };
+    const first = await processEducationHook(stop, env);
+    assert.equal(first.decision, undefined);
+    assert.match(first.hookSpecificOutput.additionalContext, /c2/);
+    assert.equal(await processEducationHook(stop, env), null, "one hint per turn");
+    const [record] = (await f.logs()).filter((entry) => entry.rule === "unread-result");
+    assert.equal(record.decision, "hint");
+    assert.deepEqual(record.evidence.emptyResult, ["c2"]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("SubagentStop never blocks a Claude subagent", async () => {
+  const f = await fixture();
+  try {
+    const env = f.env({ AIRCLAUDE_EDUCATION_SUBAGENT_REPORT: "enforce" });
+    await writeAgent(f.transcript, "k1", "Look into it.\nFinish with STATUS: done|blocked|partial", "claude-sonnet-5");
+    const stop = { ...f.base, hook_event_name: "SubagentStop", agent_id: "k1", agent_type: "general-purpose", stop_hook_active: false, last_assistant_message: "I looked." };
+    assert.equal(await processEducationHook(stop, env), null);
+    const [record] = (await f.logs()).filter((entry) => entry.event === "SubagentStop");
+    assert.equal(record.rule, "status-missing");
+    assert.equal(record.decision, "block");
+    assert.equal(record.emitted, false);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("fork agents are a known type; empty and workflow agent types stay log-only", async () => {
+  const f = await fixture();
+  try {
+    const env = f.env({ AIRCLAUDE_EDUCATION_SUBAGENT_REPORT: "enforce" });
+    const ask = "Look into it.\nFinish with STATUS: done|blocked|partial";
+    await writeAgent(f.transcript, "f1", ask);
+    await writeAgent(f.transcript, "f2", ask);
+    const stop = { ...f.base, hook_event_name: "SubagentStop", stop_hook_active: false, last_assistant_message: "I looked." };
+    assert.equal((await processEducationHook({ ...stop, agent_id: "f1", agent_type: "fork" }, env)).decision, "block");
+    assert.equal(await processEducationHook({ ...stop, agent_id: "f2", agent_type: "" }, env), null);
+    // Spec §4.4.2: workflow agents only log, even now that their agent_type is
+    // known to be "workflow-subagent"; enforcing them needs a spec decision.
+    await writeAgent(f.transcript, "f3", ask);
+    assert.equal(await processEducationHook({ ...stop, agent_id: "f3", agent_type: "workflow-subagent" }, env), null);
+    const rules = (await f.logs()).filter((entry) => entry.event === "SubagentStop").map((entry) => entry.rule);
+    assert.deepEqual(rules, ["status-missing", "status-unknown-agent-type", "status-unknown-agent-type"]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("Stop with running agents adds a don't-poll note; polling past the limit nudges once", async () => {
   const f = await fixture();
   try {
@@ -263,6 +592,18 @@ test("subagent hooks use the subagent's own model, not the parent's", async () =
     await writeAgent(f.transcript, "d1", "work", "kimi-k3");
     const out = await processEducationHook({ ...f.base, agent_id: "d1", agent_type: "general-purpose", hook_event_name: "PostToolUseFailure", tool_name: "Read", tool_input: { file_path: "/x" }, error: "File does not exist." }, f.env({ AIRCLAUDE_EDUCATION_ERROR_HINTS: "true" }));
     assert.match(out.hookSpecificOutput.additionalContext, /ls\/rg/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("SubagentStop records the subagent's own model", async () => {
+  const f = await fixture("claude-sonnet-5");
+  try {
+    await writeAgent(f.transcript, "e1", "Just do it.", "kimi-k3");
+    await processEducationHook({ ...f.base, hook_event_name: "SubagentStop", agent_id: "e1", agent_type: "general-purpose", last_assistant_message: "done" }, f.env());
+    const [record] = (await f.logs()).filter((entry) => entry.event === "SubagentStop");
+    assert.equal(record.model, "kimi-k3");
   } finally {
     await f.cleanup();
   }

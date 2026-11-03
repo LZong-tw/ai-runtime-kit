@@ -50,16 +50,88 @@ const KNOWN_AGENT_TYPES = new Set([
   "statusline-setup",
   "claude-code-guide",
   "output-style-setup",
+  "fork",
 ]);
 const READ_ONLY_AGENT_TYPES = new Set(["Explore", "Plan", "claude-code-guide"]);
 const FAN_OUT = /平行|並行|同時|分頭|各自|多個\s*reviewer|in parallel|parallel(?:ize|ly)?|fan[- ]?out|每個.{0,40}都|subagents?|workflow|teammates?|子代理/i;
 const BROAD_SEARCH = /search|find|locate|explore|survey|scan|grep|look (?:for|through)|搜尋|找出|盤點|調查/i;
 const LIST_LINE = /^\s*(?:[-*•]|\d+[.)、])\s+\S/;
 const ITEM_TOKEN = /(?:!\d+|#\d+|\b[A-Z][A-Z0-9]+-\d+\b|(?:~|\.{1,2})?\/[\w.@-]+(?:\/[\w.@-]+)+)/g;
-const FIXED_FORMAT = /verbatim|原文照錄|原樣|逐字|\bjson\b|json schema|\bschema\b|exact(?:ly)? (?:format|this format)|固定格式|only output|output only/i;
+// Only an output instruction counts as a fixed format. The 44e50e8 pattern
+// matched any "verbatim", "schema" or ".json" path anywhere in the prompt, so
+// the replay (internal reports/model-perf) found most "fixed-format" records
+// were workflow preambles and file names.
+// Rule set 2 let "schema"/"JSON" sit anywhere within 100 characters of the
+// verb ("Return to the main branch and check the schema") and dropped the
+// zh-TW "以 JSON 格式回傳" forms rule set 1 caught. Now the verb and the format
+// must share a clause and the format must be what is returned.
+// Rule set 4: a verb used as a noun ("Parse the output JSON") is not an
+// instruction, so the verb may not follow an article or possessive.
+const OUTPUT_VERB = String.raw`(?<!\b(?:the|a|an|its|their|your|our|this|that|parse|parsed|of)\s+)(?:return|output|respond|reply|answer|emit|print)\b`;
+const SAME_CLAUSE = String.raw`[^\n.;:!?。；：！？]{0,60}?`;
+const JSON_WORD = String.raw`(?<![\w./-])json(?![\w-]|\.\w)`;
+const ZH_OUTPUT_VERB = "(?:回傳|回覆|回應|輸出|產出|返回)";
+const FIXED_FORMAT = new RegExp(
+  [
+    `${OUTPUT_VERB}(?:\\s+(?:a|an|the|only|valid|raw|strict|pure))*\\s+${JSON_WORD}`,
+    `${OUTPUT_VERB}${SAME_CLAUSE}\\b(?:as|in|with|using)\\s+(?:(?:a|an|the|only|valid|raw|strict|this|that|following)\\s+)*(?:${JSON_WORD}|schema\\b(?!\\s+(?:link|url|file|path|docs?|version|migration|change|id)\\b))`,
+    `${OUTPUT_VERB}${SAME_CLAUSE}\\bonly\\s+(?:valid\\s+)?${JSON_WORD}`,
+    `${OUTPUT_VERB}${SAME_CLAUSE}(?:exactly this format|\\bverbatim\\b)`,
+    // "The config must be valid JSON" describes a file; only the reply's own
+    // format is an instruction. A bare "accepts JSON only" no longer counts.
+    `\\b(?:answer|reply|response|output)\\s+(?:must|should)\\s+be\\s+(?:valid\\s+)?${JSON_WORD}`,
+    // "回傳 JSON" / "輸出成 JSON", not "API 回傳的 JSON".
+    `${ZH_OUTPUT_VERB}\\s*(?:成|為)?\\s*(?:純|合法的?|一個|一份)?\\s*${JSON_WORD}`,
+    `(?:以|用)\\s*${JSON_WORD}\\s*(?:格式)?[^\\n。；！？]{0,8}?${ZH_OUTPUT_VERB}`,
+    "原文照錄|原樣輸出|逐字輸出|只輸出|固定格式|照下列格式",
+  ].join("|"),
+  "i",
+);
 const STATUS_ASK = /\bSTATUS:/;
 const STATUS_LINE = /^\s*\**STATUS\**\s*:/m;
-const CLASSIFIER_DENIAL = /denied by the Claude Code auto mode classifier|classifier/i;
+// Claude Code's permission denials, seen in real transcripts (2026-07..11):
+//   Permission for this action was denied by the Claude Code auto mode classifier. Reason: ...
+//   Permission for this action has been denied. Reason: Stage 2 classifier error - ...
+//   Permission to use <Tool> [with command ...] has been denied.
+//   Permission for this command was denied by a built-in Claude Code safety check ...
+//   Permission for this tool use was denied. The tool use was rejected ...
+//   Auto mode could not evaluate this action and is blocking it for safety ...
+//   <model> is temporarily unavailable, so auto mode cannot determine the safety of <Tool> ...
+//   The user doesn't want to proceed with this tool use. The tool use was rejected ...
+// Anchored at the start of the error (after an optional "Error: "), not at any
+// line start, so Bash output that prints one of these sentences on a later
+// line is not a denial.
+const USER_DENIAL = /^[ \t]*(?:Error:[ \t]*)?The user doesn't want to proceed with this tool use\b/;
+const PERMISSION_DENIAL = /^[ \t]*(?:Error:[ \t]*)?(?:Permission for this (?:action|command|tool use) (?:was|has been) denied|Permission to use \S+(?: with command [\s\S]{0,4000}?)? has been denied|Auto mode could not evaluate this action|\S+ is temporarily unavailable\b[^\n]*\bso auto mode cannot determine)/;
+// The classifier itself says these clear on retry, so they must not mark a
+// spawn as rejected for good.
+const TRANSIENT_DENIAL = /usually transient|Stage 2 classifier error|Auto mode could not evaluate|temporarily unavailable/i;
+// A Bash ENOENT is a cwd/path mistake only when the line reporting it names a
+// path and the error is not really a sandbox, permission or missing-command
+// failure. Rule set 2 took a path or quoted string from anywhere in the
+// output, so stray echo/test lines counted, and missed zsh's lowercase
+// "cd: no such file or directory: /nope".
+const BASH_ENOENT = /No such file or directory|ENOENT/i;
+const BASH_NOT_PATH = /Operation not permitted|EPERM|sandbox|command not found|Permission denied/i;
+const BASH_PATH_ON_LINE = new RegExp(
+  [
+    // ls: foo: No such file or directory
+    // (but not "Error: ENOENT: no such file or directory")
+    String.raw`(?<!\S)(?!(?:Error|ENOENT)\b)[^\s:]+:\s*(?!(?:Error|ENOENT)\b)[^\s:]+:\s*No such file or directory`,
+    // rg/jq: "dir/x": No such file ..., Could not open file /tmp/x.json: No such file ...
+    String.raw`(?:['"\x60][^'"\x60\n]+['"\x60]|[^\s:'"\x60]*[/.][^\s:'"\x60]*):\s*No such file or directory`,
+    // zsh cd, Python: no such file or directory: /nope
+    // ("no" in "ENOENT: no such file or directory" is not a path)
+    String.raw`(?:ENOENT|No such file or directory)\s*:\s*(?!no such file\b)[^\s:,]+`,
+    // Node: ENOENT: no such file or directory, open '/tmp/foo'
+    String.raw`(?:ENOENT|No such file or directory)[^\n]*?\b(?:open|stat|lstat|scandir|access|unlink|mkdir|rmdir|rename|chdir|realpath)\s+['"\x60]?[^\s'"\x60]+`,
+  ].join("|"),
+  "i",
+);
+const NPM_ENOENT_PATH = /^npm (?:error|ERR!) path \S+/m;
+// Bumped whenever a rule's matching changes, so a shadow window can be read
+// from one rule set only (education report --rules).
+export const EDUCATION_RULES_VERSION = 4;
 const STATUS_REASON = "Finish your reply with the report the task asked for: STATUS: done|blocked|partial, EVIDENCE: <paths/commands>, OPEN: <items>.";
 
 export function readEducationConfig(env = process.env) {
@@ -115,9 +187,16 @@ export function promptFeatures(prompt) {
 // so a quoted transcript or example that mentions STATUS does not.
 export function subagentPromptContract(prompt) {
   const text = typeof prompt === "string" ? prompt : "";
-  if (FIXED_FORMAT.test(text)) return "fixed-format";
   const tail = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(-3);
-  return tail.some((line) => STATUS_ASK.test(line) && !/^```/.test(line)) ? "status" : "none";
+  // Rule set 4: the closing STATUS request is the explicit contract; an
+  // earlier format phrase must not turn it into fixed-format.
+  if (tail.some((line) => STATUS_ASK.test(line) && !/^```/.test(line))) return "status";
+  return FIXED_FORMAT.test(text) ? "fixed-format" : "none";
+}
+
+function bashNamesMissingPath(error) {
+  if (NPM_ENOENT_PATH.test(error)) return true;
+  return error.split(/\r?\n/).some((line) => BASH_ENOENT.test(line) && BASH_PATH_ON_LINE.test(line));
 }
 
 export function errorHint(input, previousFailHash) {
@@ -125,10 +204,14 @@ export function errorHint(input, previousFailHash) {
   const tool = input?.tool_name;
   const error = String(input?.error ?? "");
   const callHash = hash([tool, input?.tool_input ?? null]);
+  // A permission denial is a decision, not a failed attempt: it gets no hint
+  // and must not count toward repeat-failure.
+  if (USER_DENIAL.test(error)) return { rule: null, hint: null, callHash, denied: "user" };
+  if (PERMISSION_DENIAL.test(error)) return { rule: null, hint: null, callHash, denied: TRANSIENT_DENIAL.test(error) ? "transient" : "final" };
   if (previousFailHash && previousFailHash === callHash) {
     return { rule: "repeat-failure", hint: "Identical failing call repeated; change approach.", callHash };
   }
-  if (tool === "Bash" && /No such file or directory|ENOENT/.test(error)) {
+  if (tool === "Bash" && BASH_ENOENT.test(error) && !BASH_NOT_PATH.test(error) && bashNamesMissingPath(error)) {
     // P0.5 fixture: the hook's cwd stays at the project directory after a
     // Bash `cd`, so printing it would point the model at the wrong place.
     return { rule: "bash-enoent", hint: "Bash cwd persists across calls; run `pwd` or use absolute paths.", callHash };
@@ -306,7 +389,7 @@ async function logRecord(env, record) {
   try {
     const path = educationLogPath(env);
     await mkdir(dirname(path), { recursive: true });
-    await appendFile(path, `${JSON.stringify({ ts: new Date().toISOString(), ...record })}\n`);
+    await appendFile(path, `${JSON.stringify({ ts: new Date().toISOString(), rules: EDUCATION_RULES_VERSION, ...record })}\n`);
   } catch {
     // Logging must never break the session.
   }
@@ -350,7 +433,7 @@ async function onPreToolUse(input, state, config, model, log) {
   const silent = sameTask.find((spawn) => spawn.endedAt && !spawn.statusReported && !spawn.read);
   const pending = sameTask.find((spawn) => !spawn.endedAt || !spawn.read);
   if (state.rejectedSpawns.includes(inputHash)) {
-    deny = { rule: "D4", reason: "This exact spawn was already rejected by the permission classifier. Change the request or do the work directly." };
+    deny = { rule: "D4", reason: "This exact spawn was already denied by a permission check. Change the request or do the work directly." };
   } else if (silent) {
     deny = { rule: "D2", reason: `Inspect ${silent.agentId}'s transcript (or do it yourself) before respawning.` };
   } else if (pending) {
@@ -439,11 +522,20 @@ async function onPostToolUseFailure(input, state, config, model, log) {
   if (input.is_interrupt === true) return null;
   const error = String(input.error ?? "");
   const responses = [];
+  const found = errorHint(input, state.lastFailHash);
 
   if (SPAWN_TOOLS.has(tool) && isParent) {
-    if (CLASSIFIER_DENIAL.test(error)) {
+    if (found.denied === "final") {
       state.rejectedSpawns.push(hash(input.tool_input ?? {}));
       await log({ rule: "spawn-rejected", decision: "log-only", emitted: false, reason: null, evidence: { inputHash: hash(input.tool_input ?? {}) } });
+    } else if (found.denied === "user") {
+      // The user said no; resending the same spawn is as wrong as after a
+      // classifier denial, but it is logged apart from permission checks.
+      state.rejectedSpawns.push(hash(input.tool_input ?? {}));
+      await log({ rule: "spawn-denied-user", decision: "log-only", emitted: false, reason: null, evidence: { inputHash: hash(input.tool_input ?? {}) } });
+    } else if (found.denied === "transient") {
+      // Retrying is what the denial itself recommends, so D4 must not fire.
+      await log({ rule: "spawn-denied-transient", decision: "log-only", emitted: false, reason: null, evidence: { inputHash: hash(input.tool_input ?? {}) } });
     } else if (config.subagentNudge !== "off") {
       const reason = error.replace(/\s+/g, " ").slice(0, 160) || "unknown error";
       const hint = `Subagent ended without a report (${reason}); read its transcript or do the work directly.`;
@@ -453,8 +545,7 @@ async function onPostToolUseFailure(input, state, config, model, log) {
     }
   }
 
-  const found = errorHint(input, state.lastFailHash);
-  state.lastFailHash = found.callHash;
+  if (!found.denied) state.lastFailHash = found.callHash;
   if (found.rule) {
     const emit = config.errorHints === true && model !== null && !isClaudeModel(model);
     await log({ rule: found.rule, decision: "hint", emitted: emit, reason: found.hint, evidence: { tool, error: error.slice(0, 200) } });
@@ -469,13 +560,42 @@ async function onSubagentStart(input, state) {
   return null;
 }
 
-// §4.4.2: every parent, Claude included. Blocks only when the subagent's own
-// prompt asked for STATUS, at most once per agent.
-async function onSubagentStop(input, state, config, log) {
+// An agent that ends with SubagentHandback has no closing text: its report is
+// the tool input, and the parent receives it as a message once the tool
+// result says it was delivered.
+async function handback(path) {
+  if (typeof path !== "string") return null;
+  try {
+    let found = null;
+    for (const record of parseLines(await readTail(path))) {
+      const content = Array.isArray(record?.message?.content) ? record.message.content : [];
+      for (const block of content) {
+        if (record.type === "assistant" && block?.type === "tool_use" && block.name === "SubagentHandback" && typeof block.input?.message === "string") {
+          found = { id: block.id, message: block.input.message, delivered: false };
+        } else if (found && record.type === "user" && block?.type === "tool_result" && block.tool_use_id === found.id) {
+          found.delivered = block.is_error !== true;
+        }
+      }
+    }
+    return found;
+  } catch {
+    return null;
+  }
+}
+
+// §4.4.2: non-Claude subagents only, like the other gated rules. Blocks only
+// when the subagent's own prompt asked for STATUS, at most once per agent.
+async function onSubagentStop(input, state, config, model, log) {
   if (typeof input.agent_id !== "string") return null;
-  const message = String(input.last_assistant_message ?? "");
-  const statusReported = STATUS_LINE.test(message);
   const transcriptPath = agentTranscriptPath(input);
+  let message = String(input.last_assistant_message ?? "");
+  let resultSource = message ? "last-message" : "none";
+  const handed = message ? null : await handback(transcriptPath);
+  if (handed) {
+    message = handed.message;
+    resultSource = "handback";
+  }
+  const statusReported = STATUS_LINE.test(message);
   const spawn = upsertSpawn(state, input.agent_id, {
     agentType: input.agent_type ?? null,
     endedAt: new Date().toISOString(),
@@ -483,6 +603,7 @@ async function onSubagentStop(input, state, config, log) {
     result: message.slice(0, MAX_RESULT_CHARS),
     transcriptPath,
   });
+  if (handed?.delivered) markRead(spawn, "handback");
   if (config.subagentReport === "off") return null;
   const contract = subagentPromptContract(await firstUserPrompt(transcriptPath));
   const knownType = KNOWN_AGENT_TYPES.has(input.agent_type);
@@ -494,14 +615,14 @@ async function onSubagentStop(input, state, config, log) {
     rule = "status-missing";
     block = input.stop_hook_active !== true && !spawn.reportBlocked;
   }
-  const emit = block && config.subagentReport === "enforce";
+  const emit = block && gated(config.subagentReport, model);
   if (emit) spawn.reportBlocked = true;
   await log({
     rule,
     decision: block ? "block" : "log-only",
     emitted: emit,
     reason: block ? STATUS_REASON : null,
-    evidence: { agentType: input.agent_type ?? null, contract, statusReported, stopHookActive: input.stop_hook_active === true },
+    evidence: { agentType: input.agent_type ?? null, contract, statusReported, resultSource, stopHookActive: input.stop_hook_active === true },
   });
   return emit ? { decision: "block", reason: STATUS_REASON } : null;
 }
@@ -524,7 +645,8 @@ async function assistantTextsSince(path, since) {
 
 // §4.4.3: parent only, non-Claude only. A finished background agent whose
 // result the parent never used blocks once per turn; running agents get a
-// "don't poll" note instead of a block.
+// "don't poll" note instead of a block. With no stored result there is no
+// evidence either way, so those agents only get a hint.
 async function onStop(input, state, config, model, log) {
   if (typeof input.agent_id === "string" || config.subagentNudge === "off") return null;
   const background = Array.isArray(input.background_tasks) ? input.background_tasks : [];
@@ -539,11 +661,13 @@ async function onStop(input, state, config, model, log) {
   if (unread.length > 0) {
     const list = unread.map((spawn) => `${spawn.agentId} (${spawn.description || "no description"})`).join(", ");
     const reason = `Finished background agents have results you have not read: ${list}. Read their output (TaskOutput or the output file) and use it before ending the turn.`;
-    const block = input.stop_hook_active !== true && state.stopBlockedTurn !== state.turn;
-    const emit = block && gated(config.subagentNudge, model);
+    const empty = unread.filter((spawn) => !spawn.result).map((spawn) => spawn.agentId);
+    const once = input.stop_hook_active !== true && state.stopBlockedTurn !== state.turn;
+    const decision = !once ? "log-only" : empty.length < unread.length ? "block" : "hint";
+    const emit = once && gated(config.subagentNudge, model);
     if (emit) state.stopBlockedTurn = state.turn;
-    await log({ rule: "unread-result", decision: block ? "block" : "log-only", emitted: emit, reason, evidence: { agents: unread.map((spawn) => spawn.agentId), stopHookActive: input.stop_hook_active === true } });
-    if (emit) return { decision: "block", reason };
+    await log({ rule: "unread-result", decision, emitted: emit, reason, evidence: { agents: unread.map((spawn) => spawn.agentId), emptyResult: empty, stopHookActive: input.stop_hook_active === true } });
+    if (emit) return decision === "block" ? { decision: "block", reason } : context("Stop", reason);
   }
   if (running.length > 0) {
     const note = `${running.length} agent${running.length === 1 ? "" : "s"} still running; completion notices will arrive — end the turn or keep working, don't poll.`;
@@ -565,7 +689,7 @@ export async function processEducationHook(input, env = process.env) {
   if (Object.values(config).every((value) => value === "off" || value === false)) return null;
   const path = statePath(env, input.session_id);
   const state = await loadState(path);
-  const model = ["PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop"].includes(eventName) ? await actorModel(input) : null;
+  const model = ["PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStop", "Stop"].includes(eventName) ? await actorModel(input) : null;
   const log = (record) => logRecord(env, { ...base, model, flags: config, ...record });
   let response = null;
   if (eventName === "UserPromptSubmit") response = await onUserPrompt(input, state);
@@ -573,7 +697,7 @@ export async function processEducationHook(input, env = process.env) {
   else if (eventName === "PostToolUse") response = await onPostToolUse(input, state, config, model, log);
   else if (eventName === "PostToolUseFailure") response = await onPostToolUseFailure(input, state, config, model, log);
   else if (eventName === "SubagentStart") response = await onSubagentStart(input, state);
-  else if (eventName === "SubagentStop") response = await onSubagentStop(input, state, config, log);
+  else if (eventName === "SubagentStop") response = await onSubagentStop(input, state, config, model, log);
   else if (eventName === "Stop") response = await onStop(input, state, config, model, log);
   await saveState(path, state);
   return response;
@@ -604,7 +728,7 @@ export async function runEducationHook({ env = process.env, input = process.stdi
 // P4 observation: rules stay in shadow for a week, then each is judged by its
 // hand-labelled false-positive rate (spec §6.2/§7). This only counts and
 // samples; deciding precision stays with a human reading the samples.
-export function summarizeEducationLog(text, { now = Date.now(), days = 7, samples = 20 } = {}) {
+export function summarizeEducationLog(text, { now = Date.now(), days = 7, samples = 20, rules: rulesVersion = null } = {}) {
   const since = now - days * 86_400_000;
   const rules = new Map();
   const sessions = new Set();
@@ -617,6 +741,8 @@ export function summarizeEducationLog(text, { now = Date.now(), days = 7, sample
     try { record = JSON.parse(line); } catch { malformed += 1; continue; }
     const ts = Date.parse(record?.ts);
     if (!Number.isFinite(ts) || ts < since || ts > now) continue;
+    // Records written before EDUCATION_RULES_VERSION existed carry no version: rule set 1.
+    if (rulesVersion !== null && (record.rules ?? 1) !== rulesVersion) continue;
     records += 1;
     if (record.session_id) sessions.add(record.session_id);
     if (first === null || ts < first) first = ts;
@@ -644,6 +770,7 @@ export function summarizeEducationLog(text, { now = Date.now(), days = 7, sample
     since: new Date(since).toISOString(),
     until: new Date(now).toISOString(),
     days,
+    rulesVersion,
     coverageDays: first === null ? 0 : Math.round(((now - first) / 86_400_000) * 10) / 10,
     records,
     malformed,
@@ -685,6 +812,7 @@ export function renderEducationSummary(summary) {
   const lines = [
     `Education log ${summary.since} → ${summary.until} (${summary.days}d window, ${summary.coverageDays}d of data)`,
     `records ${summary.records}, sessions ${summary.sessions}${summary.malformed ? `, malformed lines ${summary.malformed}` : ""}`,
+    summary.rulesVersion === null || summary.rulesVersion === undefined ? `rule sets: all (current ${EDUCATION_RULES_VERSION}; pass --rules ${EDUCATION_RULES_VERSION} to read only it)` : `rule set ${summary.rulesVersion} only`,
   ];
   if (summary.coverageDays < summary.days) {
     lines.push(`note: less than ${summary.days} days of data; do not decide enforce yet`);
