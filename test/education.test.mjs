@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { educationHookEnv, renderHeartbeatManagedFiles } from "../src/context-heartbeat.mjs";
 import {
   EDUCATION_EVENTS,
+  EDUCATION_RULES_VERSION,
   errorHint,
   isClaudeModel,
   processEducationHook,
@@ -107,6 +108,59 @@ test("error hints follow the fixture-verified rules", () => {
   const first = errorHint({ tool_name: "Bash", tool_input: { command: "x" }, error: "boom" });
   assert.equal(first.rule, null);
   assert.equal(errorHint({ tool_name: "Bash", tool_input: { command: "x" }, error: "boom" }, first.callHash).rule, "repeat-failure");
+});
+
+// The workflow harness preamble says "relays, verbatim"; under 44e50e8 that
+// alone turned every STATUS contract into fixed-format.
+const harnessPrompt = "Read profiles/catalog.json.\nThe harness relays, verbatim and indented below.\nInvestigate carefully.\nUse local evidence.\nFinish with STATUS: done|blocked|partial";
+
+test("fixed format means an output instruction, not a mention of JSON, schema or verbatim", () => {
+  assert.equal(subagentPromptContract(harnessPrompt), "status");
+  assert.equal(subagentPromptContract("Read profiles/catalog.json"), "none");
+  assert.equal(subagentPromptContract("Return catalog.json"), "none");
+  assert.equal(subagentPromptContract("Check the schema migration.\nFinish with STATUS: done"), "status");
+  for (const prompt of ["Return ONLY JSON matching this schema", "Return results in JSON", "Reply with exactly this format:", "Output the diff verbatim", "只輸出表格", "照下列格式回覆"]) {
+    assert.equal(subagentPromptContract(prompt), "fixed-format", prompt);
+  }
+  // §4.4.2 rule 1: a fixed-format instruction anywhere still wins over STATUS.
+  assert.equal(subagentPromptContract("Return results in JSON.\nkeys: a, b\nnotes\nFinish with STATUS: done"), "fixed-format");
+});
+
+test("bash-enoent needs a named missing path and skips sandbox, permission and missing-command errors", () => {
+  const bash = (error) => errorHint({ tool_name: "Bash", tool_input: { command: error }, error }).rule;
+  for (const error of ["ls: foo: No such file or directory", "rg: x: No such file or directory (os error 2)", "npm error code ENOENT\nnpm error path /repo/package.json", "Error: ENOENT: no such file or directory, open '/tmp/foo'"]) {
+    assert.equal(bash(error), "bash-enoent", error);
+  }
+  for (const error of ["mkdir: x: Operation not permitted\nNo such file or directory", "fatal: failed to move '/a' to '/b': Operation not permitted\nNo such file or directory", "zsh: command not found: foo", "ENOENT", "sandbox: /foo: No such file or directory", "EPERM\nENOENT /foo"]) {
+    assert.equal(bash(error), null, error);
+  }
+});
+
+test("classifier denials get no hint and never count toward repeat-failure", () => {
+  const denied = errorHint({ tool_name: "Bash", tool_input: { command: "x" }, error: "Blocked by classifier" });
+  assert.deepEqual([denied.rule, denied.classifier], [null, true]);
+  assert.equal(errorHint({ tool_name: "Bash", tool_input: { command: "x" }, error: "Auto mode classifier denied" }, denied.callHash).rule, null);
+  const plain = errorHint({ tool_name: "Bash", tool_input: { command: "x" }, error: "the classifier model crashed" });
+  assert.equal(plain.classifier, undefined, "a bare 'classifier' in a tool error is not a permission denial");
+});
+
+test("a classifier denial between two identical failures leaves the repeat visible", async () => {
+  const f = await fixture();
+  try {
+    const env = f.env({ AIRCLAUDE_EDUCATION_ERROR_HINTS: "true" });
+    const fail = { ...f.base, hook_event_name: "PostToolUseFailure", tool_name: "Bash", tool_input: { command: "make" }, error: "make: *** [all] Error 2" };
+    const denied = { ...fail, tool_input: { command: "rm -rf build" }, error: "Permission for this action was denied by the Claude Code auto mode classifier." };
+    await processEducationHook(fail, env);
+    assert.equal(await processEducationHook(denied, env), null);
+    assert.equal(await processEducationHook(denied, env), null, "a re-denied call is not a repeat failure");
+    const again = await processEducationHook(fail, env);
+    assert.match(again.hookSpecificOutput.additionalContext, /Identical failing call/);
+    const logged = await f.logs();
+    assert.deepEqual(logged.map((entry) => entry.rule), ["repeat-failure"]);
+    assert.ok(logged.every((entry) => entry.rules === EDUCATION_RULES_VERSION));
+  } finally {
+    await f.cleanup();
+  }
 });
 
 test("Claude detection and result shingles ignore the description", () => {
@@ -306,7 +360,7 @@ test("SubagentStop never blocks a Claude subagent", async () => {
   }
 });
 
-test("fork agents are a known type; an empty agent_type stays log-only", async () => {
+test("fork agents are a known type; empty and workflow agent types stay log-only", async () => {
   const f = await fixture();
   try {
     const env = f.env({ AIRCLAUDE_EDUCATION_SUBAGENT_REPORT: "enforce" });
@@ -316,8 +370,12 @@ test("fork agents are a known type; an empty agent_type stays log-only", async (
     const stop = { ...f.base, hook_event_name: "SubagentStop", stop_hook_active: false, last_assistant_message: "I looked." };
     assert.equal((await processEducationHook({ ...stop, agent_id: "f1", agent_type: "fork" }, env)).decision, "block");
     assert.equal(await processEducationHook({ ...stop, agent_id: "f2", agent_type: "" }, env), null);
+    // Spec §4.4.2: workflow agents only log, even now that their agent_type is
+    // known to be "workflow-subagent"; enforcing them needs a spec decision.
+    await writeAgent(f.transcript, "f3", ask);
+    assert.equal(await processEducationHook({ ...stop, agent_id: "f3", agent_type: "workflow-subagent" }, env), null);
     const rules = (await f.logs()).filter((entry) => entry.event === "SubagentStop").map((entry) => entry.rule);
-    assert.deepEqual(rules, ["status-missing", "status-unknown-agent-type"]);
+    assert.deepEqual(rules, ["status-missing", "status-unknown-agent-type", "status-unknown-agent-type"]);
   } finally {
     await f.cleanup();
   }

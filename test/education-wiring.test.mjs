@@ -149,6 +149,18 @@ test("airkit education report reads the log and handles a missing one", async ()
     assert.equal(await runCli(["education", "report", "--log", path, "--json"], { stdout, now }), 0);
     assert.equal(JSON.parse(out).rules[0].rule, "D1");
     await assert.rejects(runCli(["education", "report", "--days", "0", "--log", path], { stdout }), /--days/);
+    // Rule set 1 records (no "rules" field) predate the 44e50e8 rule fixes;
+    // --rules keeps the P4 observation window from mixing the two.
+    await writeFile(path, [line(1, { rule: "D1", decision: "deny", session_id: "x" }), line(1, { rule: "D3", decision: "deny", session_id: "y", rules: 2 })].join("\n"));
+    out = "";
+    assert.equal(await runCli(["education", "report", "--log", path, "--rules", "2", "--json"], { stdout, now }), 0);
+    assert.deepEqual(JSON.parse(out).rules.map((entry) => entry.rule), ["D3"]);
+    out = "";
+    assert.equal(await runCli(["education", "report", "--log", path, "--rules", "1"], { stdout, now }), 0);
+    assert.match(out, /rule set 1 only/);
+    assert.match(out, /D1/);
+    assert.doesNotMatch(out, /D3/);
+    await assert.rejects(runCli(["education", "report", "--rules", "0", "--log", path], { stdout }), /--rules/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
