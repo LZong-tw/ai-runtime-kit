@@ -131,7 +131,7 @@ const BASH_PATH_ON_LINE = new RegExp(
 const NPM_ENOENT_PATH = /^npm (?:error|ERR!) path \S+/m;
 // Bumped whenever a rule's matching changes, so a shadow window can be read
 // from one rule set only (education report --rules).
-export const EDUCATION_RULES_VERSION = 4;
+export const EDUCATION_RULES_VERSION = 5;
 const STATUS_REASON = "Finish your reply with the report the task asked for: STATUS: done|blocked|partial, EVIDENCE: <paths/commands>, OPEN: <items>.";
 
 export function readEducationConfig(env = process.env) {
@@ -583,8 +583,8 @@ async function handback(path) {
   }
 }
 
-// §4.4.2: non-Claude subagents only, like the other gated rules. Blocks only
-// when the subagent's own prompt asked for STATUS, at most once per agent.
+// §4.4.2 (decision 4): every subagent, Claude included. Blocks only when the
+// subagent's own prompt asked for STATUS, at most once per agent.
 async function onSubagentStop(input, state, config, model, log) {
   if (typeof input.agent_id !== "string") return null;
   const transcriptPath = agentTranscriptPath(input);
@@ -615,7 +615,7 @@ async function onSubagentStop(input, state, config, model, log) {
     rule = "status-missing";
     block = input.stop_hook_active !== true && !spawn.reportBlocked;
   }
-  const emit = block && gated(config.subagentReport, model);
+  const emit = block && config.subagentReport === "enforce";
   if (emit) spawn.reportBlocked = true;
   await log({
     rule,
