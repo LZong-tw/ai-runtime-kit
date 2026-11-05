@@ -98,7 +98,7 @@ test("the generated hook script picks flags by AIRCLAUDE_MODE at run time", asyn
   const dir = await mkdtemp(join(tmpdir(), "edu-script-"));
   try {
     const runtime = new URL("../src/context-heartbeat.mjs", import.meta.url).href;
-    const files = renderHeartbeatManagedFiles(dir, runtime, { education: { base: {}, modes: { gpt: { spawnGuard: "off", subagentReport: "off", subagentNudge: "off" } } } });
+    const files = renderHeartbeatManagedFiles(dir, runtime, { education: { base: {}, modes: { gpt: { spawnGuard: "off", subagentReport: "off", subagentNudge: "off", sameResultPoll: "off", cliFlagGuess: "off", blockedRetry: "off" } } } });
     const script = files.find((file) => file.relativePath.endsWith("education/hook.mjs"));
     const path = join(dir, "hook.mjs");
     await writeFile(path, script.content);

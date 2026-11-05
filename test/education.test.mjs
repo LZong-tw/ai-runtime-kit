@@ -25,6 +25,8 @@ const flags = (overrides = {}) => ({
   AIRCLAUDE_EDUCATION_ERROR_HINTS: "false",
   ...overrides,
 });
+// Hook scripts rendered before rule set 6 set none of the loop flags.
+const loopShadow = { sameResultPoll: "shadow", cliFlagGuess: "shadow", blockedRetry: "shadow" };
 
 async function fixture(model = "gpt-6-sol") {
   const home = await mkdtemp(join(tmpdir(), "airkit-education-"));
@@ -73,7 +75,7 @@ async function writeHandbackAgent(transcriptPath, agentId, prompt, report, { del
 
 test("flags: valid values parse, missing or invalid fall back to off/false and are reported", () => {
   assert.deepEqual(readEducationConfig(flags({ AIRCLAUDE_EDUCATION_ERROR_HINTS: "true" })), {
-    config: { spawnGuard: "shadow", subagentReport: "shadow", subagentNudge: "shadow", errorHints: true, rules: {} },
+    config: { spawnGuard: "shadow", subagentReport: "shadow", subagentNudge: "shadow", ...loopShadow, errorHints: true, rules: {} },
     errors: [],
   });
   const bad = readEducationConfig({ AIRCLAUDE_EDUCATION_SPAWN_GUARD: "on" });
@@ -81,12 +83,15 @@ test("flags: valid values parse, missing or invalid fall back to off/false and a
   assert.equal(bad.config.errorHints, false);
   assert.equal(bad.errors.length, 4, "an unset rules env is not an error");
   assert.equal(readEducationConfig(flags({ AIRCLAUDE_EDUCATION_ERROR_HINTS: "enforce" })).config.errorHints, "enforce");
+  const loopBad = readEducationConfig(flags({ AIRCLAUDE_EDUCATION_BLOCKED_RETRY: "on" }));
+  assert.equal(loopBad.config.blockedRetry, "off", "a set but invalid loop flag is off, not the default");
+  assert.deepEqual(loopBad.errors, ['AIRCLAUDE_EDUCATION_BLOCKED_RETRY="on"']);
 });
 
 test("flags: per-rule overrides parse; bad JSON drops them, a bad entry turns that rule off", () => {
   const rules = (raw) => readEducationConfig(flags({ AIRCLAUDE_EDUCATION_RULES: raw }));
   assert.deepEqual(rules('{"read-missing":"enforce","D3":"off"}'), {
-    config: { spawnGuard: "shadow", subagentReport: "shadow", subagentNudge: "shadow", errorHints: false, rules: { "read-missing": "enforce", D3: "off" } },
+    config: { spawnGuard: "shadow", subagentReport: "shadow", subagentNudge: "shadow", ...loopShadow, errorHints: false, rules: { "read-missing": "enforce", D3: "off" } },
     errors: [],
   });
   for (const raw of ["{nope", "[]", "null", '"D3"']) {
@@ -835,6 +840,6 @@ test("managed files add the education hook only on request, in shadow by default
   assert.match(script, /"AIRCLAUDE_EDUCATION_ERROR_HINTS":"false"/);
   assert.deepEqual(educationHookEnv({ errorHints: true }).AIRCLAUDE_EDUCATION_ERROR_HINTS, "true");
   assert.match(script, /"AIRCLAUDE_EDUCATION_RULES":"\{\}"/, "no overrides still bakes an empty set");
-  assert.equal(Object.keys(educationHookEnv({ errorHints: true })).length, 5);
+  assert.equal(Object.keys(educationHookEnv({ errorHints: true })).length, 8);
   assert.equal(educationHookEnv({ rules: { "read-missing": "enforce" } }).AIRCLAUDE_EDUCATION_RULES, '{"read-missing":"enforce"}');
 });
