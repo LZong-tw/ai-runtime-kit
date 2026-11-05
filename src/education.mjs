@@ -16,13 +16,22 @@ export const EDUCATION_ENV = Object.freeze({
   subagentReport: "AIRCLAUDE_EDUCATION_SUBAGENT_REPORT",
   subagentNudge: "AIRCLAUDE_EDUCATION_SUBAGENT_NUDGE",
   errorHints: "AIRCLAUDE_EDUCATION_ERROR_HINTS",
+  sameResultPoll: "AIRCLAUDE_EDUCATION_SAME_RESULT_POLL",
+  cliFlagGuess: "AIRCLAUDE_EDUCATION_CLI_FLAG_GUESS",
+  blockedRetry: "AIRCLAUDE_EDUCATION_BLOCKED_RETRY",
 });
 export const EDUCATION_DEFAULTS = Object.freeze({
   spawnGuard: "shadow",
   subagentReport: "shadow",
   subagentNudge: "shadow",
   errorHints: false,
+  sameResultPoll: "shadow",
+  cliFlagGuess: "shadow",
+  blockedRetry: "shadow",
 });
+// Hook scripts rendered before rule set 6 never set these, so unset means the
+// default rather than a config error.
+const LATER_FLAGS = new Set(["sameResultPoll", "cliFlagGuess", "blockedRetry"]);
 // Rules that can be switched one by one (launch.education.rules), keyed by the
 // rule name the log uses, mapped to the group flag they fall back to.
 // Log-only records (status-log, spawn-allow, …) follow their group.
@@ -40,6 +49,9 @@ export const EDUCATION_RULES = Object.freeze({
   "bash-enoent": "errorHints",
   "edit-mismatch": "errorHints",
   "read-missing": "errorHints",
+  "same-result-poll": "sameResultPoll",
+  "cli-flag-guess": "cliFlagGuess",
+  "blocked-retry": "blockedRetry",
 });
 export const EDUCATION_RULES_ENV = "AIRCLAUDE_EDUCATION_RULES";
 export const EDUCATION_EVENTS = Object.freeze([
@@ -61,6 +73,41 @@ const MAX_SPAWNS = 50;
 const MAX_RESULT_CHARS = 8192;
 const TAIL_BYTES = 256 * 1024;
 const SHINGLE = 32;
+// Loop rules (rule set 6, model-complaint report 2026-11-05 §5).
+const LOOP_WINDOW_MS = 10 * 60_000;
+const MAX_ACTORS = 20;
+const SAME_RESULT_LIMIT = 5;
+const SAME_RESULT_TOOLS = new Set(["Bash", "Read", "Grep", "Glob", "WebFetch", "WebSearch"]);
+const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+const EMPTY_RESULT = /^(?:\(Bash completed with no output\)|No matches found|No files found)/;
+// Commands that are waiting on purpose return the same thing until they stop.
+const WAITING_COMMAND = /\b(?:sleep|wait|watch|rollout status)\b/;
+const CLI_GUESS_LIMIT = 3;
+const CLI_ARG_ERROR = new RegExp([
+  String.raw`\b(?:unknown|unrecognized|unexpected|invalid) (?:option|flag|argument|command|subcommand|choice)`,
+  String.raw`flag provided but not defined`,
+  String.raw`\bno such option\b`,
+  String.raw`missing required (?:argument|option|flag)`,
+  String.raw`\boption requires an argument\b`,
+  String.raw`not configured\b`,
+  "未配置",
+].join("|"), "i");
+// A usage banner counts only when the command failed: a README or a log that
+// prints one is not an argument error.
+const USAGE_LINE = /^\s*usage:/im;
+// Their output is file content, so it says nothing about their own flags
+// unless they failed.
+const READERS = new Set(["cat", "head", "tail", "less", "sed", "awk", "grep", "rg", "jq", "echo", "printf"]);
+const HELP_FLAG = /(?:^|\s)(?:--help|-h|help)(?=\s|$)/;
+// `--help | head` shows the first screen only, which is how flags get guessed.
+const PARTIAL_READ = /\|\s*(?:head|tail|grep|rg)\b/;
+// Bash failures the sandbox causes. Retrying them unchanged fails the same way.
+const SANDBOX_DENIAL = /Operation not permitted|\bEPERM\b|<sandbox_violations>/;
+const SHELL_PREFIX = new RegExp(String.raw`^\s*(?:(?:cd|source|\.)\s+(?:"[^"]*"|'[^']*'|\S+)\s*(?:&&|;|\n)\s*|export\s+[^;&\n]*(?:&&|;|\n)\s*|[A-Za-z_]\w*=(?:"[^"]*"|'[^']*'|\S*)\s+|(?:env|command|time|exec|sudo)\s+|aws-vault\s+exec\s+\S+\s+--\s+)`);
+const LEADING_CD = /^(?:\s*cd\s+(?:"[^"]*"|'[^']*'|\S+)\s*(?:&&|;)\s*)+/;
+const SAME_RESULT_HINT = "結果一直沒變，來源可能在上游：去查是誰設定這個值，或先停下來回報";
+const CLI_FLAG_HINT = "先讀完整的 `--help` 再試";
+const BLOCKED_RETRY_HINT = "同樣的指令會再被擋：改用 unsandboxed，或停下來告訴使用者";
 // Built-in agent types. Anything else may be a workflow or plugin agent whose
 // prompt contract is unknown, so SubagentStop only logs for it (§4.4.2 rule 2).
 const KNOWN_AGENT_TYPES = new Set([
@@ -151,7 +198,7 @@ const BASH_PATH_ON_LINE = new RegExp(
 const NPM_ENOENT_PATH = /^npm (?:error|ERR!) path \S+/m;
 // Bumped whenever a rule's matching changes, so a shadow window can be read
 // from one rule set only (education report --rules).
-export const EDUCATION_RULES_VERSION = 5;
+export const EDUCATION_RULES_VERSION = 6;
 const STATUS_REASON = "Finish your reply with the report the task asked for: STATUS: done|blocked|partial, EVIDENCE: <paths/commands>, OPEN: <items>.";
 
 export function readEducationConfig(env = process.env) {
@@ -169,6 +216,7 @@ export function readEducationConfig(env = process.env) {
       continue;
     }
     if (LEVELS.has(raw)) config[key] = raw;
+    else if (raw === undefined && LATER_FLAGS.has(key)) config[key] = EDUCATION_DEFAULTS[key];
     else {
       config[key] = "off";
       errors.push(`${name}=${raw === undefined ? "<unset>" : JSON.stringify(raw)}`);
@@ -271,6 +319,9 @@ export function errorHint(input, previousFailHash) {
   // and must not count toward repeat-failure.
   if (USER_DENIAL.test(error)) return { rule: null, hint: null, callHash, denied: "user" };
   if (PERMISSION_DENIAL.test(error)) return { rule: null, hint: null, callHash, denied: TRANSIENT_DENIAL.test(error) ? "transient" : "final" };
+  // A sandbox boundary is a denial too: blocked-retry owns its retries, so
+  // repeat-failure must not count them a second time.
+  if (tool === "Bash" && SANDBOX_DENIAL.test(error)) return { rule: null, hint: null, callHash, denied: "sandbox" };
   if (previousFailHash && previousFailHash === callHash) {
     return { rule: "repeat-failure", hint: "Identical failing call repeated; change approach.", callHash };
   }
@@ -371,7 +422,7 @@ async function firstUserPrompt(path) {
 }
 
 function emptyState() {
-  return { turn: 0, prompt: promptFeatures(""), ownCalls: 0, lastFailHash: null, stopBlockedTurn: -1, rejectedSpawns: [], spawns: [] };
+  return { turn: 0, prompt: promptFeatures(""), ownCalls: 0, lastFailHash: null, stopBlockedTurn: -1, rejectedSpawns: [], spawns: [], blocked: [], helpSeen: [], loops: {} };
 }
 
 function statePath(env, sessionId) {
@@ -393,6 +444,10 @@ async function saveState(path, state) {
   if (!path) return;
   state.spawns = state.spawns.slice(-MAX_SPAWNS);
   state.rejectedSpawns = state.rejectedSpawns.slice(-MAX_SPAWNS);
+  state.blocked = state.blocked.slice(-MAX_SPAWNS);
+  state.helpSeen = state.helpSeen.slice(-MAX_SPAWNS);
+  const actors = Object.keys(state.loops);
+  for (const actor of actors.slice(0, Math.max(0, actors.length - MAX_ACTORS))) delete state.loops[actor];
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
   await writeFile(temporary, JSON.stringify(state), { mode: 0o600 });
@@ -466,6 +521,155 @@ function context(eventName, text) {
   return { hookSpecificOutput: { hookEventName: eventName, additionalContext: text } };
 }
 
+// Identity of a call for the loop rules. Bash ignores its description and a
+// leading `cd`, which models change between otherwise identical retries.
+function callKey(tool, toolInput) {
+  if (tool !== "Bash") {
+    const { description, ...rest } = toolInput && typeof toolInput === "object" ? toolInput : {};
+    return hash([tool, rest]);
+  }
+  const command = String(toolInput?.command ?? "").replace(LEADING_CD, "").replace(/\s+/g, " ").trim();
+  return hash([tool, command, toolInput?.dangerouslyDisableSandbox === true, toolInput?.allowed_domains ?? null]);
+}
+
+// The program a Bash command runs, after cd/env/source prefixes. Heuristic:
+// it reads the first pipeline segment only.
+export function cliProgram(command) {
+  let rest = String(command ?? "");
+  for (let index = 0; index < 8; index += 1) {
+    const next = rest.replace(SHELL_PREFIX, "");
+    if (next === rest) break;
+    rest = next;
+  }
+  const first = rest.split(/\||&&|;|\n/)[0].trim().split(/\s+/)[0] ?? "";
+  const name = first.replace(/^["']|["']$/g, "").split("/").pop();
+  return /^[\w.@+-]+$/.test(name) ? name : null;
+}
+
+function firstSegment(command) {
+  return String(command ?? "").replace(LEADING_CD, "").split(/\||&&|;|\n/)[0];
+}
+
+function bashOutput(response) {
+  if (typeof response === "string") return response;
+  if (!response || typeof response !== "object") return "";
+  return [response.stdout, response.stderr].filter((part) => typeof part === "string" && part !== "").join("\n");
+}
+
+// What a call returned, without fields that change on every call (durations,
+// the query echoed back).
+function resultText(tool, response) {
+  if (typeof response === "string") return response;
+  if (Array.isArray(response)) return contentText(response);
+  if (!response || typeof response !== "object") return "";
+  if (tool === "Bash") return bashOutput(response);
+  if (tool === "Read") return typeof response.file?.content === "string" ? response.file.content : "";
+  if (tool === "Grep" || tool === "Glob") {
+    return typeof response.content === "string" && response.content !== "" ? response.content : (Array.isArray(response.filenames) ? response.filenames.join("\n") : "");
+  }
+  if (tool === "WebFetch") return String(response.result ?? "");
+  if (Array.isArray(response.content)) return contentText(response.content);
+  const { durationMs, durationSeconds, query, url, ...rest } = response;
+  return JSON.stringify(rest);
+}
+
+function loopFor(state, actor) {
+  state.loops[actor] ??= { sameResult: null, cli: {} };
+  return state.loops[actor];
+}
+
+function rememberBlocked(state, actor, key, kind) {
+  const now = Date.now();
+  state.blocked = state.blocked.filter((entry) => now - entry.ts <= LOOP_WINDOW_MS);
+  const entry = state.blocked.find((candidate) => candidate.actor === actor && candidate.key === key);
+  if (entry) {
+    entry.ts = now;
+    entry.kind = kind;
+  } else {
+    state.blocked.push({ actor, key, kind, ts: now, retries: 0 });
+  }
+}
+
+// blocked-retry: the same call again after a sandbox or permission denial.
+// Spawns are D4's. A transient classifier denial says to retry, so only its
+// second retry counts.
+async function blockedRetry(input, state, config, model, log) {
+  if (SPAWN_TOOLS.has(input.tool_name) || !ruleOn(config, "blocked-retry")) return null;
+  const actor = input.agent_id ?? "";
+  const key = callKey(input.tool_name, input.tool_input);
+  const now = Date.now();
+  state.blocked = state.blocked.filter((entry) => now - entry.ts <= LOOP_WINDOW_MS);
+  const entry = state.blocked.find((candidate) => candidate.actor === actor && candidate.key === key);
+  if (!entry) return null;
+  entry.retries += 1;
+  if (entry.kind === "transient" && entry.retries < 2) return null;
+  const emit = gated(ruleLevel(config, "blocked-retry"), model);
+  await log({ rule: "blocked-retry", decision: "hint", emitted: emit, reason: BLOCKED_RETRY_HINT, evidence: { tool: input.tool_name, kind: entry.kind, retries: entry.retries, callKey: key } });
+  return emit ? context("PreToolUse", BLOCKED_RETRY_HINT) : null;
+}
+
+// cli-flag-guess: one program keeps failing on its arguments or config and
+// its full --help was never read this session.
+async function cliFlagGuess(input, state, config, model, log, failed) {
+  if (input.tool_name !== "Bash" || !ruleOn(config, "cli-flag-guess")) return null;
+  const command = input.tool_input?.command;
+  const program = cliProgram(command);
+  if (!program) return null;
+  const loop = loopFor(state, input.agent_id ?? "");
+  if (HELP_FLAG.test(firstSegment(command))) {
+    if (!PARTIAL_READ.test(command) && !state.helpSeen.includes(program)) state.helpSeen.push(program);
+    delete loop.cli[program];
+    return null;
+  }
+  const text = (failed ? String(input.error ?? "") : bashOutput(input.tool_response)).slice(0, MAX_RESULT_CHARS);
+  const argError = failed ? CLI_ARG_ERROR.test(text) || USAGE_LINE.test(text) : !READERS.has(program) && CLI_ARG_ERROR.test(text);
+  if (!argError) {
+    delete loop.cli[program];
+    return null;
+  }
+  loop.cli[program] = (loop.cli[program] ?? 0) + 1;
+  if (loop.cli[program] !== CLI_GUESS_LIMIT || state.helpSeen.includes(program)) return null;
+  const emit = gated(ruleLevel(config, "cli-flag-guess"), model);
+  await log({ rule: "cli-flag-guess", decision: "hint", emitted: emit, reason: CLI_FLAG_HINT, evidence: { program, failures: loop.cli[program], error: text.replace(/\s+/g, " ").slice(0, 200) } });
+  return emit ? CLI_FLAG_HINT : null;
+}
+
+// same-result-poll: consecutive different queries by one actor keep getting
+// the same non-empty answer, within one turn and ten minutes, with no edit in
+// between. Calls with empty results or waiting commands neither count nor
+// break the run.
+async function sameResultPoll(input, state, config, model, log) {
+  const tool = input.tool_name;
+  if (!ruleOn(config, "same-result-poll")) return null;
+  const loop = loopFor(state, input.agent_id ?? "");
+  if (EDIT_TOOLS.has(tool)) {
+    loop.sameResult = null;
+    return null;
+  }
+  if (!SAME_RESULT_TOOLS.has(tool) && !String(tool).startsWith("mcp__")) return null;
+  if (tool === "Bash" && WAITING_COMMAND.test(String(input.tool_input?.command ?? ""))) return null;
+  const text = resultText(tool, input.tool_response).trim();
+  if (text.length < 15 || EMPTY_RESULT.test(text)) return null;
+  const key = hash(text.slice(0, 200));
+  const now = Date.now();
+  let run = loop.sameResult;
+  if (!run || run.key !== key || run.turn !== state.turn || now - run.first > LOOP_WINDOW_MS) {
+    run = loop.sameResult = { key, first: now, turn: state.turn, inputs: [], fired: false };
+  }
+  const inputKey = callKey(tool, input.tool_input);
+  if (!run.inputs.includes(inputKey)) run.inputs.push(inputKey);
+  if (run.fired || run.inputs.length < SAME_RESULT_LIMIT) return null;
+  run.fired = true;
+  const emit = gated(ruleLevel(config, "same-result-poll"), model);
+  await log({ rule: "same-result-poll", decision: "hint", emitted: emit, reason: SAME_RESULT_HINT, evidence: { tool, calls: run.inputs.length, resultHash: key } });
+  return emit ? SAME_RESULT_HINT : null;
+}
+
+function withHints(eventName, response, hints) {
+  if (hints.length === 0) return response;
+  return context(eventName, [response?.hookSpecificOutput?.additionalContext, ...hints].filter(Boolean).join(" "));
+}
+
 async function onUserPrompt(input, state) {
   if (typeof input.agent_id === "string") return null;
   state.turn += 1;
@@ -475,7 +679,7 @@ async function onUserPrompt(input, state) {
 }
 
 async function onPreToolUse(input, state, config, model, log) {
-  if (!SPAWN_TOOLS.has(input.tool_name)) return null;
+  if (!SPAWN_TOOLS.has(input.tool_name)) return blockedRetry(input, state, config, model, log);
   if (config.spawnGuard === "off" && !["D1", "D2", "D3", "D4"].some((rule) => ruleOn(config, rule))) return null;
   const toolInput = input.tool_input ?? {};
   const descNorm = normalizeTask(toolInput.description || toolInput.prompt);
@@ -521,6 +725,24 @@ async function onPreToolUse(input, state, config, model, log) {
 }
 
 async function onPostToolUse(input, state, config, model, log) {
+  const hints = [];
+  const actor = input.agent_id ?? "";
+  // stderr only: stdout can be a file or log that merely mentions the error.
+  if (input.tool_name === "Bash" && ruleOn(config, "blocked-retry") && SANDBOX_DENIAL.test(String(input.tool_response?.stderr ?? ""))) {
+    rememberBlocked(state, actor, callKey("Bash", input.tool_input), "sandbox");
+  } else {
+    // It went through, so a retry of it is no longer a blocked retry.
+    const key = callKey(input.tool_name, input.tool_input);
+    state.blocked = state.blocked.filter((entry) => entry.actor !== actor || entry.key !== key);
+  }
+  for (const hint of [
+    await cliFlagGuess(input, state, config, model, log, false),
+    await sameResultPoll(input, state, config, model, log),
+  ]) if (hint) hints.push(hint);
+  return withHints("PostToolUse", await trackAfterTool(input, state, config, model, log), hints);
+}
+
+async function trackAfterTool(input, state, config, model, log) {
   const tool = input.tool_name;
   const toolInput = input.tool_input ?? {};
   const response = input.tool_response;
@@ -618,6 +840,11 @@ async function onPostToolUseFailure(input, state, config, model, log) {
     await log({ rule: found.rule, decision: "hint", emitted: emit, reason: found.hint, evidence: { tool, error: error.slice(0, 200) } });
     if (emit) responses.push(found.hint);
   }
+  if (found.denied && !SPAWN_TOOLS.has(tool) && ruleOn(config, "blocked-retry")) {
+    rememberBlocked(state, input.agent_id ?? "", callKey(tool, input.tool_input), found.denied);
+  }
+  const cliHint = await cliFlagGuess(input, state, config, model, log, true);
+  if (cliHint) responses.push(cliHint);
   return responses.length > 0 ? context("PostToolUseFailure", responses.join(" ")) : null;
 }
 
