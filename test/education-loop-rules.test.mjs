@@ -369,7 +369,15 @@ test("blocked-retry: a failing command whose output mentions the error is not a 
   }
   const denied = (command, error) => errorHint({ tool_name: "Bash", tool_input: bash(command), error }, null).denied;
   assert.equal(denied("node build.mjs", "Exit code 1\nError: EPERM: operation not permitted, open '/Users/u/x'"), "sandbox");
-  assert.equal(denied("echo x > ~/x", "Exit code 1\nzsh:1: operation not permitted: /Users/u/x"), "sandbox");
+  // The Bash tool's own shell reports a blocked redirect as "(eval):N:".
+  assert.equal(denied("echo hi > /Users/u/.x", "Exit code 1\n(eval):1: operation not permitted: /Users/u/.x"), "sandbox");
+  assert.equal(denied("sh build.sh", "Exit code 1\nzsh:1: operation not permitted: /Users/u/x"), "sandbox");
+  // npm writes "npm error ..." with no colon, and the denial is only "code EPERM".
+  const npmError = "Exit code 1\nnpm error code EPERM\nnpm error syscall mkdir\nnpm error path /Users/u/.npm/_cacache\nnpm error errno -1\nnpm error\nnpm error Your cache folder contains root-owned files";
+  assert.equal(denied("npm cache verify", npmError), "sandbox");
+  assert.equal(denied("cd /repo && npm install", "Exit code 1\nnpm ERR! code EPERM\nnpm ERR! syscall mkdir"), "sandbox");
+  // The same lines printed by another program are file content.
+  assert.equal(denied("cat npm-debug.log; false", npmError), undefined);
   assert.equal(denied("cat build.log", "Exit code 1\n[12:00] copy step: Operation not permitted"), undefined);
 });
 
