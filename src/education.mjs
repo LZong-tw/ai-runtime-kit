@@ -321,10 +321,13 @@ function bashNamesMissingPath(error) {
 const SANDBOX_DENIAL_LINE = /operation not permitted|\bEPERM\b/i;
 const DIAGNOSTIC_LABEL = /^\s*(?:(?:(?:ba|z)?sh|\(eval\))(?::\d+)?:|(?:error|fatal|[A-Za-z]*Error)(?:\[[^\]]*\])?:)/i;
 const PROGRAM_LABELS = [":", " error ", " ERR! "];
+// npx is npm: its errors are led by "npm error", not "npx error".
+const DIAGNOSTIC_ALIASES = { npx: ["npx", "npm"] };
 
 function bashSandboxDenied(command, error) {
   if (error.includes("<sandbox_violations>")) return true;
-  const programs = String(command ?? "").split(/\|\|?|&&|;|\n/).map(cliProgram).filter(Boolean);
+  const programs = String(command ?? "").split(/\|\|?|&&|;|\n/).map(cliProgram).filter(Boolean)
+    .flatMap((program) => DIAGNOSTIC_ALIASES[program] ?? [program]);
   return error.split(/\r?\n/).some((line) => SANDBOX_DENIAL_LINE.test(line)
     && (DIAGNOSTIC_LABEL.test(line)
       || programs.some((program) => PROGRAM_LABELS.some((label) => line.startsWith(`${program}${label}`)))));

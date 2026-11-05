@@ -376,6 +376,19 @@ test("blocked-retry: a failing command whose output mentions the error is not a 
   const npmError = "Exit code 1\nnpm error code EPERM\nnpm error syscall mkdir\nnpm error path /Users/u/.npm/_cacache\nnpm error errno -1\nnpm error\nnpm error Your cache folder contains root-owned files";
   assert.equal(denied("npm cache verify", npmError), "sandbox");
   assert.equal(denied("cd /repo && npm install", "Exit code 1\nnpm ERR! code EPERM\nnpm ERR! syscall mkdir"), "sandbox");
+  // npx reports through npm. Captured from a sandboxed first-time npx fetch.
+  const npxError = [
+    "Exit code 1",
+    "npm error code EPERM",
+    "npm error syscall open",
+    "npm error path /Users/u/.npm/_cacache/tmp/99261e85",
+    "npm error errno EPERM",
+    "npm error",
+    "npm error Your cache folder contains root-owned files, due to a bug in",
+    "npm error previous versions of npm which has since been addressed.",
+  ].join("\n");
+  assert.equal(denied("npx --yes -p ms@2.0.0 node -e 1", npxError), "sandbox");
+  assert.equal(denied("npm exec --yes -p ms@2.0.0 -- node -e 1", npxError), "sandbox");
   // The same lines printed by another program are file content.
   assert.equal(denied("cat npm-debug.log; false", npmError), undefined);
   assert.equal(denied("cat build.log", "Exit code 1\n[12:00] copy step: Operation not permitted"), undefined);
