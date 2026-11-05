@@ -310,7 +310,23 @@ function bashNamesMissingPath(error) {
   return error.split(/\r?\n/).some((line) => BASH_ENOENT.test(line) && BASH_PATH_ON_LINE.test(line));
 }
 
-export function errorHint(input, previousFailHash) {
+// The failure event has no stderr of its own: stdout and stderr arrive merged
+// after "Exit code N". So only the sandbox's own annotation or a diagnostic
+// line counts: one led by a program of the command ("cat: <path>: Operation
+// not permitted"), by the shell, or by an error label (Go's "error: open ...",
+// Node's "Error: EPERM", Python's "PermissionError:"). A line of file content
+// that mentions the error, such as grep's "logs/a.log: ...", does not.
+const SANDBOX_DENIAL_LINE = /operation not permitted|\bEPERM\b/i;
+const DIAGNOSTIC_LABEL = /^\s*(?:(?:ba|z)?sh(?::\d+)?:|(?:error|fatal|[A-Za-z]*Error)(?:\[[^\]]*\])?:)/i;
+
+function bashSandboxDenied(command, error) {
+  if (error.includes("<sandbox_violations>")) return true;
+  const programs = String(command ?? "").split(/\|\|?|&&|;|\n/).map(cliProgram).filter(Boolean);
+  return error.split(/\r?\n/).some((line) => SANDBOX_DENIAL_LINE.test(line)
+    && (DIAGNOSTIC_LABEL.test(line) || programs.some((program) => line.startsWith(`${program}:`))));
+}
+
+export function errorHint(input, previousFailHash, { blockedRetry = true } = {}) {
   if (input?.is_interrupt === true) return null;
   const tool = input?.tool_name;
   const error = String(input?.error ?? "");
@@ -320,8 +336,11 @@ export function errorHint(input, previousFailHash) {
   if (USER_DENIAL.test(error)) return { rule: null, hint: null, callHash, denied: "user" };
   if (PERMISSION_DENIAL.test(error)) return { rule: null, hint: null, callHash, denied: TRANSIENT_DENIAL.test(error) ? "transient" : "final" };
   // A sandbox boundary is a denial too: blocked-retry owns its retries, so
-  // repeat-failure must not count them a second time.
-  if (tool === "Bash" && SANDBOX_DENIAL.test(error)) return { rule: null, hint: null, callHash, denied: "sandbox" };
+  // repeat-failure must not count them a second time. With blocked-retry off
+  // nobody owns them, and repeat-failure keeps counting them as it always did.
+  if (blockedRetry && tool === "Bash" && bashSandboxDenied(input?.tool_input?.command, error)) {
+    return { rule: null, hint: null, callHash, denied: "sandbox" };
+  }
   if (previousFailHash && previousFailHash === callHash) {
     return { rule: "repeat-failure", hint: "Identical failing call repeated; change approach.", callHash };
   }
@@ -650,7 +669,8 @@ async function sameResultPoll(input, state, config, model, log) {
   if (tool === "Bash" && WAITING_COMMAND.test(String(input.tool_input?.command ?? ""))) return null;
   const text = resultText(tool, input.tool_response).trim();
   if (text.length < 15 || EMPTY_RESULT.test(text)) return null;
-  const key = hash(text.slice(0, 200));
+  // The whole result: a shared header or a longer log can share a prefix.
+  const key = hash(text);
   const now = Date.now();
   let run = loop.sameResult;
   if (!run || run.key !== key || run.turn !== state.turn || now - run.first > LOOP_WINDOW_MS) {
@@ -811,7 +831,7 @@ async function onPostToolUseFailure(input, state, config, model, log) {
   if (input.is_interrupt === true) return null;
   const error = String(input.error ?? "");
   const responses = [];
-  const found = errorHint(input, state.lastFailHash);
+  const found = errorHint(input, state.lastFailHash, { blockedRetry: ruleOn(config, "blocked-retry") });
 
   if (SPAWN_TOOLS.has(tool) && isParent) {
     if (found.denied === "final") {

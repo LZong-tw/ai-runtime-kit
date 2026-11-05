@@ -335,3 +335,58 @@ test("blocked-retry: a sandbox error on stderr of a zero exit counts, the same t
     await f.cleanup();
   }
 });
+
+test("blocked-retry off: identical sandbox failures stay repeat-failure's, as in 0.2.64", async () => {
+  const error = "Exit code 1\ncat: /Users/u/.aws/credentials: Operation not permitted";
+  const input = { tool_name: "Bash", tool_input: bash("cat ~/.aws/credentials"), error };
+  assert.equal(errorHint(input, null, { blockedRetry: false }).denied, undefined);
+  const f = await fixture("kimi-k3", { AIRCLAUDE_EDUCATION_BLOCKED_RETRY: "off", AIRCLAUDE_EDUCATION_ERROR_HINTS: "shadow" });
+  try {
+    for (let index = 0; index < 3; index += 1) await f.fail("Bash", bash("cat ~/.aws/credentials"), error);
+    const records = await f.logs("repeat-failure");
+    assert.equal(records.length, 2, "the second and third identical failures");
+    assert.ok(records.every((record) => record.emitted === false), "shadow never injects");
+    assert.equal((await f.logs("blocked-retry")).length, 0);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("blocked-retry: a failing command whose output mentions the error is not a sandbox denial", async () => {
+  const f = await fixture();
+  try {
+    const grep = bash("grep -r 'Operation not permitted' logs/");
+    await f.fail("Bash", grep, "Exit code 1\nlogs/a.log: Operation not permitted\nlogs/b.log: EPERM");
+    await f.pre("Bash", grep);
+    assert.equal((await f.logs("blocked-retry")).length, 0);
+    // The command's own diagnostic still counts, also behind a cd.
+    const cat = bash("cd /tmp && cat ~/.kube/config");
+    await f.fail("Bash", cat, "Exit code 1\ncat: /Users/u/.kube/config: Operation not permitted");
+    await f.pre("Bash", cat);
+    assert.equal((await f.logs("blocked-retry")).length, 1);
+  } finally {
+    await f.cleanup();
+  }
+  const denied = (command, error) => errorHint({ tool_name: "Bash", tool_input: bash(command), error }, null).denied;
+  assert.equal(denied("node build.mjs", "Exit code 1\nError: EPERM: operation not permitted, open '/Users/u/x'"), "sandbox");
+  assert.equal(denied("echo x > ~/x", "Exit code 1\nzsh:1: operation not permitted: /Users/u/x"), "sandbox");
+  assert.equal(denied("cat build.log", "Exit code 1\n[12:00] copy step: Operation not permitted"), undefined);
+});
+
+test("same-result-poll compares whole results, not a shared prefix", async () => {
+  const f = await fixture();
+  try {
+    const license = `/*\n * Copyright 2026 Example Corp.\n *\n * Licensed under the Apache License, Version 2.0 (the "License");\n * you may not use this file except in compliance with the License.\n * You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0\n */\n`;
+    for (const name of ["a", "b", "c", "d", "e"]) {
+      const filePath = `/repo/src/${name}.mjs`;
+      await f.ok("Read", { file_path: filePath }, { type: "text", file: { filePath, content: `${license}export const ${name} = "${name}";\n` } });
+    }
+    const commits = Array.from({ length: 40 }, (_, index) => `${(0xabc0000 + index).toString(16)} fix(education): commit number ${index} on the loop branch`);
+    for (const count of [5, 10, 20, 30, 40]) {
+      await f.ok("Bash", bash(`git log --oneline -${count}`), out(commits.slice(0, count).join("\n")));
+    }
+    assert.equal((await f.logs("same-result-poll")).length, 0);
+  } finally {
+    await f.cleanup();
+  }
+});
