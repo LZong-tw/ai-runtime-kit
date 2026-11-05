@@ -313,17 +313,21 @@ function bashNamesMissingPath(error) {
 // The failure event has no stderr of its own: stdout and stderr arrive merged
 // after "Exit code N". So only the sandbox's own annotation or a diagnostic
 // line counts: one led by a program of the command ("cat: <path>: Operation
-// not permitted"), by the shell, or by an error label (Go's "error: open ...",
-// Node's "Error: EPERM", Python's "PermissionError:"). A line of file content
-// that mentions the error, such as grep's "logs/a.log: ...", does not.
+// not permitted", npm's "npm error code EPERM" or older "npm ERR!"), by the
+// shell (the Bash tool's "(eval):1: operation not permitted: <path>", or a
+// script's "zsh:1:"), or by an error label (Go's "error: open ...", Node's
+// "Error: EPERM", Python's "PermissionError:"). A line of file content that
+// mentions the error, such as grep's "logs/a.log: ...", does not.
 const SANDBOX_DENIAL_LINE = /operation not permitted|\bEPERM\b/i;
-const DIAGNOSTIC_LABEL = /^\s*(?:(?:ba|z)?sh(?::\d+)?:|(?:error|fatal|[A-Za-z]*Error)(?:\[[^\]]*\])?:)/i;
+const DIAGNOSTIC_LABEL = /^\s*(?:(?:(?:ba|z)?sh|\(eval\))(?::\d+)?:|(?:error|fatal|[A-Za-z]*Error)(?:\[[^\]]*\])?:)/i;
+const PROGRAM_LABELS = [":", " error ", " ERR! "];
 
 function bashSandboxDenied(command, error) {
   if (error.includes("<sandbox_violations>")) return true;
   const programs = String(command ?? "").split(/\|\|?|&&|;|\n/).map(cliProgram).filter(Boolean);
   return error.split(/\r?\n/).some((line) => SANDBOX_DENIAL_LINE.test(line)
-    && (DIAGNOSTIC_LABEL.test(line) || programs.some((program) => line.startsWith(`${program}:`))));
+    && (DIAGNOSTIC_LABEL.test(line)
+      || programs.some((program) => PROGRAM_LABELS.some((label) => line.startsWith(`${program}${label}`)))));
 }
 
 export function errorHint(input, previousFailHash, { blockedRetry = true } = {}) {
