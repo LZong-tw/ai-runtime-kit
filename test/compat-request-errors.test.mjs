@@ -69,7 +69,7 @@ test("forwardRaw failure preserves real error/cause and returns a correlated pub
   });
   assert.equal(response.statusCode, 502);
   const error = JSON.parse(response.body).error;
-  assert.equal(error.message, "compatibility forwarding failed");
+  assert.equal(error.message, "AirKit could not complete the request to the local CCR gateway (ECONNRESET)");
   assert.equal(error.type, "api_error");
   assert.match(error.request_id, /^[a-f0-9-]{36}$/);
   assert.equal(error.request_id, response.headers["x-airkit-request-id"]);
@@ -82,6 +82,28 @@ test("forwardRaw failure preserves real error/cause and returns a correlated pub
   assert.equal(evidence.message, "core connection lost");
   assert.deepEqual(evidence.causes, [{ name: "Error", message: "ECONNRESET", code: "ECONNRESET" }]);
   assert.ok(Number.isFinite(row.total_ms));
+});
+
+test("upstream 502 names the failed provider without echoing the upstream body", async (t) => {
+  const { store, rows } = database(t);
+  const upstreamBody = JSON.stringify({ error: {
+    message: "All target providers failed.",
+    target_provider_names: ["airkit-provider-oneportal-lowcost-oneportal"],
+    attempts: [{ status: 502, details: { raw: "<html><title>502 Bad Gateway</title> private-upstream-marker</html>" } }],
+  } });
+  const response = await invoke({
+    store,
+    coreClient: createPluginCoreClient({
+      async forwardRaw() {
+        throw Object.assign(new Error("CCR upstream rejected the Messages request"), { status: 502, upstreamBody });
+      },
+    }),
+  });
+  assert.equal(response.statusCode, 502);
+  const error = JSON.parse(response.body).error;
+  assert.equal(error.message, "Upstream provider returned HTTP 502 (airkit-provider-oneportal-lowcost-oneportal)");
+  assert.doesNotMatch(String(response.body), /private-upstream-marker|Bad Gateway/);
+  assert.match(JSON.parse(rows()[0].error_json).upstreamBody, /502 Bad Gateway/);
 });
 
 for (const clientType of ["core", "gateway"]) {

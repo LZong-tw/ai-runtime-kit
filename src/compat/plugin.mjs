@@ -111,7 +111,7 @@ function containHandlerFailure(response, error, airkitRequestId) {
       status,
       body: error?.upstreamBody ?? null,
       retryAfter: validRetryAfter(error?.headers),
-      message: publicFailure(status).message,
+      message: publicFailure(status, error).message,
     });
     event.error.request_id ??= airkitRequestId;
     writeSseError(response, event);
@@ -126,7 +126,7 @@ function containHandlerFailure(response, error, airkitRequestId) {
     const requestId = validResponseRequestId(error?.headers);
     if (requestId !== null) headers["x-request-id"] = requestId;
     response.writeHead(status, headers);
-    response.end(JSON.stringify({ error: { ...publicFailure(status), request_id: airkitRequestId } }));
+    response.end(JSON.stringify({ error: { ...publicFailure(status, error), request_id: airkitRequestId } }));
     return "forwarding_failed";
   }
   response?.destroy?.(error instanceof Error ? error : new Error(String(error)));
@@ -138,16 +138,52 @@ function publicUpstreamStatus(error) {
   return Number.isInteger(status) && status >= 400 && status <= 599 ? status : 502;
 }
 
-function publicFailure(status) {
-  return status === 429
-    ? {
-        message: "Upstream provider rate limited the request; retry after the indicated delay.",
-        type: "rate_limit_error",
-      }
-    : {
-        message: status === 502 ? "compatibility forwarding failed" : "Upstream provider rejected the request",
-        type: "api_error",
-      };
+// The public message has to say which hop failed: users read every 502 as an
+// AirKit translation bug, while most are provider gateway errors relayed by CCR.
+// Only status codes, provider names, and error codes go out; upstream bodies
+// stay in the request store.
+function publicFailure(status, error) {
+  if (status === 429) {
+    return {
+      message: "Upstream provider rate limited the request; retry after the indicated delay.",
+      type: "rate_limit_error",
+    };
+  }
+  const upstreamStatus = Number(error?.status ?? error?.statusCode);
+  if (upstreamStatus === status && status >= 500) {
+    const provider = failedProviderName(error?.upstreamBody);
+    return {
+      message: `Upstream provider returned HTTP ${status}${provider === null ? "" : ` (${provider})`}`,
+      type: "api_error",
+    };
+  }
+  if (status === 502) {
+    const code = transportFailureCode(error);
+    return {
+      message: code === null
+        ? "compatibility forwarding failed"
+        : `AirKit could not complete the request to the local CCR gateway (${code})`,
+      type: "api_error",
+    };
+  }
+  return { message: "Upstream provider rejected the request", type: "api_error" };
+}
+
+function failedProviderName(body) {
+  if (typeof body !== "string" || body === "") return null;
+  try {
+    const name = JSON.parse(body)?.error?.target_provider_names?.[0];
+    return typeof name === "string" && /^[A-Za-z0-9._-]{1,80}$/.test(name) ? name : null;
+  } catch {
+    return null;
+  }
+}
+
+function transportFailureCode(error) {
+  for (let cause = error, depth = 0; cause != null && depth < 6; cause = cause.cause, depth += 1) {
+    if (typeof cause.code === "string" && /^(?:E[A-Z]{2,20}|UND_ERR_[A-Z_]{2,30})$/.test(cause.code)) return cause.code;
+  }
+  return null;
 }
 
 function validRetryAfter(headers) {

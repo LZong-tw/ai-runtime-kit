@@ -435,7 +435,9 @@ for (const fixture of [
               type: "api_error",
               message: fixture.wantStatus === 403
                 ? "Upstream provider rejected the request"
-                : "compatibility forwarding failed",
+                : fixture.disconnect
+                  ? "AirKit could not complete the request to the local CCR gateway (UND_ERR_SOCKET)"
+                  : "compatibility forwarding failed",
             }),
           request_id: requestId,
         },
