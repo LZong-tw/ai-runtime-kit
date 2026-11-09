@@ -15,10 +15,12 @@
 - `models`: 1–16 JavaScript regex sources (case-insensitive) replacing the
   default GPT (`^gpt(?:-|$)`) and DeepSeek (`^deepseek-`) patterns.
 
-The keys are exported to Claude as `AIRCLAUDE_COMPLETION_GUARD_*`, but nothing
-acts on them. The legacy guard only reacts to a `Stop` event, and the heartbeat
-plugin has registered no `Stop` hook since `c161546` (2026-08-31). Neither mode
-nudges the model, and log mode writes no
+The keys are exported to Claude as `AIRCLAUDE_COMPLETION_GUARD_*`, but they
+never produce a Stop decision. The heartbeat hook still arms a per-session
+`$CLAUDE_PLUGIN_DATA/completion-guard/<hash>.json` on `PostToolUse` and clears
+it on `UserPromptSubmit`, yet the guard only decides on a `Stop` event, and the
+heartbeat plugin has registered no `Stop` hook since `c161546` (2026-08-31).
+Neither mode nudges the model, and log mode writes no
 `$CLAUDE_PLUGIN_DATA/completion-guard/decisions.jsonl`. The only Stop entries
 today belong to the completion dispatcher below (`completionMode: "shadow"`,
 which also pins the legacy budget to 0) and to the education hooks. What still
@@ -31,8 +33,18 @@ defaults to `shadow`: each GPT Stop is classified and logged to
 `~/.claude-code-router/logs/airkit-education.jsonl` with `emitted: false`, and no
 Stop response is sent. Set `earlyFinal: "enforce"` (or
 `rules: {"early-final": "enforce"}`) to send the model back, at most two times
-per user turn. `completionGuard` values do not map onto this rule. Read the
-shadow results with `airkit education report --rules 7`.
+per user turn. A second block needs a new tool call since the first and a
+different promise, and a turn whose prompt asks for a plan only is never
+blocked. `completionGuard` values do not map onto this rule.
+
+The `earlyFinal` flag also drives a sibling rule, `phantom-wait`: a final that
+says it will wait for a result while the hook sees no background agent,
+workflow or shell still running, and the wait is not on an outside system. It is
+logged in shadow with the same flag, but `earlyFinal: "enforce"` leaves it in
+shadow, because the hook's view of background work misses shells and tasks the
+Stop payload does not list. It enforces only when named:
+`rules: {"phantom-wait": "enforce"}`. Read the shadow results for both rules
+with `airkit education report --rules 7`.
 
 ## 已實作的核心邊界
 
