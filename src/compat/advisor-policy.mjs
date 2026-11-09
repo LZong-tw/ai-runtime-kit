@@ -11,6 +11,12 @@ export const ADVISOR_BLOCKED_TEXT = "Advisor is reserved for when you are genuin
 
 const APPROACH_CHANGE = /different approach|switch(?:ing)? approach|try another approach|new approach|換個方法|換方法/i;
 const SYSTEM_REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
+// `\b` keeps "advisory" out; it is ASCII-only, so 顧問 stays unbounded.
+const ADVISOR_REQUEST = /\badvisors?\b|顧問/i;
+// Claude Code writes the compaction summary as a user message. It quotes the
+// harness Advisor guidance back, so it must not stand in for a user request.
+// If Claude Code rewords it, the summary is read as user text again.
+const COMPACTION_SUMMARY = /^\s*This session is being continued from a previous conversation/;
 const CLAUDE_FAMILIES = ["fable", "opus", "sonnet", "haiku"];
 
 const CCR_ROUTE_ID = /^(?:[^/,]+[/,])?claude-ccr-h([0-9a-f]{2,4096})(?:\[1m\])?$/i;
@@ -84,7 +90,9 @@ export function isAdvisorAllowed({ model, messages = [], gate = {} }) {
       : Array.isArray(message?.content) ? message.content : [];
     if (message?.role === "user") {
       const text = blocks.filter((block) => block?.type === "text" && typeof block.text === "string")
-        .map((block) => block.text.replace(SYSTEM_REMINDER, "")).join("\n");
+        .map((block) => block.text.replace(SYSTEM_REMINDER, ""))
+        .filter((part) => !COMPACTION_SUMMARY.test(part))
+        .join("\n");
       if (text.trim() !== "") latestUserText = text;
     }
     for (const block of blocks) {
@@ -113,7 +121,7 @@ export function isAdvisorAllowed({ model, messages = [], gate = {} }) {
     }
   }
   if (calls >= limits.maxCallsPerConversation) return false;
-  if (/advisor|顧問/i.test(latestUserText)) return true;
+  if (ADVISOR_REQUEST.test(latestUserText)) return true;
   return toolCalls >= limits.minToolCalls &&
     (failures >= limits.failedToolResults || changedApproach);
 }
