@@ -349,6 +349,41 @@ test("system reminders in user messages do not count as asking for Advisor", () 
   ] }), false);
 });
 
+test("words that merely contain advisor do not count as asking for Advisor", () => {
+  for (const text of ["the CLI shows an upgrade advisory", "read the security advisories first"]) {
+    assert.equal(isAdvisorAllowed({ model: "gpt", messages: [{ role: "user", content: text }] }), false, text);
+  }
+  for (const text of ["ask the advisor", "consult advisors on this", "請找 advisor 看一下", "請顧問幫忙"]) {
+    assert.equal(isAdvisorAllowed({ model: "gpt", messages: [{ role: "user", content: text }] }), true, text);
+  }
+});
+
+const COMPACT_SUMMARY = "This session is being continued from a previous conversation that ran out of context. " +
+  "The summary below covers the earlier portion of the conversation.\n\n" +
+  "There is an `advisor` tool backed by a stronger reviewer model; guidance says to call advisor before writing.";
+
+test("a compaction summary that quotes the advisor guidance is not a user request", () => {
+  assert.equal(isAdvisorAllowed({ model: "gpt", messages: [
+    { role: "user", content: COMPACT_SUMMARY },
+    ...toolHistory(1, 0),
+  ] }), false);
+  assert.equal(isAdvisorAllowed({ model: "gpt", messages: [
+    { role: "user", content: [
+      { type: "text", text: "<system-reminder>context</system-reminder>" },
+      { type: "text", text: COMPACT_SUMMARY },
+    ] },
+  ] }), false);
+});
+
+test("a real request merged after a compaction summary still allows Advisor", () => {
+  assert.equal(isAdvisorAllowed({ model: "gpt", messages: [
+    { role: "user", content: [
+      { type: "text", text: COMPACT_SUMMARY },
+      { type: "text", text: "請找 advisor 看一下" },
+    ] },
+  ] }), true);
+});
+
 test("comma-routed selectors classify by model, not provider", () => {
   const history = [1, 2, 3].flatMap((index) => [
     { role: "assistant", content: [{ type: "server_tool_use", id: `s${index}`, name: "advisor", input: {} }] },
