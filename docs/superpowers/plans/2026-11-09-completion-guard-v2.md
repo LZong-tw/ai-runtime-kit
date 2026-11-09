@@ -48,9 +48,9 @@
 
 ### 3.2 六項需求怎麼落地
 
-1. **compaction / resume / fork 重設**：`onLifecycle` 在 `SessionStart`（`source` 為 `resume`、`compact`、`clear`）和 `PostCompact` 時清掉 `state.earlyFinal`，並記 `resetBy`。fork 會拿到新的 session id，所以 state 一開始就是空的。重設只清計數和預算，不代表 compaction 後的 final 不會被判斷。如果 final 本身就是 compact 摘要（含 `</summary>` 或 `[AIRKIT_TASK_CAPSULE]`），一律放行並記 `allow: post-compact-summary`。這是 `hist-020` 的教訓：從 capsule 的 `next_action` 續行，會直接越權。
-2. **背景工作還在跑就不擋**：`background_tasks` 裡只要有任何一筆 `status === "running"` 就放行，不限 `type`（agent、workflow、shell、teammate 都算）。`background_tasks` 不存在時，退回用 education 自己記的 `state.spawns`（`background && !endedAt`）。反過來，final 說「在等」但沒有任何東西在跑，就判為 `phantom-wait`，可以續行（`post-158`）。shadow 期間記下實際出現過的 `type`，用來驗證欄位格式，目前只確認過 `subagent`。
-3. **允許停下的 final**（veto，命中任何一項就放行）：句尾是問句或請使用者選擇；請求授權、MFA、放行；交給使用者一段要執行的指令（fenced shell block、「請執行」「完成後回我」）；宣告停在階段 gate（「這一階段到此停止」「等審查」「再交給你決定」）；有條件的提議（「若你要我…」）；明說還沒動手、在等指令（「我尚未操作」「不會自行」）；陳述 blocker。下一步如果是寫入動作（轉 Ready、merge、sync、apply），也視為需要授權，一樣放行（`post-132`）。
+1. **compaction / resume / fork 重設**：`onLifecycle` 在 `SessionStart`（`source` 為 `resume`、`compact`、`clear`）和 `PostCompact` 時清掉承諾句 hash 和工具呼叫基準，並記 `resetBy`。compaction（`PostCompact`、`SessionStart(compact)`）發生在同一輪使用者輸入裡，所以**保留這一輪已擋的次數**、也不把背景 agent 標成孤兒；只有 `resume`、`clear` 才連次數一起歸零、並把之前的背景工作當成不會再回報（審查 F6、F7，見 §8）。fork 會拿到新的 session id，所以 state 一開始就是空的。重設只清計數和預算，不代表 compaction 後的 final 不會被判斷。如果 final 本身就是 compact 摘要（含 `</summary>` 或 `[AIRKIT_TASK_CAPSULE]`），一律放行並記 `allow: post-compact-summary`。這是 `hist-020` 的教訓：從 capsule 的 `next_action` 續行，會直接越權。
+2. **背景工作還在跑就不擋**：`background_tasks` 裡只要有任何一筆 `status === "running"` 就放行，不限 `type`（agent、workflow、shell、teammate 都算）。`background_tasks` 不存在時，退回用 education 自己記的 `state.spawns`（`background && !endedAt`）和 `state.shells`（`run_in_background` 的 Bash）。`TaskStop`／`KillShell`，或 `background_tasks` 回報某個 id 已不是 `running`，都會把它標成已結束。反過來，final 說「在等」但沒有任何東西在跑，就判為 `phantom-wait`，可以續行（`post-158`）；等的是 CI、pipeline、MR、他人審查這類 session 以外的系統時不算。`phantom-wait` 只有被單獨指名 `enforce` 才會擋，`earlyFinal` 群組設 `enforce` 時它留在 shadow。shadow 期間記下實際出現過的 `type`，用來驗證欄位格式，目前只確認過 `subagent`。
+3. **允許停下的 final**（veto，命中任何一項就放行；比對範圍是承諾所在段落的前一段到結尾，問句不必是最後一個字）：問句或請使用者選擇；請求授權、MFA、放行；交給使用者一段要執行的指令（fenced shell block、「請執行」「完成後回我」）；宣告停在階段 gate（「這一階段到此停止」「等審查」「再交給你決定」）；有條件的提議（「若你要我…」）；明說還沒動手、在等指令（「我尚未操作」「不會自行」）；陳述 blocker。條件句（「你確認後我會」「Once you approve」「完成後我再」「如果是我」）也放行。下一步只有在動詞屬於本機工作區的白名單（讀、查、確認、跑測試、修改…）而且沒有提到破壞性、對外、付費或 production 的字眼時才續行；不再用寫入動作黑名單（`post-132`，審查 F3）。使用者這一輪說「只要計畫／不要動手／等我說 go」時一律放行。
 4. **續行提示的界線**：引用偵測到的承諾句（最多 120 字，經過遮蔽），內容固定為：只做這句已經答應、而且使用者已經授權的那一步；不擴大範圍；不執行 production、破壞性或未經核准的寫入；如果下一步需要授權、使用者動作或決定，就直接結束這一輪並明確提出請求；做不到就講清楚卡在哪裡。不再使用舊的「Continue working when safe」，它被模型讀成「再做點什麼」。
 5. **沒用工具的回覆也判斷，一輪可以擋多次但有上限**：不再靠 `PostToolUse` arm，每次 Stop 都判斷，所以 `post-106`（tools=0）會被抓到。`stop_hook_active === true` 時，必須同時符合三個條件才再擋一次：（a）`blocks < 上限`（預設 2，可用舊 `maxStopBlocks` 1–3 覆蓋）；（b）上次擋下後 transcript 有新的 `tool_use`；（c）這次的承諾句 hash 和上次不同。任何一項不成立就放行，並記 `allow: loop-stop`，避免舊 guard 那種冗餘文字迴圈。
 6. **預設 shadow**：`earlyFinal` 預設 `"shadow"`，只寫 `airkit-education.jsonl`，不輸出 Stop 回應。`launch.education.earlyFinal: "enforce"`、mode 層的 `education`、或 `launch.education.rules["early-final"]: "enforce"` 都能改成實際擋下；設 `"off"` 是人工逃生口。紀錄格式比照現有規則：`{rule:"early-final", decision:"block"|"allow", emitted, reason, evidence:{promise, vetoes, backgroundRunning, blocks, progressTools, stopHookActive, resetBy}}`。只有偵測到承諾句或 phantom-wait 時才記錄（包括被 veto 放行的），一般 final 不記，避免 log 量暴增。
@@ -119,3 +119,16 @@ internal repo 另外要處理（不在這個 clone 的範圍）：`profiles/cata
 - Claude Code 在 Stop 被 block 之後，下一次 Stop 會帶 `stop_hook_active: true`。這是依舊 guard 與 education 的既有寫法推論，這次沒有查文件 [INFERENCE]
 - corpus 只有 18 筆正例，而且是單人標記；門檻只能當回歸保護，真正的誤判率要看 shadow 觀察
 - `hard` 類（回報完成但交付物沒對完、只道歉沒動作）用文字規則抓不到，這次刻意不處理
+
+## 8. 審查後修訂（2026-11-09，針對 `ca487c5`）
+
+三份審查共回報 8 類誤擋、6 類漏擋、10 個越權或狀態問題，全部收進 `test/early-final-review.test.mjs` 與 `test/early-final-hook-review.test.mjs`。主要改法：
+
+- **白名單取代黑名單**：承諾的下一步要落在本機工作區動詞白名單，且承諾句加同段後文不得出現破壞性、對外、付費或 production 字眼（「不會直接合併」這類否定先剔除）。黑名單永遠列不完（F3、F4）。
+- **veto 只看承諾附近**：從承諾所在段落的前一段到結尾，不再看最後 400 字裡的任何字眼（FN#2）；同時把常見的授權、等使用者、條件句、交指令給使用者的寫法補齊（FP-1～4、F1、F2、F9）。
+- **承諾搜尋往上看三段**，以免被收尾客套話、狀態段或長表格擠掉；但「在等」和「尚未完成」只看最後一段，避免把交給使用者的步驟清單當成承諾（`hist-086`）。
+- **compaction 保留這一輪的擋下次數**（F6），與需求 (1) 的字面「重設」有出入，屬於刻意取捨。
+
+刻意不判斷、留給 owner 決定的情況：冒號引言後接一般文字（視為已兌現）；沒有第一人稱的「Next steps:」清單；常駐的背景 shell（例如 dev server）會讓 guard 一直放行。
+
+Corpus 重播（`gate`）：precision 0.875 → 0.889、recall 0.500 → 0.571；`allow` 對照組 recall 0.556 → 0.611，`must_allow` 仍為 0。Corpus 本身是用同一套正規表示式挑出來的，數字只能當回歸保護，不能代表實際誤擋率。

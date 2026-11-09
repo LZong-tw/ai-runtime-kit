@@ -52,7 +52,7 @@ test("a final that hands the user a command to run passes", () => {
 });
 
 test("a promised write step or production step is never pushed", () => {
-  assert.equal(classifyEarlyFinal("測試通過。\n\n接下來我會把分支 merge 進 main。").reason, "next-step-write");
+  assert.equal(classifyEarlyFinal("測試通過。\n\n接下來我會把分支 merge 進 main。").reason, "next-step-unsafe");
   const production = "已確認。\n\n下一步我會到 production 叢集查看 pod 狀態。";
   assert.equal(classifyEarlyFinal(production).reason, "production-gate");
   assert.equal(classifyEarlyFinal(production, { production: "allow" }).decision, "continue", "policy A only for the replay comparison");
@@ -81,9 +81,11 @@ test("the continuation prompt only reopens the promised, authorized step", () =>
   assert.match(reason, /已經要求並授權/);
   assert.match(reason, /不要擴大範圍/);
   assert.match(reason, /production/);
-  assert.match(reason, /merge、apply、sync、deploy、刪除/);
+  assert.match(reason, /merge、apply、套用、sync、deploy、刪除、移除、覆寫、發布、publish/);
+  assert.match(reason, /只要計畫/);
   assert.match(reason, /直接結束這一輪/);
-  assert.match(earlyFinalReason("我會等結果", { phantomWait: true }), /沒有任何背景工作還在執行/);
+  assert.match(earlyFinalReason("我會等結果", { phantomWait: true }), /沒有追蹤到任何還在執行的背景工作/);
+  assert.match(earlyFinalReason("我會等結果", { phantomWait: true }), /session 以外的系統/);
   assert.match(earlyFinalReason(null), /未擷取到/);
 });
 
@@ -251,10 +253,8 @@ test("blocks are bounded per turn and a repeat needs a new tool call and a new p
   }
 });
 
-test("compaction, resume, clear and fork reset the turn budget", async () => {
+test("resume and clear reset the turn budget; compaction resets the promise but keeps the count", async () => {
   for (const reset of [
-    { hook_event_name: "PostCompact", trigger: "auto" },
-    { hook_event_name: "SessionStart", source: "compact" },
     { hook_event_name: "SessionStart", source: "resume" },
     { hook_event_name: "SessionStart", source: "clear" },
   ]) {
@@ -268,6 +268,27 @@ test("compaction, resume, clear and fork reset the turn budget", async () => {
       const record = (await f.logs("early-final")).find((entry) => entry.decision === "reset");
       assert.equal(record.evidence.hadBudget, true, JSON.stringify(reset));
       assert.equal((await f.stop(THIRD_PROMISE, {}, ENFORCE)).decision, "block", `budget restored after ${JSON.stringify(reset)}`);
+    } finally {
+      await f.cleanup();
+    }
+  }
+  // A compaction happens inside the user's turn: the same promise may be sent
+  // back again (its hash is gone), but the turn's cap still holds.
+  for (const reset of [
+    { hook_event_name: "PostCompact", trigger: "auto" },
+    { hook_event_name: "SessionStart", source: "compact" },
+  ]) {
+    const f = await fixture();
+    try {
+      await f.prompt();
+      assert.equal((await f.stop(PROMISE, {}, ENFORCE)).decision, "block");
+      await f.hook(reset, ENFORCE);
+      const record = (await f.logs("early-final")).find((entry) => entry.decision === "reset");
+      assert.deepEqual([record.evidence.hadBudget, record.evidence.keptBlocks], [true, 1], JSON.stringify(reset));
+      assert.equal((await f.stop(PROMISE, { stop_hook_active: true }, ENFORCE)).decision, "block", `promise reset by ${JSON.stringify(reset)}`);
+      await f.tool();
+      assert.equal(await f.stop(OTHER_PROMISE, { stop_hook_active: true }, ENFORCE), null, `cap kept across ${JSON.stringify(reset)}`);
+      assert.equal((await f.logs("early-final")).at(-1).reason, "budget-exhausted");
     } finally {
       await f.cleanup();
     }

@@ -133,6 +133,9 @@ const READ_ONLY_AGENT_TYPES = new Set(["Explore", "Plan", "claude-code-guide"]);
 const FAN_OUT = /平行|並行|同時|分頭|各自|多個\s*reviewer|in parallel|parallel(?:ize|ly)?|fan[- ]?out|每個.{0,40}都|subagents?|workflow|teammates?|子代理/i;
 const BROAD_SEARCH = /search|find|locate|explore|survey|scan|grep|look (?:for|through)|搜尋|找出|盤點|調查/i;
 const LIST_LINE = /^\s*(?:[-*•]|\d+[.)、])\s+\S/;
+// The user asked for a plan only, or to hold until they say go: an early-final
+// block must not push the model into implementing it.
+const PLAN_ONLY = /不要動手|別動手|先不要(?:動手|改|修|實作|執行)|不要(?:改|修改)(?:程式|code)|只要計畫|只給計畫|先給我計畫|計畫就好|等我說\s*go|\bplan only\b|\bjust (?:the|a) plan\b|\b(?:don['’]t|do not) (?:change|edit|touch|implement|modify|write) (?:any|the|code|files?)|\bno code (?:yet|changes)\b|\bwait for my (?:go|ok|approval)\b/i;
 const ITEM_TOKEN = /(?:!\d+|#\d+|\b[A-Z][A-Z0-9]+-\d+\b|(?:~|\.{1,2})?\/[\w.@-]+(?:\/[\w.@-]+)+)/g;
 // Only an output instruction counts as a fixed format. The 44e50e8 pattern
 // matched any "verbatim", "schema" or ".json" path anywhere in the prompt, so
@@ -269,10 +272,17 @@ function readRuleOverrides(raw, errors) {
 
 // A per-rule override wins over its group. errorHints=false has always logged
 // without emitting, so it reads as shadow here.
+// phantom-wait trusts the hook's view of background work, which misses shells
+// and tasks the Stop payload does not list, so it only enforces when it is
+// switched on by name; group enforce leaves it in shadow.
+const EXPLICIT_ENFORCE = new Set(["phantom-wait"]);
+
 function ruleLevel(config, rule) {
-  const level = config.rules?.[rule] ?? config[EDUCATION_RULES[rule]];
-  if (level === true) return "enforce";
-  if (level === false) return "shadow";
+  const own = config.rules?.[rule];
+  let level = own ?? config[EDUCATION_RULES[rule]];
+  if (level === true) level = "enforce";
+  if (level === false) level = "shadow";
+  if (own === undefined && level === "enforce" && EXPLICIT_ENFORCE.has(rule)) return "shadow";
   return level;
 }
 
@@ -304,6 +314,7 @@ export function promptFeatures(prompt) {
     chars: text.length,
     items: Math.max(listLines, tokens.size),
     fanOut: FAN_OUT.test(text),
+    planOnly: PLAN_ONLY.test(text),
   };
 }
 
@@ -465,7 +476,7 @@ function emptyEarlyFinal(turn = 0) {
 }
 
 function emptyState() {
-  return { turn: 0, prompt: promptFeatures(""), ownCalls: 0, turnCalls: 0, lastFailHash: null, stopBlockedTurn: -1, rejectedSpawns: [], spawns: [], blocked: [], helpSeen: [], loops: {}, earlyFinal: emptyEarlyFinal() };
+  return { turn: 0, prompt: promptFeatures(""), ownCalls: 0, turnCalls: 0, lastFailHash: null, stopBlockedTurn: -1, rejectedSpawns: [], spawns: [], shells: [], blocked: [], helpSeen: [], loops: {}, earlyFinal: emptyEarlyFinal() };
 }
 
 function statePath(env, sessionId) {
@@ -489,6 +500,7 @@ async function saveState(path, state) {
   state.rejectedSpawns = state.rejectedSpawns.slice(-MAX_SPAWNS);
   state.blocked = state.blocked.slice(-MAX_SPAWNS);
   state.helpSeen = state.helpSeen.slice(-MAX_SPAWNS);
+  state.shells = (state.shells ?? []).slice(-MAX_SPAWNS);
   const actors = Object.keys(state.loops);
   for (const actor of actors.slice(0, Math.max(0, actors.length - MAX_ACTORS))) delete state.loops[actor];
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
@@ -724,19 +736,26 @@ async function onUserPrompt(input, state) {
   return null;
 }
 
-// Compaction, resume, clear and fork start a new context: the old turn's block
-// budget and promise must not carry over, and agents spawned before a resume
-// will never report back, so they no longer count as running.
+// Compaction, resume, clear and fork start a new context, so the old promise
+// and tool-call baseline must not carry over. A compaction happens inside the
+// user's turn, though: it keeps the turn's block count (otherwise every auto
+// compaction would hand out a fresh budget) and its background agents, which
+// are still running. Resume and clear start over, and agents spawned before
+// them will never report back, so they no longer count as running.
 async function onLifecycle(input, state, config, log) {
   if (typeof input.agent_id === "string") return null;
+  const compaction = input.hook_event_name === "PostCompact" || input.source === "compact";
   const resetBy = input.hook_event_name === "PostCompact" ? `compact:${input.trigger ?? "unknown"}` : `session:${input.source ?? "unknown"}`;
-  const hadBudget = state.earlyFinal?.blocks > 0;
+  const previous = state.earlyFinal?.turn === state.turn ? state.earlyFinal : emptyEarlyFinal(state.turn);
+  const hadBudget = previous.blocks > 0;
   state.earlyFinal = emptyEarlyFinal(state.turn);
+  if (compaction) state.earlyFinal.blocks = previous.blocks;
   state.turnCalls = 0;
-  if (input.hook_event_name === "SessionStart" && input.source !== "startup") {
+  if (input.hook_event_name === "SessionStart" && !compaction && input.source !== "startup") {
     for (const spawn of state.spawns) if (spawn.background && !spawn.endedAt) spawn.orphaned = true;
+    for (const shell of state.shells ?? []) shell.orphaned = true;
   }
-  if (ruleOn(config, "early-final")) await log({ rule: "early-final", decision: "reset", emitted: false, reason: null, evidence: { resetBy, hadBudget } });
+  if (ruleOn(config, "early-final")) await log({ rule: "early-final", decision: "reset", emitted: false, reason: null, evidence: { resetBy, hadBudget, keptBlocks: state.earlyFinal.blocks } });
   return null;
 }
 
@@ -824,6 +843,24 @@ async function trackAfterTool(input, state, config, model, log) {
       // A foreground agent's result is the tool result itself.
       if (response.isAsync !== true) markRead(spawn, "foreground");
     }
+    return null;
+  }
+
+  // Background shells count as running work for the early-final guard. The
+  // Bash response field naming the shell is unverified, so the tool_use_id
+  // stands in when it is missing.
+  if (tool === "Bash" && isParent && toolInput.run_in_background === true) {
+    const id = [response?.backgroundTaskId, response?.shellId, response?.bash_id, input.tool_use_id].find((value) => typeof value === "string" && value !== "");
+    if (id) {
+      state.shells = state.shells ?? [];
+      state.shells.push({ id, description: String(toolInput.description ?? "").slice(0, 200), turn: state.turn, settled: null });
+    }
+    return null;
+  }
+
+  if ((tool === "TaskStop" || tool === "KillShell") && isParent) {
+    const id = toolInput.task_id ?? toolInput.shell_id ?? toolInput.id ?? null;
+    settleBackground(state, id, "stopped");
     return null;
   }
 
@@ -1007,11 +1044,11 @@ async function assistantTextsSince(path, since) {
 // result the parent never used blocks once per turn; running agents get a
 // "don't poll" note instead of a block. With no stored result there is no
 // evidence either way, so those agents only get a hint.
-async function onStop(input, state, config, model, log) {
+async function onStop(input, state, config, model, log, persisted) {
   if (typeof input.agent_id === "string") return null;
   const response = await backgroundStop(input, state, config, model, log);
   if (response?.decision === "block") return response;
-  return (await earlyFinal(input, state, config, model, log)) ?? response;
+  return (await earlyFinal(input, state, config, model, log, persisted)) ?? response;
 }
 
 async function backgroundStop(input, state, config, model, log) {
@@ -1071,12 +1108,31 @@ function bareModel(model) {
   return String(model ?? "").trim().split(/[/,]/).at(-1)?.replace(/\[1m\]$/i, "") ?? "";
 }
 
+// The model stopped a task, or Claude Code reported it finished. Only the
+// early-final guard reads "settled"; SubagentStop still owns endedAt.
+function settleBackground(state, id, how) {
+  if (typeof id !== "string" || id === "") return;
+  const spawn = spawnFor(state, id);
+  if (spawn && !spawn.settled) spawn.settled = how;
+  for (const shell of state.shells ?? []) if (shell.id === id && !shell.settled) shell.settled = how;
+}
+
 // Anything still working in the background: subagents, workflows, shells.
+// background_tasks is Claude Code's own view when the Stop payload has it; a
+// tracked id it reports in any other state than running is settled.
 function runningBackground(input, state) {
   const tasks = Array.isArray(input.background_tasks) ? input.background_tasks : [];
-  const running = tasks.filter((task) => task?.status === "running").map((task) => task.id ?? task.type ?? "task");
+  const running = [];
+  for (const task of tasks) {
+    const id = task?.id ?? null;
+    if (task?.status === "running") running.push(id ?? task?.type ?? "task");
+    else if (typeof task?.status === "string") settleBackground(state, id, `reported-${task.status}`);
+  }
   for (const spawn of state.spawns) {
-    if (spawn.background && !spawn.endedAt && !spawn.orphaned && !running.includes(spawn.agentId)) running.push(spawn.agentId);
+    if (spawn.background && !spawn.endedAt && !spawn.orphaned && !spawn.settled && !running.includes(spawn.agentId)) running.push(spawn.agentId);
+  }
+  for (const shell of state.shells ?? []) {
+    if (!shell.orphaned && !shell.settled && !running.includes(shell.id)) running.push(shell.id);
   }
   return running;
 }
@@ -1090,8 +1146,10 @@ async function lastAssistantText(input) {
 // Plan §3: a GPT final that promises its next step instead of taking it gets
 // sent back, at most EARLY_FINAL_MAX_BLOCKS times a turn. A repeat block needs
 // both a new tool call and a different promise, so a model that keeps
-// restating the same promise without acting ends the turn.
-async function earlyFinal(input, state, config, model, log) {
+// restating the same promise without acting ends the turn. Without a state
+// file there is no count to keep, so a Stop that is already a continuation
+// passes.
+async function earlyFinal(input, state, config, model, log, persisted = true) {
   const finalOn = ruleOn(config, "early-final");
   const phantomOn = ruleOn(config, "phantom-wait");
   if (!finalOn && !phantomOn) return null;
@@ -1108,7 +1166,9 @@ async function earlyFinal(input, state, config, model, log) {
   let decision = verdict.decision === "continue" ? "block" : "allow";
   let reason = verdict.reason;
   if (decision === "block") {
-    if (budget.blocks >= EARLY_FINAL_MAX_BLOCKS) [decision, reason] = ["allow", "budget-exhausted"];
+    if (state.prompt?.planOnly) [decision, reason] = ["allow", "plan-only-turn"];
+    else if (!persisted && input.stop_hook_active === true) [decision, reason] = ["allow", "no-state-stop-active"];
+    else if (budget.blocks >= EARLY_FINAL_MAX_BLOCKS) [decision, reason] = ["allow", "budget-exhausted"];
     else if (budget.blocks > 0 && turnCalls <= budget.callsAtBlock) [decision, reason] = ["allow", "loop-no-new-call"];
     else if (budget.blocks > 0 && promiseHash === budget.lastPromiseHash) [decision, reason] = ["allow", "loop-same-promise"];
   }
@@ -1120,6 +1180,7 @@ async function earlyFinal(input, state, config, model, log) {
     emitted: emit,
     reason,
     evidence: {
+      verdict: verdict.reason,
       promise: verdict.promise,
       vetoes: verdict.vetoes,
       backgroundRunning: running,
@@ -1156,7 +1217,7 @@ export async function processEducationHook(input, env = process.env) {
   else if (eventName === "PostToolUseFailure") response = await onPostToolUseFailure(input, state, config, model, log);
   else if (eventName === "SubagentStart") response = await onSubagentStart(input, state);
   else if (eventName === "SubagentStop") response = await onSubagentStop(input, state, config, model, log);
-  else if (eventName === "Stop") response = await onStop(input, state, config, model, log);
+  else if (eventName === "Stop") response = await onStop(input, state, config, model, log, path !== null);
   else if (eventName === "SessionStart" || eventName === "PostCompact") response = await onLifecycle(input, state, config, log);
   await saveState(path, state);
   return response;

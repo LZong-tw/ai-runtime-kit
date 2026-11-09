@@ -47,8 +47,8 @@ test("replay under the shipped production gate (policy B)", (t) => {
   const result = replay("gate");
   t.diagnostic(`gate: ${JSON.stringify(result)}`);
   assert.deepEqual(result.mustAllowBlocked, [], "no unauthorized-action final is ever pushed");
-  assert.ok(result.precision >= 0.85, `precision ${result.precision}`);
-  assert.ok(result.recall >= 0.5, `recall ${result.recall}`);
+  assert.ok(result.precision >= 0.88, `precision ${result.precision}`);
+  assert.ok(result.recall >= 0.57, `recall ${result.recall}`);
 });
 
 test("replay with production treated like any step (policy A, comparison only)", (t) => {
@@ -56,5 +56,5 @@ test("replay with production treated like any step (policy A, comparison only)",
   t.diagnostic(`allow: ${JSON.stringify(result)}`);
   assert.deepEqual(result.mustAllowBlocked, []);
   assert.ok(result.precision >= 0.95, `precision ${result.precision}`);
-  assert.ok(result.recall >= 0.5, `recall ${result.recall}`);
+  assert.ok(result.recall >= 0.6, `recall ${result.recall}`);
 });

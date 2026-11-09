@@ -108,7 +108,9 @@ test("flags: per-rule overrides parse; bad JSON drops them, a bad entry turns th
 });
 
 test("prompt features count list items and fan-out intent", () => {
-  assert.deepEqual(promptFeatures("fix the bug"), { chars: 11, items: 0, fanOut: false });
+  assert.deepEqual(promptFeatures("fix the bug"), { chars: 11, items: 0, fanOut: false, planOnly: false });
+  assert.equal(promptFeatures("先給我計畫就好，不要動手改程式，等我說 go").planOnly, true);
+  assert.equal(promptFeatures("Plan only, don't touch the code yet").planOnly, true);
   const listed = promptFeatures("Review these:\n- !12\n- !13\n- !14");
   assert.equal(listed.items, 3);
   assert.equal(promptFeatures("請平行處理這三個 MR").fanOut, true);
