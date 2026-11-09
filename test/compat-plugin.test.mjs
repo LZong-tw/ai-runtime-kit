@@ -4048,3 +4048,55 @@ test("Advisor imitation is reported even beside a real bridge call", async () =>
   }
   assert.equal(captured.some((line) => line.startsWith("[airkit-advisor-forgery]")), true);
 });
+
+test("client ToolSearch tool_reference results activate deferred tools for the executor", async () => {
+  const fixture = createBridgeFixture([message({ content: [{ type: "text", text: "ok" }] })], {
+    advisorMode: "bridge",
+    body: {
+      tools: [
+        { name: "ToolSearch", description: "Search deferred tools", input_schema: { type: "object", properties: {} } },
+        {
+          name: "mcp__slack__read_channel",
+          description: "Read a channel",
+          defer_loading: true,
+          input_schema: { type: "object", properties: {} },
+        },
+        {
+          name: "mcp__slack__search",
+          description: "Search Slack",
+          defer_loading: true,
+          input_schema: { type: "object", properties: {} },
+        },
+        { type: "advisor_20260301", name: "advisor", model: "claude-opus-5" },
+      ],
+      messages: [
+        { role: "user", content: "read the channel" },
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "toolu_ts", name: "ToolSearch", input: { query: "select:mcp__slack__read_channel" } }],
+        },
+        {
+          role: "user",
+          content: [{
+            type: "tool_result",
+            tool_use_id: "toolu_ts",
+            content: [{ type: "tool_reference", tool_name: "mcp__slack__read_channel" }],
+          }],
+        },
+      ],
+    },
+  });
+
+  await handleCompatibilityMessage(fixture.input);
+
+  const sent = fixture.calls[0].body;
+  const loaded = sent.tools.find((tool) => tool.name === "mcp__slack__read_channel");
+  assert.ok(loaded, "the referenced deferred tool reaches the executor");
+  assert.equal(loaded.defer_loading, undefined);
+  assert.equal(sent.tools.some((tool) => tool.name === "mcp__slack__search"), false);
+  assert.deepEqual(sent.messages[2].content, [{
+    type: "tool_result",
+    tool_use_id: "toolu_ts",
+    content: [{ type: "text", text: "Activated deferred tools: mcp__slack__read_channel" }],
+  }]);
+});

@@ -659,6 +659,8 @@ function normalizeCompatibilityHistory(source, inspection) {
       } else if (message.role === "assistant" && block?.type === "text") {
         const text = stripImitatedExchange(block.text);
         if (text) segment.push({ ...structuredClone(block), text });
+      } else if (hasClientToolReferences(block)) {
+        segment.push(clientToolReferenceResult(block, referencedTools));
       } else {
         segment.push(structuredClone(block));
       }
@@ -668,6 +670,30 @@ function normalizeCompatibilityHistory(source, inspection) {
   }
   if (pendingUses.size > 0) throw unsupportedHistory();
   return { messages, referencedTools };
+}
+
+// Claude Code answers its own ToolSearch tool with tool_reference blocks. The
+// executor body keeps only deferred tools that history activated, so these
+// names count as activated too; the references become text because the
+// executor receives the expanded, no-longer-deferred definitions.
+function hasClientToolReferences(block) {
+  return block?.type === "tool_result" &&
+    Array.isArray(block.content) &&
+    block.content.some((item) => item?.type === "tool_reference");
+}
+
+function clientToolReferenceResult(block, referencedTools) {
+  const names = [];
+  const rest = [];
+  for (const item of block.content) {
+    if (item?.type !== "tool_reference") rest.push(structuredClone(item));
+    else if (typeof item.tool_name === "string") names.push(item.tool_name);
+  }
+  for (const name of names) referencedTools.add(name);
+  return {
+    ...structuredClone(block),
+    content: [{ type: "text", text: `Activated deferred tools: ${names.join(", ") || "none"}` }, ...rest],
+  };
 }
 
 function isBridgeToolUse(block) {
