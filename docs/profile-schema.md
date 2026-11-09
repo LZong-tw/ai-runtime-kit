@@ -268,6 +268,22 @@ classifier marker only. Supported statuses are 401, 408, 429, 499, 500, 502,
 Transport fallback is disabled for ordinary requests when the entry is scoped
 to `classifier`, and it never changes the caller's primary route unless the
 configured status or timeout condition occurs.
+
+`restrictedThinkingProviders` lists source names of `anthropic_messages`
+providers whose upstream validates `thinking` against an older schema than
+Claude Code sends — for example a LiteLLM gateway that answers HTTP 400 to
+`display: "updates"` and to `type: "disabled"`:
+
+```json
+{ "restrictedThinkingProviders": ["web_litellm_anthropic"] }
+```
+
+For requests bound to a listed provider, AirKit removes an adaptive `display`
+other than `summarized` or `omitted`, and removes `thinking` entirely when its
+type is `disabled`. Only that member's bytes change; any other shape, provider,
+or model is forwarded unchanged. Each name must resolve exactly once to an
+`anthropic_messages` provider and is bound to its managed CCR ID.
+
 `sseKeepalive` tunes how a buffered compat reply keeps a `stream: true`
 client's connection alive:
 
