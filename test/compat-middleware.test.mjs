@@ -96,6 +96,31 @@ test("middleware emits audit boundaries without changing forwarded request bytes
   assert.equal(events[1].fields.payload.body_sha256.length, 64);
 });
 
+test("middleware hands restricted thinking providers to the gateway client", async (t) => {
+  const upstreamBodies = [];
+  const upstream = await startFixture(t, async (request, response) => {
+    upstreamBodies.push(JSON.parse(await readBody(request)));
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end('{"type":"message","content":[]}');
+  });
+  const adapter = await startCompatibilityMiddleware({
+    compatibility: { ...COMPATIBILITY, restrictedThinkingProviders: ["anthropic-messages"] },
+    providers: [{ name: "anthropic-messages", type: "anthropic_messages", models: ["claude-sonnet"] }],
+    gatewayOrigin: upstream.origin,
+    gatewayToken: GATEWAY_TOKEN,
+  });
+  t.after(() => adapter.close());
+
+  const result = await fetch(`${adapter.origin}/v1/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": GATEWAY_TOKEN },
+    body: '{"model":"anthropic-messages/claude-sonnet","messages":[],"thinking":{"type":"adaptive","display":"updates"}}',
+  });
+
+  assert.equal(result.status, 200);
+  assert.deepEqual(upstreamBodies.map(({ thinking }) => thinking), [{ type: "adaptive" }]);
+});
+
 test("middleware carries audit context into compatibility provider attempts", async (t) => {
   const events = [];
   let upstreamCalls = 0;

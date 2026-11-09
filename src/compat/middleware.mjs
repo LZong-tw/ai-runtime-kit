@@ -46,6 +46,7 @@ export async function startCompatibilityMiddleware({
     origin: gatewayOrigin,
     token: gatewayToken,
     providers,
+    restrictedThinkingProviders: compatibility.restrictedThinkingProviders ?? [],
     responseTransformFactory: createGptActivitySseTransform,
   });
   const { policies } = resolveCompatibilityPolicies(

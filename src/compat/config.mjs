@@ -22,6 +22,7 @@ const CONFIG_KEYS = new Set([
   "modeEffort",
   "modeRoutes",
   "modelPrompts",
+  "restrictedThinkingProviders",
   "routeLog",
   "routes",
   "sseKeepalive",
@@ -105,7 +106,7 @@ export function validateCompatibilityConfig(config) {
     }
     for (const key of ["nativeProviderExclusions", "clientToolExclusions"]) {
       if (definition[key] !== undefined && (!Array.isArray(definition[key]) || definition[key].some(
-        (provider) => typeof provider !== "string" || !/^[a-z0-9][a-z0-9._-]*$/i.test(provider),
+        (provider) => !isProviderIdentifier(provider),
       ))) {
         throw new Error(`${family}.${key} must be provider identifiers`);
       }
@@ -116,6 +117,13 @@ export function validateCompatibilityConfig(config) {
     if (!modes.includes(definition.mode)) {
       throw new Error(`${family}.mode must be one of: ${modes.join(", ")}`);
     }
+  }
+
+  if (config.restrictedThinkingProviders !== undefined && (
+    !Array.isArray(config.restrictedThinkingProviders) ||
+    config.restrictedThinkingProviders.some((provider) => !isProviderIdentifier(provider))
+  )) {
+    throw new Error("restrictedThinkingProviders must be provider identifiers");
   }
 
   if (config.routeLog !== undefined && typeof config.routeLog !== "boolean") {
@@ -497,6 +505,19 @@ export function validateCompatibilityProviderBinding(config, providers) {
   ]) {
     validateFallbackProvider(selected, providers, label);
   }
+  for (const name of config.restrictedThinkingProviders ?? []) {
+    const matches = (providers ?? []).filter((provider) => provider.name === name);
+    if (matches.length !== 1) {
+      throw new Error(`restrictedThinkingProviders provider must resolve exactly once: ${name}`);
+    }
+    if (matches[0].type !== "anthropic_messages") {
+      throw new Error(`restrictedThinkingProviders provider must use anthropic_messages: ${name}`);
+    }
+  }
+}
+
+function isProviderIdentifier(value) {
+  return typeof value === "string" && /^[a-z0-9][a-z0-9._-]*$/i.test(value);
 }
 
 function validateFallbackProvider(fallback, providers, label) {

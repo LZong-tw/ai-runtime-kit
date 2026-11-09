@@ -1212,6 +1212,7 @@ test("CCR compatibility binds family fallbacks and Advisor models to managed pro
     nativeProviderExclusions: ["web-litellm"],
     clientToolExclusions: ["web-litellm"],
   };
+  catalog.profiles[0].ccr.plugins[0].config.restrictedThinkingProviders = ["advisor-anthropic"];
 
   const merged = airkitRuntime.buildCcr3ManagedConfig(catalog, "launch-example", {}, {
     configDir: "/tmp/airkit-family-fallback",
@@ -1237,6 +1238,9 @@ test("CCR compatibility binds family fallbacks and Advisor models to managed pro
   ]);
   assert.deepEqual(compatibility.webSearch.clientToolExclusions, [
     "airkit-provider-launch-example-web-litellm",
+  ]);
+  assert.deepEqual(compatibility.restrictedThinkingProviders, [
+    "airkit-provider-launch-example-advisor-anthropic",
   ]);
   assert.doesNotThrow(() => validateCompatibilityProviderBinding(
     compatibility,

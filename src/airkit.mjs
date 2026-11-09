@@ -786,6 +786,10 @@ function bindManagedCompatibilityProvider(ccrConfig, managedProviderIds) {
     fallback.from.provider = managedProviderIds.get(fallback.from.provider);
     fallback.to.provider = managedProviderIds.get(fallback.to.provider);
   }
+  if (Array.isArray(compatibility.restrictedThinkingProviders)) {
+    compatibility.restrictedThinkingProviders = compatibility.restrictedThinkingProviders
+      .map((provider) => managedProviderIds.get(provider));
+  }
   for (const family of ["webSearch", "webFetch"]) {
     for (const key of ["nativeProviderExclusions", "clientToolExclusions"]) {
       const exclusions = compatibility[family]?.[key];
@@ -1007,9 +1011,11 @@ export async function exportOssRelease({ outDir }) {
     "plugin.mjs",
     "protocol.mjs",
     "request-errors.mjs",
+    "selector.mjs",
     "server-history.mjs",
     "server-tools.mjs",
     "sse-keepalive.mjs",
+    "thinking-restrictions.mjs",
     "tool-search.mjs",
   ]) {
     await copyFile(join(here, "compat", module), join(outDir, "src", "compat", module));

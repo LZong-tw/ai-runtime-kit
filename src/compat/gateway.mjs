@@ -23,6 +23,7 @@ import { allowlistedUsage } from "../audit/redaction.mjs";
 import { describeStablePrefix } from "./prefix-observability.mjs";
 import { claimSseStream, sseKeepaliveOwnsStream, upstreamSseError, writeSseError } from "./sse-keepalive.mjs";
 import { normalizeResponsesThinkingHistory } from "./reasoning-history.mjs";
+import { normalizeRestrictedThinking } from "./thinking-restrictions.mjs";
 import {
   ADVISOR_BLOCKED_TEXT,
   NON_CLAUDE_ADVISOR_PROMPT,
@@ -180,9 +181,22 @@ export function createCoreClient({ config, fetchImpl = fetch, readFile = readFil
 // Compatibility handling must use the public CCR gateway so its normal proxy
 // owns routing and request recording. This client deliberately has no access
 // to CCR's core credential or generated configuration file.
-export function createGatewayClient({ origin, token, providers = [], fetchImpl = fetch, responseTransformFactory = null }) {
+export function createGatewayClient({
+  origin,
+  token,
+  providers = [],
+  restrictedThinkingProviders = [],
+  fetchImpl = fetch,
+  responseTransformFactory = null,
+}) {
   const gatewayOrigin = normalizeGatewayOrigin(origin);
   const providerBindings = structuredClone(providers);
+  const thinkingRestricted = [...restrictedThinkingProviders];
+  const normalizeOutbound = (body) => normalizeRestrictedThinking(
+    normalizeResponsesThinkingHistory(body, providerBindings),
+    providerBindings,
+    thinkingRestricted,
+  );
   if (typeof token !== "string" || token.length === 0) {
     throw new Error("CCR gateway authentication is missing or invalid");
   }
@@ -191,9 +205,7 @@ export function createGatewayClient({ origin, token, providers = [], fetchImpl =
     "x-api-key": token,
   });
   const prepareRequest = ({ body, headers, method = "POST", path, signal }) => {
-    if (method === "POST" && path === "/v1/messages") {
-      body = normalizeResponsesThinkingHistory(body, providerBindings);
-    }
+    if (method === "POST" && path === "/v1/messages") body = normalizeOutbound(body);
     const options = {
       method,
       headers: gatewayHeaders(headers),
@@ -241,10 +253,8 @@ export function createGatewayClient({ origin, token, providers = [], fetchImpl =
       }
     },
     async forwardRaw({ body, fallback, headers, method = "POST", response, signal, onResponse, onAttempt }) {
-      body = normalizeResponsesThinkingHistory(body, providerBindings);
-      if (fallback?.body !== undefined) {
-        fallback = { ...fallback, body: normalizeResponsesThinkingHistory(fallback.body, providerBindings) };
-      }
+      body = normalizeOutbound(body);
+      if (fallback?.body !== undefined) fallback = { ...fallback, body: normalizeOutbound(fallback.body) };
       await onAttempt?.({ phase: "start", body });
       const primaryRequest = prepareRequest({ body, headers, method, path: "/v1/messages", signal });
       const primary = await fetchWithTimeout(
