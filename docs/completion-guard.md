@@ -2,34 +2,37 @@
 
 目前安裝預設為 off；明確指定 `completionMode: "shadow"` 才加入專用 Stop 入口。Shadow 不會阻擋完成、不會扣除 continuation budget，也不會從 stdin 接受 native decoder 或授權宣告。正式 profile 啟用與 production enforcing 仍需另外確認。
 
-## Legacy Stop guard: completionGuard keys
+## Legacy Stop guard: completionGuard keys (inert)
 
-Configure `launch.modes.<mode>.completionGuard` independently of the newer
-completion dispatcher described below:
+`launch.modes.<mode>.completionGuard` is still accepted and validated:
 
 ```json
 {"maxStopBlocks":1,"mode":"log","models":["^gpt-"]}
 ```
 
-- `maxStopBlocks` is required: an integer from 1 to 3, limiting Stop nudges per
-  user turn after tool use.
-- `mode` is optional: `"block"` (default) emits the existing continuation nudge;
-  `"log"` never emits a Stop response but consumes the same simulated budget.
-- `models` is optional: 1–16 non-empty JavaScript regex sources, compiled with
-  the case-insensitive `i` flag. This allowlist replaces the default GPT
-  (`^gpt(?:-|$)`) and DeepSeek (`^deepseek-`) patterns. Matching uses the model
-  name without its provider prefix or trailing `[1m]` suffix.
+- `maxStopBlocks`: an integer from 1 to 3.
+- `mode`: `"block"` (default) or `"log"`.
+- `models`: 1–16 JavaScript regex sources (case-insensitive) replacing the
+  default GPT (`^gpt(?:-|$)`) and DeepSeek (`^deepseek-`) patterns.
 
-Log mode appends matching, non-recursive Stop decisions to
-`$CLAUDE_PLUGIN_DATA/completion-guard/decisions.jsonl` (file mode `0600`). Each
-record contains only `ts` (ISO timestamp), `session` (24-hex SHA-256 session
-key, never the raw ID), `model` (normalized name), `wouldBlock` (boolean),
-`reason` (`would-block`, `not-armed`, or `budget-exhausted`), `stopBlocks`
-(count after the decision), and `maxStopBlocks`. Non-matching models write no
-log. When the log reaches 1 MiB it is renamed to `decisions.jsonl.1`
-(replacing any previous one), so at most about 2 MiB is kept; `model` is capped
-at 128 characters. No prompt, transcript, or tool content is recorded; logging failures are
-ignored. Invalid environment mode or model overrides disable the legacy guard.
+The keys are exported to Claude as `AIRCLAUDE_COMPLETION_GUARD_*`, but nothing
+acts on them. The legacy guard only reacts to a `Stop` event, and the heartbeat
+plugin has registered no `Stop` hook since `c161546` (2026-08-31). Neither mode
+nudges the model, and log mode writes no
+`$CLAUDE_PLUGIN_DATA/completion-guard/decisions.jsonl`. The only Stop entries
+today belong to the completion dispatcher below (`completionMode: "shadow"`,
+which also pins the legacy budget to 0) and to the education hooks. What still
+discourages early finals in GPT modes is the completion-discipline prompt.
+
+The replacement is the education `early-final` rule (`src/early-final.mjs`). It
+runs only when the profile enables education (`launch.education` or
+`launch.modes.<mode>.education`), judges GPT finals only (`^gpt-`), and
+defaults to `shadow`: each GPT Stop is classified and logged to
+`~/.claude-code-router/logs/airkit-education.jsonl` with `emitted: false`, and no
+Stop response is sent. Set `earlyFinal: "enforce"` (or
+`rules: {"early-final": "enforce"}`) to send the model back, at most two times
+per user turn. `completionGuard` values do not map onto this rule. Read the
+shadow results with `airkit education report --rules 7`.
 
 ## 已實作的核心邊界
 
