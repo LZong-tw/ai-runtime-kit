@@ -20,7 +20,7 @@ internal service names are replaced with placeholders (`[url]`, `[path]`,
 `[ticket]`, `![mr]`, `[hex]`, `[name]`, `[service]`, ...). The user's prompt
 is not stored; `prompt_kind` says whether the turn began with a normal prompt,
 a compaction continuation or a teammate message. `source_ref` is a truncated
-SHA-256 of the transcript reference, so the unredacted master can be looked
+SHA-256 of the transcript reference. The unredacted master stays on the owner's machine, outside every repository, so it can be looked
 up locally without the reference itself being published.
 
 ## Fields
@@ -38,6 +38,7 @@ up locally without the reference itself being published.
 | `reason_source` | `manual`, or `heuristic` for unreviewed `allow` reasons |
 | `difficulty` | `easy`, `medium` or `hard`. `hard` means no textual cue a rule can use |
 | `must_allow` | finals where the legacy guard's continuation did harm or a user gate must hold. A v2 block on any of these fails the test |
+| `next_step_touches_production` | the stated next step is a read-only production query. Four `continue` records carry it; whether they stay `continue` is an open policy decision (plan §6 item 7) |
 
 `truth` and `expected` differ on purpose for a few records. A premature final
 with background work still running is `expected: allow` (design rule 2), as is

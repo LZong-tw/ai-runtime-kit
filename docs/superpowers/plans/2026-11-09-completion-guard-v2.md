@@ -29,7 +29,8 @@
 - 組成：`hist-*` 94 筆（舊 guard 擋下的全部 GPT final）、`miss-*` 2 筆（08-25 預算用完被放行的 early final）、`post-*` 65 筆（8/31 之後只剩 prompt 的期間：regex 命中的、已知漏判，加 30 筆 seed 20261109 隨機樣本；其中 7 筆是 8/31 13:52 前 guard 期間沒被擋的 final）
 - 標籤：`expected:continue` 18 筆（easy 3、medium 8、hard 7）；`must_allow` 22 筆，包含舊 guard 造成越權的 7 筆、等待迴圈 8 筆，以及使用者設下的授權或階段 gate
 - `truth` 和 `expected` 刻意不一致的 6 筆：`hist-024`、`hist-051`、`hist-059`（背景還在跑，依規則 2 放行）、`post-201`（compact capsule 當成 final，依規則 1 放行）、`post-090`、`post-091`（模型錯報 blocker，不屬於這個 guard 處理的範圍）。這些就是這個設計放棄的部分
-- 遮蔽：只保留 final 最後 400 字，URL、主機、路徑、檔名、ticket、MR、帳號、hash、內部服務名都換成佔位符，不存使用者 prompt。未遮蔽的 master 在 `/private/tmp/claude-501/-Users-untionglim-projects-web-ai-runtime-kit/08b022c3-234a-449f-83de-ba4b48e3587d/scratchpad/cg2/`（`master.json`、`labeled.json`、產生腳本），不放進 repo
+- 遮蔽：只保留 final 最後 400 字，URL、主機、路徑、檔名、ticket、MR、帳號、hash、內部服務名都換成佔位符，不存使用者 prompt。未遮蔽的 master、原始評估資料與產生腳本在 `/Users/untionglim/projects/web/ai-runtime-kit/reports/local/completion-guard-corpus/`（該目錄有內容為 `*` 的 `.gitignore`，不會進任何 repo）；`source_ref` 是指向 `master.json` 的 hash。用常見姓氏規則掃過人名，沒有命中，但中文人名沒辦法完整自動檢查 [unverified]
+- `next_step_touches_production: true` 標在 4 筆 `continue` 上（`hist-012`、`hist-097`、`hist-099`、`post-134`），這幾筆的下一步是 production 的唯讀查詢或觀察，見 §6 第 7 項
 - 參考基準：用簡單 regex（承諾詞＋問句／授權／指令 veto＋背景／capsule 放行）跑 corpus，得到 tp=9、fp=7、fn=9，`must_allow` 被誤擋 2 筆（`post-132`、`post-196`）[VERIFIED: `python3 scratchpad/cg2/baseline.py corpus.jsonl`]。舊 guard 在同一份 corpus 上擋了全部 94 筆 hist，其中 `must_allow` 15 筆、應該續行的只有 8 筆
 
 ## 3. 設計
@@ -39,7 +40,7 @@
 | 檔案 | 變更 |
 |---|---|
 | `src/early-final.mjs`（新檔） | 純函式，不讀檔：`classifyEarlyFinal(text, { backgroundRunning })` 回傳 `{ decision: "allow"|"continue", reason, promise, vetoes }`；`earlyFinalReason(promise)` 產生續行提示。另外放 regex 常數。拆成獨立檔案，是因為 `education.mjs` 已經 1162 行，corpus 測試也需要能單獨呼叫分類器 |
-| `src/education.mjs` | `EDUCATION_ENV.earlyFinal = "AIRCLAUDE_EDUCATION_EARLY_FINAL"`；`EDUCATION_DEFAULTS.earlyFinal = "shadow"`；`LATER_FLAGS` 加 `earlyFinal`（舊 hook 腳本沒設時視為預設值，不算錯誤）；`EDUCATION_RULES["early-final"] = "earlyFinal"`；`EDUCATION_EVENTS` 加 `SessionStart`、`PostCompact`；`EDUCATION_RULES_VERSION` 6 → 7；`emptyState()` 加 `earlyFinal: { blocks: 0, lastBlockAt: null, lastPromiseHash: null, resetBy: null }`；`onUserPrompt` 重設 `earlyFinal`；新增 `onLifecycle`；`onStop` 加 early-final 分支；`processEducationHook` 分派新事件；`SAMPLED_DECISIONS` 不變（shadow 時 decision 仍記 `block`，`emitted:false`） |
+| `src/education.mjs` | `EDUCATION_ENV.earlyFinal = "AIRCLAUDE_EDUCATION_EARLY_FINAL"`；模型清單 `AIRCLAUDE_EDUCATION_EARLY_FINAL_MODELS` 是 JSON 陣列，**不能**放進 `EDUCATION_ENV`：`readEducationConfig`（`:204-227`）會把每個鍵都當成等級解析，不合就記 config-error。要比照 `EDUCATION_RULES_ENV`（`:225`）另外讀；`EDUCATION_DEFAULTS.earlyFinal = "shadow"`；`LATER_FLAGS` 加 `earlyFinal`（舊 hook 腳本沒設時視為預設值，不算錯誤）；`EDUCATION_RULES["early-final"] = "earlyFinal"`；`EDUCATION_EVENTS` 加 `SessionStart`、`PostCompact`；`EDUCATION_RULES_VERSION` 6 → 7；`emptyState()` 加 `earlyFinal: { blocks: 0, lastBlockAt: null, lastPromiseHash: null, resetBy: null }`；`onUserPrompt` 重設 `earlyFinal`；新增 `onLifecycle`；`onStop` 加 early-final 分支；`processEducationHook` 分派新事件；`SAMPLED_DECISIONS` 不變（shadow 時 decision 仍記 `block`，`emitted:false`） |
 | `src/context-heartbeat.mjs` | 刪掉舊 guard：`COMPLETION_GUARD_*` 常數與只給它用的 `TRANSCRIPT_TAIL_LIMIT`（`:22-26`）、`processCompletionGuardHook`（`:236-293`）及 helper（`:295-355`、`:581-620`；刪前再 grep 一次確認沒有其他呼叫者）、呼叫點（`:103-104`）、completion shadow 腳本裡的 `AIRCLAUDE_COMPLETION_GUARD_MAX_STOP_BLOCKS: "0"`（`:469`）。`educationHookEnv` 會自動帶出新旗標（它依 `EDUCATION_ENV` 迴圈產生），模型清單另外加 `AIRCLAUDE_EDUCATION_EARLY_FINAL_MODELS` |
 | `src/airkit.mjs` | 保留 `completionGuard` 驗證（`:2042-2065`），讓 internal catalog 不用改就能載入。`profileEducation`（`:4358`）把它轉成 mode 層 education 旗標：`mode:"log"` → `earlyFinal:"shadow"`，`"block"` → `"enforce"`；`maxStopBlocks` 當一輪的上限；`models` 當模型清單。刪掉 `:3455-3459` 的環境變數注入。`gptCompletionDisciplinePrompt`（`:82`）保留，但措詞改成和允許停下的條件一致（見 3.4） |
 | `docs/completion-guard.md` | 改寫 `:5-31` 舊 guard 的段落（目前描述的 log 路徑實際上不會寫入），說明對應規則與 shadow/enforce |
@@ -106,6 +107,10 @@ internal repo 另外要處理（不在這個 clone 的範圍）：`profiles/cata
    - A. 轉成新規則（本計畫的做法）
    - B. 直接廢除，讓載入報錯，逼 catalog 改寫
 6. **phantom-wait**（說在等但沒東西在跑）要不要一開始就納入 enforce，還是先只在 shadow 觀察
+7. **下一步是 production 唯讀動作時怎麼處理**（`hist-012`、`hist-097`、`hist-099`、`post-134`；corpus 目前標 `continue`）
+   - A. 照樣續行：唯讀不算越權，需要 production session 時模型會停下來要
+   - B. 只要碰 production 就當成 gate：不論讀寫都放行，續行提示也不准碰 production
+   - 建議 B：規則 4 要求不做 production 動作，而且舊 guard 的 7 次越權裡，有 3 次和 production 憑證或指令有關（`hist-008`、`hist-032`、`hist-108`）。選 B 的話，這 4 筆改成 `allow`，正例剩 14 筆。測試可以用這個欄位把兩種政策都跑一遍
 
 ## 7. 風險與未驗證
 
