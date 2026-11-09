@@ -982,6 +982,7 @@ export async function exportOssRelease({ outDir }) {
   await copyFile(join(here, "context-observability.mjs"), join(outDir, "src", "context-observability.mjs"));
   await copyFile(join(here, "subagent-observability.mjs"), join(outDir, "src", "subagent-observability.mjs"));
   await copyFile(join(here, "education.mjs"), join(outDir, "src", "education.mjs"));
+  await copyFile(join(here, "early-final.mjs"), join(outDir, "src", "early-final.mjs"));
   await copyFile(join(here, "launchd-plist.mjs"), join(outDir, "src", "launchd-plist.mjs"));
   await copyFile(join(here, "background-host.mjs"), join(outDir, "src", "background-host.mjs"));
   await copyFile(join(here, "pxpipe-hop.mjs"), join(outDir, "src", "pxpipe-hop.mjs"));

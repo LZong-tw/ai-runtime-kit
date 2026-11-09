@@ -42,7 +42,7 @@ const out = (stdout, stderr = "") => ({ stdout, stderr, interrupted: false, isIm
 const SAME = "replicas: 3 (set by HelmRelease spec.values.replicaCount)";
 
 test("rule set 6 registers the three loop rules under their own groups", () => {
-  assert.equal(EDUCATION_RULES_VERSION, 6);
+  assert.equal(EDUCATION_RULES_VERSION, 7);
   assert.equal(EDUCATION_RULES["same-result-poll"], "sameResultPoll");
   assert.equal(EDUCATION_RULES["cli-flag-guess"], "cliFlagGuess");
   assert.equal(EDUCATION_RULES["blocked-retry"], "blockedRetry");
@@ -61,7 +61,7 @@ test("same-result-poll logs once when five different queries return the same ans
     assert.equal(records.length, 1, "one run, one record");
     assert.equal(records[0].decision, "hint");
     assert.equal(records[0].emitted, false);
-    assert.equal(records[0].rules, 6);
+    assert.equal(records[0].rules, 7);
     assert.equal(records[0].evidence.calls, 5);
     assert.equal(records[0].reason, "結果一直沒變，來源可能在上游：去查是誰設定這個值，或先停下來回報");
   } finally {

@@ -26,7 +26,7 @@ const flags = (overrides = {}) => ({
   ...overrides,
 });
 // Hook scripts rendered before rule set 6 set none of the loop flags.
-const loopShadow = { sameResultPoll: "shadow", cliFlagGuess: "shadow", blockedRetry: "shadow" };
+const loopShadow = { sameResultPoll: "shadow", cliFlagGuess: "shadow", blockedRetry: "shadow", earlyFinal: "shadow" };
 
 async function fixture(model = "gpt-6-sol") {
   const home = await mkdtemp(join(tmpdir(), "airkit-education-"));
@@ -75,7 +75,7 @@ async function writeHandbackAgent(transcriptPath, agentId, prompt, report, { del
 
 test("flags: valid values parse, missing or invalid fall back to off/false and are reported", () => {
   assert.deepEqual(readEducationConfig(flags({ AIRCLAUDE_EDUCATION_ERROR_HINTS: "true" })), {
-    config: { spawnGuard: "shadow", subagentReport: "shadow", subagentNudge: "shadow", ...loopShadow, errorHints: true, rules: {} },
+    config: { spawnGuard: "shadow", subagentReport: "shadow", subagentNudge: "shadow", ...loopShadow, errorHints: true, rules: {}, earlyFinalModels: ["^gpt-"] },
     errors: [],
   });
   const bad = readEducationConfig({ AIRCLAUDE_EDUCATION_SPAWN_GUARD: "on" });
@@ -91,7 +91,7 @@ test("flags: valid values parse, missing or invalid fall back to off/false and a
 test("flags: per-rule overrides parse; bad JSON drops them, a bad entry turns that rule off", () => {
   const rules = (raw) => readEducationConfig(flags({ AIRCLAUDE_EDUCATION_RULES: raw }));
   assert.deepEqual(rules('{"read-missing":"enforce","D3":"off"}'), {
-    config: { spawnGuard: "shadow", subagentReport: "shadow", subagentNudge: "shadow", ...loopShadow, errorHints: false, rules: { "read-missing": "enforce", D3: "off" } },
+    config: { spawnGuard: "shadow", subagentReport: "shadow", subagentNudge: "shadow", ...loopShadow, errorHints: false, rules: { "read-missing": "enforce", D3: "off" }, earlyFinalModels: ["^gpt-"] },
     errors: [],
   });
   for (const raw of ["{nope", "[]", "null", '"D3"']) {
@@ -738,7 +738,9 @@ test("unread-result off stops the Stop block but keeps the running note", async 
     await processEducationHook({ ...f.base, hook_event_name: "SubagentStop", agent_id: "h1", agent_type: "general-purpose", last_assistant_message: "Found it in src/compat/gateway.mjs:252" }, env);
     const out = await processEducationHook({ ...f.base, hook_event_name: "Stop", stop_hook_active: false, background_tasks: [{ id: "h2", type: "subagent", status: "running" }] }, env);
     assert.match(out.hookSpecificOutput.additionalContext, /still running/);
-    assert.deepEqual((await f.logs()).filter((entry) => entry.event === "Stop").map((entry) => entry.rule), ["running-note"]);
+    const stops = (await f.logs()).filter((entry) => entry.event === "Stop");
+    assert.deepEqual(stops.map((entry) => entry.rule), ["running-note", "early-final"]);
+    assert.equal(stops[1].emitted, false, "early-final never blocks while an agent runs");
   } finally {
     await f.cleanup();
   }
@@ -840,6 +842,8 @@ test("managed files add the education hook only on request, in shadow by default
   assert.match(script, /"AIRCLAUDE_EDUCATION_ERROR_HINTS":"false"/);
   assert.deepEqual(educationHookEnv({ errorHints: true }).AIRCLAUDE_EDUCATION_ERROR_HINTS, "true");
   assert.match(script, /"AIRCLAUDE_EDUCATION_RULES":"\{\}"/, "no overrides still bakes an empty set");
-  assert.equal(Object.keys(educationHookEnv({ errorHints: true })).length, 8);
+  assert.equal(Object.keys(educationHookEnv({ errorHints: true })).length, 10);
+  assert.equal(educationHookEnv({}).AIRCLAUDE_EDUCATION_EARLY_FINAL, "shadow", "early-final ships in shadow");
+  assert.equal(educationHookEnv({}).AIRCLAUDE_EDUCATION_EARLY_FINAL_MODELS, '["^gpt-"]');
   assert.equal(educationHookEnv({ rules: { "read-missing": "enforce" } }).AIRCLAUDE_EDUCATION_RULES, '{"read-missing":"enforce"}');
 });

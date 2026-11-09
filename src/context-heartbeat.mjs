@@ -3,7 +3,7 @@ import { appendFile, mkdir, open, readFile, rename, rm, stat, writeFile } from "
 import { basename, dirname, join } from "node:path";
 import { processSubagentObservabilityHook } from "./subagent-observability.mjs";
 import { processAuditHook } from "./audit/claude-hook.mjs";
-import { EDUCATION_DEFAULTS, EDUCATION_ENV, EDUCATION_EVENTS, EDUCATION_RULES_ENV } from "./education.mjs";
+import { EARLY_FINAL_MODELS, EARLY_FINAL_MODELS_ENV, EDUCATION_DEFAULTS, EDUCATION_ENV, EDUCATION_EVENTS, EDUCATION_RULES_ENV } from "./education.mjs";
 import { createClaudeAuditHookEmitter } from "./audit/claude-hook-runtime.mjs";
 
 export const HEARTBEAT_CONTEXT_LIMIT = 512;
@@ -533,6 +533,7 @@ export function educationHookEnv(education = {}) {
   // Mode rules add to the profile-wide ones instead of replacing them. Baked
   // even when empty, or a stray shell export would supply the overrides.
   env[EDUCATION_RULES_ENV] = JSON.stringify({ ...base?.rules, ...own.rules });
+  env[EARLY_FINAL_MODELS_ENV] = JSON.stringify(EARLY_FINAL_MODELS);
   return env;
 }
 

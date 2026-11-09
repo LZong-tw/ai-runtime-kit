@@ -10,6 +10,7 @@ import { createHash } from "node:crypto";
 import { appendFile, mkdir, open, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { classifyEarlyFinal, earlyFinalReason } from "./early-final.mjs";
 
 export const EDUCATION_ENV = Object.freeze({
   spawnGuard: "AIRCLAUDE_EDUCATION_SPAWN_GUARD",
@@ -19,6 +20,7 @@ export const EDUCATION_ENV = Object.freeze({
   sameResultPoll: "AIRCLAUDE_EDUCATION_SAME_RESULT_POLL",
   cliFlagGuess: "AIRCLAUDE_EDUCATION_CLI_FLAG_GUESS",
   blockedRetry: "AIRCLAUDE_EDUCATION_BLOCKED_RETRY",
+  earlyFinal: "AIRCLAUDE_EDUCATION_EARLY_FINAL",
 });
 export const EDUCATION_DEFAULTS = Object.freeze({
   spawnGuard: "shadow",
@@ -28,10 +30,11 @@ export const EDUCATION_DEFAULTS = Object.freeze({
   sameResultPoll: "shadow",
   cliFlagGuess: "shadow",
   blockedRetry: "shadow",
+  earlyFinal: "shadow",
 });
 // Hook scripts rendered before rule set 6 never set these, so unset means the
 // default rather than a config error.
-const LATER_FLAGS = new Set(["sameResultPoll", "cliFlagGuess", "blockedRetry"]);
+const LATER_FLAGS = new Set(["sameResultPoll", "cliFlagGuess", "blockedRetry", "earlyFinal"]);
 // Rules that can be switched one by one (launch.education.rules), keyed by the
 // rule name the log uses, mapped to the group flag they fall back to.
 // Log-only records (status-log, spawn-allow, …) follow their group.
@@ -52,8 +55,13 @@ export const EDUCATION_RULES = Object.freeze({
   "same-result-poll": "sameResultPoll",
   "cli-flag-guess": "cliFlagGuess",
   "blocked-retry": "blockedRetry",
+  "early-final": "earlyFinal",
+  "phantom-wait": "earlyFinal",
 });
 export const EDUCATION_RULES_ENV = "AIRCLAUDE_EDUCATION_RULES";
+export const EARLY_FINAL_MODELS_ENV = "AIRCLAUDE_EDUCATION_EARLY_FINAL_MODELS";
+export const EARLY_FINAL_MODELS = Object.freeze(["^gpt-"]);
+export const EARLY_FINAL_MAX_BLOCKS = 2;
 export const EDUCATION_EVENTS = Object.freeze([
   "UserPromptSubmit",
   "PreToolUse",
@@ -62,6 +70,8 @@ export const EDUCATION_EVENTS = Object.freeze([
   "SubagentStart",
   "SubagentStop",
   "Stop",
+  "SessionStart",
+  "PostCompact",
 ]);
 
 const LEVELS = new Set(["off", "shadow", "enforce"]);
@@ -198,7 +208,7 @@ const BASH_PATH_ON_LINE = new RegExp(
 const NPM_ENOENT_PATH = /^npm (?:error|ERR!) path \S+/m;
 // Bumped whenever a rule's matching changes, so a shadow window can be read
 // from one rule set only (education report --rules).
-export const EDUCATION_RULES_VERSION = 6;
+export const EDUCATION_RULES_VERSION = 7;
 const STATUS_REASON = "Finish your reply with the report the task asked for: STATUS: done|blocked|partial, EVIDENCE: <paths/commands>, OPEN: <items>.";
 
 export function readEducationConfig(env = process.env) {
@@ -223,6 +233,9 @@ export function readEducationConfig(env = process.env) {
     }
   }
   config.rules = readRuleOverrides(env[EDUCATION_RULES_ENV], errors);
+  const models = earlyFinalModelSources(env);
+  if (models === null) errors.push(`${EARLY_FINAL_MODELS_ENV}=${JSON.stringify(String(env[EARLY_FINAL_MODELS_ENV]).slice(0, 200))}`);
+  config.earlyFinalModels = models ?? [];
   return { config, errors };
 }
 
@@ -447,8 +460,12 @@ async function firstUserPrompt(path) {
   return null;
 }
 
+function emptyEarlyFinal(turn = 0) {
+  return { turn, blocks: 0, lastPromiseHash: null, callsAtBlock: -1 };
+}
+
 function emptyState() {
-  return { turn: 0, prompt: promptFeatures(""), ownCalls: 0, lastFailHash: null, stopBlockedTurn: -1, rejectedSpawns: [], spawns: [], blocked: [], helpSeen: [], loops: {} };
+  return { turn: 0, prompt: promptFeatures(""), ownCalls: 0, turnCalls: 0, lastFailHash: null, stopBlockedTurn: -1, rejectedSpawns: [], spawns: [], blocked: [], helpSeen: [], loops: {}, earlyFinal: emptyEarlyFinal() };
 }
 
 function statePath(env, sessionId) {
@@ -701,7 +718,25 @@ async function onUserPrompt(input, state) {
   if (typeof input.agent_id === "string") return null;
   state.turn += 1;
   state.ownCalls = 0;
+  state.turnCalls = 0;
   state.prompt = promptFeatures(input.prompt);
+  state.earlyFinal = emptyEarlyFinal(state.turn);
+  return null;
+}
+
+// Compaction, resume, clear and fork start a new context: the old turn's block
+// budget and promise must not carry over, and agents spawned before a resume
+// will never report back, so they no longer count as running.
+async function onLifecycle(input, state, config, log) {
+  if (typeof input.agent_id === "string") return null;
+  const resetBy = input.hook_event_name === "PostCompact" ? `compact:${input.trigger ?? "unknown"}` : `session:${input.source ?? "unknown"}`;
+  const hadBudget = state.earlyFinal?.blocks > 0;
+  state.earlyFinal = emptyEarlyFinal(state.turn);
+  state.turnCalls = 0;
+  if (input.hook_event_name === "SessionStart" && input.source !== "startup") {
+    for (const spawn of state.spawns) if (spawn.background && !spawn.endedAt) spawn.orphaned = true;
+  }
+  if (ruleOn(config, "early-final")) await log({ rule: "early-final", decision: "reset", emitted: false, reason: null, evidence: { resetBy, hadBudget } });
   return null;
 }
 
@@ -974,6 +1009,12 @@ async function assistantTextsSince(path, since) {
 // evidence either way, so those agents only get a hint.
 async function onStop(input, state, config, model, log) {
   if (typeof input.agent_id === "string") return null;
+  const response = await backgroundStop(input, state, config, model, log);
+  if (response?.decision === "block") return response;
+  return (await earlyFinal(input, state, config, model, log)) ?? response;
+}
+
+async function backgroundStop(input, state, config, model, log) {
   const unreadOn = ruleOn(config, "unread-result");
   const runningOn = ruleOn(config, "running-note");
   if (!unreadOn && !runningOn) return null;
@@ -1006,6 +1047,91 @@ async function onStop(input, state, config, model, log) {
   return null;
 }
 
+// The classifier was built from GPT finals only (plan §3.3), so other models
+// are not judged unless the env lists them. Invalid lists judge no model.
+export function earlyFinalModelSources(env = process.env) {
+  const raw = env[EARLY_FINAL_MODELS_ENV];
+  if (raw === undefined || raw === "") return [...EARLY_FINAL_MODELS];
+  let sources;
+  try {
+    sources = JSON.parse(raw);
+    if (!Array.isArray(sources) || sources.length === 0 || sources.length > 16) return null;
+    for (const source of sources) {
+      if (typeof source !== "string" || source.trim() === "") return null;
+      new RegExp(source, "i");
+    }
+  } catch {
+    return null;
+  }
+  return sources;
+}
+
+// "oneportal_responses,gpt-6.1-sol" and "openai/gpt-6.1-sol[1m]" are both gpt-6.1-sol.
+function bareModel(model) {
+  return String(model ?? "").trim().split(/[/,]/).at(-1)?.replace(/\[1m\]$/i, "") ?? "";
+}
+
+// Anything still working in the background: subagents, workflows, shells.
+function runningBackground(input, state) {
+  const tasks = Array.isArray(input.background_tasks) ? input.background_tasks : [];
+  const running = tasks.filter((task) => task?.status === "running").map((task) => task.id ?? task.type ?? "task");
+  for (const spawn of state.spawns) {
+    if (spawn.background && !spawn.endedAt && !spawn.orphaned && !running.includes(spawn.agentId)) running.push(spawn.agentId);
+  }
+  return running;
+}
+
+async function lastAssistantText(input) {
+  if (typeof input.last_assistant_message === "string") return input.last_assistant_message;
+  const texts = await assistantTextsSince(input.transcript_path, null);
+  return texts.at(-1) ?? "";
+}
+
+// Plan §3: a GPT final that promises its next step instead of taking it gets
+// sent back, at most EARLY_FINAL_MAX_BLOCKS times a turn. A repeat block needs
+// both a new tool call and a different promise, so a model that keeps
+// restating the same promise without acting ends the turn.
+async function earlyFinal(input, state, config, model, log) {
+  const finalOn = ruleOn(config, "early-final");
+  const phantomOn = ruleOn(config, "phantom-wait");
+  if (!finalOn && !phantomOn) return null;
+  const patterns = (config.earlyFinalModels ?? []).map((source) => new RegExp(source, "i"));
+  if (model === null || !patterns.some((pattern) => pattern.test(bareModel(model)))) return null;
+  if (state.earlyFinal?.turn !== state.turn) state.earlyFinal = emptyEarlyFinal(state.turn);
+  const budget = state.earlyFinal;
+  const running = runningBackground(input, state);
+  const verdict = classifyEarlyFinal(await lastAssistantText(input), { backgroundRunning: running.length });
+  const rule = verdict.reason === "phantom-wait" ? "phantom-wait" : "early-final";
+  if (!ruleOn(config, rule)) return null;
+  const turnCalls = state.turnCalls ?? 0;
+  const promiseHash = verdict.promise ? hash(verdict.promise) : null;
+  let decision = verdict.decision === "continue" ? "block" : "allow";
+  let reason = verdict.reason;
+  if (decision === "block") {
+    if (budget.blocks >= EARLY_FINAL_MAX_BLOCKS) [decision, reason] = ["allow", "budget-exhausted"];
+    else if (budget.blocks > 0 && turnCalls <= budget.callsAtBlock) [decision, reason] = ["allow", "loop-no-new-call"];
+    else if (budget.blocks > 0 && promiseHash === budget.lastPromiseHash) [decision, reason] = ["allow", "loop-same-promise"];
+  }
+  const emit = decision === "block" && gated(ruleLevel(config, rule), model);
+  if (emit) Object.assign(budget, { blocks: budget.blocks + 1, lastPromiseHash: promiseHash, callsAtBlock: turnCalls });
+  await log({
+    rule,
+    decision,
+    emitted: emit,
+    reason,
+    evidence: {
+      promise: verdict.promise,
+      vetoes: verdict.vetoes,
+      backgroundRunning: running,
+      blocks: budget.blocks,
+      turnCalls,
+      stopHookActive: input.stop_hook_active === true,
+    },
+  });
+  if (!emit) return null;
+  return { decision: "block", reason: earlyFinalReason(verdict.promise, { phantomWait: rule === "phantom-wait" }) };
+}
+
 export async function processEducationHook(input, env = process.env) {
   const eventName = input?.hook_event_name;
   if (!EDUCATION_EVENTS.includes(eventName)) return null;
@@ -1021,6 +1147,9 @@ export async function processEducationHook(input, env = process.env) {
   const model = ["PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStop", "Stop"].includes(eventName) ? await actorModel(input) : null;
   const log = (record) => logRecord(env, { ...base, model, flags: config, ...record });
   let response = null;
+  if ((eventName === "PostToolUse" || eventName === "PostToolUseFailure") && typeof input.agent_id !== "string") {
+    state.turnCalls = (state.turnCalls ?? 0) + 1;
+  }
   if (eventName === "UserPromptSubmit") response = await onUserPrompt(input, state);
   else if (eventName === "PreToolUse") response = await onPreToolUse(input, state, config, model, log);
   else if (eventName === "PostToolUse") response = await onPostToolUse(input, state, config, model, log);
@@ -1028,6 +1157,7 @@ export async function processEducationHook(input, env = process.env) {
   else if (eventName === "SubagentStart") response = await onSubagentStart(input, state);
   else if (eventName === "SubagentStop") response = await onSubagentStop(input, state, config, model, log);
   else if (eventName === "Stop") response = await onStop(input, state, config, model, log);
+  else if (eventName === "SessionStart" || eventName === "PostCompact") response = await onLifecycle(input, state, config, log);
   await saveState(path, state);
   return response;
 }
