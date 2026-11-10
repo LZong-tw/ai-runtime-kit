@@ -506,6 +506,47 @@ does not replace the user's global choice. Provider credentials are passed to
 CCR management state and are never written to rendered profile files or command
 output.
 
+### Education hooks
+
+`launch.education` (or `launch.modes.<mode>.education`) opts the launch into
+the education hooks, which watch tool use and log what they would teach a
+non-Claude model to `~/.claude-code-router/logs/airkit-education.jsonl`. Without
+either block no education hook is rendered. `true` takes every default; an
+object sets flags by name:
+
+```json
+{
+  "launch": {
+    "education": {
+      "sameTargetRepeat": "shadow",
+      "rules": { "same-target-repeat": "enforce" }
+    }
+  }
+}
+```
+
+Each flag is `off`, `shadow` (evaluate and log, never change what Claude Code
+sees), or `enforce` (also act, for model-gated rules only when the acting model
+is not Claude). `errorHints` also accepts a boolean. Any other key or value is
+rejected at profile validation.
+
+| Flag | Default | Rules |
+| --- | --- | --- |
+| `spawnGuard` | `shadow` | `D1`–`D4` |
+| `subagentReport` | `shadow` | `status-missing` |
+| `subagentNudge` | `shadow` | `poll-nudge`, `subagent-cut`, `unread-result`, `running-note` |
+| `errorHints` | `false` | `repeat-failure`, `bash-enoent`, `edit-mismatch`, `read-missing` |
+| `sameResultPoll` | `shadow` | `same-result-poll` |
+| `cliFlagGuess` | `shadow` | `cli-flag-guess` |
+| `blockedRetry` | `shadow` | `blocked-retry` |
+| `sameTargetRepeat` | `shadow` | `same-target-repeat` |
+| `earlyFinal` | `shadow` | `early-final`, `phantom-wait` |
+
+`rules` overrides one rule's level, falling back to its flag. The loop rules
+are described in [education.md](education.md). Read shadow results with
+`airkit education report [--rules <n>]`; every log record carries the rule set
+version it was written under.
+
 ## Shell fields
 
 ```json

@@ -2312,6 +2312,7 @@ function publicPackage(version) {
       "CLAUDE.md",
       "README.md",
       "docs/audit.md",
+      "docs/education.md",
       "docs/install.md",
       "docs/profile-schema.md",
       "docs/runtime-lessons.md",

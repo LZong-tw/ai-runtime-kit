@@ -44,7 +44,8 @@ logged in shadow with the same flag, but `earlyFinal: "enforce"` leaves it in
 shadow, because the hook's view of background work misses shells and tasks the
 Stop payload does not list. It enforces only when named:
 `rules: {"phantom-wait": "enforce"}`. Read the shadow results for both rules
-with `airkit education report --rules 7`.
+with `airkit education report --rules 8` (rule set 7 for records logged before
+same-target-repeat was added).
 
 ## 已實作的核心邊界
 

@@ -20,6 +20,7 @@ export const EDUCATION_ENV = Object.freeze({
   sameResultPoll: "AIRCLAUDE_EDUCATION_SAME_RESULT_POLL",
   cliFlagGuess: "AIRCLAUDE_EDUCATION_CLI_FLAG_GUESS",
   blockedRetry: "AIRCLAUDE_EDUCATION_BLOCKED_RETRY",
+  sameTargetRepeat: "AIRCLAUDE_EDUCATION_SAME_TARGET_REPEAT",
   earlyFinal: "AIRCLAUDE_EDUCATION_EARLY_FINAL",
 });
 export const EDUCATION_DEFAULTS = Object.freeze({
@@ -30,11 +31,12 @@ export const EDUCATION_DEFAULTS = Object.freeze({
   sameResultPoll: "shadow",
   cliFlagGuess: "shadow",
   blockedRetry: "shadow",
+  sameTargetRepeat: "shadow",
   earlyFinal: "shadow",
 });
-// Hook scripts rendered before rule set 6 never set these, so unset means the
-// default rather than a config error.
-const LATER_FLAGS = new Set(["sameResultPoll", "cliFlagGuess", "blockedRetry", "earlyFinal"]);
+// Hook scripts rendered before rule set 6 (8 for sameTargetRepeat) never set
+// these, so unset means the default rather than a config error.
+const LATER_FLAGS = new Set(["sameResultPoll", "cliFlagGuess", "blockedRetry", "sameTargetRepeat", "earlyFinal"]);
 // Rules that can be switched one by one (launch.education.rules), keyed by the
 // rule name the log uses, mapped to the group flag they fall back to.
 // Log-only records (status-log, spawn-allow, …) follow their group.
@@ -55,6 +57,7 @@ export const EDUCATION_RULES = Object.freeze({
   "same-result-poll": "sameResultPoll",
   "cli-flag-guess": "cliFlagGuess",
   "blocked-retry": "blockedRetry",
+  "same-target-repeat": "sameTargetRepeat",
   "early-final": "earlyFinal",
   "phantom-wait": "earlyFinal",
 });
@@ -91,7 +94,9 @@ const SAME_RESULT_TOOLS = new Set(["Bash", "Read", "Grep", "Glob", "WebFetch", "
 const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 const EMPTY_RESULT = /^(?:\(Bash completed with no output\)|No matches found|No files found)/;
 // Commands that are waiting on purpose return the same thing until they stop.
-const WAITING_COMMAND = /\b(?:sleep|wait|watch|rollout status)\b/;
+// `watch` also matches `--watch`; kubectl's short `-w` is tied to kubectl
+// because `grep -w` is a word match.
+const WAITING_COMMAND = /\b(?:sleep|wait|watch|rollout status)\b|\bkubectl\b[^|;&\n]*\s-w(?=\s|$)/;
 const CLI_GUESS_LIMIT = 3;
 const CLI_ARG_ERROR = new RegExp([
   String.raw`\b(?:unknown|unrecognized|unexpected|invalid) (?:option|flag|argument|command|subcommand|choice)`,
@@ -118,6 +123,25 @@ const LEADING_CD = /^(?:\s*cd\s+(?:"[^"]*"|'[^']*'|\S+)\s*(?:&&|;)\s*)+/;
 const SAME_RESULT_HINT = "結果一直沒變，來源可能在上游：去查是誰設定這個值，或先停下來回報";
 const CLI_FLAG_HINT = "先讀完整的 `--help` 再試";
 const BLOCKED_RETRY_HINT = "同樣的指令會再被擋：改用 unsandboxed，或停下來告訴使用者";
+// same-target-repeat (rule set 8, kimi-loop report 2026-11-09 option 1).
+const SAME_INPUT_LIMIT = 3;
+const SAME_ID_LIMIT = 5;
+const MAX_TARGETS = 200;
+const ID_WORD_SPLIT = /[\s'"`=,;|&()<>{}[\]$\\]+/;
+const SHELL_SEGMENT = /\|\||&&|[|;\n]/;
+// Paths, URLs and scoped npm packages (`@scope/name`).
+const PATH_WORD = /^(?:~|\.{1,2})?\/|:\/\/|\/[^/]*\/|^@[\w.-]+\//;
+const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+// `#ff0000ff` is a colour, not a commit.
+const HASH_COLOUR = /#[0-9a-f]+/gi;
+// git commands that change the work tree, index or refs. Re-reading after one
+// is progress, like after an edit.
+const GIT_CHANGE = /\bgit\s+(?:(?:-C|-c)\s+\S+\s+|--?[\w-]+(?:=\S*)?\s+)*(?:add|am|apply|checkout|cherry-pick|commit|fetch|merge|mv|pull|rebase|reset|restore|revert|rm|stash|switch)\b/;
+// Hex with at least one digit and one letter: commit, image digest, hash.
+const HEX_ID = /^(?=[a-f]*\d)(?=\d*[a-f])[0-9a-f]{7,64}$/;
+// Kubernetes name hashes (ReplicaSet pod-template-hash) use this alphabet.
+const K8S_HASH = /^(?=[b-df-hj-np-tv-xz]*[24-9])(?=[24-9]*[b-df-hj-np-tv-xz])[b-df-hj-np-tv-xz24-9]{8,10}$/;
+const SAME_TARGET_HINT = "同一個目標已經反覆查了好幾次：先退一步，去找上游決定這個值的來源（設定、manifest、部署紀錄），不要再重查同一個地方";
 // Built-in agent types. Anything else may be a workflow or plugin agent whose
 // prompt contract is unknown, so SubagentStop only logs for it (§4.4.2 rule 2).
 const KNOWN_AGENT_TYPES = new Set([
@@ -211,7 +235,7 @@ const BASH_PATH_ON_LINE = new RegExp(
 const NPM_ENOENT_PATH = /^npm (?:error|ERR!) path \S+/m;
 // Bumped whenever a rule's matching changes, so a shadow window can be read
 // from one rule set only (education report --rules).
-export const EDUCATION_RULES_VERSION = 7;
+export const EDUCATION_RULES_VERSION = 8;
 const STATUS_REASON = "Finish your reply with the report the task asked for: STATUS: done|blocked|partial, EVIDENCE: <paths/commands>, OPEN: <items>.";
 
 export function readEducationConfig(env = process.env) {
@@ -629,7 +653,7 @@ function resultText(tool, response) {
 }
 
 function loopFor(state, actor) {
-  state.loops[actor] ??= { sameResult: null, cli: {} };
+  state.loops[actor] ??= { sameResult: null, sameTarget: null, cli: {} };
   return state.loops[actor];
 }
 
@@ -719,6 +743,93 @@ async function sameResultPoll(input, state, config, model, log) {
   const emit = gated(ruleLevel(config, "same-result-poll"), model);
   await log({ rule: "same-result-poll", decision: "hint", emitted: emit, reason: SAME_RESULT_HINT, evidence: { tool, calls: run.inputs.length, resultHash: key } });
   return emit ? SAME_RESULT_HINT : null;
+}
+
+// Rare identifiers a call names: hex ids, UUIDs and Kubernetes name hashes,
+// outside paths, URLs and git commands. Common words never match these shapes.
+// git is skipped because naming one commit across `git show`/`diff`/`log` is
+// how a commit gets reviewed; an identical git call still counts as an input.
+export function targetIdentifiers(tool, toolInput) {
+  let segments;
+  if (tool === "Bash") segments = String(toolInput?.command ?? "").split(SHELL_SEGMENT).filter((segment) => cliProgram(segment) !== "git");
+  else {
+    const { description, ...rest } = toolInput && typeof toolInput === "object" ? toolInput : {};
+    segments = [JSON.stringify(rest)];
+  }
+  const ids = new Set();
+  for (const segment of segments) {
+    for (let word of segment.split(ID_WORD_SPLIT)) {
+      if (!word || PATH_WORD.test(word)) continue;
+      word = word.replace(UUID, (uuid) => {
+        ids.add(uuid.toLowerCase());
+        return " ";
+      }).replace(HASH_COLOUR, " ");
+      for (const part of word.split(/[^A-Za-z0-9]+/)) if (HEX_ID.test(part) || K8S_HASH.test(part)) ids.add(part);
+    }
+  }
+  return [...ids];
+}
+
+// Count a key, keeping the most recently counted MAX_TARGETS. Keys are
+// 16-hex hashes or ids that contain a letter or a dash, never array-index
+// strings, so the object keeps insertion order and the first key is the oldest.
+function bump(counts, key) {
+  const count = (counts[key] ?? 0) + 1;
+  delete counts[key];
+  counts[key] = count;
+  const keys = Object.keys(counts);
+  if (keys.length > MAX_TARGETS) delete counts[keys[0]];
+  return count;
+}
+
+function changesWorkTree(command) {
+  return String(command).split(SHELL_SEGMENT).some((segment) => cliProgram(segment) === "git" && GIT_CHANGE.test(segment));
+}
+
+// same-target-repeat: within one turn, one actor runs the identical call with
+// the identical result a third time, or names the same rare identifier in a
+// fifth call. A poll whose output changes is not a repeat. Each target fires
+// once per turn. An edit or a git commit/checkout/... starts the counts over:
+// re-reading after it is progress. Waiting commands are polling on purpose
+// and do not count. A failed call (`failed`) counts but never logs; the next
+// successful call over the limit does.
+async function sameTargetRepeat(input, state, config, model, log, failed = false) {
+  const tool = input.tool_name;
+  if (!ruleOn(config, "same-target-repeat")) return null;
+  const loop = loopFor(state, input.agent_id ?? "");
+  if (!loop.sameTarget || loop.sameTarget.turn !== state.turn) {
+    loop.sameTarget = { turn: state.turn, calls: 0, inputs: {}, ids: {}, fired: [] };
+  }
+  const run = loop.sameTarget;
+  const command = tool === "Bash" ? String(input.tool_input?.command ?? "") : "";
+  if (!failed && (EDIT_TOOLS.has(tool) || changesWorkTree(command))) {
+    run.inputs = {};
+    run.ids = {};
+    return null;
+  }
+  if (!SAME_RESULT_TOOLS.has(tool) && !String(tool).startsWith("mcp__")) return null;
+  if (WAITING_COMMAND.test(command)) return null;
+  run.calls += 1;
+  const found = [];
+  const inputKey = callKey(tool, input.tool_input);
+  const result = failed ? String(input.error ?? "") : resultText(tool, input.tool_response);
+  const repeats = bump(run.inputs, hash([inputKey, result]));
+  if (repeats >= SAME_INPUT_LIMIT) found.push({ trigger: "same-input", target: inputKey, count: repeats });
+  for (const id of targetIdentifiers(tool, input.tool_input)) {
+    const count = bump(run.ids, id);
+    // A long id may be part of a key, so the log keeps only its hash.
+    if (count >= SAME_ID_LIMIT) found.push({ trigger: "same-identifier", target: id.length > 16 ? hash(id) : id, count });
+  }
+  if (failed) return null;
+  const fresh = found.filter(({ trigger, target }) => !run.fired.includes(`${trigger}:${target}`));
+  if (fresh.length === 0) return null;
+  const emit = gated(ruleLevel(config, "same-target-repeat"), model);
+  for (const { trigger, target, count } of fresh) {
+    run.fired.push(`${trigger}:${target}`);
+    if (run.fired.length > MAX_TARGETS) run.fired.shift();
+    await log({ rule: "same-target-repeat", decision: "hint", emitted: emit, reason: SAME_TARGET_HINT, evidence: { trigger, tool, target, count, calls: run.calls } });
+  }
+  return emit ? SAME_TARGET_HINT : null;
 }
 
 function withHints(eventName, response, hints) {
@@ -819,6 +930,7 @@ async function onPostToolUse(input, state, config, model, log) {
   for (const hint of [
     await cliFlagGuess(input, state, config, model, log, false),
     await sameResultPoll(input, state, config, model, log),
+    await sameTargetRepeat(input, state, config, model, log),
   ]) if (hint) hints.push(hint);
   return withHints("PostToolUse", await trackAfterTool(input, state, config, model, log), hints);
 }
@@ -944,6 +1056,9 @@ async function onPostToolUseFailure(input, state, config, model, log) {
   }
   const cliHint = await cliFlagGuess(input, state, config, model, log, true);
   if (cliHint) responses.push(cliHint);
+  // A pipeline whose last grep matched nothing exits 1 and lands here; it
+  // still ran, so it counts. A denied call never ran.
+  if (!found.denied) await sameTargetRepeat(input, state, config, model, log, true);
   return responses.length > 0 ? context("PostToolUseFailure", responses.join(" ")) : null;
 }
 

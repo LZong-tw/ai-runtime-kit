@@ -26,7 +26,7 @@ const flags = (overrides = {}) => ({
   ...overrides,
 });
 // Hook scripts rendered before rule set 6 set none of the loop flags.
-const loopShadow = { sameResultPoll: "shadow", cliFlagGuess: "shadow", blockedRetry: "shadow", earlyFinal: "shadow" };
+const loopShadow = { sameResultPoll: "shadow", cliFlagGuess: "shadow", blockedRetry: "shadow", sameTargetRepeat: "shadow", earlyFinal: "shadow" };
 
 async function fixture(model = "gpt-6-sol") {
   const home = await mkdtemp(join(tmpdir(), "airkit-education-"));
@@ -844,7 +844,8 @@ test("managed files add the education hook only on request, in shadow by default
   assert.match(script, /"AIRCLAUDE_EDUCATION_ERROR_HINTS":"false"/);
   assert.deepEqual(educationHookEnv({ errorHints: true }).AIRCLAUDE_EDUCATION_ERROR_HINTS, "true");
   assert.match(script, /"AIRCLAUDE_EDUCATION_RULES":"\{\}"/, "no overrides still bakes an empty set");
-  assert.equal(Object.keys(educationHookEnv({ errorHints: true })).length, 10);
+  assert.equal(Object.keys(educationHookEnv({ errorHints: true })).length, 11);
+  assert.equal(educationHookEnv({}).AIRCLAUDE_EDUCATION_SAME_TARGET_REPEAT, "shadow", "same-target-repeat ships in shadow");
   assert.equal(educationHookEnv({}).AIRCLAUDE_EDUCATION_EARLY_FINAL, "shadow", "early-final ships in shadow");
   assert.equal(educationHookEnv({}).AIRCLAUDE_EDUCATION_EARLY_FINAL_MODELS, '["^gpt-"]');
   assert.equal(educationHookEnv({ rules: { "read-missing": "enforce" } }).AIRCLAUDE_EDUCATION_RULES, '{"read-missing":"enforce"}');
