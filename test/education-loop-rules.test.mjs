@@ -421,10 +421,14 @@ test("rule set 8 registers same-target-repeat, shadow by default", () => {
   assert.equal(EDUCATION_DEFAULTS.sameTargetRepeat, "shadow");
 });
 
-test("targetIdentifiers keeps hex ids and Kubernetes hashes, not words or paths", () => {
+test("targetIdentifiers keeps hex ids, UUIDs and Kubernetes hashes, not words, paths or git", () => {
   assert.deepEqual(targetIdentifiers("Bash", bash("kubectl get rs web-6b899df954 -n apps -o json | python3 -c 'import sys'")), ["6b899df954"]);
   assert.deepEqual(targetIdentifiers("Bash", bash("kubectl get pod web-7d5fcb8n9x-abcde")), ["7d5fcb8n9x"]);
-  assert.deepEqual(targetIdentifiers("Bash", bash("git show 9e6a7e2 && cat /tmp/9e6a7e2f/out.txt")), ["9e6a7e2"]);
+  assert.deepEqual(targetIdentifiers("Bash", bash("git show 9e6a7e2 && cat /tmp/9e6a7e2f/out.txt")), [], "git names commits on purpose");
+  assert.deepEqual(targetIdentifiers("Bash", bash("cd /repo && git diff 9e6a7e2 -- src | grep 6b899df954")), ["6b899df954"], "only the git segment is skipped");
+  assert.deepEqual(targetIdentifiers("Bash", bash("cat session 944a4b23-e0e7-494d-819c-142efb0fd0c5")), ["944a4b23-e0e7-494d-819c-142efb0fd0c5"], "a UUID is one id");
+  assert.deepEqual(targetIdentifiers("Bash", bash("rg 'color: #ff0000ff' packages/ui")), [], "a colour");
+  assert.deepEqual(targetIdentifiers("Bash", bash("pnpm --filter @scope/pkg-b2c4d6f8 test")), [], "a scoped package");
   assert.deepEqual(targetIdentifiers("Bash", bash("deadbeef cafebabe 12345678 kubectl describe deployment")), [], "all-letter or all-digit runs are not ids");
   assert.deepEqual(targetIdentifiers("Bash", bash("curl https://example.com/blob/6b899df954")), [], "inside a URL");
   assert.deepEqual(targetIdentifiers("Grep", { pattern: "6b899df954", path: "/repo/src", description: "6b899df955" }), ["6b899df954"]);
@@ -433,11 +437,11 @@ test("targetIdentifiers keeps hex ids and Kubernetes hashes, not words or paths"
 test("same-target-repeat logs the third identical call once", async () => {
   const f = await fixture("kimi-k3", quiet);
   try {
-    await f.ok("Bash", bash("kubectl get deploy web -o yaml"), out("a"));
-    await f.ok("Bash", bash("cd /repo && kubectl  get deploy web -o yaml", { description: "again" }), out("b"));
+    await f.ok("Bash", bash("kubectl get deploy web -o yaml"), out(SAME));
+    await f.ok("Bash", bash("cd /repo && kubectl  get deploy web -o yaml", { description: "again" }), out(SAME));
     assert.equal((await f.logs("same-target-repeat")).length, 0, "two is fine");
-    assert.equal(await f.ok("Bash", bash("kubectl get deploy web -o yaml"), out("c")), null, "shadow never injects");
-    await f.ok("Bash", bash("kubectl get deploy web -o yaml"), out("d"));
+    assert.equal(await f.ok("Bash", bash("kubectl get deploy web -o yaml"), out(SAME)), null, "shadow never injects");
+    await f.ok("Bash", bash("kubectl get deploy web -o yaml"), out(SAME));
     const records = await f.logs("same-target-repeat");
     assert.equal(records.length, 1, "fires once per target per turn");
     assert.equal(records[0].emitted, false);
@@ -537,13 +541,100 @@ test("same-target-repeat on the 2026-11-05 Kimi turn: identifier at call 15, ide
   assert.equal(commands.length, 96);
   const f = await fixture("kimi-k3", quiet);
   try {
-    for (const command of commands) await f.ok("Bash", { command, dangerouslyDisableSandbox: true }, out("ok"));
+    // The fixture keeps no outputs. An identical query of an immutable
+    // ReplicaSet returns identical text, so each command gets its own.
+    for (const command of commands) await f.ok("Bash", { command, dangerouslyDisableSandbox: true }, out(`output of ${command}`));
     const records = await f.logs("same-target-repeat");
     const first = (trigger) => records.find((record) => record.evidence.trigger === trigger)?.evidence;
     assert.deepEqual(first("same-identifier"), { trigger: "same-identifier", tool: "Bash", target: "6b899df954", count: 5, calls: 15 });
     assert.equal(first("same-input").calls, 32);
     assert.equal(first("same-input").count, 3);
     assert.equal(records.filter((record) => record.evidence.trigger === "same-identifier").length, 1, "the identifier fires once in the turn");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("same-target-repeat does not count a poll whose output changes", async () => {
+  const f = await fixture("kimi-k3", quiet);
+  try {
+    for (const age of ["5s", "35s", "65s", "95s"]) await f.ok("Bash", bash("kubectl get pods -n apps -l app=web"), out(`web-7d5fcb8n9x-abcde 0/1 ContainerCreating 0 ${age}`));
+    for (const elapsed of ["1m2s", "1m40s", "2m15s"]) await f.ok("Bash", bash("gh pr checks 123"), out(`build pending ${elapsed}`));
+    for (let index = 0; index < 4; index += 1) await f.ok("Bash", bash("kubectl get pods -w -n apps --request-timeout=5s"), out("web-7d5fcb8n9x-abcde 1/1 Running"));
+    assert.equal((await f.logs("same-target-repeat")).length, 0);
+    for (let index = 0; index < 3; index += 1) await f.ok("Bash", bash("grep -w replicas values.yaml"), out(SAME));
+    assert.equal((await f.logs("same-target-repeat")).length, 1, "grep -w is not a watch");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("same-target-repeat leaves a git review and status around commits alone", async () => {
+  const f = await fixture("kimi-k3", quiet);
+  try {
+    for (const path of ["--stat", "-- src/a.mjs", "-- test/a.test.mjs", "-- docs/x.md", "-- package.json"]) await f.ok("Bash", bash(`git show 979d6c0 ${path}`), out(`diff ${path}`));
+    await f.ok("Bash", bash("git status --short"), out(" M src/a.mjs"));
+    await f.ok("Bash", bash("git add -A && git commit -m a"), out("[main 1a2b3c4] a"));
+    await f.ok("Bash", bash("git status --short"), out(" M src/a.mjs"));
+    await f.ok("Bash", bash("cd /repo && git -C /repo commit --amend --no-edit"), out("[main 5d6e7f8] a"));
+    await f.ok("Bash", bash("git status --short"), out(" M src/a.mjs"));
+    assert.equal((await f.logs("same-target-repeat")).length, 0);
+    await f.ok("Bash", bash("git status --short"), out(" M src/a.mjs"));
+    await f.ok("Bash", bash("git status --short"), out(" M src/a.mjs"));
+    assert.equal((await f.logs("same-target-repeat")).length, 1, "three in a row with nothing between still count");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("same-target-repeat logs a target once per turn even across an edit", async () => {
+  const f = await fixture("kimi-k3", quiet);
+  try {
+    const run = () => f.ok("Bash", bash("kubectl get deploy web"), out(SAME));
+    for (let index = 0; index < 3; index += 1) await run();
+    await f.ok("Edit", { file_path: "/repo/values.yaml", old_string: "a", new_string: "b" }, { filePath: "/repo/values.yaml" });
+    for (let index = 0; index < 3; index += 1) await run();
+    const records = await f.logs("same-target-repeat");
+    assert.equal(records.length, 1);
+    assert.equal(records[0].evidence.calls, 3);
+    await f.ok("Read", { file_path: "/repo/a.js" }, { type: "text", file: { content: "x" } });
+    await f.ok("Read", { file_path: "/repo/a.js" }, { type: "text", file: { content: "x" } });
+    await f.ok("Read", { file_path: "/repo/a.js" }, { type: "text", file: { content: "x" } });
+    assert.equal((await f.logs("same-target-repeat"))[1].evidence.calls, 9, "calls counts the whole turn, not since the edit");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("same-target-repeat still fires after more than 200 other targets", async () => {
+  const f = await fixture("kimi-k3", quiet);
+  try {
+    for (let index = 0; index < 250; index += 1) await f.ok("Bash", bash(`ls dir${index}`), out(`file${index}`));
+    for (let index = 0; index < 3; index += 1) await f.ok("Bash", bash("kubectl get deploy web -o yaml"), out(SAME));
+    const [record] = await f.logs("same-target-repeat");
+    assert.equal(record.evidence.calls, 253);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("same-target-repeat counts failed calls but logs only on success, and skips denied ones", async () => {
+  const f = await fixture("kimi-k3", quiet);
+  try {
+    const command = bash("kubectl get rs web-6b899df954 -o yaml | grep -c nothing");
+    const exit1 = "Error: Exit code 1\n0";
+    const denied = "Permission to use Bash with command kubectl get rs web-6b899df954 has been denied.";
+    await f.fail("Bash", command, denied);
+    await f.fail("Bash", command, exit1);
+    await f.fail("Bash", command, exit1);
+    await f.fail("Bash", command, exit1);
+    assert.equal((await f.logs("same-target-repeat")).length, 0, "the failure path never logs");
+    await f.ok("Bash", bash("kubectl describe rs web-6b899df954"), out("describe"));
+    assert.equal((await f.logs("same-target-repeat")).length, 0, "the denied call did not run, so this is the fourth");
+    await f.ok("Bash", bash("kubectl get rs web-6b899df954 -o json"), out("json"));
+    const records = await f.logs("same-target-repeat");
+    assert.equal(records.length, 1);
+    assert.deepEqual(records[0].evidence, { trigger: "same-identifier", tool: "Bash", target: "6b899df954", count: 5, calls: 5 });
   } finally {
     await f.cleanup();
   }
