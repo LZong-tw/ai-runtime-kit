@@ -32,7 +32,8 @@ defaults to `shadow`: each GPT Stop is classified and logged to
 Stop response is sent. Set `earlyFinal: "enforce"` (or
 `rules: {"early-final": "enforce"}`) to send the model back, at most two times
 per user turn. `completionGuard` values do not map onto this rule. Read the
-shadow results with `airkit education report --rules 7`.
+shadow results with `airkit education report --rules 8` (rule set 7 for
+records logged before same-target-repeat was added).
 
 ## 已實作的核心邊界
 

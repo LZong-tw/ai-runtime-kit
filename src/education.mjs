@@ -20,6 +20,7 @@ export const EDUCATION_ENV = Object.freeze({
   sameResultPoll: "AIRCLAUDE_EDUCATION_SAME_RESULT_POLL",
   cliFlagGuess: "AIRCLAUDE_EDUCATION_CLI_FLAG_GUESS",
   blockedRetry: "AIRCLAUDE_EDUCATION_BLOCKED_RETRY",
+  sameTargetRepeat: "AIRCLAUDE_EDUCATION_SAME_TARGET_REPEAT",
   earlyFinal: "AIRCLAUDE_EDUCATION_EARLY_FINAL",
 });
 export const EDUCATION_DEFAULTS = Object.freeze({
@@ -30,11 +31,12 @@ export const EDUCATION_DEFAULTS = Object.freeze({
   sameResultPoll: "shadow",
   cliFlagGuess: "shadow",
   blockedRetry: "shadow",
+  sameTargetRepeat: "shadow",
   earlyFinal: "shadow",
 });
-// Hook scripts rendered before rule set 6 never set these, so unset means the
-// default rather than a config error.
-const LATER_FLAGS = new Set(["sameResultPoll", "cliFlagGuess", "blockedRetry", "earlyFinal"]);
+// Hook scripts rendered before rule set 6 (8 for sameTargetRepeat) never set
+// these, so unset means the default rather than a config error.
+const LATER_FLAGS = new Set(["sameResultPoll", "cliFlagGuess", "blockedRetry", "sameTargetRepeat", "earlyFinal"]);
 // Rules that can be switched one by one (launch.education.rules), keyed by the
 // rule name the log uses, mapped to the group flag they fall back to.
 // Log-only records (status-log, spawn-allow, …) follow their group.
@@ -55,6 +57,7 @@ export const EDUCATION_RULES = Object.freeze({
   "same-result-poll": "sameResultPoll",
   "cli-flag-guess": "cliFlagGuess",
   "blocked-retry": "blockedRetry",
+  "same-target-repeat": "sameTargetRepeat",
   "early-final": "earlyFinal",
   "phantom-wait": "earlyFinal",
 });
@@ -118,6 +121,17 @@ const LEADING_CD = /^(?:\s*cd\s+(?:"[^"]*"|'[^']*'|\S+)\s*(?:&&|;)\s*)+/;
 const SAME_RESULT_HINT = "結果一直沒變，來源可能在上游：去查是誰設定這個值，或先停下來回報";
 const CLI_FLAG_HINT = "先讀完整的 `--help` 再試";
 const BLOCKED_RETRY_HINT = "同樣的指令會再被擋：改用 unsandboxed，或停下來告訴使用者";
+// same-target-repeat (rule set 8, kimi-loop report 2026-11-09 option 1).
+const SAME_INPUT_LIMIT = 3;
+const SAME_ID_LIMIT = 5;
+const MAX_TARGETS = 200;
+const ID_WORD_SPLIT = /[\s'"`=,;|&()<>{}[\]$\\]+/;
+const PATH_WORD = /^(?:~|\.{1,2})?\/|:\/\/|\/[^/]*\//;
+// Hex with at least one digit and one letter: commit, image digest, hash.
+const HEX_ID = /^(?=[a-f]*\d)(?=\d*[a-f])[0-9a-f]{7,64}$/;
+// Kubernetes name hashes (ReplicaSet pod-template-hash) use this alphabet.
+const K8S_HASH = /^(?=[b-df-hj-np-tv-xz]*[24-9])(?=[24-9]*[b-df-hj-np-tv-xz])[b-df-hj-np-tv-xz24-9]{8,10}$/;
+const SAME_TARGET_HINT = "同一個目標已經反覆查了好幾次：先退一步，去找上游決定這個值的來源（設定、manifest、部署紀錄），不要再重查同一個地方";
 // Built-in agent types. Anything else may be a workflow or plugin agent whose
 // prompt contract is unknown, so SubagentStop only logs for it (§4.4.2 rule 2).
 const KNOWN_AGENT_TYPES = new Set([
@@ -211,7 +225,7 @@ const BASH_PATH_ON_LINE = new RegExp(
 const NPM_ENOENT_PATH = /^npm (?:error|ERR!) path \S+/m;
 // Bumped whenever a rule's matching changes, so a shadow window can be read
 // from one rule set only (education report --rules).
-export const EDUCATION_RULES_VERSION = 7;
+export const EDUCATION_RULES_VERSION = 8;
 const STATUS_REASON = "Finish your reply with the report the task asked for: STATUS: done|blocked|partial, EVIDENCE: <paths/commands>, OPEN: <items>.";
 
 export function readEducationConfig(env = process.env) {
@@ -629,7 +643,7 @@ function resultText(tool, response) {
 }
 
 function loopFor(state, actor) {
-  state.loops[actor] ??= { sameResult: null, cli: {} };
+  state.loops[actor] ??= { sameResult: null, sameTarget: null, cli: {} };
   return state.loops[actor];
 }
 
@@ -719,6 +733,63 @@ async function sameResultPoll(input, state, config, model, log) {
   const emit = gated(ruleLevel(config, "same-result-poll"), model);
   await log({ rule: "same-result-poll", decision: "hint", emitted: emit, reason: SAME_RESULT_HINT, evidence: { tool, calls: run.inputs.length, resultHash: key } });
   return emit ? SAME_RESULT_HINT : null;
+}
+
+// Rare identifiers a call names: hex ids and Kubernetes name hashes, outside
+// paths and URLs. Common words never match either shape.
+export function targetIdentifiers(tool, toolInput) {
+  let text;
+  if (tool === "Bash") text = String(toolInput?.command ?? "");
+  else {
+    const { description, ...rest } = toolInput && typeof toolInput === "object" ? toolInput : {};
+    text = JSON.stringify(rest);
+  }
+  const ids = new Set();
+  for (const word of text.split(ID_WORD_SPLIT)) {
+    if (!word || PATH_WORD.test(word)) continue;
+    for (const part of word.split(/[^A-Za-z0-9]+/)) if (HEX_ID.test(part) || K8S_HASH.test(part)) ids.add(part);
+  }
+  return [...ids];
+}
+
+function bump(counts, key) {
+  if (!(key in counts) && Object.keys(counts).length >= MAX_TARGETS) return 0;
+  counts[key] = (counts[key] ?? 0) + 1;
+  return counts[key];
+}
+
+// same-target-repeat: within one turn, one actor runs the identical call a
+// third time, or names the same rare identifier in a fifth call. Each target
+// fires once per turn. An edit starts over: re-reading after it is progress.
+// Waiting commands are polling on purpose and do not count.
+async function sameTargetRepeat(input, state, config, model, log) {
+  const tool = input.tool_name;
+  if (!ruleOn(config, "same-target-repeat")) return null;
+  const loop = loopFor(state, input.agent_id ?? "");
+  if (!loop.sameTarget || loop.sameTarget.turn !== state.turn || EDIT_TOOLS.has(tool)) {
+    loop.sameTarget = { turn: state.turn, calls: 0, inputs: {}, ids: {}, fired: [] };
+  }
+  if (!SAME_RESULT_TOOLS.has(tool) && !String(tool).startsWith("mcp__")) return null;
+  if (tool === "Bash" && WAITING_COMMAND.test(String(input.tool_input?.command ?? ""))) return null;
+  const run = loop.sameTarget;
+  run.calls += 1;
+  const found = [];
+  const inputKey = callKey(tool, input.tool_input);
+  const repeats = bump(run.inputs, inputKey);
+  if (repeats >= SAME_INPUT_LIMIT) found.push({ trigger: "same-input", target: inputKey, count: repeats });
+  for (const id of targetIdentifiers(tool, input.tool_input)) {
+    const count = bump(run.ids, id);
+    // A long hex id may be part of a key, so the log keeps only its hash.
+    if (count >= SAME_ID_LIMIT) found.push({ trigger: "same-identifier", target: id.length > 16 ? hash(id) : id, count });
+  }
+  const fresh = found.filter(({ trigger, target }) => !run.fired.includes(`${trigger}:${target}`));
+  if (fresh.length === 0) return null;
+  const emit = gated(ruleLevel(config, "same-target-repeat"), model);
+  for (const { trigger, target, count } of fresh) {
+    run.fired.push(`${trigger}:${target}`);
+    await log({ rule: "same-target-repeat", decision: "hint", emitted: emit, reason: SAME_TARGET_HINT, evidence: { trigger, tool, target, count, calls: run.calls } });
+  }
+  return emit ? SAME_TARGET_HINT : null;
 }
 
 function withHints(eventName, response, hints) {
@@ -819,6 +890,7 @@ async function onPostToolUse(input, state, config, model, log) {
   for (const hint of [
     await cliFlagGuess(input, state, config, model, log, false),
     await sameResultPoll(input, state, config, model, log),
+    await sameTargetRepeat(input, state, config, model, log),
   ]) if (hint) hints.push(hint);
   return withHints("PostToolUse", await trackAfterTool(input, state, config, model, log), hints);
 }

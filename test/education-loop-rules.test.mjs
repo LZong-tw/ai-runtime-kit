@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { EDUCATION_RULES, EDUCATION_RULES_VERSION, cliProgram, errorHint, processEducationHook, summarizeEducationLog } from "../src/education.mjs";
+import { EDUCATION_DEFAULTS, EDUCATION_RULES, EDUCATION_RULES_VERSION, cliProgram, errorHint, processEducationHook, summarizeEducationLog, targetIdentifiers } from "../src/education.mjs";
 
 // Rule set 6: same-result-poll, cli-flag-guess and blocked-retry
 // (reports/model-complaint-2026-11-05.md §5 in the internal repository).
@@ -42,7 +42,7 @@ const out = (stdout, stderr = "") => ({ stdout, stderr, interrupted: false, isIm
 const SAME = "replicas: 3 (set by HelmRelease spec.values.replicaCount)";
 
 test("rule set 6 registers the three loop rules under their own groups", () => {
-  assert.equal(EDUCATION_RULES_VERSION, 7);
+  assert.equal(EDUCATION_RULES_VERSION, 8);
   assert.equal(EDUCATION_RULES["same-result-poll"], "sameResultPoll");
   assert.equal(EDUCATION_RULES["cli-flag-guess"], "cliFlagGuess");
   assert.equal(EDUCATION_RULES["blocked-retry"], "blockedRetry");
@@ -61,7 +61,7 @@ test("same-result-poll logs once when five different queries return the same ans
     assert.equal(records.length, 1, "one run, one record");
     assert.equal(records[0].decision, "hint");
     assert.equal(records[0].emitted, false);
-    assert.equal(records[0].rules, 7);
+    assert.equal(records[0].rules, 8);
     assert.equal(records[0].evidence.calls, 5);
     assert.equal(records[0].reason, "結果一直沒變，來源可能在上游：去查是誰設定這個值，或先停下來回報");
   } finally {
@@ -407,6 +407,143 @@ test("same-result-poll compares whole results, not a shared prefix", async () =>
       await f.ok("Bash", bash(`git log --oneline -${count}`), out(commits.slice(0, count).join("\n")));
     }
     assert.equal((await f.logs("same-result-poll")).length, 0);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+// Rule set 8: same-target-repeat (kimi-loop report 2026-11-09, option 1).
+const TARGET_HINT = "同一個目標已經反覆查了好幾次：先退一步，去找上游決定這個值的來源（設定、manifest、部署紀錄），不要再重查同一個地方";
+const quiet = { AIRCLAUDE_EDUCATION_SAME_RESULT_POLL: "off", AIRCLAUDE_EDUCATION_CLI_FLAG_GUESS: "off", AIRCLAUDE_EDUCATION_BLOCKED_RETRY: "off" };
+
+test("rule set 8 registers same-target-repeat, shadow by default", () => {
+  assert.equal(EDUCATION_RULES["same-target-repeat"], "sameTargetRepeat");
+  assert.equal(EDUCATION_DEFAULTS.sameTargetRepeat, "shadow");
+});
+
+test("targetIdentifiers keeps hex ids and Kubernetes hashes, not words or paths", () => {
+  assert.deepEqual(targetIdentifiers("Bash", bash("kubectl get rs web-6b899df954 -n apps -o json | python3 -c 'import sys'")), ["6b899df954"]);
+  assert.deepEqual(targetIdentifiers("Bash", bash("kubectl get pod web-7d5fcb8n9x-abcde")), ["7d5fcb8n9x"]);
+  assert.deepEqual(targetIdentifiers("Bash", bash("git show 9e6a7e2 && cat /tmp/9e6a7e2f/out.txt")), ["9e6a7e2"]);
+  assert.deepEqual(targetIdentifiers("Bash", bash("deadbeef cafebabe 12345678 kubectl describe deployment")), [], "all-letter or all-digit runs are not ids");
+  assert.deepEqual(targetIdentifiers("Bash", bash("curl https://example.com/blob/6b899df954")), [], "inside a URL");
+  assert.deepEqual(targetIdentifiers("Grep", { pattern: "6b899df954", path: "/repo/src", description: "6b899df955" }), ["6b899df954"]);
+});
+
+test("same-target-repeat logs the third identical call once", async () => {
+  const f = await fixture("kimi-k3", quiet);
+  try {
+    await f.ok("Bash", bash("kubectl get deploy web -o yaml"), out("a"));
+    await f.ok("Bash", bash("cd /repo && kubectl  get deploy web -o yaml", { description: "again" }), out("b"));
+    assert.equal((await f.logs("same-target-repeat")).length, 0, "two is fine");
+    assert.equal(await f.ok("Bash", bash("kubectl get deploy web -o yaml"), out("c")), null, "shadow never injects");
+    await f.ok("Bash", bash("kubectl get deploy web -o yaml"), out("d"));
+    const records = await f.logs("same-target-repeat");
+    assert.equal(records.length, 1, "fires once per target per turn");
+    assert.equal(records[0].emitted, false);
+    assert.equal(records[0].rules, 8);
+    assert.equal(records[0].reason, TARGET_HINT);
+    assert.equal(records[0].evidence.trigger, "same-input");
+    assert.equal(records[0].evidence.count, 3);
+    assert.equal(records[0].evidence.calls, 3);
+    for (let index = 0; index < 3; index += 1) await f.ok("Read", { file_path: "/repo/a.js" }, { type: "text", file: { content: "x" } });
+    assert.equal((await f.logs("same-target-repeat")).length, 2, "another target fires on its own");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("same-target-repeat logs the fifth call naming the same identifier", async () => {
+  const f = await fixture("kimi-k3", quiet);
+  try {
+    const commands = ["get rs", "describe rs", "get rs -o yaml", "get rs -o json", "get pods -l pod-template-hash=", "get events --field-selector involvedObject.name="];
+    for (const [index, verb] of commands.entries()) {
+      await f.ok("Bash", bash(`kubectl ${verb}${verb.endsWith("=") ? "" : " "}web-6b899df954`), out(`r${index}`));
+      if (index === 3) assert.equal((await f.logs("same-target-repeat")).length, 0, "four calls are under the threshold");
+    }
+    const records = await f.logs("same-target-repeat");
+    assert.equal(records.length, 1);
+    assert.deepEqual(records[0].evidence, { trigger: "same-identifier", tool: "Bash", target: "6b899df954", count: 5, calls: 5 });
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("same-target-repeat logs only a hash of a long hex identifier", async () => {
+  const f = await fixture("kimi-k3", quiet);
+  try {
+    const digest = "3f2a9c1e8b7d6f5a4c3b2a1908f7e6d5c4b3a291";
+    for (let index = 0; index < 5; index += 1) await f.ok("Bash", bash(`crane manifest img@sha256:${digest} | jq .${index}`), out("m"));
+    const [record] = await f.logs("same-target-repeat");
+    assert.equal(record.evidence.trigger, "same-identifier");
+    assert.match(record.evidence.target, /^[0-9a-f]{16}$/);
+    assert.notEqual(record.evidence.target, digest.slice(0, 16));
+    assert.equal(JSON.stringify(await f.logs()).includes(digest), false);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("same-target-repeat starts over on a new turn, after an edit, and per actor", async () => {
+  const f = await fixture("kimi-k3", quiet);
+  try {
+    const run = (extra = {}) => f.ok("Bash", bash("kubectl get deploy web -o yaml"), out("a"), extra);
+    await run();
+    await run();
+    await f.send({ hook_event_name: "UserPromptSubmit", prompt: "try again" });
+    await run();
+    await run();
+    await f.ok("Edit", { file_path: "/repo/values.yaml", old_string: "a", new_string: "b" }, { filePath: "/repo/values.yaml" });
+    await run();
+    await run({ agent_id: "sub1", agent_type: "Explore" });
+    await run({ agent_id: "sub1", agent_type: "Explore" });
+    await run();
+    assert.equal((await f.logs("same-target-repeat")).length, 0, "a subagent's calls do not count for the parent");
+    await run();
+    assert.equal((await f.logs("same-target-repeat")).length, 1);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("same-target-repeat ignores waiting commands", async () => {
+  const f = await fixture("kimi-k3", quiet);
+  try {
+    for (let index = 0; index < 6; index += 1) await f.ok("Bash", bash("kubectl rollout status deploy/web-6b899df954"), out("waiting"));
+    assert.equal((await f.logs("same-target-repeat")).length, 0);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("same-target-repeat injects the hint on enforce for non-Claude models only", async () => {
+  for (const [model, injected] of [["kimi-k3", true], ["claude-sonnet-5-5", false]]) {
+    const f = await fixture(model, { ...quiet, AIRCLAUDE_EDUCATION_SAME_TARGET_REPEAT: "enforce" });
+    try {
+      await f.ok("Bash", bash("kubectl get deploy web"), out("a"));
+      assert.equal(await f.ok("Bash", bash("kubectl get deploy web"), out("a")), null);
+      const response = await f.ok("Bash", bash("kubectl get deploy web"), out("a"));
+      if (injected) assert.equal(response.hookSpecificOutput.additionalContext, TARGET_HINT);
+      else assert.equal(response, null);
+      assert.equal((await f.logs("same-target-repeat"))[0].emitted, injected);
+    } finally {
+      await f.cleanup();
+    }
+  }
+});
+
+test("same-target-repeat on the 2026-11-05 Kimi turn: identifier at call 15, identical input at call 32", async () => {
+  const { commands } = JSON.parse(await readFile(new URL("./fixtures/education/kimi-same-target-2026-11-05.json", import.meta.url), "utf8"));
+  assert.equal(commands.length, 96);
+  const f = await fixture("kimi-k3", quiet);
+  try {
+    for (const command of commands) await f.ok("Bash", { command, dangerouslyDisableSandbox: true }, out("ok"));
+    const records = await f.logs("same-target-repeat");
+    const first = (trigger) => records.find((record) => record.evidence.trigger === trigger)?.evidence;
+    assert.deepEqual(first("same-identifier"), { trigger: "same-identifier", tool: "Bash", target: "6b899df954", count: 5, calls: 15 });
+    assert.equal(first("same-input").calls, 32);
+    assert.equal(first("same-input").count, 3);
+    assert.equal(records.filter((record) => record.evidence.trigger === "same-identifier").length, 1, "the identifier fires once in the turn");
   } finally {
     await f.cleanup();
   }
