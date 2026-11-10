@@ -49,12 +49,19 @@ again. Only the read/query tools that `same-result-poll` watches count (`Bash`,
 the work tree, index or refs (`add`, `commit`, `checkout`, `switch`, `reset`,
 `restore`, `stash`, `merge`, `rebase`, `cherry-pick`, `revert`, `pull`,
 `fetch`, `rm`, `mv`, `apply`, `am`), starts the counts over, because
-re-reading after a change is progress. Waiting commands (`sleep`, `wait`,
+re-reading after a change is progress. Only the subcommand after git's global
+options (`-C <dir>`, `-c <key>=<value>`, `--git-dir=<path>`, ...) decides, so
+quoted text such as `git log --grep='git add'` is still a read; `git stash`
+counts as a change when bare or followed by `push`, `save`, `pop`, `apply`,
+`drop`, `clear`, `store`, `branch` or an option, but not as `list`, `show` or
+`create`. Waiting commands (`sleep`, `wait`,
 `watch` including `--watch`, `rollout status`, and `kubectl ... -w`) are not
 counted; `same-result-poll` shares this list. A failed call that ran (for
 example a pipeline whose last `grep` matched nothing exits 1) counts but never
 logs; the next successful call that reaches a limit does. A sandbox or
-permission denial did not run and is left to `blocked-retry`.
+permission denial did not run and is left to `blocked-retry`, including a Bash
+call that exits 0 with a sandbox denial on stderr. With `blocked-retry` off,
+nobody owns sandbox denials and they count like any other call.
 
 Each actor keeps the 200 most recently counted inputs and identifiers; an older
 one drops out of the count when a newer one would be the 201st.

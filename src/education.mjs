@@ -134,9 +134,15 @@ const PATH_WORD = /^(?:~|\.{1,2})?\/|:\/\/|\/[^/]*\/|^@[\w.-]+\//;
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 // `#ff0000ff` is a colour, not a commit.
 const HASH_COLOUR = /#[0-9a-f]+/gi;
-// git commands that change the work tree, index or refs. Re-reading after one
-// is progress, like after an edit.
-const GIT_CHANGE = /\bgit\s+(?:(?:-C|-c)\s+\S+\s+|--?[\w-]+(?:=\S*)?\s+)*(?:add|am|apply|checkout|cherry-pick|commit|fetch|merge|mv|pull|rebase|reset|restore|revert|rm|stash|switch)\b/;
+// git subcommands that change the work tree, index or refs. Re-reading after
+// one is progress, like after an edit. Only the subcommand counts, so
+// `git log --grep='git add'` is still a read.
+const GIT_CHANGES = new Set(["add", "am", "apply", "checkout", "cherry-pick", "commit", "fetch", "merge", "mv", "pull", "rebase", "reset", "restore", "revert", "rm", "stash", "switch"]);
+// `git stash` alone, or with options only, is `git stash push`.
+const GIT_STASH_CHANGES = new Set(["push", "save", "pop", "apply", "drop", "clear", "store", "branch"]);
+// git's global options that take their value as the next word.
+const GIT_VALUE_OPTIONS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix"]);
+const COMMAND_WRAPPERS = new Set(["env", "command", "time", "exec", "sudo"]);
 // Hex with at least one digit and one letter: commit, image digest, hash.
 const HEX_ID = /^(?=[a-f]*\d)(?=\d*[a-f])[0-9a-f]{7,64}$/;
 // Kubernetes name hashes (ReplicaSet pod-template-hash) use this alphabet.
@@ -782,8 +788,57 @@ function bump(counts, key) {
   return count;
 }
 
+// The command's simple commands as word lists, split at unquoted `|`, `||`,
+// `&&`, `&`, `;` and newlines, with quotes removed. A heuristic, not a shell:
+// no expansions or subshells.
+function shellCommands(command) {
+  const text = String(command ?? "");
+  const commands = [[]];
+  let word = null;
+  let quote = null;
+  const endWord = () => {
+    if (word !== null) commands.at(-1).push(word);
+    word = null;
+  };
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (quote) {
+      if (char === quote) quote = null;
+      else if (char === "\\" && quote === '"' && index + 1 < text.length) word += text[++index];
+      else word += char;
+    } else if (char === "'" || char === '"') {
+      quote = char;
+      word ??= "";
+    } else if (char === "\\" && index + 1 < text.length) {
+      word = (word ?? "") + text[++index];
+    } else if ("|;\n".includes(char) || (char === "&" && !"<>".includes(text[index - 1]) && text[index + 1] !== ">")) {
+      endWord();
+      if (commands.at(-1).length > 0) commands.push([]);
+      if (text[index + 1] === char) index += 1;
+    } else if (/\s/.test(char)) {
+      endWord();
+    } else {
+      word = (word ?? "") + char;
+    }
+  }
+  endWord();
+  return commands.filter((words) => words.length > 0);
+}
+
+function gitChanges(words) {
+  let index = 0;
+  while (index < words.length && (COMMAND_WRAPPERS.has(words[index]) || /^[A-Za-z_]\w*=/.test(words[index]))) index += 1;
+  if (words[index]?.split("/").pop() !== "git") return false;
+  index += 1;
+  while (words[index]?.startsWith("-")) index += GIT_VALUE_OPTIONS.has(words[index]) ? 2 : 1;
+  const subcommand = words[index];
+  if (subcommand !== "stash") return GIT_CHANGES.has(subcommand);
+  const action = words[index + 1];
+  return action === undefined || action.startsWith("-") || GIT_STASH_CHANGES.has(action);
+}
+
 function changesWorkTree(command) {
-  return String(command).split(SHELL_SEGMENT).some((segment) => cliProgram(segment) === "git" && GIT_CHANGE.test(segment));
+  return shellCommands(command).some(gitChanges);
 }
 
 // same-target-repeat: within one turn, one actor runs the identical call with
@@ -920,7 +975,9 @@ async function onPostToolUse(input, state, config, model, log) {
   const hints = [];
   const actor = input.agent_id ?? "";
   // stderr only: stdout can be a file or log that merely mentions the error.
-  if (input.tool_name === "Bash" && ruleOn(config, "blocked-retry") && SANDBOX_DENIAL.test(String(input.tool_response?.stderr ?? ""))) {
+  // A Bash call can exit 0 and still have been blocked by the sandbox.
+  const sandboxDenied = input.tool_name === "Bash" && ruleOn(config, "blocked-retry") && SANDBOX_DENIAL.test(String(input.tool_response?.stderr ?? ""));
+  if (sandboxDenied) {
     rememberBlocked(state, actor, callKey("Bash", input.tool_input), "sandbox");
   } else {
     // It went through, so a retry of it is no longer a blocked retry.
@@ -930,7 +987,8 @@ async function onPostToolUse(input, state, config, model, log) {
   for (const hint of [
     await cliFlagGuess(input, state, config, model, log, false),
     await sameResultPoll(input, state, config, model, log),
-    await sameTargetRepeat(input, state, config, model, log),
+    // blocked-retry owns a denied call, as on the failure path.
+    sandboxDenied ? null : await sameTargetRepeat(input, state, config, model, log),
   ]) if (hint) hints.push(hint);
   return withHints("PostToolUse", await trackAfterTool(input, state, config, model, log), hints);
 }

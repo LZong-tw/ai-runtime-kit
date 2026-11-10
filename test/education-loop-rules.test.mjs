@@ -587,6 +587,75 @@ test("same-target-repeat leaves a git review and status around commits alone", a
   }
 });
 
+test("same-target-repeat reads only git's subcommand, not quoted text", async () => {
+  const f = await fixture("kimi-k3", quiet);
+  try {
+    const status = () => f.ok("Bash", bash("git status --short"), out(" M src/a.mjs"));
+    await status();
+    await f.ok("Bash", bash("git log --grep='git add' -1"), out("commit 1a2b3c4"));
+    await f.ok("Bash", bash(`git log --grep="fix; git commit" --oneline`), out("1a2b3c4 fix"));
+    await f.ok("Bash", bash("git stash list"), out("stash@{0}: WIP"));
+    await f.ok("Bash", bash("git stash show -p"), out("diff"));
+    await status();
+    assert.equal((await f.logs("same-target-repeat")).length, 0);
+    await status();
+    assert.equal((await f.logs("same-target-repeat")).length, 1, "none of the reads in between started the counts over");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("same-target-repeat starts over after a git change behind global options", async () => {
+  const f = await fixture("kimi-k3", quiet);
+  try {
+    const status = () => f.ok("Bash", bash("git status --short"), out(" M src/a.mjs"));
+    for (const change of [
+      "git -C /repo commit -m a",
+      "git -c user.name=a commit --amend --no-edit",
+      "git --git-dir=/repo/.git add .",
+      "git --work-tree /repo checkout -- src/a.mjs",
+      "git --no-pager -C /repo reset --hard",
+      "GIT_EDITOR=true git rebase --continue",
+      "git stash",
+      "git stash -u",
+      "git stash pop",
+    ]) {
+      await status();
+      await status();
+      await f.ok("Bash", bash(change), out(""));
+    }
+    assert.equal((await f.logs("same-target-repeat")).length, 0);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("same-target-repeat leaves a sandbox denial that exits 0 to blocked-retry", async () => {
+  const f = await fixture("kimi-k3", { ...quiet, AIRCLAUDE_EDUCATION_BLOCKED_RETRY: "shadow" });
+  try {
+    const denied = out("", "cat: /repo/.env: Operation not permitted");
+    for (let index = 0; index < 3; index += 1) await f.ok("Bash", bash("cat /repo/.env"), denied);
+    assert.equal((await f.logs("same-target-repeat")).length, 0, "denied calls are not counted");
+    const status = () => f.ok("Bash", bash("git status --short"), out(" M src/a.mjs"));
+    await status();
+    await status();
+    await f.ok("Bash", bash("git commit -m a"), out("", "fatal: Unable to create '/repo/.git/index.lock': Operation not permitted"));
+    await status();
+    const records = await f.logs("same-target-repeat");
+    assert.equal(records.length, 1, "a denied commit changed nothing");
+    assert.equal(records[0].evidence.calls, 3);
+  } finally {
+    await f.cleanup();
+  }
+  const off = await fixture("kimi-k3", quiet);
+  try {
+    for (let index = 0; index < 3; index += 1) await off.ok("Bash", bash("cat /repo/.env"), out("", "cat: /repo/.env: Operation not permitted"));
+    assert.equal((await off.logs("same-target-repeat")).length, 1, "with blocked-retry off nobody owns it, so it counts");
+  } finally {
+    await off.cleanup();
+  }
+});
+
 test("same-target-repeat logs a target once per turn even across an edit", async () => {
   const f = await fixture("kimi-k3", quiet);
   try {
