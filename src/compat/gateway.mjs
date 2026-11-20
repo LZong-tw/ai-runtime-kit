@@ -24,6 +24,7 @@ import { describeStablePrefix } from "./prefix-observability.mjs";
 import { claimSseStream, sseKeepaliveOwnsStream, upstreamSseError, writeSseError } from "./sse-keepalive.mjs";
 import { normalizeResponsesThinkingHistory } from "./reasoning-history.mjs";
 import { normalizeRestrictedThinking } from "./thinking-restrictions.mjs";
+import { hoistToolResultImages } from "./tool-result-images.mjs";
 import {
   ADVISOR_BLOCKED_TEXT,
   NON_CLAUDE_ADVISOR_PROMPT,
@@ -193,7 +194,7 @@ export function createGatewayClient({
   const providerBindings = structuredClone(providers);
   const thinkingRestricted = [...restrictedThinkingProviders];
   const normalizeOutbound = (body) => normalizeRestrictedThinking(
-    normalizeResponsesThinkingHistory(body, providerBindings),
+    normalizeResponsesThinkingHistory(hoistToolResultImages(body, providerBindings), providerBindings),
     providerBindings,
     thinkingRestricted,
   );
