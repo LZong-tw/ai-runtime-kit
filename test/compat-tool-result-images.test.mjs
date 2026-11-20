@@ -111,6 +111,27 @@ test("tool_reference blocks stay inside the tool_result", () => {
   assert.deepEqual(sent.messages[2].content[0].content, [reference, marker(1, 1)]);
 });
 
+test("no marker is left beside a document or search_result that carries no top-level text", () => {
+  const doc = { type: "document", source: { type: "text", media_type: "text/plain", data: "doc body" } };
+  const found = { type: "search_result", source: "https://example.test", title: "t", content: [text("hit")] };
+  for (const others of [[doc], [found], [doc, found], [doc, text("")]]) {
+    const { sent } = hoist(request([{ type: "tool_result", tool_use_id: "toolu_1", content: [others[0], png("AAAA"), ...others.slice(1)] }]));
+    assert.deepEqual(sent.messages[2].content, [
+      { type: "tool_result", tool_use_id: "toolu_1", content: others },
+      label("toolu_1", 1, 1),
+      png("AAAA"),
+    ]);
+  }
+});
+
+test("markers stay when the tool_result text already hides opaque blocks or only empty text remains", () => {
+  const doc = { type: "document", source: { type: "text", media_type: "text/plain", data: "doc body" } };
+  const withText = hoist(request([{ type: "tool_result", tool_use_id: "toolu_1", content: [text("Shot"), doc, png("AAAA")] }]));
+  assert.deepEqual(withText.sent.messages[2].content[0].content, [text("Shot"), doc, marker(1, 1)]);
+  const emptyText = hoist(request([{ type: "tool_result", tool_use_id: "toolu_1", content: [text(""), png("AAAA")] }]));
+  assert.deepEqual(emptyText.sent.messages[2].content[0].content, [text(""), marker(1, 1)]);
+});
+
 test("bodies without tool_result images are returned as the same object", () => {
   for (const content of [
     [{ type: "tool_result", tool_use_id: "toolu_1", content: "string output with an \"image\" word" }],

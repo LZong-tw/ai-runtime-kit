@@ -246,6 +246,11 @@ to CCR. It moves each image out of its `tool_result` and leaves a
 marker in its place. The image goes immediately after the last `tool_result`
 of the same user message, with a label that names its `tool_use_id`. No
 message is added. `is_error` and `cache_control` stay on the `tool_result`.
+The marker is omitted when the other blocks of that `tool_result`, such as a
+`document` or `search_result`, have no top-level text. The gateway keeps
+only text once any part has text, so a marker there would drop those
+blocks. Without it, the gateway still serializes them as before, minus the
+image.
 Anthropic Messages targets are skipped. For the same protocol, the gateway
 by default forwards the body unparsed, so the images already arrive intact.
 The body is rebuilt from the lossy parse only in two cases: a `beforeUpstream`

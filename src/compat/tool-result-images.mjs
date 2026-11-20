@@ -7,8 +7,9 @@ import { bindSelector } from "./selector.mjs";
 // image-only result is JSON.stringify'd, so the base64 reaches the model as
 // text tokens. Image blocks in ordinary user content are converted properly.
 // So each image a tool_result carries moves out of it, to just after the last
-// tool_result of the same user message, with a marker left in its place; no
-// message is added, so role alternation holds. A label naming the tool_use_id
+// tool_result of the same user message, with a marker left in its place
+// unless that would hide a sibling block (see leavesMarkers); no message is
+// added, so role alternation holds. A label naming the tool_use_id
 // precedes each moved image so several results stay distinguishable. The
 // marker does not say "below": the Responses builder emits the user item
 // before function_call_output.
@@ -67,25 +68,44 @@ function hoistMessageImages(message) {
     if (!Array.isArray(block.content)) return block;
     const total = block.content.filter(isImage).length;
     if (total === 0) return block;
+    const markers = leavesMarkers(block.content);
     let seen = 0;
-    const kept = block.content.map((item) => {
-      if (!isImage(item)) return item;
+    const kept = block.content.flatMap((item) => {
+      if (!isImage(item)) return [item];
       seen++;
       const from = typeof block.tool_use_id === "string" ? `tool result ${block.tool_use_id}` : "a tool result";
       hoisted.push(
         { type: "text", text: `[image ${seen} of ${total} from ${from}]` },
         item,
       );
-      return {
+      if (!markers) return [];
+      return [{
         type: "text",
         text: `[image ${seen} of ${total} from this tool result is attached separately as user content]`,
-      };
+      }];
     });
     return { ...block, content: kept };
   });
   if (hoisted.length === 0) return null;
   content.splice(lastToolResult + 1, 0, ...hoisted);
   return content;
+}
+
+// The gateway keeps only the text of a tool_result once any part yields text,
+// reading just a top-level text/input_text/output_text string. A marker beside
+// a document or search_result with no such text would therefore discard that
+// block, which before the hoist reached the model inside the JSON.stringify'd
+// array. Markers stay only when the other blocks already carry text (opaque
+// ones are dropped either way) or are all plain text.
+function leavesMarkers(content) {
+  const others = content.filter((item) => !isImage(item) && item?.type !== "tool_reference");
+  return others.some(yieldsText) || others.every((item) => typeof item === "string" || item?.type === "text");
+}
+
+function yieldsText(item) {
+  if (typeof item === "string") return item.trim() !== "";
+  if (!isRecord(item)) return false;
+  return ["text", "input_text", "output_text"].some((key) => typeof item[key] === "string" && item[key].trim() !== "");
 }
 
 function isImage(item) {
