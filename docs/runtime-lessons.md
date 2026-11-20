@@ -230,6 +230,33 @@ status line can no longer say 529. A `Retry-After` header cannot follow a
 committed `200` either, so its value is appended to the message as
 `(retry-after: N)`; clients that only honour the header will not see it.
 
+## Images inside tool results
+
+CCR 3.0.18's gateway (`@the-next-ai/ai-gateway` 1.0.21) flattens an Anthropic
+`tool_result` content array to a single string when it converts the request
+for an OpenAI chat or Responses target. When the result also has text, its
+images are dropped. When it has only images, the whole array is serialized
+as JSON, so the base64 data reaches the model as text: one 40 KB PNG cost
+about 27,000 input tokens, and one session overflowed a 1M-token context.
+Images in ordinary user content convert to real image parts.
+
+`src/compat/tool-result-images.mjs` runs on every `/v1/messages` body sent
+to CCR. It moves each image out of its `tool_result` and leaves a
+`[image k of n from this tool result is attached separately as user content]`
+marker in its place. The image goes immediately after the last `tool_result`
+of the same user message, with a label that names its `tool_use_id`. No
+message is added. `is_error` and `cache_control` stay on the `tool_result`.
+The marker is omitted when the other blocks of that `tool_result`, such as a
+`document` or `search_result`, have no top-level text. The gateway keeps
+only text once any part has text, so a marker there would drop those
+blocks. Without it, the gateway still serializes them as before, minus the
+image.
+Anthropic Messages targets are skipped. For the same protocol, the gateway
+by default forwards the body unparsed, so the images already arrive intact.
+The body is rebuilt from the lossy parse only in two cases: a `beforeUpstream`
+request transform plugin is loaded, or `transparentToolExecution` is enabled
+for a non-streaming request. CCR 3.0.18 does neither.
+
 ## Verification contract
 
 Before release:
