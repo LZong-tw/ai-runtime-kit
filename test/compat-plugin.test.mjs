@@ -1372,7 +1372,7 @@ test("ordinary Messages requests preserve raw bytes and abort propagation", asyn
   assert.deepEqual(response.body, Buffer.from("raw-response"));
 });
 
-test("ordinary Messages requests move Claude Code system hooks before raw passthrough", async () => {
+test("ordinary Messages requests keep Claude Code system hooks in place as reminders before raw passthrough", async () => {
   const forwarded = [];
   const fixture = await createPluginFixture({
     coreClient: createPluginCoreClient({
@@ -1401,11 +1401,13 @@ test("ordinary Messages requests move Claude Code system hooks before raw passth
 
   assert.deepEqual(forwarded, [{
     ...body,
-    system: [
-      { type: "text", text: "original system" },
-      { type: "text", text: "UserPromptSubmit hook additional context" },
-    ],
-    messages: [body.messages[0], body.messages[1], body.messages[3]],
+    messages: [body.messages[0], body.messages[1], {
+      role: "user",
+      content: [
+        { type: "text", text: "<system-reminder>\nUserPromptSubmit hook additional context\n</system-reminder>" },
+        { type: "text", text: "second request" },
+      ],
+    }],
   }]);
 });
 
@@ -1635,7 +1637,7 @@ test("unused native-first server-tool definitions keep a GPT request on its exec
   assert.equal(JSON.parse(response.body).content[0].text, "executor response");
 });
 
-test("compatibility moves Claude Code mid-history system hooks to the top-level system", async () => {
+test("compatibility keeps Claude Code mid-history system hooks at their history position", async () => {
   const calls = [];
   const fixture = await createPluginFixture({
     coreClient: {
@@ -1668,13 +1670,13 @@ test("compatibility moves Claude Code mid-history system hooks to the top-level 
   );
 
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].system, [
-    { type: "text", text: "original system" },
-    { type: "text", text: "UserPromptSubmit hook additional context" },
-  ]);
+  assert.deepEqual(calls[0].system, [{ type: "text", text: "original system" }]);
   assert.deepEqual(calls[0].messages, [
     body.messages[0],
     body.messages[1],
+    { role: "user", content: [
+      { type: "text", text: "<system-reminder>\nUserPromptSubmit hook additional context\n</system-reminder>" },
+    ] },
     body.messages[3],
     body.messages[4],
   ]);
