@@ -8,10 +8,19 @@ export const MAX_UPSTREAM_BODY_BYTES = 64 * 1024;
 const require = createRequire(import.meta.url);
 const DAY = 24 * 60 * 60 * 1000;
 const NOOP_STORE = Object.freeze({ record() {}, prune() {}, close() {} });
+// Columns added after the table first shipped. CREATE TABLE IF NOT EXISTS
+// leaves an existing file alone, so these are added on open instead.
+const ADDED_COLUMNS = [
+  ["prefix_status", "TEXT"], ["prefix_reason", "TEXT"], ["prefix_origin", "TEXT"],
+  ["prefix_field", "TEXT"], ["prefix_index", "INTEGER"], ["prefix_inbound_index", "INTEGER"],
+  ["prefix_messages", "INTEGER"], ["cache_read_tokens", "INTEGER"],
+  ["cache_creation_tokens", "INTEGER"], ["cache_miss_tokens", "INTEGER"],
+];
 const COLUMNS = [
   "request_id", "at", "kind", "path", "mode", "in_model", "out_model",
   "client_status", "upstream_status", "outcome", "received_to_upstream_ms",
   "upstream_first_byte_ms", "total_ms", "transform_ms", "error_json",
+  ...ADDED_COLUMNS.map(([name]) => name),
 ];
 const PRIVATE_HEADERS = new Set([
   "authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key", "x-ccr-core-auth",
@@ -56,14 +65,15 @@ export function openRequestErrorStore({ env = process.env, path, now = Date.now 
         total_ms REAL, transform_ms REAL, error_json TEXT
       );
       CREATE INDEX IF NOT EXISTS compat_requests_kind_at ON compat_requests(kind, at);`);
+    const columns = addMissingColumns(db);
     const pruneRows = db.prepare(`DELETE FROM compat_requests
       WHERE (kind IN ('error', 'fallback_error') AND at < ?)
          OR (kind = 'success' AND at < ?)`);
     // A fallback rejection is recorded before the handler's terminal timings.
     // Merge those into the same request row without losing the upstream evidence.
-    const insert = db.prepare(`INSERT INTO compat_requests (${COLUMNS.join(",")})
-      VALUES (${COLUMNS.map(() => "?").join(",")})
-      ON CONFLICT(request_id) DO UPDATE SET ${COLUMNS.slice(1).map((column) =>
+    const insert = db.prepare(`INSERT INTO compat_requests (${columns.join(",")})
+      VALUES (${columns.map(() => "?").join(",")})
+      ON CONFLICT(request_id) DO UPDATE SET ${columns.slice(1).map((column) =>
         column === "kind" || column === "error_json"
           ? `${column} = CASE WHEN compat_requests.kind = 'fallback_error' THEN compat_requests.${column} ELSE COALESCE(excluded.${column}, compat_requests.${column}) END`
           : `${column} = COALESCE(excluded.${column}, compat_requests.${column})`).join(",")}`);
@@ -72,7 +82,7 @@ export function openRequestErrorStore({ env = process.env, path, now = Date.now 
       record(row) {
         try {
           if (now() - lastPruned >= 60 * 60 * 1000) store.prune();
-          insert.run(...COLUMNS.map((column) => row[column] ?? (column === "at" ? now() : null)));
+          insert.run(...columns.map((column) => row[column] ?? (column === "at" ? now() : null)));
         } catch { /* Diagnostics must never interrupt forwarding. */ }
       },
       prune() {
@@ -92,6 +102,20 @@ export function openRequestErrorStore({ env = process.env, path, now = Date.now 
     try { db?.close(); } catch { /* Failed open is a no-op store. */ }
     return NOOP_STORE;
   }
+}
+
+// Several launchers can open the same file at once, so a lost race ("duplicate
+// column") is expected. Any column that still could not be added is left out
+// of the insert: a missing diagnostic column must not cost the whole row.
+function addMissingColumns(db) {
+  const present = () => new Set(db.prepare("PRAGMA table_info(compat_requests)").all().map((row) => row.name));
+  const before = present();
+  for (const [name, type] of ADDED_COLUMNS) {
+    if (before.has(name)) continue;
+    try { db.exec(`ALTER TABLE compat_requests ADD COLUMN ${name} ${type}`); } catch { /* Re-checked below. */ }
+  }
+  const after = present();
+  return COLUMNS.filter((column) => after.has(column));
 }
 
 export function truncateUpstreamBody(value) {

@@ -70,6 +70,7 @@ async function runSession({ requests, route, path }) {
   const pipeline = createOutboundPipeline({ config, providers });
   const sessionId = `00000000-0000-4000-8000-${String(++sessionCounter).padStart(12, "0")}`;
   const sent = [];
+  const verdicts = [];
   for (const [index, request] of requests.entries()) {
     const body = { ...request.body, model: route.model, tools: path.tools(request.body.tools) };
     const scoped = withSession(body, request.headers ?? {}, sessionId);
@@ -83,8 +84,26 @@ async function runSession({ requests, route, path }) {
     // A silent whole-request fallback would compare a different lane.
     assert.equal(result.attempts[0].body.model, route.model, `${where}: outbound model`);
     sent.push(result.attempts[0].body);
+    verdicts.push(prefixVerdict(result.row));
   }
-  return sent;
+  return { sent, verdicts };
+}
+
+// The runtime tracker's view of the same replay, as stored per request.
+function prefixVerdict(row) {
+  return Object.fromEntries(["status", "reason", "origin", "field", "index"]
+    .map((key) => [key, row?.[`prefix_${key}`] ?? null])
+    .filter(([key, value]) => key === "status" || value !== null));
+}
+
+// Whatever the replay asserts about the bytes, the runtime detector watching
+// the same session must agree: no request may be flagged as airkit drift.
+function assertNoAirkitDrift(verdicts, label) {
+  assert.deepEqual(verdicts[0], { status: "baseline" }, `${label}: first request`);
+  for (const [index, verdict] of verdicts.entries()) {
+    assert.ok(verdict.status !== "drift" || verdict.origin !== "airkit",
+      `${label}: request ${index + 1} flagged as airkit drift ${JSON.stringify(verdict)}`);
+  }
 }
 
 // The same checks with the comparator stripped down would pass vacuously on a
@@ -125,14 +144,16 @@ for (const route of ROUTES) {
   for (const path of PATHS) {
     test(`captured Claude Code session with hooks, an image and --resume keeps its prefix on ${route.model} (${path.path})`, async () => {
       const { requests } = fixture("claude-code-2.1.330-hooks-image-resume.json");
-      const sent = await runSession({ requests, route, path });
+      const { sent, verdicts } = await runSession({ requests, route, path });
       assertPrefixStable(sent, requests.map((request) => request.body), () => ({}), `${route.model} ${path.path}`);
       assertTransformsRan(sent, route, { image: true });
+      assertNoAirkitDrift(verdicts, `${route.model} ${path.path}`);
+      assert.deepEqual(verdicts.slice(1), verdicts.slice(1).map(() => ({ status: "stable" })));
     });
 
     test(`captured ToolSearch activation keeps its prefix on ${route.model} (${path.path})`, async () => {
       const { requests } = fixture("claude-code-2.1.330-toolsearch-activation.json");
-      const sent = await runSession({ requests, route, path });
+      const { sent, verdicts } = await runSession({ requests, route, path });
       // Claude Code inserts the loaded tool's definition itself. Passthrough
       // forwards that insertion unchanged; the executor lists the tool once
       // history shows it loaded, which is the activation allowance.
@@ -144,6 +165,11 @@ for (const route of ROUTES) {
         outbound: [outbound],
       } : {}, `${route.model} ${path.path}`);
       assertTransformsRan(sent, route);
+      // The tracker sees the insertion arrive in the inbound tools too.
+      assertNoAirkitDrift(verdicts, `${route.model} ${path.path}`);
+      const { index: _index, ...insertion } = verdicts[1];
+      assert.deepEqual(insertion, { status: "drift", origin: "upstream", field: "tools" });
+      assert.deepEqual(verdicts[2], { status: "stable" });
     });
   }
 }
@@ -236,12 +262,16 @@ for (const route of ROUTES) {
   for (const path of PATHS) {
     test(`synthetic session with hooks at every position keeps its prefix on ${route.model} (${path.path})`, async () => {
       const requests = syntheticRequests();
-      const sent = await runSession({ requests, route, path });
+      const { sent, verdicts } = await runSession({ requests, route, path });
       // The tool_addition in turn 3 is the one point where tools may change.
       assertPrefixStable(sent, requests.map((request) => request.body), (index) => index === 2 ? {
         outbound: [allow("deferred_tool_activation", ["WebFetch"])],
       } : {}, `${route.model} ${path.path}`);
       assertTransformsRan(sent, route, { image: true, thinking: true });
+      assertNoAirkitDrift(verdicts, `${route.model} ${path.path}`);
+      assert.deepEqual(verdicts.slice(1), verdicts.slice(1).map((_, at) => at + 1 === 2
+        ? { status: "allowed", reason: "deferred_tool_activation", origin: "airkit", field: "tools", index: 2 }
+        : { status: "stable" }));
     });
   }
 }
@@ -258,7 +288,7 @@ test("known gap: a system message arriving after an already-sent user turn exten
     [system("Late hook context."), assistant([text("Answer.")]), user("Follow-up.")],
   ];
   const requests = syntheticRequests(turns);
-  const sent = await runSession({ requests, route, path: PATHS[0] });
+  const { sent, verdicts } = await runSession({ requests, route, path: PATHS[0] });
   const divergence = prefixDivergence(sent[0], sent[1]);
   assert.equal(divergence?.field, "messages");
   assert.equal(divergence.index, sent[0].messages.length - 1);
@@ -267,6 +297,25 @@ test("known gap: a system message arriving after an already-sent user turn exten
   const after = strip(sent[1].messages[divergence.index].content);
   assert.deepEqual(after.slice(0, before.length), before);
   assert.ok(after.length > before.length);
+  // The runtime tracker reports the same break, and blames airkit: the
+  // inbound history was append-only.
+  assert.deepEqual(verdicts[1], {
+    status: "drift", origin: "airkit", field: "messages", index: sent[0].messages.length - 1,
+  });
+});
+
+test("a throwing drift tracker costs the request neither its response nor its row", async () => {
+  const [route] = ROUTES;
+  const pipeline = createOutboundPipeline({
+    config, providers, prefixDriftTracker: { observe() { throw new Error("tracker bug"); } },
+  });
+  const [request] = fixture("claude-code-2.1.330-hooks-image-resume.json").requests;
+  const scoped = withSession({ ...request.body, model: route.model }, request.headers, "00000000-0000-4000-8000-0000000000ff");
+  const result = await pipeline.send(scoped.body, scoped.headers);
+  assert.equal(result.status, 200);
+  assert.equal(result.attempts.length, 1);
+  assert.equal(result.row.kind, "success");
+  assert.equal(result.row.prefix_status, null);
 });
 
 test("the comparator names the first diverging field, index and block", () => {

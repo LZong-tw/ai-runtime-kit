@@ -1,26 +1,15 @@
 import { createMessagesHandler } from "../../src/compat/plugin.mjs";
 import { createGatewayClient } from "../../src/compat/gateway.mjs";
 import { resolveCompatibilityPolicies, VERIFIED_NATIVE_COMPATIBILITY } from "../../src/compat/config.mjs";
+import { canonicalPrefixJson, canonicalTextShape } from "../../src/compat/prefix-observability.mjs";
 import { createPluginRequest, createRecordingResponse } from "./compat-fixtures.mjs";
 
-// Provider prompt caches match on the rendered prompt: tools, then system,
-// then messages. Claude Code moves its cache_control marker to the newest
-// message every turn and providers ignore the marker when matching, so it is
-// stripped before comparing. Everything else, key order included, must stay
-// identical. Comparison is on parsed JSON, so escape-only byte differences
-// (`é` vs `é`) do not count; providers parse before tokenizing.
-export function canonical(value) {
-  return JSON.stringify(value, (key, inner) => (key === "cache_control" ? undefined : inner));
-}
-
-// Claude Code itself re-sends the previous turn's trailing inline system
-// message as a bare string after sending it as [{type:"text", cache_control}]
-// (captured with 2.1.330). That only applies to what arrives at airkit; the
-// outbound comparison stays strict so airkit cannot hide a shape change.
-export function canonicalTextShape(message) {
-  if (typeof message?.content !== "string") return message;
-  return { ...message, content: [{ type: "text", text: message.content }] };
-}
+// The runtime drift tracker and this replay test must agree on what counts as
+// the same prefix, so both use the same canonical form. Comparison is on
+// parsed JSON, so escape-only byte differences (`é` vs `é`) do not count;
+// providers parse before tokenizing.
+export const canonical = canonicalPrefixJson;
+export { canonicalTextShape };
 
 // Named, structural allowances for the one-off tool catalogue changes a
 // session legitimately goes through. Each describes exactly which diff it
@@ -151,9 +140,13 @@ const CANNED_MESSAGE = {
 // (createGatewayClient + createMessagesHandler), so the outbound normalizers in
 // the gateway client run too. Only fetch is replaced: it records the exact
 // bytes that would leave for CCR. forwardRaw hands fetch a Buffer, the
-// compatibility executor a string, which tells the two paths apart.
-export function createOutboundPipeline({ config, providers }) {
+// compatibility executor a string, which tells the two paths apart. The
+// request store keeps each row, so a replay also shows the runtime prefix
+// drift verdict the launcher would record.
+export function createOutboundPipeline({ config, providers, prefixDriftTracker }) {
   const attempts = [];
+  const rows = [];
+  const requestStore = { record(row) { rows.push(row); }, prune() {}, close() {} };
   const coreClient = createGatewayClient({
     origin: "http://127.0.0.1:3456",
     token: "synthetic-token",
@@ -168,7 +161,10 @@ export function createOutboundPipeline({ config, providers }) {
     },
   });
   const { policies } = resolveCompatibilityPolicies(config, VERIFIED_NATIVE_COMPATIBILITY);
-  const handler = createMessagesHandler({ config, coreClient, policies, requestStore: null });
+  const handler = createMessagesHandler({
+    config, coreClient, policies, requestStore,
+    ...(prefixDriftTracker === undefined ? {} : { prefixDriftTracker }),
+  });
   return {
     async send(body, headers = {}) {
       const start = attempts.length;
@@ -176,7 +172,7 @@ export function createOutboundPipeline({ config, providers }) {
       await handler(createPluginRequest(Buffer.from(JSON.stringify(body)), { headers }), response, {
         readBody: async (request) => request.body,
       });
-      return { status: response.statusCode, attempts: attempts.slice(start) };
+      return { status: response.statusCode, attempts: attempts.slice(start), row: rows.at(-1) };
     },
   };
 }

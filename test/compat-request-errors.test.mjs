@@ -319,6 +319,42 @@ test("record triggers pruning at most hourly", (t) => {
   assert.deepEqual(rows().map((row) => row.request_id), ["before-hour", "at-hour"]);
 });
 
+test("a database from before the prefix and cache columns gains them on open and keeps its rows", (t) => {
+  const dir = tempDir(t);
+  const path = join(dir, "requests.sqlite");
+  const old = new DatabaseSync(path);
+  old.exec(`CREATE TABLE compat_requests (
+    request_id TEXT PRIMARY KEY, at INTEGER NOT NULL,
+    kind TEXT CHECK(kind IN ('success', 'error', 'fallback_error')),
+    path TEXT, mode TEXT, in_model TEXT, out_model TEXT,
+    client_status INTEGER, upstream_status INTEGER, outcome TEXT,
+    received_to_upstream_ms REAL, upstream_first_byte_ms REAL,
+    total_ms REAL, transform_ms REAL, error_json TEXT
+  )`);
+  const now = Date.now();
+  old.prepare("INSERT INTO compat_requests (request_id, at, kind) VALUES (?, ?, ?)").run("old-row", now, "success");
+  old.close();
+
+  // Every launcher opens the same file; the later one finds the columns there.
+  const first = openRequestErrorStore({ path });
+  const second = openRequestErrorStore({ path });
+  t.after(() => { first.close(); second.close(); });
+  second.record({
+    request_id: "new-row", kind: "success", out_model: "chat/model-a",
+    prefix_status: "drift", prefix_origin: "airkit", prefix_field: "system", prefix_index: 4,
+    cache_read_tokens: 900, cache_creation_tokens: 0, cache_miss_tokens: 100,
+  });
+  const db = new DatabaseSync(path, { readOnly: true });
+  t.after(() => db.close());
+  const rows = db.prepare("SELECT * FROM compat_requests ORDER BY request_id").all();
+  assert.deepEqual(rows.map((row) => row.request_id), ["new-row", "old-row"]);
+  assert.equal(rows[1].prefix_status, null);
+  assert.deepEqual(
+    [rows[0].prefix_status, rows[0].prefix_origin, rows[0].prefix_field, rows[0].prefix_index, rows[0].cache_read_tokens],
+    ["drift", "airkit", "system", 4, 900],
+  );
+});
+
 test("file-as-directory open failure and throwing injected stores do not break requests", async (t) => {
   const dir = tempDir(t);
   const file = join(dir, "not-a-directory");
