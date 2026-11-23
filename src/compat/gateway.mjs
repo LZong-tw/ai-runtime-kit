@@ -728,30 +728,68 @@ function orderToolResultsFirst(content) {
   ];
 }
 
+// Claude Code sends hook output and environment updates as inline
+// `role: "system"` messages at the point in history where they happened.
+// Providers reject that role inside `messages`, so each one becomes
+// <system-reminder> text in an adjacent user turn, at the same position.
+// Hoisting them into `system` instead would change the prompt prefix every
+// time a hook fired and invalidate the cached conversation behind it.
 export function normalizeMessageSystemRoles(body) {
   body = normalizeInlineToolReferences(body);
   if (!isRecord(body) || !Array.isArray(body.messages)) return body;
-  const movedSystem = [];
+  if (!body.messages.some((message) => message?.role === "system")) return body;
   const messages = [];
+  let pending = [];
   for (const message of body.messages) {
-    if (message?.role !== "system") {
-      messages.push(message);
+    if (message?.role === "system") {
+      const reminders = systemMessageReminders(message.content);
+      if (reminders.length === 0) continue;
+      const previous = messages.at(-1);
+      // History is append-only, so attaching to the preceding user turn
+      // gives the same bytes on every later request.
+      if (pending.length === 0 && previous?.role === "user") {
+        messages[messages.length - 1] = {
+          ...previous,
+          content: [...userContentBlocks(previous.content), ...reminders],
+        };
+      } else {
+        pending.push(...reminders);
+      }
       continue;
     }
-    const content = message.content;
-    if (typeof content === "string" && content.length > 0) {
-      movedSystem.push({ type: "text", text: content });
-    } else if (Array.isArray(content)) {
-      movedSystem.push(...content.map((block) => structuredClone(block)));
+    if (pending.length > 0 && message?.role === "user") {
+      // A tool_result must stay first after the assistant's tool_use.
+      messages.push({
+        ...message,
+        content: orderToolResultsFirst([...pending, ...userContentBlocks(message.content)]),
+      });
+      pending = [];
+      continue;
     }
+    if (pending.length > 0) {
+      messages.push({ role: "user", content: pending });
+      pending = [];
+    }
+    messages.push(message);
   }
-  if (movedSystem.length === 0) return body;
-  const existingSystem = Array.isArray(body.system)
-    ? body.system.map((block) => structuredClone(block))
-    : typeof body.system === "string" && body.system.length > 0
-      ? [{ type: "text", text: body.system }]
-      : [];
-  return { ...body, system: [...existingSystem, ...movedSystem], messages };
+  if (pending.length > 0) messages.push({ role: "user", content: pending });
+  return { ...body, messages };
+}
+
+function systemMessageReminders(content) {
+  const blocks = typeof content === "string"
+    ? (content.length > 0 ? [{ type: "text", text: content }] : [])
+    : Array.isArray(content) ? content.map((block) => structuredClone(block)) : [];
+  return blocks.map((block) => {
+    if (block?.type !== "text" || typeof block.text !== "string") return block;
+    if (block.text.trimStart().startsWith("<system-reminder>")) return block;
+    return { ...block, text: `<system-reminder>\n${block.text}\n</system-reminder>` };
+  });
+}
+
+function userContentBlocks(content) {
+  if (Array.isArray(content)) return content;
+  return typeof content === "string" && content.length > 0 ? [{ type: "text", text: content }] : [];
 }
 
 
