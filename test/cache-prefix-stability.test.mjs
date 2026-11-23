@@ -80,6 +80,8 @@ async function runSession({ requests, route, path }) {
     // Advisor consults and executor continuations would be separate lanes.
     assert.equal(result.attempts.length, 1, `${where}: upstream calls`);
     assert.equal(result.attempts[0].path, path.path, `${where}: took the wrong path`);
+    // A silent whole-request fallback would compare a different lane.
+    assert.equal(result.attempts[0].body.model, route.model, `${where}: outbound model`);
     sent.push(result.attempts[0].body);
   }
   return sent;
