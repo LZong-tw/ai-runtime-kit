@@ -30,6 +30,11 @@ function observe(tracker, inbound, outbound = inbound, requestHeaders = headers(
   return tracker.observe({ headers: requestHeaders, inbound, outbound });
 }
 
+function pick(verdict) {
+  const { status, origin, field, index, inboundIndex } = verdict;
+  return { status, origin, field, index, inboundIndex };
+}
+
 test("an append-only session is a baseline and then stable, ignoring the moving cache marker", () => {
   const tracker = createPrefixDriftTracker();
   assert.deepEqual(observe(tracker, first), { status: "baseline", messages: 1, tools: 2 });
@@ -96,15 +101,90 @@ test("a message airkit rewrote in history is drift at that message", () => {
   assert.deepEqual([verdict.status, verdict.origin, verdict.field, verdict.index], ["drift", "airkit", "messages", 2]);
 });
 
-test("inbound bare-string re-sends of a block message are not upstream drift", () => {
+test("a block message re-sent as a bare string is the same prefix on both sides", () => {
   const tracker = createPrefixDriftTracker();
   observe(tracker, turn(user([text("First question.")]), { role: "user", content: [text("Hook.")] }));
   const resent = turn(user([text("First question.")]), assistant([text("Answer.")]), user([text("Next.")]));
   resent.messages.splice(1, 0, { role: "user", content: "Hook." });
-  // Outbound airkit normalises both shapes to the same blocks.
+  // Inline system messages come out of airkit as blocks again.
   const outbound = structuredClone(resent);
   outbound.messages[1] = { role: "user", content: [text("Hook.")] };
   assert.equal(observe(tracker, resent, outbound).status, "stable");
+  // A typed prompt is forwarded in whatever shape Claude Code sent it; the
+  // flip from tail block to bare string is not a break airkit introduced.
+  const typed = turn(...resent.messages.map((message) => ({ ...message, content: typeof message.content === "string"
+    ? message.content
+    : message.content.map(({ cache_control: _marker, ...block }) => block) })), assistant([text("Done.")]), user([text("More.")]));
+  typed.messages[3] = { role: "user", content: "Next." };
+  assert.equal(observe(tracker, typed).status, "stable");
+});
+
+test("an airkit break before a later upstream edit is still blamed on airkit", () => {
+  const tracker = createPrefixDriftTracker();
+  const history = Array.from({ length: 60 }, (_, index) => index % 2 === 0
+    ? user([text(`Prompt ${index}.`)])
+    : assistant([text(`Reply ${index}.`)]));
+  observe(tracker, turn(...history));
+  const next = turn(...structuredClone(history), assistant([text("New reply.")]), user([text("New prompt.")]));
+  // Upstream: an old tool result cleared in place, as microcompact does.
+  next.messages[50] = user([text("[Old tool result content cleared]")]);
+  const outbound = structuredClone(next);
+  outbound.messages[3] = assistant([text("Rewritten by airkit.")]);
+  assert.deepEqual(pick(observe(tracker, next, outbound)), { status: "drift", origin: "airkit", field: "messages", index: 3, inboundIndex: 50 });
+  // Without the airkit rewrite, the same edit is upstream.
+  const again = createPrefixDriftTracker();
+  observe(again, turn(...history));
+  assert.deepEqual(pick(observe(again, next)), { status: "drift", origin: "upstream", field: "messages", index: 50, inboundIndex: 50 });
+});
+
+test("an upstream edit stays upstream when folded inline system messages shift the outbound indices", () => {
+  const system = (value) => ({ role: "system", content: value });
+  // airkit's fold: each inline system message joins the user turn before it.
+  const fold = (body) => {
+    const messages = [];
+    for (const message of body.messages) {
+      if (message.role !== "system") messages.push(structuredClone(message));
+      else messages.at(-1).content.push(text(`<system-reminder>${message.content}</system-reminder>`));
+    }
+    return { ...body, messages };
+  };
+  const history = [];
+  for (let index = 0; index < 20; index++) {
+    history.push(user([text(`Prompt ${index}.`)]), system(`Hook ${index}.`), assistant([text(`Reply ${index}.`)]));
+  }
+  const tracker = createPrefixDriftTracker();
+  const previous = turn(...history);
+  observe(tracker, previous, fold(previous));
+  const next = turn(...structuredClone(history), user([text("New prompt.")]));
+  next.messages[45] = user([text("Edited upstream.")]);
+  const verdict = observe(tracker, next, fold(next));
+  assert.deepEqual(pick(verdict), { status: "drift", origin: "upstream", field: "messages", index: 30, inboundIndex: 45 });
+});
+
+test("cache-keyed request parameters are compared like the prefix", () => {
+  const tracker = createPrefixDriftTracker();
+  observe(tracker, { ...first, thinking: { type: "adaptive" } });
+  const inbound = { ...second, thinking: { type: "adaptive" } };
+  assert.deepEqual(pick(observe(tracker, inbound, { ...inbound, tool_choice: { type: "auto" } })),
+    { status: "drift", origin: "airkit", field: "params", index: 0, inboundIndex: null });
+  const upstream = createPrefixDriftTracker();
+  observe(upstream, { ...first, output_config: { effort: "high" } });
+  assert.deepEqual(pick(observe(upstream, { ...second, output_config: { effort: "low" } })),
+    { status: "drift", origin: "upstream", field: "params", index: 0, inboundIndex: 0 });
+});
+
+test("long payloads are fingerprinted by length and samples, so a rewritten image is still drift", () => {
+  const image = (data) => ({ type: "image", source: { type: "base64", media_type: "image/png", data } });
+  const payload = "A".repeat(100_000);
+  const withImage = (data) => turn(user([image(data), text("Look.")]), assistant([text("Seen.")]), user([text("And?")]));
+  const tracker = createPrefixDriftTracker();
+  observe(tracker, turn(user([image(payload), text("Look.")])));
+  assert.equal(observe(tracker, withImage(payload)).status, "stable");
+  const again = createPrefixDriftTracker();
+  observe(again, turn(user([image(payload), text("Look.")])));
+  const resized = withImage(payload);
+  const outbound = withImage(payload.slice(0, 50_000));
+  assert.deepEqual(pick(observe(again, resized, outbound)), { status: "drift", origin: "airkit", field: "messages", index: 0, inboundIndex: null });
 });
 
 test("compaction or a rewind that shrinks the history resets the thread", () => {

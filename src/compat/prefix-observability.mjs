@@ -89,10 +89,11 @@ export function canonicalPrefixJson(value) {
   return JSON.stringify(value, (key, inner) => (key === "cache_control" ? undefined : inner));
 }
 
-// Claude Code re-sends the previous turn's trailing inline system message as a
-// bare string after sending it as [{type:"text", cache_control}] (captured
-// with 2.1.330). Only inbound comparisons may normalise this; outbound stays
-// strict so airkit cannot hide a shape change.
+// Claude Code sends its newest message as [{type:"text", cache_control}] and
+// re-sends the same message as a bare string once it is no longer last
+// (captured with 2.1.330). It does this every turn by design, so the two
+// shapes count as one prefix on both sides of airkit; otherwise every typed
+// prompt would read as a break airkit forwarded.
 export function canonicalTextShape(message) {
   if (typeof message?.content !== "string") return message;
   return { ...message, content: [{ type: "text", text: message.content }] };
@@ -105,7 +106,9 @@ export function canonicalTextShape(message) {
 // was already in the inbound field is upstream (Claude Code, pxpipe);
 // drift that only appears outbound was introduced by airkit. Fingerprints are
 // truncated hashes held in memory only; results carry fields, indices and
-// counts, never content.
+// counts, never content. Threads that share a session, request class and
+// first message (parallel subagents with one prompt, forks) share a slot, so
+// their interleaving shows up as upstream drift.
 export function createPrefixDriftTracker({ maxThreads = 256, ttlMs = 86_400_000, now = Date.now } = {}) {
   const threads = new Map();
   return {
@@ -134,9 +137,13 @@ function observePrefix(threads, { headers, inbound, outbound, maxThreads, ttlMs,
   if (isAutoModeClassifierRequest(inboundBody)) return null;
   const sessionId = requestSessionId(headers, inboundBody);
   if (sessionId === null || !Array.isArray(inboundBody.messages) || inboundBody.messages.length === 0) return null;
+  // Passthrough shares most message objects (and every image string) between
+  // the inbound and outbound bodies; hashing each once keeps an image-heavy
+  // request in the low milliseconds on the shared event loop.
+  const memo = new WeakMap();
   const current = {
-    inbound: fingerprint(inboundBody, canonicalTextShape),
-    outbound: fingerprint(outboundBody, (message) => message),
+    inbound: fingerprint(inboundBody, memo),
+    outbound: fingerprint(outboundBody, memo),
   };
   if (current.inbound === null || current.outbound === null) return null;
   // Main thread, subagents and side requests share one session id. Their first
@@ -161,12 +168,17 @@ function comparePrefix(previous, current) {
   }
   if (current.outbound.model !== previous.outbound.model) return { status: "reset", reason: "model_changed" };
   const drifts = [];
-  for (const field of ["tools", "system", "messages"]) {
+  for (const field of ["tools", "system", "messages", "params"]) {
     const compare = field === "messages" ? prefixBreak : arrayBreak;
     const index = compare(previous.outbound[field], current.outbound[field]);
     if (index === null) continue;
     const inboundIndex = compare(previous.inbound[field], current.inbound[field]);
-    const origin = inboundIndex === null ? "airkit" : "upstream";
+    // An upstream edit late in the history (microcompact, a rewind) must not
+    // hide an airkit break earlier in it.
+    const origin = inboundIndex === null ||
+      (field === "messages" && index < earliestOutboundIndex(current, inboundIndex))
+      ? "airkit"
+      : "upstream";
     const reason = field === "tools" && origin === "airkit" &&
       isDeferredToolActivation(previous.outbound.toolForms, current.outbound.toolForms, current.inbound.toolForms)
       ? "deferred_tool_activation"
@@ -190,22 +202,80 @@ function comparePrefix(previous, current) {
   };
 }
 
-function fingerprint(body, textShape) {
+// Inbound and outbound message indices differ: airkit folds each inline system
+// message into a user turn, and the compatibility path may merge others. The
+// outbound position of inbound message `index` is at least `index` minus
+// every message airkit dropped (all assumed to sit before it), minus one for
+// a system message folded into the turn before it. Below that bound the break
+// cannot come from the inbound change.
+function earliestOutboundIndex(current, index) {
+  const { inlineSystem, messages } = current.inbound;
+  const foldedBefore = inlineSystem.filter((at) => at < index).length;
+  const otherDropped = Math.max(0, messages.length - inlineSystem.length - current.outbound.messages.length);
+  return index - foldedBefore - otherDropped - 1;
+}
+
+// Request parameters the provider keys its messages cache on besides the
+// prefix: changing tool_choice, thinking, effort or speed misses the cached
+// messages even when every byte of tools, system and messages is unchanged.
+function cacheParams(body) {
+  return {
+    thinking: body.thinking,
+    tool_choice: body.tool_choice,
+    effort: body.output_config?.effort,
+    speed: body.speed,
+  };
+}
+
+function fingerprint(body, memo) {
   if (!Array.isArray(body.messages)) return null;
   const tools = Array.isArray(body.tools) ? body.tools : [];
+  const hash = (value) => memoDigest(value, memo);
+  const toolDigests = tools.map(hash);
   return {
     model: typeof body.model === "string" ? body.model : null,
-    tools: tools.map((tool) => digest(canonicalPrefixJson(tool))),
+    tools: toolDigests,
     // Same tools hashed without defer_loading, so the one-off activation of a
     // deferred tool can be told apart from any other catalogue change.
-    toolForms: tools.map((tool) => ({
-      base: digest(canonicalPrefixJson(withoutDeferLoading(tool))),
+    toolForms: tools.map((tool, index) => ({
+      base: isRecord(tool) && "defer_loading" in tool ? hash(withoutDeferLoading(tool)) : toolDigests[index],
       deferred: tool?.defer_loading === true,
     })),
-    system: (typeof body.system === "string" ? [{ type: "text", text: body.system }] : body.system ?? [])
-      .map((block) => digest(canonicalPrefixJson(block))),
-    messages: body.messages.map((message) => digest(canonicalPrefixJson(textShape(message)))),
+    system: (typeof body.system === "string" ? [{ type: "text", text: body.system }] : body.system ?? []).map(hash),
+    messages: body.messages.map((message) => hash(canonicalTextShape(message))),
+    params: [hash(cacheParams(body))],
+    inlineSystem: body.messages.flatMap((message, index) => message?.role === "system" ? [index] : []),
   };
+}
+
+// Strings this long are image or document payloads. They are fingerprinted
+// by length and sampled slices instead of in full: anything that reads every
+// byte (a full SHA-256, even a Map lookup, which hashes the whole string) of
+// a 30 MB image-heavy history costs tens of milliseconds on the shared event
+// loop every request. A transform that rewrites a payload (re-encoding,
+// resizing, truncation) still changes its length or its sampled bytes.
+const LONG_STRING = 16_384;
+const SAMPLE_SLICES = 32;
+const SLICE = 64;
+
+function sampledDigest(value) {
+  const hash = createHash("sha256").update(String(value.length));
+  hash.update(value.slice(0, 1024)).update(value.slice(-1024));
+  const step = Math.floor(value.length / SAMPLE_SLICES);
+  for (let at = 0; at < SAMPLE_SLICES; at++) hash.update(value.slice(at * step, at * step + SLICE));
+  return hash.digest("base64");
+}
+
+function memoDigest(value, memo) {
+  const cacheable = value !== null && typeof value === "object";
+  if (cacheable && memo.has(value)) return memo.get(value);
+  const text = JSON.stringify(value, (key, inner) => {
+    if (key === "cache_control") return undefined;
+    return typeof inner === "string" && inner.length >= LONG_STRING ? `\u0000sampled:${sampledDigest(inner)}` : inner;
+  });
+  const result = digest(text);
+  if (cacheable) memo.set(value, result);
+  return result;
 }
 
 // airkit activates a deferred tool once a tool_addition or ToolSearch result

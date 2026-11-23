@@ -6,7 +6,6 @@ import { test } from "node:test";
 import { NON_CLAUDE_ADVISOR_PROMPT } from "../src/compat/advisor-policy.mjs";
 import {
   allow,
-  canonicalTextShape,
   createOutboundPipeline,
   formatDivergence,
   prefixDivergence,
@@ -17,6 +16,9 @@ import {
 // prompt cache misses for the whole conversation. 1fde474 fixed one such
 // regression (inline hook messages hoisted into `system`); this file runs
 // whole sessions through the real outbound pipeline so the next one fails here.
+// The captures carry no thinking blocks (their stub never streamed any), so
+// the thinking-history guard (reasoning-history, the Responses thinking
+// rewrite) rests on the synthetic session below.
 
 const providers = [
   { name: "messages", type: "anthropic_messages", models: ["claude-opus-5-5"] },
@@ -130,7 +132,6 @@ function assertPrefixStable(sent, inbound, allowancesFor, label) {
     // would blame airkit for what Claude Code sent.
     const upstream = prefixDivergence(inbound[index - 1], inbound[index], {
       allowances: allowancesFor(index).inbound ?? [],
-      textShape: canonicalTextShape,
     });
     assert.equal(upstream, null, `${label}: inbound ${index}→${index + 1} ${formatDivergence(upstream)}`);
     const divergence = prefixDivergence(sent[index - 1], sent[index], {
@@ -177,8 +178,11 @@ for (const route of ROUTES) {
 // Synthetic session in Claude Code's wire shape, covering positions the
 // captures did not: hooks between assistant turns and between a tool_use and
 // its tool_result, an environment update, an inline tool_addition, unsigned
-// thinking and non-ASCII text. Requests are cut only where Claude Code sends
-// one: after a user turn and the system messages that arrive with it.
+// thinking, non-ASCII text, and a typed prompt with no hook after it, which is
+// the tail as a block and re-sent as a bare string. A second deferred tool
+// that is never loaded pins the activation to the named tool only. Requests
+// are cut only where Claude Code sends one: after a user turn and the system
+// messages that arrive with it.
 const text = (value) => ({ type: "text", text: value });
 const user = (content) => ({ role: "user", content });
 const assistant = (content) => ({ role: "assistant", content });
@@ -216,6 +220,14 @@ const SYNTHETIC_TURNS = [
     user("Next question."),
     system("UserPromptSubmit hook additional context: second prompt."),
   ],
+  [
+    assistant([text("Second answer.")]),
+    user("A typed prompt with no hook output."),
+  ],
+  [
+    assistant([text("DONE")]),
+    user("Last prompt."),
+  ],
 ];
 
 const SYNTHETIC_BASE = {
@@ -230,6 +242,7 @@ const SYNTHETIC_BASE = {
     { name: "ToolSearch", description: "Load deferred tools.", input_schema: schema },
     { name: "WebFetch", description: "Fetch a URL.", input_schema: schema, defer_loading: true },
     { name: "Write", description: "Write a file.", input_schema: schema },
+    { name: "NotebookEdit", description: "Edit a notebook.", input_schema: schema, defer_loading: true },
   ],
   metadata: { user_id: JSON.stringify({ device_id: "1".repeat(64), account_uuid: "", session_id: "placeholder" }) },
   max_tokens: 32000,
@@ -318,6 +331,28 @@ test("a throwing drift tracker costs the request neither its response nor its ro
   assert.equal(result.row.prefix_status, null);
 });
 
+// observe() runs on the event loop every other stream shares, so the handler
+// gives it the bodies it already parsed: re-parsing a 30 MB image-heavy
+// history twice per request cost 100+ ms there.
+test("the drift tracker gets parsed bodies, not bytes to parse again, on the passthrough", async () => {
+  const [route] = ROUTES;
+  const seen = [];
+  const pipeline = createOutboundPipeline({
+    config, providers, prefixDriftTracker: { observe(args) { seen.push(args); return null; } },
+  });
+  const [request] = fixture("claude-code-2.1.330-hooks-image-resume.json").requests;
+  const scoped = withSession({ ...request.body, model: route.model }, request.headers, "00000000-0000-4000-8000-0000000000fe");
+  await pipeline.send(scoped.body, scoped.headers);
+  assert.equal(seen.length, 1);
+  for (const side of ["inbound", "outbound"]) {
+    assert.ok(!Buffer.isBuffer(seen[0][side]) && typeof seen[0][side] === "object", `${side} is parsed`);
+    assert.ok(Array.isArray(seen[0][side].messages), `${side} is the request body`);
+  }
+  // The inbound side is the body as Claude Code sent it, before any transform.
+  assert.ok(seen[0].inbound.messages.some((message) => message.role === "system"));
+  assert.ok(seen[0].outbound.messages.every((message) => message.role !== "system"));
+});
+
 test("the comparator names the first diverging field, index and block", () => {
   const base = {
     model: "m",
@@ -338,9 +373,12 @@ test("the comparator names the first diverging field, index and block", () => {
     { field: "system", index: 2, detail: "system length 2 became 3" });
   assert.deepEqual(prefixDivergence(base, changed({ messages: [user([text("u0"), text("x")]), base.messages[1]] })),
     { field: "messages", index: 0, block: 1, detail: "messages[0].content length 1 became 2" });
-  assert.equal(prefixDivergence(base, changed({ messages: [user("u0"), base.messages[1]] }))?.field, "messages",
-    "string and one-block content differ outbound");
-  assert.equal(prefixDivergence(base, changed({ messages: [user("u0"), base.messages[1]] }), { textShape: canonicalTextShape }), null);
+  assert.equal(prefixDivergence(base, changed({ messages: [user("u0"), base.messages[1]] })), null,
+    "string and one-block content are the same prefix");
+  assert.deepEqual(prefixDivergence(base, changed({ tool_choice: { type: "auto" } })),
+    { field: "params", detail: 'tool_choice absent became {"type":"auto"}' });
+  assert.deepEqual(prefixDivergence({ ...base, thinking: { type: "adaptive" } }, base),
+    { field: "params", detail: 'thinking {"type":"adaptive"} became absent' });
   assert.deepEqual(prefixDivergence(base, base, { allowances: [allow("deferred_tool_activation", ["a"])] }),
     { field: "allowance", detail: "unused allowance deferred_tool_activation" });
   assert.throws(() => allow("anything_goes", []), /unknown allowance/);

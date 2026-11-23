@@ -241,6 +241,10 @@ export function createMessagesHandler({
     // continuations or Advisor consults, each a different prompt by design.
     let wireBody = null;
     const onWire = (body) => { wireBody ??= body; };
+    // The drift tracker reuses these parsed bodies instead of parsing the
+    // bytes again; neither is mutated once built.
+    let inboundParsed = null;
+    let forwarded = null;
     const onFirstByte = (result) => {
       firstByteMs ??= elapsed();
       if (Number.isInteger(result?.status)) upstreamStatus = result.status;
@@ -249,6 +253,7 @@ export function createMessagesHandler({
       rawBody = await helpers.readBody(request);
       const parseStarted = elapsed();
       const parsedBody = parseJsonCopy(rawBody);
+      inboundParsed = parsedBody;
       const body = normalizeMessageSystemRoles(parsedBody);
       // Route bare Claude model ids before any forwarding decision: this
       // plugin owns POST /v1/messages, so CCR Router rules never see these
@@ -289,6 +294,7 @@ export function createMessagesHandler({
       const outboundRaw = outboundBody === parsedBody
         ? rawBody
         : Buffer.from(JSON.stringify(outboundBody), "utf8");
+      forwarded = { raw: outboundRaw, body: outboundBody };
       const compat = isRecord(outboundBody) && isConfiguredCompatibilityRequest(outboundBody, policies, config);
       const stablePrefix = describeStablePrefix(outboundBody);
       telemetry.stablePrefix = stablePrefix;
@@ -396,7 +402,11 @@ export function createMessagesHandler({
       // Hashing waits until the response is done so it never delays dispatch.
       let prefix = null;
       try {
-        prefix = prefixDriftTracker?.observe({ headers: request?.headers, inbound: rawBody, outbound: wireBody }) ?? null;
+        prefix = prefixDriftTracker?.observe({
+          headers: request?.headers,
+          inbound: inboundParsed ?? rawBody,
+          outbound: wireBody !== null && wireBody === forwarded?.raw ? forwarded.body : wireBody,
+        }) ?? null;
       } catch { /* A diagnostic must not cost the request its log line or row. */ }
       if (prefix !== null) telemetry.prefixDrift = prefix;
       logRequestTerminal({ outcome, response, telemetry });

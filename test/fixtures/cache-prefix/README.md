@@ -48,3 +48,13 @@ What these captures show about the wire format:
   blocks 1 and 2 only.
 - No `# Environment update` message appeared; the test's synthetic session
   reconstructs one.
+
+What they do not cover, so the synthetic session in the test does:
+
+- No thinking blocks or signatures: the stub never streamed any, so the
+  thinking-history guards (reasoning history, the Responses thinking rewrite,
+  restricted thinking) are checked only against the synthetic shapes.
+- No `tool_addition` block, so the deferred-tool activation allowance runs
+  only on the synthetic turns, which also keep a second deferred tool that is
+  never activated.
+- No typed prompt that is later re-sent as a bare string.

@@ -7,9 +7,10 @@ import { createPluginRequest, createRecordingResponse } from "./compat-fixtures.
 // The runtime drift tracker and this replay test must agree on what counts as
 // the same prefix, so both use the same canonical form. Comparison is on
 // parsed JSON, so escape-only byte differences (`é` vs `é`) do not count;
-// providers parse before tokenizing.
+// providers parse before tokenizing. A message sent as a bare string and as
+// one text block is the same prefix too: Claude Code flips between the two
+// every turn (see canonicalTextShape).
 export const canonical = canonicalPrefixJson;
-export { canonicalTextShape };
 
 // Named, structural allowances for the one-off tool catalogue changes a
 // session legitimately goes through. Each describes exactly which diff it
@@ -49,7 +50,7 @@ export function allow(name, tools) {
 // provider renders them, so the report names the earliest cache break.
 // Each allowance must be consumed: an allowance that matched nothing means the
 // scenario no longer exercises what it claims to.
-export function prefixDivergence(previous, next, { allowances = [], textShape = (message) => message } = {}) {
+export function prefixDivergence(previous, next, { allowances = [] } = {}) {
   if (previous.model !== next.model) {
     return { field: "model", detail: `model changed from ${previous.model} to ${next.model}` };
   }
@@ -68,8 +69,8 @@ export function prefixDivergence(previous, next, { allowances = [], textShape = 
     if (index >= after.length) {
       return { field: "messages", index, detail: `messages: N has ${before.length}, N+1 only ${after.length}` };
     }
-    const a = textShape(before[index]);
-    const b = textShape(after[index]);
+    const a = canonicalTextShape(before[index]);
+    const b = canonicalTextShape(after[index]);
     if (canonical(a) === canonical(b)) continue;
     const blocks = describeArray(`messages[${index}].content`, asBlocks(a.content), asBlocks(b.content), blockLabel);
     return {
@@ -79,6 +80,10 @@ export function prefixDivergence(previous, next, { allowances = [], textShape = 
       detail: a.role === b.role ? blocks.detail : `messages[${index}] role ${a.role} became ${b.role}`,
     };
   }
+  // Request parameters the provider keys its messages cache on (thinking,
+  // tool_choice, effort, speed) must not change between requests either.
+  const params = describeParams(previous, next);
+  if (params !== null) return params;
   if (unused.size > 0) {
     return { field: "allowance", detail: `unused allowance ${[...unused].map((entry) => entry.name).join(", ")}` };
   }
@@ -87,6 +92,22 @@ export function prefixDivergence(previous, next, { allowances = [], textShape = 
 
 export function formatDivergence(divergence) {
   return divergence === null ? "prefix stable" : `${divergence.field}: ${divergence.detail}`;
+}
+
+export const CACHE_PARAMS = {
+  thinking: (body) => body.thinking,
+  tool_choice: (body) => body.tool_choice,
+  effort: (body) => body.output_config?.effort,
+  speed: (body) => body.speed,
+};
+
+function describeParams(previous, next) {
+  for (const [name, read] of Object.entries(CACHE_PARAMS)) {
+    const before = JSON.stringify(read(previous)) ?? "absent";
+    const after = JSON.stringify(read(next)) ?? "absent";
+    if (before !== after) return { field: "params", detail: `${name} ${before} became ${after}` };
+  }
+  return null;
 }
 
 function asBlocks(value) {

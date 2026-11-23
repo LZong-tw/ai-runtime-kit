@@ -269,15 +269,18 @@ cache miss on every later turn. The adapter checks this on every request.
 
 For each conversation thread (session id, request class when Claude Code sends
 it, and first message), the adapter remembers fingerprints of the previous
-request as it arrived and as it was sent upstream, with `cache_control` ignored.
-It compares tools, then system, then messages, in the order providers render
-them, and stores the verdict on the request's `compat_requests` row:
+request as it arrived and as it was sent upstream, with `cache_control` ignored
+and a message sent as a bare string treated the same as one text block (Claude
+Code flips between the two every turn). It compares tools, then system, then
+messages, in the order providers render them, then the request parameters the
+provider keys its message cache on (`thinking`, `tool_choice`, effort,
+`speed`), and stores the verdict on the request's `compat_requests` row:
 
 | Column | Meaning |
 | --- | --- |
 | `prefix_status` | `baseline` (first request of a thread), `stable`, `drift`, `allowed`, or `reset`. NULL when there is no verdict: no session id, nothing sent upstream, or an auto-mode classifier request. |
-| `prefix_origin` | `airkit` when only the outbound request changed: a regression in AirKit. `upstream` when the inbound request already changed in that field (Claude Code, or pxpipe in front of the adapter). |
-| `prefix_field`, `prefix_index` | First diverging field (`tools`, `system`, `messages`) and the index inside it, in the outbound request. `prefix_inbound_index` is the inbound index for upstream drift. |
+| `prefix_origin` | `airkit` when only the outbound request changed: a regression in AirKit. `upstream` when the inbound request already changed in that field (Claude Code, or pxpipe in front of the adapter). In messages, a break earlier than any outbound position the inbound change could map to is still `airkit`. |
+| `prefix_field`, `prefix_index` | First diverging field (`tools`, `system`, `messages`, `params`) and the index inside it, in the outbound request. `prefix_inbound_index` is the inbound index of the inbound break, if any. |
 | `prefix_reason` | `deferred_tool_activation` for `allowed`: a deferred tool loaded once, which changes the tool list by design. `messages_shrunk` or `model_changed` for `reset`. |
 | `prefix_messages` | Outbound message count. |
 | `cache_read_tokens`, `cache_creation_tokens`, `cache_miss_tokens` | Prompt-cache counters from the response, when the provider reports them. |
@@ -285,8 +288,13 @@ them, and stores the verdict on the request's `compat_requests` row:
 Compaction starts a new thread (its first message changes), so it shows up as
 a `baseline`, not drift. Only the first upstream call of a turn is compared;
 the transport fallback, executor continuations and Advisor consults are
-different prompts by design. Fingerprints are truncated hashes held in memory
-by the launcher (at most 256 threads, 24 hours each); the database holds field
+different prompts by design. Threads that share a session, request class and
+first message (parallel subagents given the same prompt, forked subagents)
+share one slot, so their interleaving counts as upstream drift; it never counts
+as AirKit drift. Fingerprints are truncated hashes held in memory by the
+gateway plugin (at most 256 threads, 24 hours each; a CCR restart starts every
+thread again as `baseline`). Image and document payloads are fingerprinted by
+length and sampled bytes to keep the check cheap. The database holds field
 names, indices and counts only, never prompt content. The check runs after
 the response finishes and never fails a request. CCR and the provider's
 Anthropic-to-OpenAI conversion run after the adapter and are not covered.
