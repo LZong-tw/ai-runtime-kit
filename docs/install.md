@@ -259,6 +259,67 @@ headers, and downstream termination. `transform_ms` covers parsing and rewrites
 before dispatch, excluding the body read. Bridge requests can make multiple
 upstream calls; first-byte timing refers to the first response headers.
 
+### Prompt-cache prefix drift
+
+Provider prompt caches only reuse a request's tools, system prompt and earlier
+messages when the next request repeats them exactly. Claude Code sends an
+append-only history, so anything AirKit rewrites inconsistently between turns
+(for example, moving hook output into the system prompt) silently costs a
+cache miss on every later turn. The adapter checks this on every request.
+
+For each conversation thread (session id, request class when Claude Code sends
+it, and first message), the adapter remembers fingerprints of the previous
+request as it arrived and as it was sent upstream, with `cache_control` ignored
+and a message sent as a bare string treated the same as one text block (Claude
+Code flips between the two every turn). It compares tools, then system, then
+messages, in the order providers render them, then the request parameters the
+provider keys its message cache on (`thinking`, `tool_choice`, effort,
+`speed`), and stores the verdict on the request's `compat_requests` row:
+
+| Column | Meaning |
+| --- | --- |
+| `prefix_status` | `baseline` (first request of a thread), `stable`, `drift`, `allowed`, or `reset`. NULL when there is no verdict: no session id, nothing sent upstream, or an auto-mode classifier request. |
+| `prefix_origin` | `airkit` when only the outbound request changed: a regression in AirKit. `upstream` when the inbound request already changed in that field (Claude Code, or pxpipe in front of the adapter). In messages, a break earlier than any outbound position the inbound change could map to is still `airkit`. |
+| `prefix_field`, `prefix_index` | First diverging field (`tools`, `system`, `messages`, `params`) and the index inside it, in the outbound request. `prefix_inbound_index` is the inbound index of the inbound break, if any. |
+| `prefix_reason` | `deferred_tool_activation` for `allowed`: a deferred tool loaded once, which changes the tool list by design. `messages_shrunk` or `model_changed` for `reset`. |
+| `prefix_messages` | Outbound message count. |
+| `cache_read_tokens`, `cache_creation_tokens`, `cache_miss_tokens` | Prompt-cache counters from the response, when the provider reports them. |
+
+Compaction starts a new thread (its first message changes), so it shows up as
+a `baseline`, not drift. Only the first upstream call of a turn is compared;
+the transport fallback, executor continuations and Advisor consults are
+different prompts by design. Threads that share a session, request class and
+first message (parallel subagents given the same prompt, forked subagents)
+share one slot, so their interleaving counts as upstream drift; it never counts
+as AirKit drift. Fingerprints are truncated hashes held in memory by the
+gateway plugin (at most 256 threads, 24 hours each; a CCR restart starts every
+thread again as `baseline`). Image and document payloads are fingerprinted by
+length and sampled bytes to keep the check cheap. The database holds field
+names, indices and counts only, never prompt content. The check runs after
+the response finishes and never fails a request. CCR and the provider's
+Anthropic-to-OpenAI conversion run after the adapter and are not covered.
+
+```bash
+DB="${XDG_STATE_HOME:-$HOME/.local/state}/airkit/compat-requests.sqlite"
+# Per model: AirKit-introduced drift (should be 0), upstream drift, and cache hit rate.
+sqlite3 -header -column "$DB" "SELECT out_model, count(*) AS requests,
+    sum(prefix_status = 'drift' AND prefix_origin = 'airkit') AS airkit_drift,
+    sum(prefix_status = 'drift' AND prefix_origin = 'upstream') AS upstream_drift,
+    sum(prefix_status = 'allowed') AS allowed, sum(prefix_status = 'reset') AS resets,
+    round(1.0 * sum(cache_read_tokens) / nullif(sum(cache_read_tokens
+      + coalesce(cache_miss_tokens, 0) + coalesce(cache_creation_tokens, 0)), 0), 3) AS hit_rate
+  FROM compat_requests WHERE at > (strftime('%s', 'now') - 7 * 86400) * 1000
+  GROUP BY out_model ORDER BY airkit_drift DESC, requests DESC;"
+# Where AirKit broke the prefix:
+sqlite3 "$DB" "SELECT datetime(at / 1000, 'unixepoch'), out_model, path,
+    prefix_field, prefix_index, prefix_messages
+  FROM compat_requests WHERE prefix_status = 'drift' AND prefix_origin = 'airkit'
+  ORDER BY at DESC LIMIT 20;"
+```
+
+With route logging on, the `[airkit-request]` line carries the same verdict
+as `prefixDrift`.
+
 To migrate an older source profile, remove Advisor `model`, `fallbackModel`,
 and `mode: "bridge"`; put the model in the generic `fallback` block; add every
 missing family entry; and change `webSearch.mode: "mcp"` to `native-first`.

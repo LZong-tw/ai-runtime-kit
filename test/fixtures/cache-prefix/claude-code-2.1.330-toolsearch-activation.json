@@ -1,0 +1,1720 @@
+{
+  "description": "One session: ToolSearch select:WebFetch activates a deferred tool (tool_reference in tool_result), then a Read, then DONE. Claude Code inserts WebFetch (defer_loading:true) into tools between request 1 and 2.",
+  "capturedWith": "Claude Code 2.1.330 (claude -p, isolated HOME/CLAUDE_CONFIG_DIR) against a local stub Anthropic server, 2026-11-23",
+  "sanitization": "Paths -> /workspace/project; device_id/session UUIDs -> fixed placeholders; long Claude Code prompt text, tool descriptions and boilerplate paragraphs -> \"[elided ...: N chars, sha256:...]\" (deterministic per original text). Roles, block types, string-vs-array content shape, ordering, cache_control placement, tool order/defer_loading and system block layout are untouched.",
+  "requests": [
+    {
+      "method": "POST",
+      "url": "/v1/messages?beta=true",
+      "headers": {
+        "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,thinking-token-count-2026-05-13,advanced-tool-use-2025-11-20,effort-2025-11-24",
+        "anthropic-version": "2023-06-01",
+        "x-app": "cli",
+        "user-agent": "claude-cli/2.1.330 (external, sdk-cli)",
+        "x-claude-code-session-id": "00000000-0000-4000-8000-000000000002"
+      },
+      "body": {
+        "model": "claude-opus-5-5",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "<system-reminder>\n[elided Claude Code paragraph: 581 chars, sha256:e291f933f863]"
+              },
+              {
+                "type": "text",
+                "text": "Load the WebFetch tool, then read notes.txt, then reply DONE."
+              }
+            ]
+          },
+          {
+            "role": "system",
+            "content": [
+              {
+                "type": "text",
+                "text": "SessionStart hook additional context: HOOK-SessionStart-CONTEXT: synthetic context injected by the SessionStart hook.\n\n# Environment\n[elided Claude Code paragraph: 752 chars, sha256:38378d1aef1a]\n\nYou are powered by the model named Opus 5.5. The exact model ID is claude-opus-5-5. Assistant knowledge cutoff is June 2026.\n\nThe following deferred tools are now available via ToolSearch. Their schemas are NOT loaded — calling them directly will fail with InputValidationError. Use ToolSearch with query \"select:<name>[,<name>...]\" to load tool schemas before calling them:\nCronCreate\nCronDelete\nCronList\nEnterWorktree\nExitWorktree\nMonitor\nNotebookEdit\nSendMessage\nTaskStop\nWebFetch\nWebSearch\n\nAvailable agent types for the Agent tool:\n[elided Claude Code paragraph: 1501 chars, sha256:27e3fa22c41b]\n\nWhen you launch multiple agents for independent work, send them in a single message with multiple tool uses so they run concurrently.\n\nThe following skills are available for use with the Skill tool:\n\n- dataviz: Use this skill whenever you are about to create ANY chart, graph, plot, dashboard, or data visualization, in \n[elided Claude Code paragraph: 6210 chars, sha256:54dd00da99db]\n\nUserPromptSubmit hook additional context: HOOK-UserPromptSubmit-CONTEXT: synthetic context injected by the UserPromptSubmit hook.\n\nToday's date is 2026-11-23.",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              }
+            ],
+            "output_config": {
+              "effort": "medium"
+            }
+          }
+        ],
+        "system": [
+          {
+            "type": "text",
+            "text": "x-anthropic-billing-header: cc_version=2.1.330.e08; cc_entrypoint=sdk-cli;"
+          },
+          {
+            "type": "text",
+            "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          },
+          {
+            "type": "text",
+            "text": "[elided Claude Code system prompt block: 7061 chars, sha256:4f090b1b763c]",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tools": [
+          {
+            "name": "Agent",
+            "description": "[elided description: 3225 chars, sha256:75c12458f1f8]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "description": {
+                  "description": "A short (3-5 word) description of the task",
+                  "type": "string"
+                },
+                "prompt": {
+                  "description": "The task for the agent to perform",
+                  "type": "string"
+                },
+                "subagent_type": {
+                  "description": "The type of specialized agent to use for this task",
+                  "type": "string"
+                },
+                "model": {
+                  "description": "[elided description: 358 chars, sha256:532ef2fc3ef0]",
+                  "type": "string",
+                  "enum": [
+                    "sonnet",
+                    "opus",
+                    "haiku",
+                    "fable"
+                  ]
+                },
+                "effort": {
+                  "description": "[elided description: 341 chars, sha256:4117fe0f2257]",
+                  "type": "string",
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                  ]
+                },
+                "run_in_background": {
+                  "description": "[elided description: 286 chars, sha256:b4a7c95f0869]",
+                  "type": "boolean"
+                },
+                "isolation": {
+                  "description": "[elided description: 221 chars, sha256:2188ebd982e4]",
+                  "type": "string",
+                  "enum": [
+                    "worktree",
+                    "remote"
+                  ]
+                }
+              },
+              "required": [
+                "description",
+                "prompt"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "Bash",
+            "description": "[elided description: 2110 chars, sha256:f25c2899b543]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "command": {
+                  "description": "The command to execute",
+                  "type": "string"
+                },
+                "timeout": {
+                  "description": "Optional timeout in milliseconds (max 600000 for a foreground command)",
+                  "type": "number"
+                },
+                "description": {
+                  "description": "[elided description: 926 chars, sha256:7e54ad728290]",
+                  "type": "string"
+                },
+                "run_in_background": {
+                  "description": "[elided description: 181 chars, sha256:1cb421b5d38b]",
+                  "type": "boolean"
+                },
+                "dangerouslyDisableSandbox": {
+                  "description": "[elided description: 90 chars, sha256:ec23994e0dbb]",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "command"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "Edit",
+            "description": "[elided description: 360 chars, sha256:2eaaa8e08e0b]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "file_path": {
+                  "description": "The absolute path to the file to modify",
+                  "type": "string"
+                },
+                "old_string": {
+                  "description": "The text to replace",
+                  "type": "string"
+                },
+                "new_string": {
+                  "description": "The text to replace it with (must be different from old_string)",
+                  "type": "string"
+                },
+                "replace_all": {
+                  "description": "Replace all occurrences of old_string (default false)",
+                  "default": false,
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "file_path",
+                "old_string",
+                "new_string"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "ListAgents",
+            "description": "[elided description: 1433 chars, sha256:f55cb6d9e5f0]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "channel": {
+                  "description": "Not available in this build; leave unset.",
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "q": {
+                  "description": "Not available in this build; leave unset.",
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "cursor": {
+                  "description": "[elided description: 96 chars, sha256:6e8ef29f389e]",
+                  "type": "string",
+                  "maxLength": 256
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "Read",
+            "description": "[elided description: 790 chars, sha256:80fb15d2d15c]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "file_path": {
+                  "description": "The absolute path to the file to read",
+                  "type": "string"
+                },
+                "offset": {
+                  "description": "[elided description: 92 chars, sha256:a55994c8dc5b]",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "limit": {
+                  "description": "[elided description: 83 chars, sha256:32aa442b9d89]",
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "pages": {
+                  "description": "[elided description: 113 chars, sha256:98c222c16a72]",
+                  "type": "string"
+                },
+                "allow_large": {
+                  "description": "[elided description: 281 chars, sha256:5864e9d06976]",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "file_path"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "ReportFindings",
+            "description": "[elided description: 574 chars, sha256:59ea4187fcd5]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "level": {
+                  "description": "Effort level the review ran at",
+                  "type": "string",
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                  ]
+                },
+                "findings": {
+                  "description": "Verified findings, most-severe first; empty if none survived",
+                  "maxItems": 32,
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "file": {
+                        "description": "Repo-relative path of the file the finding is in",
+                        "type": "string"
+                      },
+                      "line": {
+                        "description": "1-indexed line the finding anchors to",
+                        "type": "integer",
+                        "minimum": -9007199254740991,
+                        "maximum": 9007199254740991
+                      },
+                      "summary": {
+                        "description": "Statement of the defect",
+                        "type": "string"
+                      },
+                      "short_summary": {
+                        "description": "[elided description: 96 chars, sha256:83b7eec338d7]",
+                        "type": "string",
+                        "maxLength": 60
+                      },
+                      "failure_scenario": {
+                        "description": "Concrete inputs/state → wrong output/crash",
+                        "type": "string"
+                      },
+                      "category": {
+                        "description": "[elided description: 110 chars, sha256:dc9dc4a8f845]",
+                        "type": "string",
+                        "maxLength": 40
+                      },
+                      "severity": {
+                        "description": "[elided description: 166 chars, sha256:9aa4f64fb402]",
+                        "type": "string",
+                        "enum": [
+                          "important",
+                          "pre_existing",
+                          "nit"
+                        ]
+                      },
+                      "verdict": {
+                        "description": "Set when a verify pass ran; absent on inline-only reviews",
+                        "type": "string",
+                        "enum": [
+                          "CONFIRMED",
+                          "PLAUSIBLE"
+                        ]
+                      },
+                      "outcome": {
+                        "description": "Set ONLY when re-reporting after applying fixes: what happened to this finding",
+                        "type": "string",
+                        "enum": [
+                          "fixed",
+                          "skipped",
+                          "no_change_needed"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "file",
+                      "summary",
+                      "failure_scenario"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "findings"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "ScheduleWakeup",
+            "description": "[elided description: 3396 chars, sha256:cd114f81a9f2]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "delaySeconds": {
+                  "description": "[elided description: 98 chars, sha256:336d8660b1e6]",
+                  "type": "number"
+                },
+                "reason": {
+                  "description": "[elided description: 136 chars, sha256:847ac4c68012]",
+                  "type": "string"
+                },
+                "prompt": {
+                  "description": "[elided description: 355 chars, sha256:a7431c3cf528]",
+                  "type": "string"
+                },
+                "stop": {
+                  "description": "[elided description: 154 chars, sha256:10e133589e04]",
+                  "type": "boolean"
+                },
+                "noop": {
+                  "description": "[elided description: 307 chars, sha256:de7f3ba87fc6]",
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "Skill",
+            "description": "[elided description: 1417 chars, sha256:5995de30f319]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "skill": {
+                  "description": "The name of a skill from the available-skills list. Do not guess names.",
+                  "type": "string"
+                },
+                "args": {
+                  "description": "Optional arguments for the skill",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "skill"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "ToolSearch",
+            "description": "[elided description: 952 chars, sha256:2b34428bc5e7]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "query": {
+                  "description": "[elided description: 99 chars, sha256:b90268e28a7e]",
+                  "type": "string"
+                },
+                "max_results": {
+                  "description": "Maximum number of results to return (default: 5)",
+                  "default": 5,
+                  "type": "number"
+                }
+              },
+              "required": [
+                "query",
+                "max_results"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "Workflow",
+            "description": "[elided description: 3496 chars, sha256:2d6f1471a1e6]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "script": {
+                  "description": "[elided description: 207 chars, sha256:569e4a2fdd64]",
+                  "type": "string",
+                  "maxLength": 524288
+                },
+                "name": {
+                  "description": "[elided description: 105 chars, sha256:a2bb766d620b]",
+                  "type": "string"
+                },
+                "description": {
+                  "description": "Ignored — set the workflow description in the script's `meta` block.",
+                  "type": "string"
+                },
+                "title": {
+                  "description": "Ignored — set the workflow title in the script's `meta` block.",
+                  "type": "string"
+                },
+                "args": {
+                  "description": "[elided description: 280 chars, sha256:2126b6037f6f]"
+                },
+                "scriptPath": {
+                  "description": "[elided description: 329 chars, sha256:2a9e4b7526b9]",
+                  "type": "string"
+                },
+                "resumeFromRunId": {
+                  "description": "[elided description: 568 chars, sha256:f410258a0e74]",
+                  "type": "string",
+                  "pattern": "^wf_[a-z0-9-]{6,}$"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "DeferredToolPlaceholder",
+            "description": "[elided description: 83 chars, sha256:97f0a3ed59c7]",
+            "input_schema": {
+              "type": "object",
+              "properties": {}
+            },
+            "defer_loading": true
+          },
+          {
+            "name": "Write",
+            "description": "[elided description: 240 chars, sha256:c5d31bd00109]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "file_path": {
+                  "description": "The absolute path to the file to write (must be absolute, not relative)",
+                  "type": "string"
+                },
+                "content": {
+                  "description": "The content to write to the file",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "file_path",
+                "content"
+              ],
+              "additionalProperties": false
+            }
+          }
+        ],
+        "metadata": {
+          "user_id": "{\"device_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"account_uuid\":\"\",\"session_id\":\"00000000-0000-4000-8000-000000000002\"}"
+        },
+        "max_tokens": 128000,
+        "thinking": {
+          "type": "adaptive",
+          "display": "omitted"
+        },
+        "context_management": {
+          "edits": [
+            {
+              "type": "clear_thinking_20251015",
+              "keep": "all"
+            }
+          ]
+        },
+        "output_config": {
+          "effort": "medium"
+        },
+        "stream": true
+      }
+    },
+    {
+      "method": "POST",
+      "url": "/v1/messages?beta=true",
+      "headers": {
+        "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,thinking-token-count-2026-05-13,advanced-tool-use-2025-11-20,effort-2025-11-24",
+        "anthropic-version": "2023-06-01",
+        "x-app": "cli",
+        "user-agent": "claude-cli/2.1.330 (external, sdk-cli)",
+        "x-claude-code-session-id": "00000000-0000-4000-8000-000000000002"
+      },
+      "body": {
+        "model": "claude-opus-5-5",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "<system-reminder>\n[elided Claude Code paragraph: 581 chars, sha256:e291f933f863]"
+              },
+              {
+                "type": "text",
+                "text": "Load the WebFetch tool, then read notes.txt, then reply DONE."
+              }
+            ]
+          },
+          {
+            "role": "system",
+            "content": "SessionStart hook additional context: HOOK-SessionStart-CONTEXT: synthetic context injected by the SessionStart hook.\n\n# Environment\n[elided Claude Code paragraph: 752 chars, sha256:38378d1aef1a]\n\nYou are powered by the model named Opus 5.5. The exact model ID is claude-opus-5-5. Assistant knowledge cutoff is June 2026.\n\nThe following deferred tools are now available via ToolSearch. Their schemas are NOT loaded — calling them directly will fail with InputValidationError. Use ToolSearch with query \"select:<name>[,<name>...]\" to load tool schemas before calling them:\nCronCreate\nCronDelete\nCronList\nEnterWorktree\nExitWorktree\nMonitor\nNotebookEdit\nSendMessage\nTaskStop\nWebFetch\nWebSearch\n\nAvailable agent types for the Agent tool:\n[elided Claude Code paragraph: 1501 chars, sha256:27e3fa22c41b]\n\nWhen you launch multiple agents for independent work, send them in a single message with multiple tool uses so they run concurrently.\n\nThe following skills are available for use with the Skill tool:\n\n- dataviz: Use this skill whenever you are about to create ANY chart, graph, plot, dashboard, or data visualization, in \n[elided Claude Code paragraph: 6210 chars, sha256:54dd00da99db]\n\nUserPromptSubmit hook additional context: HOOK-UserPromptSubmit-CONTEXT: synthetic context injected by the UserPromptSubmit hook.\n\nToday's date is 2026-11-23.",
+            "output_config": {
+              "effort": "medium"
+            }
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_stub_1",
+                "name": "ToolSearch",
+                "input": {
+                  "query": "select:WebFetch",
+                  "max_results": 5
+                }
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "toolu_stub_1",
+                "content": [
+                  {
+                    "type": "tool_reference",
+                    "tool_name": "WebFetch"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": "Tool loaded.",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              }
+            ]
+          }
+        ],
+        "system": [
+          {
+            "type": "text",
+            "text": "x-anthropic-billing-header: cc_version=2.1.330.e08; cc_entrypoint=sdk-cli;"
+          },
+          {
+            "type": "text",
+            "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          },
+          {
+            "type": "text",
+            "text": "[elided Claude Code system prompt block: 7061 chars, sha256:4f090b1b763c]",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tools": [
+          {
+            "name": "Agent",
+            "description": "[elided description: 3225 chars, sha256:75c12458f1f8]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "description": {
+                  "description": "A short (3-5 word) description of the task",
+                  "type": "string"
+                },
+                "prompt": {
+                  "description": "The task for the agent to perform",
+                  "type": "string"
+                },
+                "subagent_type": {
+                  "description": "The type of specialized agent to use for this task",
+                  "type": "string"
+                },
+                "model": {
+                  "description": "[elided description: 358 chars, sha256:532ef2fc3ef0]",
+                  "type": "string",
+                  "enum": [
+                    "sonnet",
+                    "opus",
+                    "haiku",
+                    "fable"
+                  ]
+                },
+                "effort": {
+                  "description": "[elided description: 341 chars, sha256:4117fe0f2257]",
+                  "type": "string",
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                  ]
+                },
+                "run_in_background": {
+                  "description": "[elided description: 286 chars, sha256:b4a7c95f0869]",
+                  "type": "boolean"
+                },
+                "isolation": {
+                  "description": "[elided description: 221 chars, sha256:2188ebd982e4]",
+                  "type": "string",
+                  "enum": [
+                    "worktree",
+                    "remote"
+                  ]
+                }
+              },
+              "required": [
+                "description",
+                "prompt"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "Bash",
+            "description": "[elided description: 2110 chars, sha256:f25c2899b543]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "command": {
+                  "description": "The command to execute",
+                  "type": "string"
+                },
+                "timeout": {
+                  "description": "Optional timeout in milliseconds (max 600000 for a foreground command)",
+                  "type": "number"
+                },
+                "description": {
+                  "description": "[elided description: 926 chars, sha256:7e54ad728290]",
+                  "type": "string"
+                },
+                "run_in_background": {
+                  "description": "[elided description: 181 chars, sha256:1cb421b5d38b]",
+                  "type": "boolean"
+                },
+                "dangerouslyDisableSandbox": {
+                  "description": "[elided description: 90 chars, sha256:ec23994e0dbb]",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "command"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "Edit",
+            "description": "[elided description: 360 chars, sha256:2eaaa8e08e0b]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "file_path": {
+                  "description": "The absolute path to the file to modify",
+                  "type": "string"
+                },
+                "old_string": {
+                  "description": "The text to replace",
+                  "type": "string"
+                },
+                "new_string": {
+                  "description": "The text to replace it with (must be different from old_string)",
+                  "type": "string"
+                },
+                "replace_all": {
+                  "description": "Replace all occurrences of old_string (default false)",
+                  "default": false,
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "file_path",
+                "old_string",
+                "new_string"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "ListAgents",
+            "description": "[elided description: 1433 chars, sha256:f55cb6d9e5f0]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "channel": {
+                  "description": "Not available in this build; leave unset.",
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "q": {
+                  "description": "Not available in this build; leave unset.",
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "cursor": {
+                  "description": "[elided description: 96 chars, sha256:6e8ef29f389e]",
+                  "type": "string",
+                  "maxLength": 256
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "Read",
+            "description": "[elided description: 790 chars, sha256:80fb15d2d15c]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "file_path": {
+                  "description": "The absolute path to the file to read",
+                  "type": "string"
+                },
+                "offset": {
+                  "description": "[elided description: 92 chars, sha256:a55994c8dc5b]",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "limit": {
+                  "description": "[elided description: 83 chars, sha256:32aa442b9d89]",
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "pages": {
+                  "description": "[elided description: 113 chars, sha256:98c222c16a72]",
+                  "type": "string"
+                },
+                "allow_large": {
+                  "description": "[elided description: 281 chars, sha256:5864e9d06976]",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "file_path"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "ReportFindings",
+            "description": "[elided description: 574 chars, sha256:59ea4187fcd5]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "level": {
+                  "description": "Effort level the review ran at",
+                  "type": "string",
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                  ]
+                },
+                "findings": {
+                  "description": "Verified findings, most-severe first; empty if none survived",
+                  "maxItems": 32,
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "file": {
+                        "description": "Repo-relative path of the file the finding is in",
+                        "type": "string"
+                      },
+                      "line": {
+                        "description": "1-indexed line the finding anchors to",
+                        "type": "integer",
+                        "minimum": -9007199254740991,
+                        "maximum": 9007199254740991
+                      },
+                      "summary": {
+                        "description": "Statement of the defect",
+                        "type": "string"
+                      },
+                      "short_summary": {
+                        "description": "[elided description: 96 chars, sha256:83b7eec338d7]",
+                        "type": "string",
+                        "maxLength": 60
+                      },
+                      "failure_scenario": {
+                        "description": "Concrete inputs/state → wrong output/crash",
+                        "type": "string"
+                      },
+                      "category": {
+                        "description": "[elided description: 110 chars, sha256:dc9dc4a8f845]",
+                        "type": "string",
+                        "maxLength": 40
+                      },
+                      "severity": {
+                        "description": "[elided description: 166 chars, sha256:9aa4f64fb402]",
+                        "type": "string",
+                        "enum": [
+                          "important",
+                          "pre_existing",
+                          "nit"
+                        ]
+                      },
+                      "verdict": {
+                        "description": "Set when a verify pass ran; absent on inline-only reviews",
+                        "type": "string",
+                        "enum": [
+                          "CONFIRMED",
+                          "PLAUSIBLE"
+                        ]
+                      },
+                      "outcome": {
+                        "description": "Set ONLY when re-reporting after applying fixes: what happened to this finding",
+                        "type": "string",
+                        "enum": [
+                          "fixed",
+                          "skipped",
+                          "no_change_needed"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "file",
+                      "summary",
+                      "failure_scenario"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "findings"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "ScheduleWakeup",
+            "description": "[elided description: 3396 chars, sha256:cd114f81a9f2]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "delaySeconds": {
+                  "description": "[elided description: 98 chars, sha256:336d8660b1e6]",
+                  "type": "number"
+                },
+                "reason": {
+                  "description": "[elided description: 136 chars, sha256:847ac4c68012]",
+                  "type": "string"
+                },
+                "prompt": {
+                  "description": "[elided description: 355 chars, sha256:a7431c3cf528]",
+                  "type": "string"
+                },
+                "stop": {
+                  "description": "[elided description: 154 chars, sha256:10e133589e04]",
+                  "type": "boolean"
+                },
+                "noop": {
+                  "description": "[elided description: 307 chars, sha256:de7f3ba87fc6]",
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "Skill",
+            "description": "[elided description: 1417 chars, sha256:5995de30f319]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "skill": {
+                  "description": "The name of a skill from the available-skills list. Do not guess names.",
+                  "type": "string"
+                },
+                "args": {
+                  "description": "Optional arguments for the skill",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "skill"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "ToolSearch",
+            "description": "[elided description: 952 chars, sha256:2b34428bc5e7]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "query": {
+                  "description": "[elided description: 99 chars, sha256:b90268e28a7e]",
+                  "type": "string"
+                },
+                "max_results": {
+                  "description": "Maximum number of results to return (default: 5)",
+                  "default": 5,
+                  "type": "number"
+                }
+              },
+              "required": [
+                "query",
+                "max_results"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "WebFetch",
+            "description": "[elided description: 469 chars, sha256:28495ef9c5ab]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "url": {
+                  "description": "The URL to fetch content from",
+                  "type": "string",
+                  "format": "uri"
+                },
+                "prompt": {
+                  "description": "The prompt to run on the fetched content",
+                  "type": "string"
+                },
+                "offset": {
+                  "description": "[elided description: 155 chars, sha256:31acc86ca1af]",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "url",
+                "prompt"
+              ],
+              "additionalProperties": false
+            },
+            "defer_loading": true
+          },
+          {
+            "name": "Workflow",
+            "description": "[elided description: 3496 chars, sha256:2d6f1471a1e6]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "script": {
+                  "description": "[elided description: 207 chars, sha256:569e4a2fdd64]",
+                  "type": "string",
+                  "maxLength": 524288
+                },
+                "name": {
+                  "description": "[elided description: 105 chars, sha256:a2bb766d620b]",
+                  "type": "string"
+                },
+                "description": {
+                  "description": "Ignored — set the workflow description in the script's `meta` block.",
+                  "type": "string"
+                },
+                "title": {
+                  "description": "Ignored — set the workflow title in the script's `meta` block.",
+                  "type": "string"
+                },
+                "args": {
+                  "description": "[elided description: 280 chars, sha256:2126b6037f6f]"
+                },
+                "scriptPath": {
+                  "description": "[elided description: 329 chars, sha256:2a9e4b7526b9]",
+                  "type": "string"
+                },
+                "resumeFromRunId": {
+                  "description": "[elided description: 568 chars, sha256:f410258a0e74]",
+                  "type": "string",
+                  "pattern": "^wf_[a-z0-9-]{6,}$"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "DeferredToolPlaceholder",
+            "description": "[elided description: 83 chars, sha256:97f0a3ed59c7]",
+            "input_schema": {
+              "type": "object",
+              "properties": {}
+            },
+            "defer_loading": true
+          },
+          {
+            "name": "Write",
+            "description": "[elided description: 240 chars, sha256:c5d31bd00109]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "file_path": {
+                  "description": "The absolute path to the file to write (must be absolute, not relative)",
+                  "type": "string"
+                },
+                "content": {
+                  "description": "The content to write to the file",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "file_path",
+                "content"
+              ],
+              "additionalProperties": false
+            }
+          }
+        ],
+        "metadata": {
+          "user_id": "{\"device_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"account_uuid\":\"\",\"session_id\":\"00000000-0000-4000-8000-000000000002\"}"
+        },
+        "max_tokens": 128000,
+        "thinking": {
+          "type": "adaptive",
+          "display": "omitted"
+        },
+        "context_management": {
+          "edits": [
+            {
+              "type": "clear_thinking_20251015",
+              "keep": "all"
+            }
+          ]
+        },
+        "output_config": {
+          "effort": "medium"
+        },
+        "stream": true
+      }
+    },
+    {
+      "method": "POST",
+      "url": "/v1/messages?beta=true",
+      "headers": {
+        "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,thinking-token-count-2026-05-13,advanced-tool-use-2025-11-20,effort-2025-11-24",
+        "anthropic-version": "2023-06-01",
+        "x-app": "cli",
+        "user-agent": "claude-cli/2.1.330 (external, sdk-cli)",
+        "x-claude-code-session-id": "00000000-0000-4000-8000-000000000002"
+      },
+      "body": {
+        "model": "claude-opus-5-5",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "<system-reminder>\n[elided Claude Code paragraph: 581 chars, sha256:e291f933f863]"
+              },
+              {
+                "type": "text",
+                "text": "Load the WebFetch tool, then read notes.txt, then reply DONE."
+              }
+            ]
+          },
+          {
+            "role": "system",
+            "content": "SessionStart hook additional context: HOOK-SessionStart-CONTEXT: synthetic context injected by the SessionStart hook.\n\n# Environment\n[elided Claude Code paragraph: 752 chars, sha256:38378d1aef1a]\n\nYou are powered by the model named Opus 5.5. The exact model ID is claude-opus-5-5. Assistant knowledge cutoff is June 2026.\n\nThe following deferred tools are now available via ToolSearch. Their schemas are NOT loaded — calling them directly will fail with InputValidationError. Use ToolSearch with query \"select:<name>[,<name>...]\" to load tool schemas before calling them:\nCronCreate\nCronDelete\nCronList\nEnterWorktree\nExitWorktree\nMonitor\nNotebookEdit\nSendMessage\nTaskStop\nWebFetch\nWebSearch\n\nAvailable agent types for the Agent tool:\n[elided Claude Code paragraph: 1501 chars, sha256:27e3fa22c41b]\n\nWhen you launch multiple agents for independent work, send them in a single message with multiple tool uses so they run concurrently.\n\nThe following skills are available for use with the Skill tool:\n\n- dataviz: Use this skill whenever you are about to create ANY chart, graph, plot, dashboard, or data visualization, in \n[elided Claude Code paragraph: 6210 chars, sha256:54dd00da99db]\n\nUserPromptSubmit hook additional context: HOOK-UserPromptSubmit-CONTEXT: synthetic context injected by the UserPromptSubmit hook.\n\nToday's date is 2026-11-23.",
+            "output_config": {
+              "effort": "medium"
+            }
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_stub_1",
+                "name": "ToolSearch",
+                "input": {
+                  "query": "select:WebFetch",
+                  "max_results": 5
+                }
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "toolu_stub_1",
+                "content": [
+                  {
+                    "type": "tool_reference",
+                    "tool_name": "WebFetch"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": "Tool loaded."
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_stub_2",
+                "name": "Read",
+                "input": {
+                  "file_path": "/workspace/project/notes.txt"
+                }
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "tool_use_id": "toolu_stub_2",
+                "type": "tool_result",
+                "content": "1\talpha line one\n2\talpha line two\n3\t"
+              }
+            ]
+          },
+          {
+            "role": "system",
+            "content": [
+              {
+                "type": "text",
+                "text": "PreToolUse:Read hook additional context: HOOK-PreToolUse-CONTEXT: synthetic context injected by the PreToolUse hook.\n\nPostToolUse:Read hook additional context: HOOK-PostToolUse-CONTEXT: synthetic context injected by the PostToolUse hook.",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              }
+            ]
+          }
+        ],
+        "system": [
+          {
+            "type": "text",
+            "text": "x-anthropic-billing-header: cc_version=2.1.330.e08; cc_entrypoint=sdk-cli;"
+          },
+          {
+            "type": "text",
+            "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          },
+          {
+            "type": "text",
+            "text": "[elided Claude Code system prompt block: 7061 chars, sha256:4f090b1b763c]",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tools": [
+          {
+            "name": "Agent",
+            "description": "[elided description: 3225 chars, sha256:75c12458f1f8]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "description": {
+                  "description": "A short (3-5 word) description of the task",
+                  "type": "string"
+                },
+                "prompt": {
+                  "description": "The task for the agent to perform",
+                  "type": "string"
+                },
+                "subagent_type": {
+                  "description": "The type of specialized agent to use for this task",
+                  "type": "string"
+                },
+                "model": {
+                  "description": "[elided description: 358 chars, sha256:532ef2fc3ef0]",
+                  "type": "string",
+                  "enum": [
+                    "sonnet",
+                    "opus",
+                    "haiku",
+                    "fable"
+                  ]
+                },
+                "effort": {
+                  "description": "[elided description: 341 chars, sha256:4117fe0f2257]",
+                  "type": "string",
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                  ]
+                },
+                "run_in_background": {
+                  "description": "[elided description: 286 chars, sha256:b4a7c95f0869]",
+                  "type": "boolean"
+                },
+                "isolation": {
+                  "description": "[elided description: 221 chars, sha256:2188ebd982e4]",
+                  "type": "string",
+                  "enum": [
+                    "worktree",
+                    "remote"
+                  ]
+                }
+              },
+              "required": [
+                "description",
+                "prompt"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "Bash",
+            "description": "[elided description: 2110 chars, sha256:f25c2899b543]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "command": {
+                  "description": "The command to execute",
+                  "type": "string"
+                },
+                "timeout": {
+                  "description": "Optional timeout in milliseconds (max 600000 for a foreground command)",
+                  "type": "number"
+                },
+                "description": {
+                  "description": "[elided description: 926 chars, sha256:7e54ad728290]",
+                  "type": "string"
+                },
+                "run_in_background": {
+                  "description": "[elided description: 181 chars, sha256:1cb421b5d38b]",
+                  "type": "boolean"
+                },
+                "dangerouslyDisableSandbox": {
+                  "description": "[elided description: 90 chars, sha256:ec23994e0dbb]",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "command"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "Edit",
+            "description": "[elided description: 360 chars, sha256:2eaaa8e08e0b]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "file_path": {
+                  "description": "The absolute path to the file to modify",
+                  "type": "string"
+                },
+                "old_string": {
+                  "description": "The text to replace",
+                  "type": "string"
+                },
+                "new_string": {
+                  "description": "The text to replace it with (must be different from old_string)",
+                  "type": "string"
+                },
+                "replace_all": {
+                  "description": "Replace all occurrences of old_string (default false)",
+                  "default": false,
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "file_path",
+                "old_string",
+                "new_string"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "ListAgents",
+            "description": "[elided description: 1433 chars, sha256:f55cb6d9e5f0]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "channel": {
+                  "description": "Not available in this build; leave unset.",
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "q": {
+                  "description": "Not available in this build; leave unset.",
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "cursor": {
+                  "description": "[elided description: 96 chars, sha256:6e8ef29f389e]",
+                  "type": "string",
+                  "maxLength": 256
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "Read",
+            "description": "[elided description: 790 chars, sha256:80fb15d2d15c]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "file_path": {
+                  "description": "The absolute path to the file to read",
+                  "type": "string"
+                },
+                "offset": {
+                  "description": "[elided description: 92 chars, sha256:a55994c8dc5b]",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "limit": {
+                  "description": "[elided description: 83 chars, sha256:32aa442b9d89]",
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "pages": {
+                  "description": "[elided description: 113 chars, sha256:98c222c16a72]",
+                  "type": "string"
+                },
+                "allow_large": {
+                  "description": "[elided description: 281 chars, sha256:5864e9d06976]",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "file_path"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "ReportFindings",
+            "description": "[elided description: 574 chars, sha256:59ea4187fcd5]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "level": {
+                  "description": "Effort level the review ran at",
+                  "type": "string",
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                  ]
+                },
+                "findings": {
+                  "description": "Verified findings, most-severe first; empty if none survived",
+                  "maxItems": 32,
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "file": {
+                        "description": "Repo-relative path of the file the finding is in",
+                        "type": "string"
+                      },
+                      "line": {
+                        "description": "1-indexed line the finding anchors to",
+                        "type": "integer",
+                        "minimum": -9007199254740991,
+                        "maximum": 9007199254740991
+                      },
+                      "summary": {
+                        "description": "Statement of the defect",
+                        "type": "string"
+                      },
+                      "short_summary": {
+                        "description": "[elided description: 96 chars, sha256:83b7eec338d7]",
+                        "type": "string",
+                        "maxLength": 60
+                      },
+                      "failure_scenario": {
+                        "description": "Concrete inputs/state → wrong output/crash",
+                        "type": "string"
+                      },
+                      "category": {
+                        "description": "[elided description: 110 chars, sha256:dc9dc4a8f845]",
+                        "type": "string",
+                        "maxLength": 40
+                      },
+                      "severity": {
+                        "description": "[elided description: 166 chars, sha256:9aa4f64fb402]",
+                        "type": "string",
+                        "enum": [
+                          "important",
+                          "pre_existing",
+                          "nit"
+                        ]
+                      },
+                      "verdict": {
+                        "description": "Set when a verify pass ran; absent on inline-only reviews",
+                        "type": "string",
+                        "enum": [
+                          "CONFIRMED",
+                          "PLAUSIBLE"
+                        ]
+                      },
+                      "outcome": {
+                        "description": "Set ONLY when re-reporting after applying fixes: what happened to this finding",
+                        "type": "string",
+                        "enum": [
+                          "fixed",
+                          "skipped",
+                          "no_change_needed"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "file",
+                      "summary",
+                      "failure_scenario"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "findings"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "ScheduleWakeup",
+            "description": "[elided description: 3396 chars, sha256:cd114f81a9f2]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "delaySeconds": {
+                  "description": "[elided description: 98 chars, sha256:336d8660b1e6]",
+                  "type": "number"
+                },
+                "reason": {
+                  "description": "[elided description: 136 chars, sha256:847ac4c68012]",
+                  "type": "string"
+                },
+                "prompt": {
+                  "description": "[elided description: 355 chars, sha256:a7431c3cf528]",
+                  "type": "string"
+                },
+                "stop": {
+                  "description": "[elided description: 154 chars, sha256:10e133589e04]",
+                  "type": "boolean"
+                },
+                "noop": {
+                  "description": "[elided description: 307 chars, sha256:de7f3ba87fc6]",
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "Skill",
+            "description": "[elided description: 1417 chars, sha256:5995de30f319]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "skill": {
+                  "description": "The name of a skill from the available-skills list. Do not guess names.",
+                  "type": "string"
+                },
+                "args": {
+                  "description": "Optional arguments for the skill",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "skill"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "ToolSearch",
+            "description": "[elided description: 952 chars, sha256:2b34428bc5e7]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "query": {
+                  "description": "[elided description: 99 chars, sha256:b90268e28a7e]",
+                  "type": "string"
+                },
+                "max_results": {
+                  "description": "Maximum number of results to return (default: 5)",
+                  "default": 5,
+                  "type": "number"
+                }
+              },
+              "required": [
+                "query",
+                "max_results"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "WebFetch",
+            "description": "[elided description: 469 chars, sha256:28495ef9c5ab]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "url": {
+                  "description": "The URL to fetch content from",
+                  "type": "string",
+                  "format": "uri"
+                },
+                "prompt": {
+                  "description": "The prompt to run on the fetched content",
+                  "type": "string"
+                },
+                "offset": {
+                  "description": "[elided description: 155 chars, sha256:31acc86ca1af]",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "url",
+                "prompt"
+              ],
+              "additionalProperties": false
+            },
+            "defer_loading": true
+          },
+          {
+            "name": "Workflow",
+            "description": "[elided description: 3496 chars, sha256:2d6f1471a1e6]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "script": {
+                  "description": "[elided description: 207 chars, sha256:569e4a2fdd64]",
+                  "type": "string",
+                  "maxLength": 524288
+                },
+                "name": {
+                  "description": "[elided description: 105 chars, sha256:a2bb766d620b]",
+                  "type": "string"
+                },
+                "description": {
+                  "description": "Ignored — set the workflow description in the script's `meta` block.",
+                  "type": "string"
+                },
+                "title": {
+                  "description": "Ignored — set the workflow title in the script's `meta` block.",
+                  "type": "string"
+                },
+                "args": {
+                  "description": "[elided description: 280 chars, sha256:2126b6037f6f]"
+                },
+                "scriptPath": {
+                  "description": "[elided description: 329 chars, sha256:2a9e4b7526b9]",
+                  "type": "string"
+                },
+                "resumeFromRunId": {
+                  "description": "[elided description: 568 chars, sha256:f410258a0e74]",
+                  "type": "string",
+                  "pattern": "^wf_[a-z0-9-]{6,}$"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "DeferredToolPlaceholder",
+            "description": "[elided description: 83 chars, sha256:97f0a3ed59c7]",
+            "input_schema": {
+              "type": "object",
+              "properties": {}
+            },
+            "defer_loading": true
+          },
+          {
+            "name": "Write",
+            "description": "[elided description: 240 chars, sha256:c5d31bd00109]",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "file_path": {
+                  "description": "The absolute path to the file to write (must be absolute, not relative)",
+                  "type": "string"
+                },
+                "content": {
+                  "description": "The content to write to the file",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "file_path",
+                "content"
+              ],
+              "additionalProperties": false
+            }
+          }
+        ],
+        "metadata": {
+          "user_id": "{\"device_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"account_uuid\":\"\",\"session_id\":\"00000000-0000-4000-8000-000000000002\"}"
+        },
+        "max_tokens": 128000,
+        "thinking": {
+          "type": "adaptive",
+          "display": "omitted"
+        },
+        "context_management": {
+          "edits": [
+            {
+              "type": "clear_thinking_20251015",
+              "keep": "all"
+            }
+          ]
+        },
+        "output_config": {
+          "effort": "medium"
+        },
+        "stream": true
+      }
+    }
+  ]
+}

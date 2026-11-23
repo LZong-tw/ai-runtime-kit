@@ -218,28 +218,33 @@ export function createGatewayClient({
     }
     return { endpoint: new URL(path, gatewayOrigin), options };
   };
-  const request = async (requestArgs) => {
+  // onWire sees the exact body after the outbound normalizers, the bytes the
+  // provider cache will key on. It is diagnostics only and cannot fail a send.
+  const request = async ({ onWire, ...requestArgs }) => {
     const { endpoint, options } = prepareRequest(requestArgs);
+    try { onWire?.(options.body); } catch { /* Observation never blocks forwarding. */ }
     return fetchImpl(endpoint, options);
   };
 
   return {
-    async requestFallback(body, headers, signal, { onFirstByte } = {}) {
+    async requestFallback(body, headers, signal, { onFirstByte, onWire } = {}) {
       const result = await request({
         body: JSON.stringify(body),
         headers: { ...headers, "content-type": "application/json" },
         path: "/v1/messages",
         signal,
+        onWire,
       });
       onFirstByte?.(result);
       return result;
     },
-    async requestMessage(body, headers, signal, { onFirstByte } = {}) {
+    async requestMessage(body, headers, signal, { onFirstByte, onWire } = {}) {
       const result = await request({
         body: JSON.stringify({ ...body, stream: false }),
         headers: { ...headers, "content-type": "application/json" },
         path: "/v1/messages",
         signal,
+        onWire,
       });
       onFirstByte?.(result);
       await assertUpstreamOk(result);

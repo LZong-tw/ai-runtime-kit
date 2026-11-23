@@ -44,7 +44,7 @@ import {
   stripServerToolFamily,
 } from "./server-tools.mjs";
 import { applyToolSearchBudget, canApplyToolSearchBudget } from "./tool-search.mjs";
-import { classifyCacheCohort, describeStablePrefix } from "./prefix-observability.mjs";
+import { classifyCacheCohort, createPrefixDriftTracker, describeStablePrefix } from "./prefix-observability.mjs";
 
 const MCP_PROTOCOL_VERSION = "2025-03-26";
 const MAX_QUERY_LENGTH = 1_000;
@@ -211,7 +211,7 @@ function responseHeader(headers, name) {
 
 export function createMessagesHandler({
   config, coreClient, policies, auditEmitter = null, auditContext = null, requestStore = null,
-  sseKeepalive = null,
+  sseKeepalive = null, prefixDriftTracker = createPrefixDriftTracker(),
 }) {
   const followMainModel = createMainModelFollower(config);
   return async (request, response, helpers) => {
@@ -235,14 +235,25 @@ export function createMessagesHandler({
     let upstreamStatus = null;
     let fallbackOutModel = null;
     let stopKeepalive = null;
+    let rawBody = null;
+    // Only the first upstream body of a turn carries the prefix the provider
+    // cached last turn. Later ones are the transport fallback, executor
+    // continuations or Advisor consults, each a different prompt by design.
+    let wireBody = null;
+    const onWire = (body) => { wireBody ??= body; };
+    // The drift tracker reuses these parsed bodies instead of parsing the
+    // bytes again; neither is mutated once built.
+    let inboundParsed = null;
+    let forwarded = null;
     const onFirstByte = (result) => {
       firstByteMs ??= elapsed();
       if (Number.isInteger(result?.status)) upstreamStatus = result.status;
     };
     try {
-      const rawBody = await helpers.readBody(request);
+      rawBody = await helpers.readBody(request);
       const parseStarted = elapsed();
       const parsedBody = parseJsonCopy(rawBody);
+      inboundParsed = parsedBody;
       const body = normalizeMessageSystemRoles(parsedBody);
       // Route bare Claude model ids before any forwarding decision: this
       // plugin owns POST /v1/messages, so CCR Router rules never see these
@@ -283,6 +294,7 @@ export function createMessagesHandler({
       const outboundRaw = outboundBody === parsedBody
         ? rawBody
         : Buffer.from(JSON.stringify(outboundBody), "utf8");
+      forwarded = { raw: outboundRaw, body: outboundBody };
       const compat = isRecord(outboundBody) && isConfiguredCompatibilityRequest(outboundBody, policies, config);
       const stablePrefix = describeStablePrefix(outboundBody);
       telemetry.stablePrefix = stablePrefix;
@@ -328,8 +340,10 @@ export function createMessagesHandler({
           response,
           signal,
           onAttempt: async (attempt) => {
-            if (attempt.phase === "start") currentAttempt = await audit.start(parseJsonCopy(attempt.body));
-            else await audit.response(currentAttempt, {
+            if (attempt.phase === "start") {
+              onWire(attempt.body);
+              currentAttempt = await audit.start(parseJsonCopy(attempt.body));
+            } else await audit.response(currentAttempt, {
               status: attempt.status,
               actual: actualFromHeaders(attempt.headers),
               headers: attempt.headers,
@@ -356,7 +370,7 @@ export function createMessagesHandler({
         onFirstByte,
         body: outboundBody,
         config,
-        coreClient,
+        coreClient: observeWire(coreClient, onWire),
         headers: request.headers,
         response,
         signal,
@@ -385,6 +399,16 @@ export function createMessagesHandler({
       const terminalEvent = await waitForResponseTerminal(telemetry, outcome);
       if (outcome === "completed" && terminalEvent === "close") outcome = "client_aborted";
       if (outcome === "completed" && terminalEvent === "error") outcome = "response_destroyed";
+      // Hashing waits until the response is done so it never delays dispatch.
+      let prefix = null;
+      try {
+        prefix = prefixDriftTracker?.observe({
+          headers: request?.headers,
+          inbound: inboundParsed ?? rawBody,
+          outbound: wireBody !== null && wireBody === forwarded?.raw ? forwarded.body : wireBody,
+        }) ?? null;
+      } catch { /* A diagnostic must not cost the request its log line or row. */ }
+      if (prefix !== null) telemetry.prefixDrift = prefix;
       logRequestTerminal({ outcome, response, telemetry });
       recordRequest(requestStore, {
         request_id: airkitRequestId,
@@ -402,9 +426,31 @@ export function createMessagesHandler({
         total_ms: elapsed(),
         transform_ms: transformMs,
         error_json: failure === null ? null : JSON.stringify(serializeError(failure)),
+        prefix_status: prefix?.status ?? null,
+        prefix_reason: prefix?.reason ?? null,
+        prefix_origin: prefix?.origin ?? null,
+        prefix_field: prefix?.field ?? null,
+        prefix_index: prefix?.index ?? null,
+        prefix_inbound_index: prefix?.inboundIndex ?? null,
+        prefix_messages: prefix?.messages ?? null,
+        cache_read_tokens: telemetry.promptCache?.cache_read_input_tokens ?? null,
+        cache_creation_tokens: telemetry.promptCache?.cache_creation_input_tokens ?? null,
+        cache_miss_tokens: telemetry.promptCache?.cache_miss_input_tokens ?? null,
       });
     }
   };
+}
+
+// The compatibility path reaches the provider through requestMessage and
+// requestFallback; the client reports the normalized body via onWire.
+function observeWire(coreClient, onWire) {
+  const observed = { ...coreClient };
+  for (const method of ["requestMessage", "requestFallback"]) {
+    if (typeof coreClient?.[method] !== "function") continue;
+    observed[method] = (body, headers, signal, options = {}) =>
+      coreClient[method](body, headers, signal, { ...options, onWire });
+  }
+  return observed;
 }
 
 function stripExcludedClientTools(body, config, policies) {
@@ -545,6 +591,7 @@ function logRequestTerminal({ outcome, response, telemetry }) {
       ...(decision.stablePrefix ? { stablePrefix: decision.stablePrefix } : {}),
       cacheCohort: classifyCacheCohort(telemetry.stablePrefix, telemetry.promptCache),
       ...(telemetry.promptCache ? { promptCache: telemetry.promptCache } : {}),
+      ...(telemetry.prefixDrift ? { prefixDrift: telemetry.prefixDrift } : {}),
     });
   } catch {
     // never let logging interfere with the request
