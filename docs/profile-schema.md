@@ -129,9 +129,15 @@ CCR 3 itself strips `default`/`background` from its gateway Router on load, so
 during the managed merge AirKit translates them three ways:
 
 1. Into each named profile's pinned `model`/`smallFastModel`.
-2. Into two managed gateway condition rules (`<prefix>route-background`:
-   `request.body.model starts-with claude-haiku` → background route;
-   `<prefix>route-default`: `starts-with claude-` → default route).
+2. Into managed condition rules in each named CCR profile's own
+   `routing.rules` — never the global `Router.rules`:
+   `<prefix>route-background` (`request.body.model starts-with claude-haiku-`
+   → background route), `<prefix>route-opus` (`claude-opus-` → opus route)
+   and `<prefix>route-default` (`claude-sonnet-` → sonnet route), each falling
+   back to the default route. A profile without the compatibility plugin
+   also gets `<prefix>route-launch`: `request.body.model == <launch id>` →
+   that mode's default, for a dedicated launch id such as `airkit-mode` that
+   no family prefix covers.
 3. Into the AirKit loopback adapter's `routes` config, plus a `launchModel` key
    holding `launch.claudeModel` with any `[1m]` suffix stripped. The adapter
    owns the child-facing `POST /v1/messages` endpoint and performs the
@@ -189,12 +195,25 @@ A followed subagent keeps the context window, output limit and auto-compact
 threshold Claude Code chose for its launch, not values matched to the followed
 model.
 
-This is what lets bare Claude model names — plain `claude` launched outside a
-named profile, including its constant claude-haiku background requests —
-resolve at the gateway instead of failing model resolution with
-`400 All target providers failed`. Foreign Router rules in the live config are
-preserved ahead of the managed rules; stale managed rules are replaced on
-every merge.
+This is what lets bare Claude model names — plain `claude`, including its
+constant claude-haiku background requests — resolve at the gateway instead of
+failing model resolution with `400 All target providers failed`.
+
+The rules are per profile because every managed profile claims the same
+Claude family prefixes. CCR 3.0.18 resolves a request's profile from the
+gateway key it presented (`x-auth-api-key-id` is set to the key's id,
+`profile:<profile id>`) and evaluates that profile's `routing.rules` before
+the global `Router.rules`. Every AirKit launch presents its own profile's key,
+so each profile's routes apply only to its own requests. A request that
+presents no AirKit profile key gets no AirKit route. When the rules were
+global, CCR took the first match, so with two profiles installed whichever
+launched last decided the other's traffic.
+
+Global `Router.rules` that you write yourself are left alone. They still apply
+to models no profile rule claims. A launch removes its own profile's global
+rules left by an older AirKit build, and removes orphans. Another installed
+profile's old global rules stay until that profile is launched again, so its
+already-installed entries keep working until then.
 
 During merge, AirKit creates a stable managed provider identity and intentionally
 sets its CCR `id` and `name` to the same value. CCR 3 resolves profile selectors

@@ -29,6 +29,7 @@ import {
   VERIFIED_NATIVE_COMPATIBILITY,
   AIRKIT_MODE_HEADER,
   airkitModeLabel,
+  claudeFamilyLane,
   isAirkitModeLabel,
   resolveCompatibilityPolicies,
   validateCompatibilityConfig,
@@ -329,6 +330,7 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
     }
   });
   const currentProfiles = currentConfig.profile?.profiles ?? [];
+  const baseRouteRules = buildManagedRouterRules(baseConfig, managedRouteSelector, managedPrefix);
   const managedProfiles = modes.map((mode) => {
     const modeConfig = modeConfigs.get(mode);
     const modeRoute = splitRoute(modeConfig?.Router?.default ?? "");
@@ -353,8 +355,18 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
       name: `AirKit ${profile.name} ${mode}`,
       // CCR's built-in Claude agent rule runs before Router.rules. AirKit owns
       // the provider-qualified route, so keep the profile active while opting
-      // out of that generic rewrite path.
-      routing: { enabled: true, enhancedRoute: false, rules: [] },
+      // out of that generic rewrite path. The rules are this profile's alone;
+      // see buildManagedRouterRules for why they are not global.
+      routing: {
+        enabled: true,
+        enhancedRoute: false,
+        rules: [
+          ...(compatibility
+            ? []
+            : buildLaunchModelRule(claudeModel, modeConfig.Router?.default, managedRouteSelector, managedPrefix)),
+          ...baseRouteRules,
+        ],
+      },
       scope: "ccr",
       settingsFile: join(configDir, "ccr-profiles", `${managedPrefix}${slug(mode)}`, "settings.json"),
       smallFastModel: managedRouteSelector(modeConfig.Router?.background ?? modeConfig.Router?.default),
@@ -371,9 +383,8 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
     config: {
       ...structuredClone(currentConfig),
       Providers: [...preservedProviders, ...managedProviders],
-      Router: mergeManagedRouter(
+      Router: pruneManagedRouter(
         currentConfig.Router,
-        buildManagedRouterRules(baseConfig, managedRouteSelector, managedPrefix),
         managedPrefix,
         { ownedPrefixes: ownedPrefixes.profiles, pruned: pruned.rules },
       ),
@@ -743,28 +754,28 @@ async function inspectPluginFreshness(currentConfig = {}, options = {}) {
 }
 
 // CCR 3 strips CCR 2 Router.default/background keys on load, so bare Claude
-// model names (plain `claude` outside a named profile, including its constant
-// claude-haiku background requests) would fail gateway model resolution.
-// Translate the profile's base routes into managed condition rules instead.
+// model names (plain `claude`, including its constant claude-haiku background
+// requests) would fail gateway model resolution. Translate the profile's base
+// routes into managed condition rules instead.
+//
+// The rules live in each managed CCR profile's own `routing.rules`, never in
+// the global Router.rules. Every managed profile claims the same claude-haiku-/
+// claude-opus-/claude-sonnet- prefixes, and CCR takes the first global match,
+// so two installed profiles' global rules decided each other's traffic by
+// whichever launched last. CCR resolves the request's profile from the
+// gateway key it presented (x-auth-api-key-id = `profile:<id>`) and evaluates
+// that profile's rules ahead of the global ones; every AirKit launch presents
+// its own profile's key, so profile rules scope each route to its owner.
 function buildManagedRouterRules(baseConfig, managedRouteSelector, managedPrefix) {
   const router = baseConfig.Router ?? {};
   if (!router.default) return [];
-  // CCR 3 canonicalizes a single-rewrite condition rule to carry BOTH the
-  // singular `rewrite` and the `rewrites` array (same as the omitted-`enabled`
-  // case). Emit the canonical pair, or every prepare sees getConfig drift,
-  // re-saves, and restarts the gateway on each launch.
-  const rule = (kind, name, prefix, route) => {
-    const rewrite = { key: "request.body.model", operation: "set", value: managedRouteSelector(route) };
-    return {
-      id: `${managedPrefix}route-${kind}`,
-      name,
-      type: "condition",
-      enabled: true,
-      condition: { left: "request.body.model", operator: "starts-with", right: prefix },
-      rewrite,
-      rewrites: [{ ...rewrite }],
-    };
-  };
+  const rule = (kind, name, prefix, route) => managedRouteRule(
+    managedPrefix,
+    kind,
+    name,
+    { left: "request.body.model", operator: "starts-with", right: prefix },
+    managedRouteSelector(route),
+  );
   return [
     rule("background", "AirKit background route", "claude-haiku-", router.background ?? router.default),
     rule("opus", "AirKit Opus route", "claude-opus-", router.opus ?? router.default),
@@ -772,7 +783,49 @@ function buildManagedRouterRules(baseConfig, managedRouteSelector, managedPrefix
   ];
 }
 
-function mergeManagedRouter(currentRouter, managedRules, managedPrefix, orphans = {}) {
+// A dedicated launch id (`airkit-mode`) matches no Claude family prefix. With
+// the compatibility plugin in front, the plugin rewrites it to the mode's
+// default before core sees it, so only profiles without one (a Codex profile)
+// get this rule; there nothing else would route it, and the gateway answers
+// 400 "All target providers failed". A family id used as the launch model is
+// already covered by the prefix rules.
+function buildLaunchModelRule(claudeModel, route, managedRouteSelector, managedPrefix) {
+  const bare = bareClaudeModelId(claudeModel);
+  if (!bare || !route || claudeFamilyLane(bare) !== null) return [];
+  return [managedRouteRule(
+    managedPrefix,
+    "launch",
+    "AirKit launch model route",
+    { left: "request.body.model", operator: "==", right: bare },
+    managedRouteSelector(route),
+  )];
+}
+
+// CCR 3 canonicalizes a single-rewrite condition rule to carry BOTH the
+// singular `rewrite` and the `rewrites` array (same as the omitted-`enabled`
+// case), for global and profile rules alike. Emit the canonical pair, or every
+// prepare sees getConfig drift, re-saves, and restarts the gateway on each
+// launch.
+function managedRouteRule(managedPrefix, kind, name, condition, value) {
+  const rewrite = { key: "request.body.model", operation: "set", value };
+  return {
+    id: `${managedPrefix}route-${kind}`,
+    name,
+    type: "condition",
+    enabled: true,
+    condition,
+    rewrite,
+    rewrites: [{ ...rewrite }],
+  };
+}
+
+// AirKit no longer writes global Router rules, so a launch only takes away:
+// its own rules from an older build, and orphans. Another installed profile's
+// global rules stay until that profile's own launch moves them into its CCR
+// profile — removing them here would leave its already-installed profile
+// entries with no routes at all. They cannot outrank this profile's routes,
+// because CCR evaluates profile rules before global ones.
+function pruneManagedRouter(currentRouter, managedPrefix, orphans = {}) {
   const router = structuredClone(currentRouter ?? {});
   const ownedPrefixes = orphans.ownedPrefixes ?? [];
   const preserved = (router.rules ?? []).filter((candidate) => {
@@ -783,7 +836,7 @@ function mergeManagedRouter(currentRouter, managedRules, managedPrefix, orphans 
       default: return true;
     }
   });
-  return { ...router, rules: [...preserved, ...managedRules] };
+  return { ...router, rules: preserved };
 }
 
 function bindManagedCompatibilityProvider(ccrConfig, managedProviderIds) {

@@ -479,17 +479,18 @@ node src/airkit.mjs doctor --profile openai-compatible-example
 ## Removing A Profile
 
 Deleting a profile from the catalog does not by itself remove what it wrote
-into CCR. Its Router rules and CCR agent profiles are namespaced by profile name
+into CCR. Its CCR agent profiles, which carry its routing rules, and any
+global Router rules left by an older build are namespaced by profile name
 (`airkit-<profile>-…`). Providers default to
 `airkit-provider-<profile>-<provider>`, but may declare an endpoint-owned
 `managedId` when the same provider identity must be shared across profiles.
 Every managed merge preserves ids outside the profile being prepared.
 
-Leftover rules are not harmless. CCR evaluates Router rules in order and takes
-the first match, so a rule left behind by an older build — for example one
-matching the bare prefix `claude-` — outranks the correctly scoped
-`claude-opus-` and `claude-sonnet-` rules that follow it, and the routes that
-appear correct in the config never run.
+Leftover global rules are not harmless. CCR evaluates the global Router rules
+in order and takes the first match, so a rule left behind by an older build —
+for example one matching the bare prefix `claude-` — catches every request
+whose own profile rules do not claim the model, including requests from
+other profiles.
 
 The next launch removes managed state whose profile is present in neither the
 loaded catalog nor `<configDir>/ccr`, and prints what it removed:

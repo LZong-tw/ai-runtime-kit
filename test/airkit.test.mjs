@@ -8,6 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import * as airkitRuntime from "../src/airkit.mjs";
+import { resolveCcrRoute } from "./helpers/ccr-routing.mjs";
 import * as ccrVerifier from "../scripts/verify-ccr3-e2e.mjs";
 import {
   buildHeartbeatResponse,
@@ -540,7 +541,7 @@ test("CCR 3 managed profiles pin the mode's Sonnet and Opus lanes", () => {
   });
 });
 
-test("CCR 3 merge translates base routes into gateway rules for bare Claude models", () => {
+test("CCR 3 merge translates base routes into profile rules for bare Claude models", () => {
   const current = {
     Router: {
       builtInRules: { "claude-code": { enabled: true } },
@@ -558,15 +559,23 @@ test("CCR 3 merge translates base routes into gateway rules for bare Claude mode
 
   assert.deepEqual(
     merged.config.Router.rules.map(({ id }) => id),
-    [
-      "unrelated-rule",
-      "airkit-launch-example-route-background",
-      "airkit-launch-example-route-opus",
-      "airkit-launch-example-route-default",
-    ],
-    "foreign rules stay first; stale managed rules are replaced",
+    ["unrelated-rule"],
+    "foreign global rules stay; the profile's own global rules from an older build are removed",
   );
-  const [, background, opus, sonnet] = merged.config.Router.rules;
+  const managedProfiles = merged.config.profile.profiles.filter(({ id }) => id.startsWith("airkit-launch-example-"));
+  assert.ok(managedProfiles.length > 1);
+  for (const profile of managedProfiles) {
+    assert.deepEqual(
+      profile.routing.rules.map(({ id }) => id),
+      [
+        "airkit-launch-example-route-background",
+        "airkit-launch-example-route-opus",
+        "airkit-launch-example-route-default",
+      ],
+      `${profile.id} carries the base routes itself`,
+    );
+  }
+  const [background, opus, sonnet] = managedProfiles[0].routing.rules;
   assert.deepEqual(background.condition, {
     left: "request.body.model",
     operator: "starts-with",
@@ -607,16 +616,16 @@ test("CCR 3 merge translates base routes into gateway rules for bare Claude mode
   assert.equal(background.type, "condition");
   assert.equal(background.enabled, true);
   assert.deepEqual(merged.config.Router.builtInRules, { "claude-code": { enabled: true } });
-  assert.deepEqual(
-    merged.config.profile.profiles.find(({ id }) => id === "airkit-launch-example-auto").routing,
-    { enabled: true, enhancedRoute: false, rules: [] },
-  );
+  const autoRouting = merged.config.profile.profiles.find(({ id }) => id === "airkit-launch-example-auto").routing;
+  assert.equal(autoRouting.enabled, true);
+  assert.equal(autoRouting.enhancedRoute, false);
   assert.deepEqual(merged.config.Router.fallback, { mode: "off", models: [], retryCount: 1 });
 
   const repeated = airkitRuntime.buildCcr3ManagedConfig(launchCatalog(), "launch-example", merged.config, {
     configDir: "/tmp/airkit-config",
   });
   assert.deepEqual(repeated.config.Router, merged.config.Router, "router merge is idempotent");
+  assert.deepEqual(repeated.config.profile, merged.config.profile, "profile rules are idempotent");
 });
 
 test("managed providers can use an endpoint-owned CCR id instead of the profile namespace", () => {
@@ -635,7 +644,7 @@ test("managed providers can use an endpoint-owned CCR id instead of the profile 
     undefined,
   );
   assert.equal(
-    merged.config.Router.rules.at(-1).rewrites[0].value,
+    merged.config.profile.profiles.find(({ id }) => id === "airkit-launch-example-auto").routing.rules.at(-1).rewrites[0].value,
     "airkit-provider-shared-demo/steady-coder",
   );
 });
@@ -816,9 +825,10 @@ test("outer compatibility routing and managed core rules preserve unknown Claude
     coreClient: {
       async forwardRaw({ body }) {
         const request = JSON.parse(body.toString());
-        const matchingRule = merged.config.Router.rules.find((rule) =>
-          request.model.startsWith(rule.condition.right));
-        coreModels.push(matchingRule ? matchingRule.rewrites[0].value : request.model);
+        coreModels.push(resolveCcrRoute(merged.config, {
+          model: request.model,
+          profileId: "airkit-launch-example-auto",
+        }).model);
       },
     },
     policies: {},
