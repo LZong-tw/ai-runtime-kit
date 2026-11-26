@@ -129,9 +129,15 @@ CCR 3 itself strips `default`/`background` from its gateway Router on load, so
 during the managed merge AirKit translates them three ways:
 
 1. Into each named profile's pinned `model`/`smallFastModel`.
-2. Into two managed gateway condition rules (`<prefix>route-background`:
-   `request.body.model starts-with claude-haiku` → background route;
-   `<prefix>route-default`: `starts-with claude-` → default route).
+2. Into managed condition rules in each named CCR profile's own
+   `routing.rules` — never the global `Router.rules`:
+   `<prefix>route-background` (`request.body.model starts-with claude-haiku-`
+   → background route), `<prefix>route-opus` (`claude-opus-` → opus route)
+   and `<prefix>route-default` (`claude-sonnet-` → sonnet route), each falling
+   back to the default route. A profile without the compatibility plugin
+   also gets `<prefix>route-launch`: `request.body.model == <launch id>` →
+   that mode's default, for a dedicated launch id such as `airkit-mode` that
+   no family prefix covers.
 3. Into the AirKit loopback adapter's `routes` config, plus a `launchModel` key
    holding `launch.claudeModel` with any `[1m]` suffix stripped. The adapter
    owns the child-facing `POST /v1/messages` endpoint and performs the
@@ -189,12 +195,25 @@ A followed subagent keeps the context window, output limit and auto-compact
 threshold Claude Code chose for its launch, not values matched to the followed
 model.
 
-This is what lets bare Claude model names — plain `claude` launched outside a
-named profile, including its constant claude-haiku background requests —
-resolve at the gateway instead of failing model resolution with
-`400 All target providers failed`. Foreign Router rules in the live config are
-preserved ahead of the managed rules; stale managed rules are replaced on
-every merge.
+This is what lets bare Claude model names — plain `claude`, including its
+constant claude-haiku background requests — resolve at the gateway instead of
+failing model resolution with `400 All target providers failed`.
+
+The rules are per profile because every managed profile claims the same
+Claude family prefixes. CCR 3.0.18 resolves a request's profile from the
+gateway key it presented (`x-auth-api-key-id` is set to the key's id,
+`profile:<profile id>`) and evaluates that profile's `routing.rules` before
+the global `Router.rules`. Every AirKit launch presents its own profile's key,
+so each profile's routes apply only to its own requests. A request that
+presents no AirKit profile key gets no AirKit route. When the rules were
+global, CCR took the first match, so with two profiles installed whichever
+launched last decided the other's traffic.
+
+Global `Router.rules` that you write yourself are left alone. They still apply
+to models no profile rule claims. A launch removes its own profile's global
+rules left by an older AirKit build, and removes orphans. Another installed
+profile's old global rules stay until that profile is launched again, so its
+already-installed entries keep working until then.
 
 During merge, AirKit creates a stable managed provider identity and intentionally
 sets its CCR `id` and `name` to the same value. CCR 3 resolves profile selectors
@@ -205,6 +224,63 @@ to an endpoint-owned value such as `airkit-provider-web-litellm`; AirKit removes
 that field from the generated CCR object and uses the value for routes and
 provider identity. Without it, the default remains
 `airkit-provider-<profile>-<provider>`.
+
+## Codex ChatGPT subscription provider
+
+A provider can use the ChatGPT subscription that the Codex CLI is logged in
+with, instead of an API key. It sends your ChatGPT account credentials to
+`chatgpt.com`, and the usage counts against that subscription's Codex quota,
+not an API bill.
+
+```json
+{
+  "name": "codex",
+  "type": "openai_responses",
+  "api_base_url": "https://chatgpt.com/backend-api/codex/responses",
+  "api_key": "airkit-codex-auth-json",
+  "models": ["gpt-6.1-sol"]
+}
+```
+
+- `api_key` must be the literal marker `airkit-codex-auth-json`. It is not a
+  credential; it tells AirKit to authenticate the provider from the Codex
+  login file.
+- `type` must be `openai_responses` and `api_base_url` must be exactly the URL
+  above (the path is `/responses`, not `/v1/responses`). Catalog validation
+  rejects anything else, and `AIRCLAUDE_PROVIDER_BASE_URLS` /
+  `AIRCLAUDE_RESPONSES_PROVIDER_BASE_URL` overrides cannot move it.
+- During the managed merge AirKit adds a CCR wrapper plugin,
+  `airkit-codex-auth`, whose only job is to load
+  `src/compat/codex-auth-gateway.mjs` into CCR's core gateway with the
+  `core-gateway-config` permission. That hook reads `$CODEX_HOME/auth.json`
+  (default `~/.codex/auth.json`), caches it by file identity and mtime, and
+  sets `Authorization`, `chatgpt-account-id`, `originator: codex_cli_rs` and
+  `OpenAI-Beta: responses=experimental` on requests to
+  `https://chatgpt.com/backend-api/codex/`. It also forces `store: false`,
+  `stream: true`, a non-empty `instructions`, and
+  `include: ["reasoning.encrypted_content"]`, which that backend requires.
+- AirKit only reads `auth.json`. It never refreshes the token, never writes the
+  file, and never takes `auth.json.lock`; the Codex CLI owns the refresh-token
+  rotation. A missing, unreadable, non-ChatGPT or expired login fails the
+  request with a message telling you to run `codex` once. When the profile runs
+  the compatibility middleware, an upstream 401 gets the same hint appended
+  after the upstream text; without it (a profile with no
+  `airkit-compatibility` plugin) the upstream 401 arrives verbatim. There is no
+  fallback to another provider on Codex auth or quota failures, and catalog
+  validation rejects a `transportFallbacks` entry that starts from a Codex
+  provider.
+- The marker deliberately differs from CCR's own `ccr-local-agent-login`, so
+  CCR's built-in Codex OAuth plugin, which does refresh, never attaches to this
+  provider. The marker is the provider's only Codex identity: any other
+  provider whose `api_base_url` points at the Codex backend is rejected, and a
+  resolved API key never replaces the marker.
+- The auth file location and the upstream prefix are fixed in code; the
+  persisted CCR plugin entry only names the Codex providers.
+- Token values never reach logs: the hook's error strings never include file
+  contents, and request-error evidence drops `authorization` and
+  `chatgpt-account-id`.
+- `doctor --profile` reports a `codexAuth` check with the file path, the token
+  expiry and the failure reason, never the token.
 
 ## Compatibility declaration opt-in
 

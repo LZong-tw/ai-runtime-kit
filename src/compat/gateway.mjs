@@ -25,6 +25,7 @@ import { claimSseStream, sseKeepaliveOwnsStream, upstreamSseError, writeSseError
 import { normalizeResponsesThinkingHistory } from "./reasoning-history.mjs";
 import { normalizeRestrictedThinking } from "./thinking-restrictions.mjs";
 import { hoistToolResultImages } from "./tool-result-images.mjs";
+import { codexAuthFailureMessage, isCodexAuthProvider } from "./codex-auth-gateway.mjs";
 import {
   ADVISOR_BLOCKED_TEXT,
   NON_CLAUDE_ADVISOR_PROMPT,
@@ -193,6 +194,10 @@ export function createGatewayClient({
   const gatewayOrigin = normalizeGatewayOrigin(origin);
   const providerBindings = structuredClone(providers);
   const thinkingRestricted = [...restrictedThinkingProviders];
+  const codexProviders = providerBindings
+    .filter(isCodexAuthProvider)
+    .flatMap((provider) => [provider.id, provider.name])
+    .filter((name) => typeof name === "string" && name !== "");
   const normalizeOutbound = (body) => normalizeRestrictedThinking(
     normalizeResponsesThinkingHistory(hoistToolResultImages(body, providerBindings), providerBindings),
     providerBindings,
@@ -223,7 +228,7 @@ export function createGatewayClient({
   const request = async ({ onWire, ...requestArgs }) => {
     const { endpoint, options } = prepareRequest(requestArgs);
     try { onWire?.(options.body); } catch { /* Observation never blocks forwarding. */ }
-    return fetchImpl(endpoint, options);
+    return annotateCodexLoginRejection(await fetchImpl(endpoint, options), codexProviders);
   };
 
   return {
@@ -291,6 +296,7 @@ export function createGatewayClient({
         result = retry.response ?? createTimeoutResponse();
         await onAttempt?.({ phase: "response", body: fallback.body, status: result.status, headers: result.headers });
       }
+      result = await annotateCodexLoginRejection(result, codexProviders);
       const error = rawResponseError(result);
       onResponse?.({ fallbackUsed, headers: result.headers, status: result.status, error });
       await pipeCoreResponse(result, response, signal, responseTransformFactory?.({ body }), error);
@@ -300,6 +306,33 @@ export function createGatewayClient({
       await pipeCoreResponse(result, response, signal);
     },
   };
+}
+
+// A revoked ChatGPT login comes back from the gateway as a bare upstream 401
+// ("All target providers failed"). The codex auth hook cannot add to it: the
+// gateway retries once and then returns the original response. Name the fix
+// here instead, keeping the upstream message verbatim ahead of the hint. Only
+// a JSON error that names a codex provider is touched; anything else is
+// replayed byte for byte.
+async function annotateCodexLoginRejection(response, codexProviders) {
+  if (codexProviders.length === 0 || response?.status !== 401 || response.body === null) return response;
+  const bytes = Buffer.from(await response.arrayBuffer());
+  const headers = new Headers(response.headers);
+  headers.delete("content-length");
+  headers.delete("content-encoding");
+  const replay = (body) => new Response(body, { status: response.status, statusText: response.statusText, headers });
+  let parsed;
+  try {
+    parsed = JSON.parse(bytes.toString("utf8"));
+  } catch {
+    return replay(bytes);
+  }
+  const error = parsed?.error;
+  if (!isRecord(error) || typeof error.message !== "string") return replay(bytes);
+  const evidence = JSON.stringify(error);
+  if (!codexProviders.some((name) => evidence.includes(JSON.stringify(name)))) return replay(bytes);
+  error.message = `${error.message} [AirKit] ${codexAuthFailureMessage("rejected")}`;
+  return replay(JSON.stringify(parsed));
 }
 
 function shouldRetryRawFallback(result, fallback) {

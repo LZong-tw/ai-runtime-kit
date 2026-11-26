@@ -16,9 +16,20 @@ import {
 } from "./codex-takeover-guard.mjs";
 import { repairCodexTranscriptGuard } from "./codex-transcript-guard.mjs";
 import {
+  CODEX_API_BASE_URL,
+  CODEX_AUTH_API_KEY,
+  CODEX_AUTH_PLUGIN_ID,
+  codexAuthFailureMessage,
+  defaultCodexAuthFile,
+  describeCodexAuth,
+  isCodexAuthProvider,
+  isCodexBackendUrl,
+} from "./compat/codex-auth-gateway.mjs";
+import {
   VERIFIED_NATIVE_COMPATIBILITY,
   AIRKIT_MODE_HEADER,
   airkitModeLabel,
+  claudeFamilyLane,
   isAirkitModeLabel,
   resolveCompatibilityPolicies,
   validateCompatibilityConfig,
@@ -65,6 +76,7 @@ const compatibilityPluginId = "airkit-compatibility";
 const compatibilityPluginModule = join(here, "compat", "plugin.mjs");
 const auditUiPluginId = "airkit-audit-ui";
 const auditUiPluginModule = join(here, "audit", "ccr-plugin.mjs");
+const codexAuthPluginModule = join(here, "compat", "codex-auth-gateway.mjs");
 export const RUNTIME_REQUIREMENTS = Object.freeze({
   claudeCode: ">=2.1.208",
   claudeCodeRouter: ">=3.0.18 <4",
@@ -150,6 +162,9 @@ function resolveProviderBaseUrls(value, providers) {
   for (const [providerName, baseUrl] of Object.entries(parsed)) {
     const provider = providerByName.get(providerName);
     if (!provider) throw new Error(`provider base URLs references unknown provider: ${providerName}`);
+    if (isCodexAuthProvider(provider)) {
+      throw new Error(`provider base URL for ${providerName} cannot be overridden: it carries the ChatGPT login and only talks to ${CODEX_API_BASE_URL}`);
+    }
     if (typeof baseUrl !== "string" || baseUrl.trim() === "") {
       throw new Error(`provider base URL for ${providerName} must be a non-empty string`);
     }
@@ -218,7 +233,8 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
   const managedProviderEntries = baseConfig.Providers.map((provider) => {
     const id = managedProviderId(profile, provider);
     const { managedId: _managedId, ...providerConfig } = provider;
-    const isActiveProvider = provider.name === activeProviderName;
+    // The ChatGPT login must never follow a base URL override somewhere else.
+    const isActiveProvider = provider.name === activeProviderName && !isCodexAuthProvider(provider);
     const scalarProviderBaseUrl = isActiveProvider && provider.type === "openai_chat_completions"
       ? providerBaseUrl
       : isActiveProvider && provider.type === "anthropic_messages"
@@ -233,7 +249,12 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
         api_base_url: providerBaseUrls[provider.name] || scalarProviderBaseUrl || provider.api_base_url,
         id,
         name: id,
-        api_key: options.apiKeys?.[provider.name] ?? provider.api_key,
+        // A resolved credential must never replace the Codex marker: the
+        // auth hook is installed by the marker, so a swapped key would reach
+        // chatgpt.com with no hook in front of it.
+        api_key: isCodexAuthProvider(provider)
+          ? provider.api_key
+          : options.apiKeys?.[provider.name] ?? provider.api_key,
       },
     };
   });
@@ -275,6 +296,7 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
       permissions: ["trusted-code", "apps", "http-backends"],
       config: {},
     },
+    ...codexAuthCcrPlugins(managedProviders),
   ];
   const managedProviderNames = new Set(managedProviderEntries.map((entry) => entry.sourceName));
   const managedProviderIdSet = new Set(managedProviders.map((provider) => provider.id));
@@ -308,6 +330,7 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
     }
   });
   const currentProfiles = currentConfig.profile?.profiles ?? [];
+  const baseRouteRules = buildManagedRouterRules(baseConfig, managedRouteSelector, managedPrefix);
   const managedProfiles = modes.map((mode) => {
     const modeConfig = modeConfigs.get(mode);
     const modeRoute = splitRoute(modeConfig?.Router?.default ?? "");
@@ -332,8 +355,18 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
       name: `AirKit ${profile.name} ${mode}`,
       // CCR's built-in Claude agent rule runs before Router.rules. AirKit owns
       // the provider-qualified route, so keep the profile active while opting
-      // out of that generic rewrite path.
-      routing: { enabled: true, enhancedRoute: false, rules: [] },
+      // out of that generic rewrite path. The rules are this profile's alone;
+      // see buildManagedRouterRules for why they are not global.
+      routing: {
+        enabled: true,
+        enhancedRoute: false,
+        rules: [
+          ...(compatibility
+            ? []
+            : buildLaunchModelRule(claudeModel, modeConfig.Router?.default, managedRouteSelector, managedPrefix)),
+          ...baseRouteRules,
+        ],
+      },
       scope: "ccr",
       settingsFile: join(configDir, "ccr-profiles", `${managedPrefix}${slug(mode)}`, "settings.json"),
       smallFastModel: managedRouteSelector(modeConfig.Router?.background ?? modeConfig.Router?.default),
@@ -350,9 +383,8 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
     config: {
       ...structuredClone(currentConfig),
       Providers: [...preservedProviders, ...managedProviders],
-      Router: mergeManagedRouter(
+      Router: pruneManagedRouter(
         currentConfig.Router,
-        buildManagedRouterRules(baseConfig, managedRouteSelector, managedPrefix),
         managedPrefix,
         { ownedPrefixes: ownedPrefixes.profiles, pruned: pruned.rules },
       ),
@@ -722,28 +754,28 @@ async function inspectPluginFreshness(currentConfig = {}, options = {}) {
 }
 
 // CCR 3 strips CCR 2 Router.default/background keys on load, so bare Claude
-// model names (plain `claude` outside a named profile, including its constant
-// claude-haiku background requests) would fail gateway model resolution.
-// Translate the profile's base routes into managed condition rules instead.
+// model names (plain `claude`, including its constant claude-haiku background
+// requests) would fail gateway model resolution. Translate the profile's base
+// routes into managed condition rules instead.
+//
+// The rules live in each managed CCR profile's own `routing.rules`, never in
+// the global Router.rules. Every managed profile claims the same claude-haiku-/
+// claude-opus-/claude-sonnet- prefixes, and CCR takes the first global match,
+// so two installed profiles' global rules decided each other's traffic by
+// whichever launched last. CCR resolves the request's profile from the
+// gateway key it presented (x-auth-api-key-id = `profile:<id>`) and evaluates
+// that profile's rules ahead of the global ones; every AirKit launch presents
+// its own profile's key, so profile rules scope each route to its owner.
 function buildManagedRouterRules(baseConfig, managedRouteSelector, managedPrefix) {
   const router = baseConfig.Router ?? {};
   if (!router.default) return [];
-  // CCR 3 canonicalizes a single-rewrite condition rule to carry BOTH the
-  // singular `rewrite` and the `rewrites` array (same as the omitted-`enabled`
-  // case). Emit the canonical pair, or every prepare sees getConfig drift,
-  // re-saves, and restarts the gateway on each launch.
-  const rule = (kind, name, prefix, route) => {
-    const rewrite = { key: "request.body.model", operation: "set", value: managedRouteSelector(route) };
-    return {
-      id: `${managedPrefix}route-${kind}`,
-      name,
-      type: "condition",
-      enabled: true,
-      condition: { left: "request.body.model", operator: "starts-with", right: prefix },
-      rewrite,
-      rewrites: [{ ...rewrite }],
-    };
-  };
+  const rule = (kind, name, prefix, route) => managedRouteRule(
+    managedPrefix,
+    kind,
+    name,
+    { left: "request.body.model", operator: "starts-with", right: prefix },
+    managedRouteSelector(route),
+  );
   return [
     rule("background", "AirKit background route", "claude-haiku-", router.background ?? router.default),
     rule("opus", "AirKit Opus route", "claude-opus-", router.opus ?? router.default),
@@ -751,7 +783,49 @@ function buildManagedRouterRules(baseConfig, managedRouteSelector, managedPrefix
   ];
 }
 
-function mergeManagedRouter(currentRouter, managedRules, managedPrefix, orphans = {}) {
+// A dedicated launch id (`airkit-mode`) matches no Claude family prefix. With
+// the compatibility plugin in front, the plugin rewrites it to the mode's
+// default before core sees it, so only profiles without one (a Codex profile)
+// get this rule; there nothing else would route it, and the gateway answers
+// 400 "All target providers failed". A family id used as the launch model is
+// already covered by the prefix rules.
+function buildLaunchModelRule(claudeModel, route, managedRouteSelector, managedPrefix) {
+  const bare = bareClaudeModelId(claudeModel);
+  if (!bare || !route || claudeFamilyLane(bare) !== null) return [];
+  return [managedRouteRule(
+    managedPrefix,
+    "launch",
+    "AirKit launch model route",
+    { left: "request.body.model", operator: "==", right: bare },
+    managedRouteSelector(route),
+  )];
+}
+
+// CCR 3 canonicalizes a single-rewrite condition rule to carry BOTH the
+// singular `rewrite` and the `rewrites` array (same as the omitted-`enabled`
+// case), for global and profile rules alike. Emit the canonical pair, or every
+// prepare sees getConfig drift, re-saves, and restarts the gateway on each
+// launch.
+function managedRouteRule(managedPrefix, kind, name, condition, value) {
+  const rewrite = { key: "request.body.model", operation: "set", value };
+  return {
+    id: `${managedPrefix}route-${kind}`,
+    name,
+    type: "condition",
+    enabled: true,
+    condition,
+    rewrite,
+    rewrites: [{ ...rewrite }],
+  };
+}
+
+// AirKit no longer writes global Router rules, so a launch only takes away:
+// its own rules from an older build, and orphans. Another installed profile's
+// global rules stay until that profile's own launch moves them into its CCR
+// profile — removing them here would leave its already-installed profile
+// entries with no routes at all. They cannot outrank this profile's routes,
+// because CCR evaluates profile rules before global ones.
+function pruneManagedRouter(currentRouter, managedPrefix, orphans = {}) {
   const router = structuredClone(currentRouter ?? {});
   const ownedPrefixes = orphans.ownedPrefixes ?? [];
   const preserved = (router.rules ?? []).filter((candidate) => {
@@ -762,7 +836,7 @@ function mergeManagedRouter(currentRouter, managedRules, managedPrefix, orphans 
       default: return true;
     }
   });
-  return { ...router, rules: [...preserved, ...managedRules] };
+  return { ...router, rules: preserved };
 }
 
 function bindManagedCompatibilityProvider(ccrConfig, managedProviderIds) {
@@ -1000,6 +1074,7 @@ export async function exportOssRelease({ outDir }) {
   for (const module of [
     "activity.mjs",
     "advisor-policy.mjs",
+    "codex-auth-gateway.mjs",
     "config.mjs",
     "diagnostics.mjs",
     "effort.mjs",
@@ -1913,6 +1988,9 @@ export async function doctorProfile(catalog, profileName, options = {}) {
   const runtime = {
     ccr: await checkCcrAvailability(profile, options.commandExists ?? commandExistsOnPath),
     compatibility: compatibilityCapabilityStatus(profile.ccr),
+    ...((profile.ccr?.Providers ?? []).some(isCodexAuthProvider)
+      ? { codexAuth: codexAuthStatus(options.codexAuthFile ?? defaultCodexAuthFile(options.env ?? process.env)) }
+      : {}),
     context: {
       ok: true,
       ...buildContextObservability({
@@ -1935,6 +2013,17 @@ export async function doctorProfile(catalog, profileName, options = {}) {
     .map((file) => file.reason);
 
   return { ok: failures.length === 0, profile: plan.profile, files, runtime, failures };
+}
+
+// Doctor reports the Codex login state only: never the token, never a refresh.
+function codexAuthStatus(authFile) {
+  const state = describeCodexAuth(authFile);
+  return {
+    ok: state.ok,
+    path: authFile,
+    ...(state.expiresAt == null ? {} : { expiresAt: new Date(state.expiresAt).toISOString() }),
+    ...(state.ok ? {} : { reason: codexAuthFailureMessage(state.reason) }),
+  };
 }
 
 function findProfile(catalog, profileName) {
@@ -2159,8 +2248,51 @@ function validateCcr(profileName, ccr) {
     if (typeof provider.api_key === "string" && provider.api_key.startsWith("sk-")) {
       throw new Error(`profile "${profileName}" embeds a secret-looking API key`);
     }
+    if (isCodexAuthProvider(provider)
+      && (provider.type !== "openai_responses" || provider.api_base_url !== CODEX_API_BASE_URL)) {
+      throw new Error(`profile "${profileName}" provider "${provider.name}" uses the Codex ChatGPT login, so it must be type openai_responses with api_base_url ${CODEX_API_BASE_URL}`);
+    }
+    // Without the marker, the URL-keyed auth hook would still attach the
+    // ChatGPT login, and CCR's "ccr-local-agent-login" would also refresh it.
+    if (!isCodexAuthProvider(provider) && isCodexBackendUrl(provider.api_base_url)) {
+      throw new Error(`profile "${profileName}" provider "${provider.name}" targets the Codex backend, so its api_key must be the marker "${CODEX_AUTH_API_KEY}"`);
+    }
+  }
+  // Codex auth and quota failures surface as errors; they never divert the
+  // request to another provider.
+  const codexProviderNames = new Set((ccr.Providers ?? []).filter(isCodexAuthProvider).map(({ name }) => name));
+  for (const fallback of configuredCompatibility(ccr)?.transportFallbacks ?? []) {
+    if (codexProviderNames.has(fallback?.from?.provider)) {
+      throw new Error(`profile "${profileName}" transportFallbacks cannot start from Codex provider "${fallback.from.provider}"`);
+    }
   }
   validateConfiguredCompatibility(ccr);
+}
+
+// The Codex provider authenticates inside CCR's core gateway, the only place
+// that sees the final upstream request. CCR loads gateway module plugins only
+// through a wrapper plugin's coreGateway.config, so this wrapper carries no code
+// of its own: it hands the gateway our read-only auth.json hook.
+function codexAuthCcrPlugins(providers) {
+  const codexProviders = providers.filter(isCodexAuthProvider).map((provider) => provider.name);
+  if (codexProviders.length === 0) return [];
+  return [{
+    id: CODEX_AUTH_PLUGIN_ID,
+    enabled: true,
+    surfaces: { apps: false, gateway: true, provider: false },
+    permissions: ["core-gateway-config"],
+    config: {},
+    coreGateway: {
+      config: {
+        plugins: [{
+          key: CODEX_AUTH_PLUGIN_ID,
+          enabled: true,
+          modulePath: codexAuthPluginModule,
+          config: { providers: codexProviders },
+        }],
+      },
+    },
+  }];
 }
 
 function configuredCompatibility(ccrConfig) {
@@ -4444,6 +4576,13 @@ function renderDoctorResult(result) {
     ...renderManagementServiceLines(result.runtime.managementServices),
     ...renderPluginFreshnessLines(result.runtime.pluginFreshness),
     `${statusOf(result.runtime.shellSource)} shell source: ${result.runtime.shellSource.path}`,
+    ...(result.runtime.codexAuth
+      ? [
+          `${statusOf(result.runtime.codexAuth)} codexAuth: ${result.runtime.codexAuth.path}${
+            result.runtime.codexAuth.expiresAt ? ` (access token expires ${result.runtime.codexAuth.expiresAt})` : ""
+          }`,
+        ]
+      : []),
     renderContextWindow(result.runtime.context),
     renderAutoCompactWindow(result.runtime.context),
     renderCompletionUsage(result.runtime.context),

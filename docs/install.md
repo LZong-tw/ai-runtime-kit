@@ -386,6 +386,30 @@ If `doctor` reports stale or missing rendered files, rerun the dry run, confirm
 the paths, and use the update flow below. If it reports missing tools or shell
 source failures, fix the local runtime environment and rerun `doctor --profile`.
 
+## Use A ChatGPT Subscription Through Codex
+
+A profile with a Codex provider (see `docs/profile-schema.md`, "Codex ChatGPT
+subscription provider") routes requests to `chatgpt.com` with the ChatGPT
+credentials the Codex CLI stores. Those are your personal subscription
+credentials; usage counts against that subscription's Codex quota.
+
+1. Log in once with the Codex CLI: `codex login` (choose ChatGPT). Confirm
+   `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`) exists.
+2. Write the profile as usual (`init --profile <name> --write`, or `update`
+   for an installed one), then run `doctor --profile <name>` and check that
+   the `codexAuth` entry is `ok`.
+3. Launch with the profile's launcher.
+
+AirKit never refreshes that login. When the access token is missing or
+expired, the request fails with an error that says "run `codex` once so
+the Codex CLI refreshes ~/.codex/auth.json". When ChatGPT itself rejects the
+token with a 401, that hint is appended only if the profile runs the
+compatibility middleware; otherwise you see the upstream 401 as is, and the
+fix is the same. Start `codex` once and quit so it
+refreshes the login, then retry. Nothing in AirKit needs restarting: the hook
+rereads the file when its mtime changes. Quota exhaustion is reported as the upstream
+error; AirKit does not fall back to another provider.
+
 ## Repair Codex Takeover State
 
 AirKit fails closed before launch when it finds an enabled global Codex profile
@@ -455,17 +479,18 @@ node src/airkit.mjs doctor --profile openai-compatible-example
 ## Removing A Profile
 
 Deleting a profile from the catalog does not by itself remove what it wrote
-into CCR. Its Router rules and CCR agent profiles are namespaced by profile name
+into CCR. Its CCR agent profiles, which carry its routing rules, and any
+global Router rules left by an older build are namespaced by profile name
 (`airkit-<profile>-…`). Providers default to
 `airkit-provider-<profile>-<provider>`, but may declare an endpoint-owned
 `managedId` when the same provider identity must be shared across profiles.
 Every managed merge preserves ids outside the profile being prepared.
 
-Leftover rules are not harmless. CCR evaluates Router rules in order and takes
-the first match, so a rule left behind by an older build — for example one
-matching the bare prefix `claude-` — outranks the correctly scoped
-`claude-opus-` and `claude-sonnet-` rules that follow it, and the routes that
-appear correct in the config never run.
+Leftover global rules are not harmless. CCR evaluates the global Router rules
+in order and takes the first match, so a rule left behind by an older build —
+for example one matching the bare prefix `claude-` — catches every request
+whose own profile rules do not claim the model, including requests from
+other profiles.
 
 The next launch removes managed state whose profile is present in neither the
 loaded catalog nor `<configDir>/ccr`, and prints what it removed:

@@ -24,6 +24,7 @@ const COLUMNS = [
 ];
 const PRIVATE_HEADERS = new Set([
   "authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key", "x-ccr-core-auth",
+  "chatgpt-account-id",
 ]);
 
 // Loaded on first open: a top-level import would print node's SQLite
