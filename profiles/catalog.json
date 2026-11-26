@@ -992,6 +992,93 @@
           "background": "openai-compatible,fast-coder"
         }
       }
+    },
+    {
+      "name": "codex",
+      "visibility": "public",
+      "summary": "Codex ChatGPT subscription read from ~/.codex/auth.json (run `codex login` first): opus/default gpt-6.2-sol, sonnet gpt-6.1-terra, haiku/background gpt-6-luna, fable gpt-6.2-astra. Launch with cx or airclaude --profile codex.",
+      "shell": {
+        "wrappers": [
+          {
+            "name": "cx",
+            "command": "airclaude"
+          }
+        ]
+      },
+      "launch": {
+        "education": {
+          "spawnGuard": "shadow",
+          "subagentReport": "shadow",
+          "subagentNudge": "shadow",
+          "errorHints": false,
+          "sameResultPoll": "shadow",
+          "cliFlagGuess": "shadow",
+          "blockedRetry": "shadow",
+          "sameTargetRepeat": "shadow"
+        },
+        "binary": "claude",
+        "args": [
+          "--permission-mode",
+          "auto",
+          "--exclude-dynamic-system-prompt-sections",
+          "--append-system-prompt",
+          "AirClaude compatibility delta: Treat Claude Code tools and response formats as portable; runtime owns transport compatibility. Never infer capability from model names or routes. On unsupported or validation errors, preserve completed work and make one safe simpler attempt. Never repeat successful or mutating actions. Verify returned results; state limits plainly. Prefer native edit tools and literal paths. For local credential-path failures, treat the first as a sandbox boundary; use approved unsandboxed execution, not credential rotation or retry."
+        ],
+        "claudeModel": "claude-airkit-mode[1m]",
+        "context": {
+          "autoCompactRatio": 0.25,
+          "maxOutputTokens": 64000
+        },
+        "defaultMode": "codex",
+        "modes": {
+          "codex": {
+            "perModelAutoCompact": true,
+            "completionGuard": {
+              "maxStopBlocks": 1,
+              "mode": "log",
+              "models": [
+                "^gpt-"
+              ]
+            },
+            "effort": "xhigh",
+            "ccr": {
+              "Router": {
+                "default": "codex,gpt-6.2-sol",
+                "background": "codex,gpt-6-luna",
+                "opus": "codex,gpt-6.2-sol",
+                "sonnet": "codex,gpt-6.1-terra",
+                "fable": "codex,gpt-6.2-astra"
+              }
+            }
+          }
+        }
+      },
+      "ccr": {
+        "APIKEY": "ccr-local",
+        "LOG": false,
+        "API_TIMEOUT_MS": 600000,
+        "Providers": [
+          {
+            "name": "codex",
+            "type": "openai_responses",
+            "api_base_url": "https://chatgpt.com/backend-api/codex/responses",
+            "api_key": "airkit-codex-auth-json",
+            "models": [
+              "gpt-6.2-sol",
+              "gpt-6.2-astra",
+              "gpt-6.1-terra",
+              "gpt-6-luna"
+            ]
+          }
+        ],
+        "Router": {
+          "default": "codex,gpt-6.2-sol",
+          "background": "codex,gpt-6-luna",
+          "opus": "codex,gpt-6.2-sol",
+          "sonnet": "codex,gpt-6.1-terra",
+          "fable": "codex,gpt-6.2-astra"
+        }
+      }
     }
   ]
 }

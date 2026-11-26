@@ -93,6 +93,22 @@ do not claim onboarding is complete merely because `init --write` succeeded.
 See [`docs/install.md`](docs/install.md) for updates, takeover recovery,
 troubleshooting, and the complete fresh-machine workflow.
 
+### Codex subscription profile
+
+If you have a ChatGPT plan with Codex, the public `codex` profile runs Claude
+Code on it. AirKit reads `~/.codex/auth.json` and never refreshes or writes it,
+so sign in with `codex login` first and re-run it when the token expires.
+
+```bash
+airkit init --profile codex
+airkit init --profile codex --write
+source ~/.config/ai-runtime-kit/shell/codex.zsh
+cx                               # opus/default: gpt-6.2-sol
+cx --model claude-sonnet-5-5     # gpt-6.1-terra; haiku/background: gpt-6-luna; fable: gpt-6.2-astra
+```
+
+All requests, including background ones, use your Codex plan's quota.
+
 ## Local audit and observability
 
 AirKit includes an opt-in local audit daemon and metadata-first client

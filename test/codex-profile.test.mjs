@@ -261,3 +261,23 @@ test("doctor reports the Codex login state without the token", async (t) => {
   assert.equal(missing.runtime.codexAuth.ok, false);
   assert.match(missing.runtime.codexAuth.reason, /not found/);
 });
+
+test("shipped catalog has a public codex profile that routes every lane to the Codex subscription", async () => {
+  const catalog = await loadCatalog(undefined, { includeLocal: false });
+  const codex = catalog.profiles.find(({ name }) => name === "codex");
+  assert.equal(codex.visibility, "public");
+  assert.deepEqual(codex.shell, { wrappers: [{ name: "cx", command: "airclaude" }] });
+  assert.deepEqual(codex.ccr.Providers.map(({ name }) => name), ["codex"]);
+  assert.equal(codex.ccr.Providers[0].api_base_url, CODEX_API_BASE_URL);
+  assert.equal(codex.ccr.Providers[0].api_key, CODEX_AUTH_API_KEY);
+  const router = {
+    default: "codex,gpt-6.2-sol",
+    background: "codex,gpt-6-luna",
+    opus: "codex,gpt-6.2-sol",
+    sonnet: "codex,gpt-6.1-terra",
+    fable: "codex,gpt-6.2-astra",
+  };
+  assert.deepEqual(codex.ccr.Router, router);
+  assert.deepEqual(codex.launch.modes[codex.launch.defaultMode].ccr.Router, router);
+  assert.doesNotMatch(JSON.stringify(codex), /op:\/\/|oneportal|kkcompany|kkinternal/i);
+});
