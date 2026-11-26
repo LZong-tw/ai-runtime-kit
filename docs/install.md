@@ -386,6 +386,27 @@ If `doctor` reports stale or missing rendered files, rerun the dry run, confirm
 the paths, and use the update flow below. If it reports missing tools or shell
 source failures, fix the local runtime environment and rerun `doctor --profile`.
 
+## Use A ChatGPT Subscription Through Codex
+
+A profile with a Codex provider (see `docs/profile-schema.md`, "Codex ChatGPT
+subscription provider") routes requests to `chatgpt.com` with the ChatGPT
+credentials the Codex CLI stores. Those are your personal subscription
+credentials; usage counts against that subscription's Codex quota.
+
+1. Log in once with the Codex CLI: `codex login` (choose ChatGPT). Confirm
+   `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`) exists.
+2. Write the profile as usual (`init --profile <name> --write`, or `update`
+   for an installed one), then run `doctor --profile <name>` and check that
+   the `codexAuth` entry is `ok`.
+3. Launch with the profile's launcher.
+
+AirKit never refreshes that login. When the access token expires or ChatGPT
+rejects it, the request fails with an error that says "run `codex` once so
+the Codex CLI refreshes ~/.codex/auth.json". Start `codex` once and quit so it
+refreshes the login, then retry. Nothing in AirKit needs restarting: the hook
+rereads the file when its mtime changes. Quota exhaustion is reported as the upstream
+error; AirKit does not fall back to another provider.
+
 ## Repair Codex Takeover State
 
 AirKit fails closed before launch when it finds an enabled global Codex profile

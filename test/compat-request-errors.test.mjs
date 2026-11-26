@@ -392,8 +392,8 @@ test("serialization removes sensitive record and Headers keys and caps cause dep
   let error = new Error("root");
   for (let i = 0; i < 8; i += 1) error = new Error(`cause-${i}`, { cause: error });
   for (const headers of [
-    { Authorization: "hidden", "Proxy-Authorization": "hidden", Cookie: "hidden", "Set-Cookie": "hidden", "X-Api-Key": "hidden", "X-Ccr-Core-Auth": "hidden", "x-visible": "kept" },
-    new Headers({ authorization: "hidden", cookie: "hidden", "set-cookie": "hidden", "x-api-key": "hidden", "x-ccr-core-auth": "hidden", "proxy-authorization": "hidden", "x-visible": "kept" }),
+    { Authorization: "hidden", "Proxy-Authorization": "hidden", Cookie: "hidden", "Set-Cookie": "hidden", "X-Api-Key": "hidden", "X-Ccr-Core-Auth": "hidden", "ChatGPT-Account-Id": "hidden", "x-visible": "kept" },
+    new Headers({ authorization: "hidden", cookie: "hidden", "set-cookie": "hidden", "x-api-key": "hidden", "x-ccr-core-auth": "hidden", "proxy-authorization": "hidden", "chatgpt-account-id": "hidden", "x-visible": "kept" }),
   ]) {
     error.headers = headers;
     const evidence = serializeError(error);

@@ -16,6 +16,14 @@ import {
 } from "./codex-takeover-guard.mjs";
 import { repairCodexTranscriptGuard } from "./codex-transcript-guard.mjs";
 import {
+  CODEX_API_BASE_URL,
+  CODEX_AUTH_PLUGIN_ID,
+  codexAuthFailureMessage,
+  defaultCodexAuthFile,
+  describeCodexAuth,
+  isCodexAuthProvider,
+} from "./compat/codex-auth-gateway.mjs";
+import {
   VERIFIED_NATIVE_COMPATIBILITY,
   AIRKIT_MODE_HEADER,
   airkitModeLabel,
@@ -65,6 +73,7 @@ const compatibilityPluginId = "airkit-compatibility";
 const compatibilityPluginModule = join(here, "compat", "plugin.mjs");
 const auditUiPluginId = "airkit-audit-ui";
 const auditUiPluginModule = join(here, "audit", "ccr-plugin.mjs");
+const codexAuthPluginModule = join(here, "compat", "codex-auth-gateway.mjs");
 export const RUNTIME_REQUIREMENTS = Object.freeze({
   claudeCode: ">=2.1.208",
   claudeCodeRouter: ">=3.0.18 <4",
@@ -150,6 +159,9 @@ function resolveProviderBaseUrls(value, providers) {
   for (const [providerName, baseUrl] of Object.entries(parsed)) {
     const provider = providerByName.get(providerName);
     if (!provider) throw new Error(`provider base URLs references unknown provider: ${providerName}`);
+    if (isCodexAuthProvider(provider)) {
+      throw new Error(`provider base URL for ${providerName} cannot be overridden: it carries the ChatGPT login and only talks to ${CODEX_API_BASE_URL}`);
+    }
     if (typeof baseUrl !== "string" || baseUrl.trim() === "") {
       throw new Error(`provider base URL for ${providerName} must be a non-empty string`);
     }
@@ -218,7 +230,8 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
   const managedProviderEntries = baseConfig.Providers.map((provider) => {
     const id = managedProviderId(profile, provider);
     const { managedId: _managedId, ...providerConfig } = provider;
-    const isActiveProvider = provider.name === activeProviderName;
+    // The ChatGPT login must never follow a base URL override somewhere else.
+    const isActiveProvider = provider.name === activeProviderName && !isCodexAuthProvider(provider);
     const scalarProviderBaseUrl = isActiveProvider && provider.type === "openai_chat_completions"
       ? providerBaseUrl
       : isActiveProvider && provider.type === "anthropic_messages"
@@ -275,6 +288,7 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
       permissions: ["trusted-code", "apps", "http-backends"],
       config: {},
     },
+    ...codexAuthCcrPlugins(managedProviders),
   ];
   const managedProviderNames = new Set(managedProviderEntries.map((entry) => entry.sourceName));
   const managedProviderIdSet = new Set(managedProviders.map((provider) => provider.id));
@@ -1000,6 +1014,7 @@ export async function exportOssRelease({ outDir }) {
   for (const module of [
     "activity.mjs",
     "advisor-policy.mjs",
+    "codex-auth-gateway.mjs",
     "config.mjs",
     "diagnostics.mjs",
     "effort.mjs",
@@ -1913,6 +1928,9 @@ export async function doctorProfile(catalog, profileName, options = {}) {
   const runtime = {
     ccr: await checkCcrAvailability(profile, options.commandExists ?? commandExistsOnPath),
     compatibility: compatibilityCapabilityStatus(profile.ccr),
+    ...((profile.ccr?.Providers ?? []).some(isCodexAuthProvider)
+      ? { codexAuth: codexAuthStatus(options.codexAuthFile ?? defaultCodexAuthFile(options.env ?? process.env)) }
+      : {}),
     context: {
       ok: true,
       ...buildContextObservability({
@@ -1935,6 +1953,17 @@ export async function doctorProfile(catalog, profileName, options = {}) {
     .map((file) => file.reason);
 
   return { ok: failures.length === 0, profile: plan.profile, files, runtime, failures };
+}
+
+// Doctor reports the Codex login state only: never the token, never a refresh.
+function codexAuthStatus(authFile) {
+  const state = describeCodexAuth(authFile);
+  return {
+    ok: state.ok,
+    path: authFile,
+    ...(state.expiresAt == null ? {} : { expiresAt: new Date(state.expiresAt).toISOString() }),
+    ...(state.ok ? {} : { reason: codexAuthFailureMessage(state.reason) }),
+  };
 }
 
 function findProfile(catalog, profileName) {
@@ -2159,8 +2188,38 @@ function validateCcr(profileName, ccr) {
     if (typeof provider.api_key === "string" && provider.api_key.startsWith("sk-")) {
       throw new Error(`profile "${profileName}" embeds a secret-looking API key`);
     }
+    if (isCodexAuthProvider(provider)
+      && (provider.type !== "openai_responses" || provider.api_base_url !== CODEX_API_BASE_URL)) {
+      throw new Error(`profile "${profileName}" provider "${provider.name}" uses the Codex ChatGPT login, so it must be type openai_responses with api_base_url ${CODEX_API_BASE_URL}`);
+    }
   }
   validateConfiguredCompatibility(ccr);
+}
+
+// The Codex provider authenticates inside CCR's core gateway, the only place
+// that sees the final upstream request. CCR loads gateway module plugins only
+// through a wrapper plugin's coreGateway.config, so this wrapper carries no code
+// of its own: it hands the gateway our read-only auth.json hook.
+function codexAuthCcrPlugins(providers) {
+  const codexProviders = providers.filter(isCodexAuthProvider).map((provider) => provider.name);
+  if (codexProviders.length === 0) return [];
+  return [{
+    id: CODEX_AUTH_PLUGIN_ID,
+    enabled: true,
+    surfaces: { apps: false, gateway: true, provider: false },
+    permissions: ["core-gateway-config"],
+    config: {},
+    coreGateway: {
+      config: {
+        plugins: [{
+          key: CODEX_AUTH_PLUGIN_ID,
+          enabled: true,
+          modulePath: codexAuthPluginModule,
+          config: { providers: codexProviders },
+        }],
+      },
+    },
+  }];
 }
 
 function configuredCompatibility(ccrConfig) {
@@ -4444,6 +4503,13 @@ function renderDoctorResult(result) {
     ...renderManagementServiceLines(result.runtime.managementServices),
     ...renderPluginFreshnessLines(result.runtime.pluginFreshness),
     `${statusOf(result.runtime.shellSource)} shell source: ${result.runtime.shellSource.path}`,
+    ...(result.runtime.codexAuth
+      ? [
+          `${statusOf(result.runtime.codexAuth)} codexAuth: ${result.runtime.codexAuth.path}${
+            result.runtime.codexAuth.expiresAt ? ` (access token expires ${result.runtime.codexAuth.expiresAt})` : ""
+          }`,
+        ]
+      : []),
     renderContextWindow(result.runtime.context),
     renderAutoCompactWindow(result.runtime.context),
     renderCompletionUsage(result.runtime.context),

@@ -206,6 +206,55 @@ that field from the generated CCR object and uses the value for routes and
 provider identity. Without it, the default remains
 `airkit-provider-<profile>-<provider>`.
 
+## Codex ChatGPT subscription provider
+
+A provider can use the ChatGPT subscription that the Codex CLI is logged in
+with, instead of an API key. It sends your ChatGPT account credentials to
+`chatgpt.com`, and the usage counts against that subscription's Codex quota,
+not an API bill.
+
+```json
+{
+  "name": "codex",
+  "type": "openai_responses",
+  "api_base_url": "https://chatgpt.com/backend-api/codex/responses",
+  "api_key": "airkit-codex-auth-json",
+  "models": ["gpt-6.1-sol"]
+}
+```
+
+- `api_key` must be the literal marker `airkit-codex-auth-json`. It is not a
+  credential; it tells AirKit to authenticate the provider from the Codex
+  login file.
+- `type` must be `openai_responses` and `api_base_url` must be exactly the URL
+  above (the path is `/responses`, not `/v1/responses`). Catalog validation
+  rejects anything else, and `AIRCLAUDE_PROVIDER_BASE_URLS` /
+  `AIRCLAUDE_RESPONSES_PROVIDER_BASE_URL` overrides cannot move it.
+- During the managed merge AirKit adds a CCR wrapper plugin,
+  `airkit-codex-auth`, whose only job is to load
+  `src/compat/codex-auth-gateway.mjs` into CCR's core gateway with the
+  `core-gateway-config` permission. That hook reads `$CODEX_HOME/auth.json`
+  (default `~/.codex/auth.json`), caches it by file identity and mtime, and
+  sets `Authorization`, `chatgpt-account-id`, `originator: codex_cli_rs` and
+  `OpenAI-Beta: responses=experimental` on requests to
+  `https://chatgpt.com/backend-api/codex/`. It also forces `store: false`,
+  `stream: true`, a non-empty `instructions`, and
+  `include: ["reasoning.encrypted_content"]`, which that backend requires.
+- AirKit only reads `auth.json`. It never refreshes the token, never writes the
+  file, and never takes `auth.json.lock`; the Codex CLI owns the refresh-token
+  rotation. A missing, unreadable, non-ChatGPT or expired login fails the
+  request with a message telling you to run `codex` once. An upstream 401 gets
+  the same hint appended after the upstream text. There is no fallback to
+  another provider on Codex auth or quota failures.
+- The marker deliberately differs from CCR's own `ccr-local-agent-login`, so
+  CCR's built-in Codex OAuth plugin, which does refresh, never attaches to this
+  provider.
+- Token values never reach logs: the hook's error strings never include file
+  contents, and request-error evidence drops `authorization` and
+  `chatgpt-account-id`.
+- `doctor --profile` reports a `codexAuth` check with the file path, the token
+  expiry and the failure reason, never the token.
+
 ## Compatibility declaration opt-in
 
 Compatibility is disabled unless a profile declares an `airkit-compatibility`
