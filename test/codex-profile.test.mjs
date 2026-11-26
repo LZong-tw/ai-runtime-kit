@@ -124,6 +124,54 @@ test("base URL overrides never redirect the ChatGPT login", async (t) => {
   assert.equal(config.Providers.find((provider) => provider.id === CODEX_ID).api_base_url, CODEX_API_BASE_URL);
 });
 
+test("only the marker may reach the Codex backend", async (t) => {
+  // CCR's own refreshing login, a real-looking key, or a flag next to some
+  // other key: none of them may point a provider at chatgpt.com/backend-api/codex.
+  for (const api_key of ["ccr-local-agent-login", "$OPENAI_API_KEY", "opaque-token"]) {
+    const catalog = codexCatalog();
+    Object.assign(catalog.profiles[0].ccr.Providers[0], { api_key });
+    await assert.rejects(loadFrom(t, catalog), /targets the Codex backend.*airkit-codex-auth-json/);
+  }
+  const catalog = codexCatalog();
+  catalog.profiles[0].ccr.Providers[1].api_base_url = "https://chatgpt.com/backend-api/codex/responses/compact";
+  await assert.rejects(loadFrom(t, catalog), /"cheap" targets the Codex backend/);
+});
+
+test("a resolved API key never replaces the Codex marker", async (t) => {
+  const catalog = await loadFrom(t, codexCatalog());
+  const { config } = buildCcr3ManagedConfig(catalog, "codex-example", {}, {
+    configDir: "/tmp/airkit-codex-profile",
+    apiKeys: { codex: "resolved-secret-fixture", cheap: "cheap-secret-fixture" },
+  });
+  assert.equal(config.Providers.find((provider) => provider.id === CODEX_ID).api_key, CODEX_AUTH_API_KEY);
+  assert.equal(config.Providers.find((provider) => provider.id === "airkit-provider-codex-example-cheap").api_key, "cheap-secret-fixture");
+  assert.ok(config.plugins.some((plugin) => plugin.id === "airkit-codex-auth"));
+});
+
+test("transport fallbacks cannot start from a Codex provider", async (t) => {
+  const catalog = codexCatalog();
+  catalog.profiles[0].ccr.Providers.push({
+    name: "anthropic",
+    type: "anthropic_messages",
+    api_base_url: "https://example.invalid/v1/messages",
+    api_key: "$ANTHROPIC_API_KEY",
+    models: ["claude-sonnet-5"],
+  });
+  catalog.profiles[0].ccr.plugins = [{
+    id: "airkit-compatibility",
+    enabled: true,
+    config: {
+      fallback: { provider: "anthropic", model: "claude-sonnet-5" },
+      transportFallbacks: [{
+        from: { provider: "codex", model: "gpt-6.1-sol" },
+        to: { provider: "anthropic", model: "claude-sonnet-5" },
+        statuses: [401, 429],
+      }],
+    },
+  }];
+  await assert.rejects(loadFrom(t, catalog), /transportFallbacks cannot start from Codex provider "codex"/);
+});
+
 function rejection(providerName) {
   return JSON.stringify({
     error: {

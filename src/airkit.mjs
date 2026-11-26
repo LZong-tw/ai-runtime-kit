@@ -17,11 +17,13 @@ import {
 import { repairCodexTranscriptGuard } from "./codex-transcript-guard.mjs";
 import {
   CODEX_API_BASE_URL,
+  CODEX_AUTH_API_KEY,
   CODEX_AUTH_PLUGIN_ID,
   codexAuthFailureMessage,
   defaultCodexAuthFile,
   describeCodexAuth,
   isCodexAuthProvider,
+  isCodexBackendUrl,
 } from "./compat/codex-auth-gateway.mjs";
 import {
   VERIFIED_NATIVE_COMPATIBILITY,
@@ -246,7 +248,12 @@ export function buildCcr3ManagedConfig(catalog, profileName, currentConfig = {},
         api_base_url: providerBaseUrls[provider.name] || scalarProviderBaseUrl || provider.api_base_url,
         id,
         name: id,
-        api_key: options.apiKeys?.[provider.name] ?? provider.api_key,
+        // A resolved credential must never replace the Codex marker: the
+        // auth hook is installed by the marker, so a swapped key would reach
+        // chatgpt.com with no hook in front of it.
+        api_key: isCodexAuthProvider(provider)
+          ? provider.api_key
+          : options.apiKeys?.[provider.name] ?? provider.api_key,
       },
     };
   });
@@ -2191,6 +2198,19 @@ function validateCcr(profileName, ccr) {
     if (isCodexAuthProvider(provider)
       && (provider.type !== "openai_responses" || provider.api_base_url !== CODEX_API_BASE_URL)) {
       throw new Error(`profile "${profileName}" provider "${provider.name}" uses the Codex ChatGPT login, so it must be type openai_responses with api_base_url ${CODEX_API_BASE_URL}`);
+    }
+    // Without the marker, the URL-keyed auth hook would still attach the
+    // ChatGPT login, and CCR's "ccr-local-agent-login" would also refresh it.
+    if (!isCodexAuthProvider(provider) && isCodexBackendUrl(provider.api_base_url)) {
+      throw new Error(`profile "${profileName}" provider "${provider.name}" targets the Codex backend, so its api_key must be the marker "${CODEX_AUTH_API_KEY}"`);
+    }
+  }
+  // Codex auth and quota failures surface as errors; they never divert the
+  // request to another provider.
+  const codexProviderNames = new Set((ccr.Providers ?? []).filter(isCodexAuthProvider).map(({ name }) => name));
+  for (const fallback of configuredCompatibility(ccr)?.transportFallbacks ?? []) {
+    if (codexProviderNames.has(fallback?.from?.provider)) {
+      throw new Error(`profile "${profileName}" transportFallbacks cannot start from Codex provider "${fallback.from.provider}"`);
     }
   }
   validateConfiguredCompatibility(ccr);

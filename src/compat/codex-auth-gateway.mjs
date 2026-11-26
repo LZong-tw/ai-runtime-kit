@@ -14,7 +14,6 @@ import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export const CODEX_AUTH_KIND = "codex-chatgpt";
 export const CODEX_AUTH_PLUGIN_ID = "airkit-codex-auth";
 // CCR needs a non-empty api_key. This marker is not a credential: the hook
 // replaces the bearer it produces. It must never equal CCR's
@@ -36,8 +35,25 @@ export function defaultCodexAuthFile(env = process.env) {
   return join(env.CODEX_HOME || join(homedir(), ".codex"), "auth.json");
 }
 
+// The marker is the only identity. Anything weaker (a separate flag next to
+// some other api_key) could pair with CCR's "ccr-local-agent-login" and
+// re-enable the refreshing path this module exists to avoid.
 export function isCodexAuthProvider(provider) {
-  return provider?.auth?.kind === CODEX_AUTH_KIND || provider?.api_key === CODEX_AUTH_API_KEY;
+  return provider?.api_key === CODEX_AUTH_API_KEY;
+}
+
+// Any base URL on the Codex backend, matched the way CCR's own Codex check
+// does (same origin, path prefix). Used to refuse providers that would reach
+// chatgpt.com without going through the marker.
+export function isCodexBackendUrl(value) {
+  try {
+    const url = new URL(value);
+    const base = new URL(CODEX_UPSTREAM_PREFIX);
+    return url.origin === base.origin
+      && url.pathname.toLowerCase().startsWith(base.pathname.toLowerCase().replace(/\/$/, ""));
+  } catch {
+    return false;
+  }
 }
 
 // Reads and checks auth.json. The result carries the token only under
@@ -198,12 +214,15 @@ export function createCodexAuthHook({
   };
 }
 
+// The persisted CCR config is editable by anything that can write it, so it
+// only supplies the provider names. Where the bearer may go and which file it
+// comes from stay fixed in code; createCodexAuthHook keeps them as test seams.
 export function createGatewayPlugin({ plugin } = {}) {
   const config = plugin?.config ?? {};
   return {
     providerHooks: [createCodexAuthHook({
-      authFile: config.authFile ?? defaultCodexAuthFile(),
-      upstreamPrefix: config.upstreamPrefix ?? CODEX_UPSTREAM_PREFIX,
+      authFile: defaultCodexAuthFile(),
+      upstreamPrefix: CODEX_UPSTREAM_PREFIX,
       providers: Array.isArray(config.providers) ? config.providers : [],
     })],
   };

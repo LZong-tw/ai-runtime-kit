@@ -243,12 +243,20 @@ not an API bill.
 - AirKit only reads `auth.json`. It never refreshes the token, never writes the
   file, and never takes `auth.json.lock`; the Codex CLI owns the refresh-token
   rotation. A missing, unreadable, non-ChatGPT or expired login fails the
-  request with a message telling you to run `codex` once. An upstream 401 gets
-  the same hint appended after the upstream text. There is no fallback to
-  another provider on Codex auth or quota failures.
+  request with a message telling you to run `codex` once. When the profile runs
+  the compatibility middleware, an upstream 401 gets the same hint appended
+  after the upstream text; without it (a profile with no
+  `airkit-compatibility` plugin) the upstream 401 arrives verbatim. There is no
+  fallback to another provider on Codex auth or quota failures, and catalog
+  validation rejects a `transportFallbacks` entry that starts from a Codex
+  provider.
 - The marker deliberately differs from CCR's own `ccr-local-agent-login`, so
   CCR's built-in Codex OAuth plugin, which does refresh, never attaches to this
-  provider.
+  provider. The marker is the provider's only Codex identity: any other
+  provider whose `api_base_url` points at the Codex backend is rejected, and a
+  resolved API key never replaces the marker.
+- The auth file location and the upstream prefix are fixed in code; the
+  persisted CCR plugin entry only names the Codex providers.
 - Token values never reach logs: the hook's error strings never include file
   contents, and request-error evidence drops `authorization` and
   `chatgpt-account-id`.

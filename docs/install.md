@@ -400,9 +400,12 @@ credentials; usage counts against that subscription's Codex quota.
    the `codexAuth` entry is `ok`.
 3. Launch with the profile's launcher.
 
-AirKit never refreshes that login. When the access token expires or ChatGPT
-rejects it, the request fails with an error that says "run `codex` once so
-the Codex CLI refreshes ~/.codex/auth.json". Start `codex` once and quit so it
+AirKit never refreshes that login. When the access token is missing or
+expired, the request fails with an error that says "run `codex` once so
+the Codex CLI refreshes ~/.codex/auth.json". When ChatGPT itself rejects the
+token with a 401, that hint is appended only if the profile runs the
+compatibility middleware; otherwise you see the upstream 401 as is, and the
+fix is the same. Start `codex` once and quit so it
 refreshes the login, then retry. Nothing in AirKit needs restarting: the hook
 rereads the file when its mtime changes. Quota exhaustion is reported as the upstream
 error; AirKit does not fall back to another provider.

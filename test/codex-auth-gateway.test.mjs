@@ -12,6 +12,7 @@ import {
   defaultCodexAuthFile,
   describeCodexAuth,
   isCodexAuthProvider,
+  isCodexBackendUrl,
 } from "../src/compat/codex-auth-gateway.mjs";
 
 const NOW = Date.UTC(2026, 10, 26, 12, 0, 0);
@@ -240,11 +241,35 @@ test("codex auth hook rejects non-JSON bodies for codex requests", (t) => {
   assert.equal(result.ok, false);
 });
 
-test("codex gateway plugin reads its settings from the plugin entry", (t) => {
-  const { authFile } = fakeCodexHome(t);
-  const plugin = createGatewayPlugin({ plugin: { key: "airkit-codex-auth", config: { authFile, providers: [PROVIDER] } } });
+test("codex gateway plugin takes only provider names from the persisted entry", (t) => {
+  const { codexDir } = fakeCodexHome(t);
+  const { authFile: decoyFile } = fakeCodexHome(t, chatgptAuth({ accountId: "acct-decoy" }));
+  const previous = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexDir;
+  t.after(() => {
+    if (previous === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previous;
+  });
+  // An edited CCR config must not move the bearer to another host or swap
+  // the file it is read from.
+  const plugin = createGatewayPlugin({ plugin: { key: "airkit-codex-auth", config: {
+    authFile: decoyFile,
+    upstreamPrefix: "https://evil.invalid/backend-api/codex/",
+    providers: [PROVIDER],
+  } } });
   assert.equal(plugin.providerHooks.length, 1);
-  assert.equal(plugin.providerHooks[0].key, "airkit-codex-auth");
+  const [hook] = plugin.providerHooks;
+  assert.equal(hook.key, "airkit-codex-auth");
+
+  const redirected = hook.transformRequest({
+    upstreamRequest: upstream({ url: "https://evil.invalid/backend-api/codex/responses" }),
+    targetProviderConfig: { name: PROVIDER },
+  });
+  assert.equal(redirected.ok, false);
+
+  const pinned = hook.transformRequest({ upstreamRequest: upstream(), targetProviderConfig: { name: PROVIDER } });
+  assert.equal(pinned.ok, true);
+  assert.equal(pinned.value.headers["chatgpt-account-id"], "acct-fixture");
   assert.equal(createGatewayPlugin({ plugin: { config: {} } }).providerHooks.length, 1);
 });
 
@@ -262,9 +287,25 @@ test("describeCodexAuth reports state without credentials", (t) => {
   assert.equal(describeCodexAuth(join(authFile, "..", "absent.json")).reason, "missing");
 });
 
-test("isCodexAuthProvider recognizes catalog and managed codex providers", () => {
-  assert.equal(isCodexAuthProvider({ auth: { kind: "codex-chatgpt" } }), true);
+test("isCodexAuthProvider recognizes only the marker", () => {
   assert.equal(isCodexAuthProvider({ api_key: CODEX_AUTH_API_KEY }), true);
+  // A side flag must not mark a provider whose key opts into CCR's refresh path.
+  assert.equal(isCodexAuthProvider({ auth: { kind: "codex-chatgpt" }, api_key: "ccr-local-agent-login" }), false);
   assert.equal(isCodexAuthProvider({ api_key: "ccr-local-agent-login" }), false);
   assert.equal(isCodexAuthProvider({}), false);
+});
+
+test("isCodexBackendUrl matches the Codex backend the way CCR does", () => {
+  for (const url of [
+    "https://chatgpt.com/backend-api/codex",
+    "https://chatgpt.com/backend-api/codex/responses",
+    "https://chatgpt.com/Backend-API/Codex/responses/compact",
+  ]) assert.equal(isCodexBackendUrl(url), true, url);
+  for (const url of [
+    "https://chatgpt.com/backend-api/wham/usage",
+    "https://api.openai.com/v1/responses",
+    "http://chatgpt.com/backend-api/codex/responses",
+    "not a url",
+    undefined,
+  ]) assert.equal(isCodexBackendUrl(url), false, String(url));
 });
