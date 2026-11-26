@@ -780,6 +780,8 @@ function buildManagedRouterRules(baseConfig, managedRouteSelector, managedPrefix
     rule("background", "AirKit background route", "claude-haiku-", router.background ?? router.default),
     rule("opus", "AirKit Opus route", "claude-opus-", router.opus ?? router.default),
     rule("default", "AirKit default route", "claude-sonnet-", router.sonnet ?? router.default),
+    // Fable has no CCR 2 Router lane; a profile opts in with Router.fable.
+    ...(router.fable ? [rule("fable", "AirKit Fable route", "claude-fable-", router.fable)] : []),
   ];
 }
 
@@ -3348,7 +3350,7 @@ function renderLaunchResult(result, options = {}) {
   // that routes every Claude family to `default` reads exactly as before. They
   // are what an in-session `/model` pick reaches, which is worth proving in the
   // same output that proves the mode.
-  const optionalRouteLines = ["opus", "sonnet"]
+  const optionalRouteLines = ["opus", "sonnet", "fable"]
     .filter((key) => result.ccrConfig.Router?.[key])
     .map((key) => `- ${key}: ${result.ccrConfig.Router[key]}`);
 
@@ -3770,7 +3772,7 @@ function airclaudeRoutingPrompt(mode, ccrConfig, claudeModel) {
 // narrower on purpose: it names the launch environment variables, and profiles
 // template against `default`/`background` only.
 function sortedRouterEntries(router = {}) {
-  return ["default", "background", "opus", "sonnet"]
+  return ["default", "background", "opus", "sonnet", "fable"]
     .filter((key) => typeof router[key] === "string")
     .map((key) => [key, router[key]]);
 }

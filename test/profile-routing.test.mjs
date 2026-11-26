@@ -303,3 +303,14 @@ test("migration drops stale AirKit global rules and keeps user rules", async (t)
     "user rules still apply to models no profile rule claims",
   );
 });
+
+test("Router.fable adds a claude-fable- profile rule only when set", async () => {
+  const { buildCcr3ManagedConfig } = await import("../src/airkit.mjs");
+  const catalog = (fable) => ({ profiles: [{ name: "fx", launch: { binary: "claude" }, ccr: { APIKEY: "k", Providers: [{ name: "p", type: "openai_responses", api_base_url: "https://example.test/v1/responses", api_key: "x", models: ["a", "b"] }], Router: { default: "p,a", ...(fable ? { fable: "p,b" } : {}) } } }] });
+  const rulesOf = (c) => c.config.profile.profiles.flatMap((p) => p.routing?.rules ?? []);
+  const withFable = rulesOf(buildCcr3ManagedConfig(catalog(true), "fx", {}, {}));
+  const fableRule = withFable.find(({ id }) => id.endsWith("route-fable"));
+  assert.equal(fableRule.condition.right, "claude-fable-");
+  assert.match(fableRule.rewrites[0].value, /\/b$/);
+  assert.equal(rulesOf(buildCcr3ManagedConfig(catalog(false), "fx", {}, {})).some(({ id }) => id.endsWith("route-fable")), false);
+});
